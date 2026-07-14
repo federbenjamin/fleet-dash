@@ -85,7 +85,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
     "This session is being continued from" blob. Consecutive assistant text rows merge into one
     logical reply unless a KEY_TOOLS entry lands between them. Extend the filter list there,
-    not in the client.
+    not in the client. **Mid-turn user messages never become user rows** — they arrive as
+    `type:"attachment"` rows (`attachment.type:"queued_command"`, `origin.kind:"human"`,
+    prompt is a string OR content-block list) plus transient `queue-operation` rows; fold the
+    attachment only, or the message is invisible in the convo.
 12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
     Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
     2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
@@ -103,6 +106,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     idempotency mechanism — switching the drain to additive upserts double-counts every
     restart. Skill $ is turn-cost attribution (Skill tool_use → end_turn, most recent skill
     wins); tool "tokens in" is result chars/4 — both estimates, unlike the ledger's real $.
+    Corollary: REPLACE never purges keys the counting logic stopped producing — after any
+    change to how a kind is counted, `DELETE FROM usage_stats WHERE kind='<kind>'` once and
+    restart, or stale rows keep polluting the aggregates.
+16. **Cache-bust detection (`Tail._cache_track`) counts RE-PAID tokens only** —
+    `min(prev_read+prev_write − read, write + uncached_input)`, threshold 2048 — a shrunken
+    read alone (title-gen side call, context edit) costs nothing and must not register.
+    Side calls with a tiny prefix must not become the next call's baseline (the 0.3× guard).
+    Cause priority: compaction > model switch > idle/ttl > skill > tail-rewrite (read still
+    ≥50% of prev prefix = breakpoint drift) > deep bust.
 
 ## Dev workflow
 

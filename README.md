@@ -47,7 +47,7 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
     leads with a **"read first" chip** — visible even on a collapsed card. Window:
     `question_file_pair_seconds`.
 - **Conversation context**: the session's recent turns (your prompts + Claude's replies,
-  markdown-rendered) in a scrollable box — shown automatically above the amber box when a
+  markdown-rendered, including messages you send mid-turn from the app) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
@@ -70,7 +70,15 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **closed sessions** dropdown: every closed session the daemon ever saw (title, final spend,
   agents, closed-ago); tap a row for its info block (full id, cwd, branch, model, lifetime,
   spend split).
-- **cost insights** dropdown (7/30/90-day window): where the tokens and money actually go —
+- **cost insights** dropdown (7/30/90-day window; each subsection its own dropdown): where
+  the tokens and money actually go —
+  - **cache invalidations**: every API call whose cache_read fell short of the previous
+    call's read+write, counting only tokens actually re-paid (as cache-write/uncached),
+    classified by cause — compaction, model switch, idle/TTL, skill invocation, tail
+    rewrite after the last breakpoint ("breakpoint drift"), deep bust — with est $ re-paid;
+  - **$ by token class per day**: uncached input / cache write / cache read / output,
+    priced per model family from real transcript usage — the single most direct
+    "what costs money" view;
   - **by agent type**: runs, total $, avg $/run, cache-hit % (exact, from the agent ledger);
   - **by skill**: uses + the attributed cost of turns run while that skill was active
     (heuristic: from a `Skill` invocation to end-of-turn; overlapping skills attribute to the

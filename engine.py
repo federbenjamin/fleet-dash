@@ -128,6 +128,9 @@ class Tail:
         self.stats = {}                 # (day, kind, name) -> [uses, chars, ti, tw, tr, to]
         self.stats_dirty = set()
         self.active_skill = None        # skill turn-cost attribution (most recent wins)
+        self.prev_usage = None          # (epoch, model, cache_read+cache_write) of last API call
+        self.saw_compaction = False     # compaction marker since last API call
+        self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
 
     def poll(self):
         try:
@@ -159,6 +162,30 @@ class Tail:
         if ts:
             self.first_ts = self.first_ts or ts
             self.last_ts = ts
+        if o.get("isCompactSummary"):
+            self.saw_compaction = True
+        if o.get("type") == "attachment":
+            # mid-turn user messages never become user rows — they arrive as
+            # queued_command attachments (plus transient queue-operation rows,
+            # which we ignore so each message folds exactly once)
+            a = o.get("attachment") or {}
+            txt = ""
+            if a.get("type") == "queued_command" \
+               and (a.get("origin") or {}).get("kind") == "human":
+                raw = a.get("prompt")
+                if isinstance(raw, list):   # prompt may be content blocks
+                    raw = "\n".join(b.get("text", "") for b in raw
+                                    if isinstance(b, dict) and b.get("type") == "text")
+                txt = str(raw or "").strip()
+            if txt and not txt.startswith(("<command-", "/")):
+                for e in reversed(self.convo):    # guard against a dequeued twin
+                    if e.get("role") == "user":
+                        if e.get("text") == txt:
+                            txt = ""
+                        break
+                if txt:
+                    self._convo_add("user", txt, ts)
+            return
         if o.get("gitBranch"):
             self.git_branch = o["gitBranch"]
         if o.get("type") == "ai-title":            # the iTerm tab title source
@@ -178,6 +205,7 @@ class Tail:
                 self.to += u.get("output_tokens", 0)
                 self.last_usage = u
                 self.model = m.get("model") or self.model
+                self._cache_track(u, ts, m.get("model") or self.model)
                 if self.active_skill:   # attribute this turn's spend to the running skill
                     st = self._stat((self._day(ts), "skill", self.active_skill))
                     st[2] += u.get("input_tokens", 0)
@@ -194,6 +222,7 @@ class Tail:
                             sk = (b.get("input") or {}).get("skill") or "?"
                             self._stat((self._day(ts), "skill", sk))[0] += 1
                             self.active_skill = sk
+                            self.skill_since_usage = sk
                         if b.get("name") == "SendUserFile":
                             inp = b.get("input") or {}
                             for fp in (inp.get("files") or [])[:6]:
@@ -232,6 +261,8 @@ class Tail:
                         utxt = "\n\n".join(b.get("text", "") for b in content
                                            if isinstance(b, dict) and b.get("type") == "text")
                     utxt = re.sub(r"<system-reminder>.*?</system-reminder>", "", utxt, flags=re.S).strip()
+                    if utxt.startswith("This session is being continued"):
+                        self.saw_compaction = True
                     if utxt and not utxt.startswith(("<command-", "<local-command", "Caveat:",
                                                      "This session is being continued from",
                                                      "[SYSTEM NOTIFICATION", "<task-notification")):
@@ -294,6 +325,55 @@ class Tail:
             prev["ts"] = ts or prev["ts"]
             return
         self.convo.append({"role": role, "text": text, "ts": ts})
+
+    def _cache_track(self, u, ts, mdl):
+        """Per-day token-class mix + prompt-cache invalidation detection.
+        Healthy loop: this call's cache_read ≈ previous call's read+write. A
+        drop means the missing prefix was re-paid (write at 1.25x or uncached)
+        — classify the cause from what happened since the previous call."""
+        ep = iso_epoch(ts) or 0
+        rd = u.get("cache_read_input_tokens", 0)
+        cw = u.get("cache_creation_input_tokens", 0)
+        day = self._day(ts)
+        st = self._stat((day, "tokens", "all"))
+        st[2] += u.get("input_tokens", 0)
+        st[3] += cw
+        st[4] += rd
+        st[5] += u.get("output_tokens", 0)
+        repaid = 0
+        if self.prev_usage:
+            p_ep, p_mdl, p_prefix = self.prev_usage
+            missing = p_prefix - rd
+            # only count tokens actually RE-PAID this call (write or uncached
+            # input) — a shrunken read alone (title-gen side call, context edit)
+            # costs nothing and must not register as a bust
+            repaid = min(missing, cw + u.get("input_tokens", 0))
+            if p_prefix > 4096 and missing > 2048 and repaid > 2048:
+                gap = ep - p_ep if ep and p_ep else 0
+                if self.saw_compaction:
+                    cause = "compaction"
+                elif p_mdl and mdl != p_mdl:
+                    cause = "model switch"
+                elif gap > 3900:
+                    cause = "idle >1h (ttl)"
+                elif gap > 330:
+                    cause = "idle 5m–1h (ttl?)"
+                elif self.skill_since_usage:
+                    cause = "skill " + self.skill_since_usage
+                elif rd >= p_prefix * 0.5:
+                    # most of the prefix still read from cache: the re-paid part is
+                    # the tail after the last breakpoint, rewritten call after call
+                    cause = "tail rewrite (breakpoint drift)"
+                else:
+                    cause = "deep bust (unattributed)"
+                cs = self._stat((day, "cache", cause))
+                cs[0] += 1
+                cs[1] += repaid
+        # a tiny side-call must not become the baseline the next call is judged by
+        if self.prev_usage is None or rd + cw >= self.prev_usage[2] * 0.3 or repaid > 2048:
+            self.prev_usage = (ep, mdl, rd + cw)
+        self.saw_compaction = False
+        self.skill_since_usage = None
 
     def _day(self, ts):
         return str(ts)[:10] if ts else time.strftime("%Y-%m-%d")
@@ -729,9 +809,38 @@ class Engine:
                     """SELECT title, name, project, cost, agent_cost FROM session_runs
                        WHERE last_seen >= ? ORDER BY cost + agent_cost DESC LIMIT 12""",
                     (since_e,))]
+            ca = {}
+            for name, fam, ev, tok in db.execute(
+                    """SELECT name, fam, sum(uses), sum(chars) FROM usage_stats
+                       WHERE kind='cache' AND day >= date('now', ?) GROUP BY name, fam""",
+                    (since_d,)):
+                ri, rw, rr, ro = cfg["rates"].get(fam, cfg["rates"]["opus"])
+                e = ca.setdefault(name, {"name": name, "events": 0, "tokens": 0, "cost": 0.0})
+                e["events"] += ev or 0
+                e["tokens"] += tok or 0
+                e["cost"] += (tok or 0) * (rw - rr) / 1e6   # re-paid at write vs read rate
+            out["cache_busts"] = sorted(
+                [{**e, "cost": round(e["cost"], 2)} for e in ca.values()],
+                key=lambda x: -x["cost"])
+            mix = {}
+            for day, fam, ti, tw, tr, to_ in db.execute(
+                    """SELECT day, fam, sum(t_in), sum(t_cw), sum(t_cr), sum(t_out)
+                       FROM usage_stats WHERE kind='tokens' AND day >= date('now', ?)
+                       GROUP BY day, fam""", (since_d,)):
+                ri, rw, rr, ro = cfg["rates"].get(fam, cfg["rates"]["opus"])
+                e = mix.setdefault(day, {"day": day, "input": 0.0, "write": 0.0,
+                                         "read": 0.0, "output": 0.0})
+                e["input"] += (ti or 0) * ri / 1e6
+                e["write"] += (tw or 0) * rw / 1e6
+                e["read"] += (tr or 0) * rr / 1e6
+                e["output"] += (to_ or 0) * ro / 1e6
+            out["token_mix"] = sorted(
+                [{k: (round(v, 2) if isinstance(v, float) else v) for k, v in e.items()}
+                 for e in mix.values()], key=lambda x: x["day"], reverse=True)
             out["totals"] = {
                 "agent_cost": round(sum(a["cost"] for a in out["agents"]), 2),
                 "session_cost": round(sum(p["sessions"] for p in out["projects"]), 2),
+                "bust_cost": round(sum(c["cost"] for c in out["cache_busts"]), 2),
             }
             out["ok"] = True
         except Exception as e:

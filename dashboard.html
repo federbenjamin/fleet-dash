@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- maximum-scale=1 only disables iOS's AUTO-zoom on input focus; pinch zoom
+     still works (iOS ignores it for user gestures since iOS 10) -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Fleet View</title>
 <style>
 :root{
@@ -17,8 +19,6 @@
    ::-webkit-scrollbar styling, so never mix the two. */
 *{scrollbar-width:thin;scrollbar-color:transparent transparent}
 .scrolling{scrollbar-color:#4a545f transparent}
-/* iOS Safari auto-zooms any focused input with font-size < 16px */
-@media (pointer:coarse){input[type=text],input:not([type]),input[type=number]{font-size:16px}}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,sans-serif;
      padding:12px 12px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
 .pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
@@ -149,6 +149,9 @@ td.r,th.r{text-align:right}
 .mqarr:disabled{color:var(--faint);cursor:default}
 .mqarr.cur{border-color:var(--blue);color:var(--blue)}
 .insbar{display:flex;align-items:center;gap:8px;padding:6px 0;flex-wrap:wrap}
+.insfold{margin:3px 0}
+.insfold summary{cursor:pointer;color:var(--dim);font-size:12.5px;padding:5px 2px;user-select:none}
+.squiet{margin-left:auto;color:var(--dim);font-size:12px;font-weight:400;white-space:nowrap}
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
 .ptool{display:flex;align-items:center;gap:8px}
@@ -213,6 +216,9 @@ td.r,th.r{text-align:right}
 .mdoc table{margin:8px 0;display:block;overflow-x:auto;width:max-content;max-width:100%}
 .mdoc hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 .mdoc a{color:var(--blue)}
+/* iOS Safari auto-zooms any focused input with font-size < 16px — must be the
+   LAST rule (ties on specificity with .freetext/.setnum input sizes; later wins) */
+@media (pointer:coarse){input{font-size:16px!important}}
 </style>
 </head>
 <body>
@@ -495,7 +501,6 @@ function sessionCard(s){
           <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}</b>
         </div>
       </details>
-      ${s.bridge_url?`<div style="padding:4px 0"><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
       ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
       <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message to this session"
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
@@ -514,19 +519,20 @@ function sessionCard(s){
         <summary>completed agents (${done.length})</summary>
         <div class="foldscroll">${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}</div>
       </details>
+      ${s.bridge_url?`<div style="padding:6px 0 2px"><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
     </div>`:'';
   return`<div class="card ${cls}" data-sid="${s.session_id}">
     <div class="shead" onclick="toggle('${s.session_id}')">
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
-      <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
-        onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
     <div class="smeta">
       <span class="m">${esc(s.family)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
-      <span class="m">quiet ${fmtAge(s.quiet_s)}</span>
+      <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
+      <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
+        onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
     ${needs?ctxHtml:''}
     ${pendingBox(s)}
@@ -760,32 +766,46 @@ function insTable(heads,rows){
   if(!rows||!rows.length)return'<div class="setnum" style="padding:2px 8px 8px">no data in window</div>';
   return`<table><tr>${heads.map(h=>`<th${h[1]?' class="r"':''}>${h[0]}</th>`).join('')}</tr>${rows.join('')}</table>`;
 }
+const insOpen=new Set();   // per-subsection fold state, survives re-renders
+function insFold(key,title,inner){
+  return`<details class="insfold" ${insOpen.has(key)?'open':''} ontoggle="insOpen[this.open?'add':'delete']('${key}')">
+    <summary>${title}</summary>${inner}</details>`;
+}
 function insightsSection(){
   const c=insightsCache[insightsDays],d=c&&c.data;
   let body='<div class="ctxload">crunching…</div>';
   if(d&&d.ok){
+    const mixTot=(d.token_mix||[]).reduce((a,x)=>({input:a.input+x.input,write:a.write+x.write,
+      read:a.read+x.read,output:a.output+x.output}),{input:0,write:0,read:0,output:0});
+    const mixRow=x=>`<tr><td>${x.day}</td><td class="r">${x.input.toFixed(2)}</td><td class="r">${x.write.toFixed(2)}</td><td class="r">${x.read.toFixed(2)}</td><td class="r">${x.output.toFixed(2)}</td><td class="r"><b>${(x.input+x.write+x.read+x.output).toFixed(2)}</b></td></tr>`;
     body=`<div class="insbar">${[7,30,90].map(n=>`<button class="mqarr${insightsDays===n?' cur':''}" onclick="setInsightsDays(${n})">${n}d</button>`).join('')}
-        <span class="setnum">agents ${fmt$(d.totals.agent_cost)} · sessions active in window ${fmt$(d.totals.session_cost)} (lifetime $)</span></div>
-      <div class="dhead">by agent type</div>
-      ${insTable([['agent'],['runs',1],['total $',1],['avg $',1],['cache hit',1]],
-        d.agents.map(a=>`<tr><td>${esc(a.name)}</td><td class="r">${a.runs}</td><td class="r">${a.cost.toFixed(2)}</td><td class="r">${a.avg.toFixed(3)}</td><td class="r">${a.cache_pct}%</td></tr>`))}
-      <div class="dhead">by skill — attributed cost of turns run while the skill was active</div>
-      ${insTable([['skill'],['uses',1],['total $',1],['avg $/use',1]],
-        d.skills.map(s=>`<tr><td>${esc(s.name)}</td><td class="r">${s.uses}</td><td class="r">${s.cost.toFixed(2)}</td><td class="r">${s.avg.toFixed(3)}</td></tr>`))}
-      <div class="dhead">by tool — context injected by tool results (est tokens)</div>
-      ${insTable([['tool'],['uses',1],['tokens in',1],['avg/use',1]],
-        d.tools.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.uses}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${fmtTok(x.avg_tokens)}</td></tr>`))}
-      <div class="dhead">by model</div>
-      ${insTable([['model'],['agents $',1],['sessions $',1]],
-        d.models.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${m.agents.toFixed(2)}</td><td class="r">${m.sessions.toFixed(2)}</td></tr>`))}
-      <div class="dhead">by project (sessions active in window; lifetime $)</div>
-      ${insTable([['project'],['agents $',1],['sessions $',1]],
-        d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`))}
-      <div class="dhead">agent $ by day</div>
-      ${insTable([['day'],['$',1]],d.by_day.map(x=>`<tr><td>${x.day}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`))}
-      <div class="dhead">top sessions (lifetime $)</div>
-      ${insTable([['session'],['project'],['$',1]],
-        d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`))}`;
+        <span class="setnum">agents ${fmt$(d.totals.agent_cost)} · sessions active in window ${fmt$(d.totals.session_cost)} (lifetime $) · cache busts ~${fmt$(d.totals.bust_cost||0)}</span></div>`
+      +insFold('cache',`cache invalidations — est ${fmt$(d.totals.bust_cost||0)} re-paid in window`,
+        insTable([['cause'],['events',1],['tokens re-paid',1],['est $',1]],
+          (d.cache_busts||[]).map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.events}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
+      +insFold('mix','$ by token class per day — where the money actually goes',
+        insTable([['day'],['uncached $',1],['cache write $',1],['cache read $',1],['output $',1],['total',1]],
+          (d.token_mix||[]).length?[mixRow({day:'window',...mixTot})].concat(d.token_mix.map(mixRow)):[]))
+      +insFold('agents','by agent type',
+        insTable([['agent'],['runs',1],['total $',1],['avg $',1],['cache hit',1]],
+          d.agents.map(a=>`<tr><td>${esc(a.name)}</td><td class="r">${a.runs}</td><td class="r">${a.cost.toFixed(2)}</td><td class="r">${a.avg.toFixed(3)}</td><td class="r">${a.cache_pct}%</td></tr>`)))
+      +insFold('skills','by skill — attributed cost of turns run while the skill was active',
+        insTable([['skill'],['uses',1],['total $',1],['avg $/use',1]],
+          d.skills.map(s=>`<tr><td>${esc(s.name)}</td><td class="r">${s.uses}</td><td class="r">${s.cost.toFixed(2)}</td><td class="r">${s.avg.toFixed(3)}</td></tr>`)))
+      +insFold('tools','by tool — context injected by tool results (est tokens)',
+        insTable([['tool'],['uses',1],['tokens in',1],['avg/use',1]],
+          d.tools.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.uses}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${fmtTok(x.avg_tokens)}</td></tr>`)))
+      +insFold('models','by model',
+        insTable([['model'],['agents $',1],['sessions $',1]],
+          d.models.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${m.agents.toFixed(2)}</td><td class="r">${m.sessions.toFixed(2)}</td></tr>`)))
+      +insFold('projects','by project (sessions active in window; lifetime $)',
+        insTable([['project'],['agents $',1],['sessions $',1]],
+          d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`)))
+      +insFold('bydayy','agent $ by day',
+        insTable([['day'],['$',1]],d.by_day.map(x=>`<tr><td>${x.day}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
+      +insFold('topsess','top sessions (lifetime $)',
+        insTable([['session'],['project'],['$',1]],
+          d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
   }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
   return`<details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
     <summary>cost insights</summary>${body}</details>`;
