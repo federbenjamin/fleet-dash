@@ -225,8 +225,8 @@ td.r,th.r{text-align:right}
 .xbtn{background:none;border:1px solid var(--line);border-radius:8px;color:var(--dim);
       font:inherit;font-size:12px;padding:2px 9px;cursor:pointer;white-space:nowrap}
 /* stop, like the square on a remote */
-.stopbtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
-  padding:0;line-height:1;font-size:10px;cursor:pointer;border-radius:5px;
+.stopbtn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;
+  padding:0;line-height:1;font-size:16px;cursor:pointer;border-radius:6px;
   background:#2a1517;border:1px solid var(--red);color:var(--red)}
 .stopbtn:hover{background:var(--red);color:#0a0e14}
 #vfiles:empty{display:none}
@@ -610,7 +610,6 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();close
 // channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
 // prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
 let sessionView=null;            // sessionId of the open overlay
-let sessInfoOpen=false;          // the info dropdown INSIDE the overlay
 function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
   sessionView=sid;
@@ -618,7 +617,7 @@ function openSession(sid){
   renderSession(true);
 }
 function closeSession(){
-  sessionView=null;sessInfoOpen=false;slashClose();
+  sessionView=null;slashClose();
   $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';
 }
 function renderSession(force){
@@ -645,7 +644,6 @@ function renderSession(force){
   body.scrollTop=old.atBottom?body.scrollHeight:old.top;
   if(typing)return;                        // never replace the input being typed into
   const files=(c&&c.files)||[];
-  const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   $('#sact').innerHTML=`
     ${pendingBox(s,'smsg')}
     ${files.length?`<div class="stripbox"><div class="fstrip">${files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div></div>`:''}
@@ -654,20 +652,7 @@ function renderSession(force){
       onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
       <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
-    <div class="actmsg" id="smsg-${s.session_id}"></div>
-    <details class="dfold" ${sessInfoOpen?'open':''} ontoggle="sessInfoOpen=this.open">
-      <summary>session info</summary>
-      <div class="kv">
-        <span>session</span>${cpb(s.session_id)}
-        <span>pid</span><b>${s.pid??'?'}</b>
-        <span>cwd</span>${cpb(s.cwd||'?')}
-        <span>model</span><b>${esc(s.model||'?')}</b>
-        <span>state</span><b>${s.state}${s.reg_status?` · ${s.reg_status}`:''} · quiet ${fmtAge(s.quiet_s)}</b>
-        <span>context</span><b>${fmtTok(s.ctx_tokens||0)} · ${s.ctx_pct??'?'}%</b>
-        <span>agents</span><b>${s.agents_running} running · ${s.agents_total} total · ${fmt$(s.agent_cost)}</b>
-        <span>cost</span><b>${fmt$(s.cost)}</b>
-      </div>
-    </details>`;
+    <div class="actmsg" id="smsg-${s.session_id}"></div>`;
 }
 
 // ---- subagent chat overlay -------------------------------------------------
@@ -838,8 +823,6 @@ function sessionCard(s){
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
-      ${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
-        onclick="event.stopPropagation();sendInterrupt('${s.session_id}')">■</button>`:''}
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>

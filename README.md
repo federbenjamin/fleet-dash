@@ -29,8 +29,7 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
 - **Per card:** model, context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive
   and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
-  running-agent count, quiet time, 🔔 mute, and — while a session is mid-turn — a **■ stop
-  button** (confirms first, then sends Esc: the remote "stop this turn").
+  running-agent count, quiet time, and 🔔 mute. (The ■ stop button lives in the full view.)
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
@@ -60,9 +59,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   confirmation before sending.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
-  autocomplete), the amber question block when it's blocked on you, delivered-file chips,
-  ■ stop + 🔔 mute in the header, and the session-info dropdown. The card keeps its
-  inline conversation for scanning; this is for actually reading and working a session.
+  autocomplete), the amber question block when it's blocked on you, delivered-file chips, and
+  — in the header — the **■ stop button** (confirms first, then sends Esc: the remote "stop this
+  turn"; only offered while the session is mid-turn) plus 🔔 mute. The card keeps its inline
+  conversation for scanning; this is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
   button (right of "show conversation") takes you straight back.
