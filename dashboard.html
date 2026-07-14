@@ -233,8 +233,8 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
-  <div id="vhead"><span id="vtitle"></span><button id="vfilesbtn"
-    onclick="viewerFilesOpen=!viewerFilesOpen;renderVFiles()">📄 ▸</button><button id="vtheme" onclick="toggleTheme()">☀︎</button><button id="vclose" onclick="closeViewer()">✕ close</button></div>
+  <div id="vhead"><button id="vclose" onclick="closeViewer()">✕</button><span id="vtitle"></span><button id="vfilesbtn"
+    onclick="viewerFilesOpen=!viewerFilesOpen;renderVFiles()">📄 ▸</button><button id="vtheme" onclick="toggleTheme()">☀︎</button></div>
   <div id="vfiles"></div>
   <div id="vbody"></div>
   <div id="vact"></div>
@@ -506,6 +506,7 @@ function sessionCard(s){
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
+      ${ctxFiles.length?`<div class="fstrip" style="margin:8px 0 2px">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
       <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
         ontoggle="filesOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>delivered files (${ctxFiles.length})</summary>

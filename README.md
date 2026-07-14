@@ -31,8 +31,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
 - **Tap a card** → detail panel: a "session info" dropdown at the top (full session id, pid, cwd,
   exact model, started-ago, CLI status, tokens in context, spend split), recent conversation,
-  a **free-text send box** (types the message into that session's terminal and submits it), then
-  "delivered files" and "completed agents" dropdowns (both scroll internally past ~220px).
+  a **free-text send box** (types the message into that session's terminal and submits it), a
+  one-line horizontal strip of delivered-file chips (quick open), then the "delivered files"
+  (with caption + age) and "completed agents" dropdowns (both scroll internally past ~220px).
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit), plus an
     **"Other" free-text input** (types your own answer into the TUI's "Type something" row) and
