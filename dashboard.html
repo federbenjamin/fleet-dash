@@ -37,12 +37,14 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
 #totals .sep{color:var(--faint);font-style:normal;margin:0 7px}
 /* one-line "last message" preview — the newest prose, never a tool call */
-.lastmsg{display:flex;align-items:baseline;gap:7px;padding:6px 12px;font-size:12px;
-  color:var(--dim);border-top:1px solid var(--line);background:#0f1319;
-  overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lastmsg{display:flex;align-items:flex-start;gap:7px;padding:6px 12px;font-size:12px;
+  color:var(--dim);border-top:1px solid var(--line);background:#0f1319;overflow:hidden}
 .lastmsg .lmwho{flex:0 0 auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
-  color:var(--faint)}
-.lastmsg .lmtext{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  color:var(--faint);line-height:1.45;padding-top:1px}
+/* up to TWO lines, then ellipsis */
+.lastmsg .lmtext{flex:1;min-width:0;line-height:1.45;overflow:hidden;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.lastmsg.amsgprev .lmtext{-webkit-line-clamp:1}
 .lastmsg .lmwho.user{color:var(--blue)}
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
@@ -370,7 +372,7 @@ td.r,th.r{text-align:right}
 .nfwarn{background:#2b2111;border:1px solid var(--amber);color:var(--amber);border-radius:8px;
   padding:7px 9px;font-size:11.5px;margin:6px 0;line-height:1.45}
 .nfgo{width:100%;margin-top:10px;padding:10px}
-.nfcheck{display:flex;align-items:center;gap:9px;margin:10px 0 4px;font-size:13px;cursor:pointer}
+.nfcheck{display:flex;align-items:center;gap:9px;margin:10px 0;font-size:13px;cursor:pointer}
 .nfcheck input{width:24px;height:24px;flex:0 0 auto;margin:0;accent-color:var(--blue);cursor:pointer}
 .nfcheck span{line-height:1}
 /* the "open" button focuses an iTerm tab — meaningless from a phone */
@@ -799,10 +801,10 @@ function renderSession(force){
 // parent forwards with SendMessage), so it is labelled as a relay, not a channel.
 let agentView=null;              // {sid, aid} of the open overlay
 const agentCache={};             // aid -> {v, messages, info}
-let agentInfoOpen2=true;         // the info dropdown INSIDE the overlay (open by default)
+let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
 function openAgent(sid,aid){
   agentView={sid,aid};
-  agentInfoOpen2=true;
+  agentInfoOpen2=false;
   $('#aview').style.display='flex';
   renderAgent(true);
 }
@@ -917,12 +919,16 @@ function sessionCard(s){
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const done=s.agents.filter(a=>['done','ended'].includes(a.state));
   const activeSession=!['idle','dormant'].includes(s.state);
-  // context auto-opens with the amber box; other states get it in the detail panel
+  // A QUESTION card is a signal only: the ask itself is the context, and the answer
+  // lives in the full view. A PERMISSION card still peeks at the conversation — you
+  // need to see what the session was doing to judge the tool call.
+  const isQuestion=!!(s.pending&&s.pending.kind==='question');
+  const peek=needs&&!isQuestion;
   let ctxHtml='';
-  if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s,needs);}
+  if(peek||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s,peek);}
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   const detail=isOpen?`<div class="detail">
-      ${!needs&&ctxHtml?`<div class="dhead">recent conversation
+      ${!peek&&ctxHtml?`<div class="dhead">recent conversation
         <button class="expandbtn" title="open the full conversation"
           onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
       <div class="actmsg" id="msg-${s.session_id}"></div>
@@ -975,7 +981,7 @@ function sessionCard(s){
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
     ${s.last_msg?`<div class="lastmsg"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext">${esc(s.last_msg.text)}</span></div>`:''}
-    ${needs&&ctxHtml?`<div class="dhead chead">recent conversation
+    ${peek&&ctxHtml?`<div class="dhead chead">recent conversation
       <button class="expandbtn" title="open the full conversation"
         onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
     ${cardPending(s)}

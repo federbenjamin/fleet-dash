@@ -728,7 +728,7 @@ class Engine:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
-                "last_msg": mt.last_message(),      # one-line preview on every card
+                "last_msg": mt.last_message(280),   # card preview: up to two lines
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
