@@ -58,7 +58,7 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .smeta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:0 12px 10px;font-size:12px;color:var(--dim)}
 .smeta .m{white-space:nowrap}
 .ctxwrap{flex:0 0 auto;display:flex;align-items:center;gap:5px}
-.ctxbar{width:120px;height:5px;background:var(--card2);border-radius:3px;overflow:hidden}
+.ctxbar{width:80px;height:5px;background:var(--card2);border-radius:3px;overflow:hidden}
 .ctxbar i{display:block;height:100%;background:var(--blue);border-radius:3px}
 a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
@@ -178,8 +178,8 @@ td.r,th.r{text-align:right}
 #vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
 #vact .optbtn{margin:4px 0;padding:6px 9px;font-size:12px}
 #vact .freetext{margin-top:8px}
-.vchat-toggle{display:block;background:none;border:none;color:var(--dim);font:inherit;font-size:12px;
-              cursor:pointer;padding:4px 0 2px;user-select:none}
+.vchat-toggle{display:block;width:100%;text-align:left;background:none;border:none;color:var(--dim);
+              font:inherit;font-size:12px;cursor:pointer;padding:4px 0 2px;user-select:none}
 .vconvo{max-height:34vh;border:1px solid var(--line);border-radius:8px;background:#10141b;
         padding:4px 9px;margin-top:4px}
 #vbody.light{background:#f7f8fa;color:#1c2128}
@@ -522,7 +522,6 @@ function sessionCard(s){
       <span class="m">${esc(s.family)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
-      ${isOpen&&s.agents_total?`<span class="m">${done.length} done · ${fmt$(s.agent_cost)} on agents</span>`:''}
       <span class="m">quiet ${fmtAge(s.quiet_s)}</span>
       ${s.bridge_url?`<a class="jump" href="${s.bridge_url}" target="_blank" onclick="event.stopPropagation()">open ↗</a>`:''}
     </div>
@@ -711,17 +710,32 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
   act(sid,{type:'text',text:v},msgPre);if(inp)inp.value='';
 }
 let closedOpen=false;
+const closedInfoOpen=new Set();   // closed-session info blocks, survives re-renders
+function toggleClosed(sid){
+  closedInfoOpen.has(sid)?closedInfoOpen.delete(sid):closedInfoOpen.add(sid);render(last,true);
+}
 function closedSection(list,now){
   if(!list||!list.length)return'';
   return`<details class="foldbox" ${closedOpen?'open':''} ontoggle="closedOpen=this.open">
-    <summary>recently closed (${list.length})</summary>
-    ${list.map(c=>`<div class="crow">
+    <summary>closed sessions (${list.length})</summary>
+    ${list.map(c=>{
+      const open=closedInfoOpen.has(c.session_id);
+      return`<div class="crow" style="cursor:pointer" onclick="toggleClosed('${c.session_id}')">
       <span class="cname">${c.title?esc(c.title)+' ':''}<small>${esc(c.project)}${c.branch&&c.branch!=='HEAD'?` · ${esc(c.branch)}`:''}</small></span>
       <span class="anum">${c.agents_total||0} agents</span>
       <span class="anum">${fmtAge(Math.max(0,Math.round(now-c.closed_at)))} ago</span>
       <span class="acost">${fmt$((c.cost||0)+(c.agent_cost||0))}</span>
-      ${c.bridge_url?`<a class="jump" href="${c.bridge_url}" target="_blank">↗</a>`:''}
-    </div>`).join('')}
+      ${c.bridge_url?`<a class="jump" href="${c.bridge_url}" target="_blank" onclick="event.stopPropagation()">↗</a>`:''}
+    </div>${open?`<div class="detail"><div class="kv">
+      <span>session</span><b>${esc(c.session_id)}</b>
+      <span>cwd</span><b>${esc(c.cwd||'?')}</b>
+      <span>branch</span><b>${esc(c.branch||'—')}</b>
+      <span>model</span><b>${esc(c.model||'?')}</b>
+      <span>lifetime</span><b>${c.first_seen&&c.closed_at?fmtAge(Math.max(0,c.closed_at-c.first_seen)):'?'}</b>
+      <span>closed</span><b>${fmtAge(Math.max(0,Math.round(now-c.closed_at)))} ago</b>
+      <span>spend</span><b>${fmt$(c.cost||0)} session + ${fmt$(c.agent_cost||0)} agents</b>
+      <span>agents</span><b>${c.agents_total||0}</b>
+    </div></div>`:''}`;}).join('')}
   </details>`;
 }
 
@@ -751,8 +765,7 @@ function render(f,force){
   $('#totals').innerHTML=`<span><b>${t.sessions}</b> sessions</span><span><b>${t.busy}</b> busy</span>
     <span style="color:${t.needs_me?'var(--amber)':'inherit'}"><b>${t.needs_me}</b> need you</span>
     ${t.done?`<span style="color:var(--green)"><b>${t.done}</b> done</span>`:''}
-    <span><b>${t.agents_running}</b> agents running</span>
-    <span>agents <b>${fmt$(t.agent_cost)}</b></span><span>sessions <b>${fmt$(t.session_cost)}</b></span>`;
+    <span><b>${t.agents_running}</b> agents running</span>`;
   const ae=document.activeElement;
   const typing=ae&&ae.tagName==='INPUT'&&$('#sessions').contains(ae);
   // preserve convo scroll positions across the wholesale innerHTML re-render

@@ -586,14 +586,14 @@ class Engine:
         except Exception as e:
             print(f"session ledger error: {e}", file=sys.stderr, flush=True)
 
-    def closed_sessions(self, limit=20):
-        cols = ("session_id", "name", "project", "branch", "cost", "agent_cost",
-                "agents_total", "bridge_url", "first_seen", "closed_at", "title")
+    def closed_sessions(self):
+        cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
+                "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
+                "closed_at", "title")
         try:
             rows = self.ensure_db().execute(
                 f"""SELECT {','.join(cols)} FROM session_runs
-                    WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT ?""",
-                (limit,)).fetchall()
+                    WHERE closed_at IS NOT NULL ORDER BY closed_at DESC""").fetchall()
             return [dict(zip(cols, r)) for r in rows]
         except Exception:
             return []

@@ -20,8 +20,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
   across daemon restarts and auto-expire 30 days after being set.
-- Collapsed cards stay lean: total spend, done-agent count, and agent spend appear once the
-  card is open (running-agent count stays visible everywhere).
+- Card headers stay lean: the $ total appears only on an open card; done-agent count and
+  agent spend live in the detail panel ("completed agents", "session info"), not the header.
+  The running-agent count stays visible everywhere.
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
@@ -66,7 +67,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   ✕ dismiss), and the always-visible free-text send box.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
-- **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
+- **closed sessions** dropdown: every closed session the daemon ever saw (title, final spend,
+  agents, closed-ago); tap a row for its info block (full id, cwd, branch, model, lifetime,
+  spend split).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.
 - Scrollbars (vertical + horizontal) auto-hide when idle and appear while scrolling; the 2s
