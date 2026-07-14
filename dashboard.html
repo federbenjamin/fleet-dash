@@ -68,11 +68,28 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;color:var(--dim);margin-bottom:8px}
 .kv b{color:var(--fg);font-weight:500;word-break:break-all}
 .dhead{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px}
-details.foldbox{margin-top:18px}
-details.foldbox summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 2px;user-select:none}
+/* dropdowns: no native marker; a rotating chevron + quiet card-styled summaries */
+details.foldbox summary,details.dfold summary,details.insfold summary{list-style:none;cursor:pointer;user-select:none}
+details.foldbox summary::-webkit-details-marker,details.dfold summary::-webkit-details-marker,
+details.insfold summary::-webkit-details-marker{display:none}
+details.foldbox summary::before,details.dfold summary::before,details.insfold summary::before{
+  content:'▸';display:inline-block;width:15px;color:var(--faint);transition:transform .15s ease}
+details.foldbox[open]>summary::before,details.dfold[open]>summary::before,
+details.insfold[open]>summary::before{transform:rotate(90deg)}
+details.foldbox{margin-top:14px;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;overflow:clip}
+details.foldbox>summary{color:var(--fg);font-size:13px;font-weight:500;padding:10px 12px}
+details.foldbox>summary:hover{background:var(--card2)}
+details.foldbox[open]>summary{border-bottom:1px solid var(--line)}
+details.foldbox .insfold,details.foldbox .insbar,details.foldbox table,
+details.foldbox .setnum,details.foldbox .ctxload{margin-left:8px;margin-right:8px}
 details.dfold{margin:2px 0 8px}
-details.dfold summary{cursor:pointer;color:var(--dim);font-size:12px;padding:4px 0;user-select:none}
-details.dfold .kv{margin:6px 0 4px}
+details.dfold>summary{color:var(--dim);font-size:12px;padding:7px 10px;background:var(--card);
+  border:1px solid var(--line);border-radius:8px}
+details.dfold>summary:hover{color:var(--fg)}
+details.dfold[open]>summary{color:var(--fg)}
+details.dfold .kv{margin:8px 2px 4px}
+details.insfold>summary:hover{color:var(--fg)}
 .crow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px}
 .crow .cname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .crow small{color:var(--faint)}
@@ -152,6 +169,15 @@ td.r,th.r{text-align:right}
 .insfold{margin:3px 0}
 .insfold summary{cursor:pointer;color:var(--dim);font-size:12.5px;padding:5px 2px;user-select:none}
 .squiet{margin-left:auto;color:var(--dim);font-size:12px;font-weight:400;white-space:nowrap}
+.detailstrip{margin:8px 0 2px}
+/* touch screens: more breathing room between the detail panel's blocks */
+@media (pointer:coarse){
+  .detail details.dfold{margin:14px 0}
+  .detail .dhead{margin-top:16px}
+  .detail .freetext{margin-top:16px}
+  .detail .detailstrip{margin:14px 0 4px}
+  .detail .ctxbox{margin-bottom:12px}
+}
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
 .ptool{display:flex;align-items:center;gap:8px}
@@ -506,7 +532,7 @@ function sessionCard(s){
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
-      ${ctxFiles.length?`<div class="fstrip" style="margin:8px 0 2px">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
+      ${ctxFiles.length?`<div class="fstrip detailstrip">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
       <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
         ontoggle="filesOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>delivered files (${ctxFiles.length})</summary>
