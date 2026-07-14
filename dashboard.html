@@ -48,9 +48,13 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
 #stale{display:none;background:var(--red);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:clip}
+/* focus is per-card and tied only to THIS card's open state: an expanded ("less")
+   card is at full brightness, a collapsed ("more") card is recessed */
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;
+  overflow:clip;opacity:.7;transition:opacity .12s ease}
 .card.needs{border-color:var(--amber)}
 .card.stalled{border-color:var(--red)}
+.card.open{opacity:1}
 /* sticky: header pins to the viewport top while its card scrolls past (so a long
    open card can still be collapsed), then exits with the card bottom. Requires the
    card ancestor NOT be a scroll container: overflow:clip above, never hidden. */
@@ -64,7 +68,8 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .chip.stalled{background:#2d1214;color:var(--red)}
 .chip.stalled_or_prompt{background:#2b2111;color:var(--amber)}
 .chip.dormant{background:var(--card2);color:var(--faint)}
-.card.dorm{opacity:.5}
+.card.dorm{opacity:.4}
+.card.dorm.open{opacity:1}   /* opening a dormant card still focuses it */
 .sname{font-weight:600;overflow:hidden;flex:1;min-width:0;line-height:1.3}
 .sname .stitle,.sname small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sname small{color:var(--dim);font-weight:400}
@@ -276,19 +281,26 @@ td.r,th.r{text-align:right}
 .fchip:disabled{color:var(--faint);cursor:default}
 .fchip:active{background:var(--card2)}
 #viewer{display:none;position:fixed;inset:0;background:#0a0e14;z-index:50;flex-direction:column}
-#vhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+#vhead{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
        padding-top:calc(10px + env(safe-area-inset-top))}
-#vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
-        font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+/* session heading (title / project·branch·model), a tight rule, then the file name */
+#vtitle{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+#vtitle b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#vtitle small{color:var(--dim);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vfsep{align-self:stretch;border-top:1px solid var(--line);margin:5px 0}
+.vfname{font-size:12.5px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#vclose,#vtheme{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
+        color:var(--fg);font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
 #vtheme{font-size:28px;line-height:1;padding:2px 12px}
 /* full-screen session view — the card's chat, question block and controls,
    with room to actually read (same overlay shape as the subagent view) */
 #sview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:52;flex-direction:column}
-#shead2{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+#shead2{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
         padding-top:calc(10px + env(safe-area-inset-top))}
-#stitle2{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#stitle2 small{color:var(--dim);font-weight:400;margin-left:8px}
+/* title on its own line, project · branch · model beneath */
+#stitle2{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+#stitle2 b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stitle2 small{color:var(--dim);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #sctrl{display:flex;align-items:center;gap:6px}
 #sclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
@@ -439,19 +451,19 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
-  <div id="vhead"><button id="vclose" onclick="closeViewer()">✕</button><span id="vtitle"></span><button id="vtheme" onclick="toggleTheme()">☀︎</button></div>
+  <div id="vhead"><button id="vclose" onclick="dismissOverlay()">✕</button><span id="vtitle"></span><button id="vtheme" onclick="toggleTheme()">☀︎</button></div>
   <div id="vbody"></div>
   <div id="vact"></div>
 </div>
 <div id="confirm"></div>
 <div id="aview">
-  <div id="ahead"><button id="aclose" onclick="closeAgent()">✕</button><span id="atitle"></span>
+  <div id="ahead"><button id="aclose" onclick="dismissOverlay()">✕</button><span id="atitle"></span>
     <span id="actrl"></span></div>
   <div id="abody"></div>
   <div id="aact"></div>
 </div>
 <div id="sview">
-  <div id="shead2"><button id="sclose" onclick="closeSession()">✕</button><span id="stitle2"></span>
+  <div id="shead2"><button id="sclose" onclick="dismissOverlay()">✕</button><span id="stitle2"></span>
     <span id="sctrl"></span></div>
   <div id="sbody"></div>
   <div id="sact"></div>
@@ -691,13 +703,24 @@ function renderViewerBar(force){
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
   if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
 }
+// the chat view's title/subtitle block for a session (title on its own line,
+// project · branch · model beneath) — shared by the full chat view and the md viewer
+function sessTitleBlock(s){
+  if(!s)return '<b>session</b>';
+  return `<b>${esc(s.title||s.project)}</b>
+    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}${s.family?` · ${modelLabel(s)}`:''}</small>`;
+}
 function viewFile(sid,ep,en,kind,ecap){
   closeSession();          // the two full-screen surfaces are mutually exclusive
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
-  $('#vtitle').textContent=name+(cap?' — '+cap:'');
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  // same session heading as the chat view, then a rule, then the file name
+  $('#vtitle').innerHTML=`${sessTitleBlock(s)}
+    <span class="vfsep"></span>
+    <span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
   $('#viewer').style.display='flex';
-  viewerSid=sid;viewerPath=path;renderViewerBar(true);
+  viewerSid=sid;viewerPath=path;syncOverlayHistory();renderViewerBar(true);
   const vb=$('#vbody');
   if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
   vb.textContent='loading…';
@@ -709,10 +732,28 @@ function viewFile(sid,ep,en,kind,ecap){
 }
 function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
   viewerSid=null;viewerPath=null;}
-document.addEventListener('keydown',e=>{
-  if(e.key!=='Escape')return;
-  if(confirmYes!==null||$('#confirm').style.display==='flex')return closeConfirm();  // dismiss the ask first
-  closeViewer();closeAgent();closeSession();});
+// ---- back-gesture / Esc closes the open full-screen overlay ----------------
+// The three overlays are mutually exclusive fullscreen surfaces, so we model
+// "an overlay is open" as ONE logical state: push a single history entry when we
+// go from none-open to open, and the phone's back-swipe (popstate) closes it
+// instead of navigating away from the dashboard. Closing via ✕/Esc calls
+// history.back() so the pushed entry is consumed and history stays balanced.
+let histPushed=false;
+const anyOverlay=()=>['#viewer','#sview','#aview'].some(id=>$(id).style.display==='flex');
+function syncOverlayHistory(){
+  if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
+}
+window.addEventListener('popstate',()=>{
+  if(!histPushed)return;                 // an entry we didn't push — leave it
+  histPushed=false;
+  closeConfirm();closeViewer();closeAgent();closeSession();
+});
+function dismissOverlay(){
+  if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(histPushed)history.back();          // → popstate does the actual close
+  else{closeViewer();closeAgent();closeSession();}
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 
 // ---- full-screen session view ----------------------------------------------
 // Same overlay shape as the subagent view, but this one is a real terminal
@@ -725,6 +766,7 @@ function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
   sessionView={sid,closed:false};
   $('#sview').style.display='flex';
+  syncOverlayHistory();
   renderSession(true);
 }
 // a closed session has no process: read its transcript, offer no controls
@@ -732,6 +774,7 @@ function openClosed(sid){
   closeViewer();
   sessionView={sid,closed:true};
   $('#sview').style.display='flex';
+  syncOverlayHistory();
   renderClosed(true);
 }
 function closeSession(){
@@ -774,8 +817,7 @@ function renderSession(force){
   const ae=document.activeElement;
   const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
   const done=['done','ended'];
-  $('#stitle2').innerHTML=`<b>${esc(s.title||s.project)}</b>
-    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${modelLabel(s)}</small>`;
+  $('#stitle2').innerHTML=sessTitleBlock(s);
   $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
       onclick="sendInterrupt('${s.session_id}','smsg')"></button>`:''}`;
   if(!force&&(typing||touching()))return;
@@ -815,6 +857,7 @@ function openAgent(sid,aid){
   agentView={sid,aid};
   agentInfoOpen2=false;
   $('#aview').style.display='flex';
+  syncOverlayHistory();
   renderAgent(true);
 }
 function closeAgent(){
@@ -970,7 +1013,7 @@ function sessionCard(s){
       </details>
       ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
     </div>`:'';
-  return`<div class="card ${cls}" data-sid="${s.session_id}">
+  return`<div class="card ${cls}${isOpen?' open':''}" data-sid="${s.session_id}">
     <div class="shead" title="open the full conversation" onclick="openSession('${s.session_id}')">
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
@@ -1506,7 +1549,11 @@ function insightsSection(){
         insTable([['session'],['project'],['$',1]],
           d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
   }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
-  return`<details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
+  // leading separator: closes off the session/closed lists. Its margin-bottom (8)
+  // collapses with the foldbox margin-top (14) → a 14px gap to cost insights,
+  // matching the dormant-to-its-separator gap above.
+  return`<div class="dsep"></div>
+    <details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
     <summary>cost insights</summary>${body}</details>`;
 }
 
