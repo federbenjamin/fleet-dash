@@ -40,10 +40,13 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Per card:** model, context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive
   and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
   running-agent count, quiet time, and 🔔 mute. (The ■ stop button lives in the full view.)
-- **Last-message preview** on every card: one line of the newest actual message (prose only —
-  tool calls and system events are skipped), tagged YOU / CLAUDE, between the meta row and the
-  subagent rows. The ⚙ panel has a **display** toggle to show the same preview on running
-  subagent rows (off by default); tapping one opens that agent's chat.
+- **Conversation peek** on every card: the newest actual message (prose only — tool calls and
+  system events are skipped), tagged YOU / CLAUDE, between the meta row and the subagent rows.
+  The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
+  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). The line count also caps
+  what the server sends, so a short peek isn't shipping long text every poll. Tapping a
+  subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
+  is the context.
 - **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
   `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
   included** — so it is a liveness signal (is it moving?), not output speed; a big context makes

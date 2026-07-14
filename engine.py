@@ -37,7 +37,11 @@ DEFAULT_CONFIG = {
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
-    "preview_agents": False,            # one-line last-message preview on agent rows too
+    # last-message peeks: on/off + how many lines each is allowed
+    "preview_sessions": True,
+    "preview_session_lines": 2,
+    "preview_agents": False,
+    "preview_agent_lines": 1,
     "_permission_keys_note": "keystrokes injected for permission-prompt choices; deny defaults to Esc (cancels any prompt variant)",
     "permission_keys": {"allow": "1", "always": "2", "deny": ""},
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
@@ -728,7 +732,10 @@ class Engine:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
-                "last_msg": mt.last_message(280),   # card preview: up to two lines
+                # ~140 chars fills one rendered line at the card's width; send enough
+                # for the configured clamp and no more (this rides every 2s poll)
+                "last_msg": (mt.last_message(140 * int(cfg.get("preview_session_lines", 2)))
+                             if cfg.get("preview_sessions", True) else None),
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
@@ -773,7 +780,8 @@ class Engine:
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
                           "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
-                          "preview_agents")},
+                          "preview_sessions", "preview_session_lines",
+                          "preview_agents", "preview_agent_lines")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -849,7 +857,8 @@ class Engine:
                 "convo_v": t.convo_rev,     # cache key for the agent chat overlay
                 # only running agents get a preview: a finished one's last line is its
                 # final report, which the completed-agents view already shows
-                "last_msg": t.last_message(120) if not done else None,
+                "last_msg": (t.last_message(120 * int(cfg.get("preview_agent_lines", 1)))
+                             if cfg.get("preview_agents") and not done else None),
             })
             if done:
                 self.ledger_finalize(subdir, agent_id, meta, t)
@@ -1766,7 +1775,10 @@ class Engine:
     NUM_KEYS = {"awaiting_input_notify_seconds": (int,   0,    86400),
                 "stall_seconds":                 (int,   30,   86400),
                 "spend_threshold_usd":           (float, 0.5,  10000),
-                "fleet_quiet_minutes":           (float, 0,    1440)}
+                "fleet_quiet_minutes":           (float, 0,    1440),
+                "preview_session_lines":         (int,   1,    6),
+                "preview_agent_lines":           (int,   1,    6)}
+    BOOL_KEYS = ("preview_sessions", "preview_agents")
 
     def update_settings(self, patch):
         """Persist dashboard-editable settings: notify toggles, notification
@@ -1788,8 +1800,9 @@ class Engine:
                 if not lo <= v <= hi:
                     return {"ok": False, "error": f"{k} must be {lo}–{hi}"}
                 self.cfg[k] = changed[k] = v
-        if "preview_agents" in patch:
-            self.cfg["preview_agents"] = changed["preview_agents"] = bool(patch["preview_agents"])
+        for k in self.BOOL_KEYS:
+            if k in patch:
+                self.cfg[k] = changed[k] = bool(patch[k])
         if "dashboard_url" in patch:
             u = str(patch["dashboard_url"] or "").strip()[:300]
             if u and not u.startswith(("http://", "https://")):

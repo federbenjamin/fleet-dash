@@ -44,7 +44,6 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 /* up to TWO lines, then ellipsis */
 .lastmsg .lmtext{flex:1;min-width:0;line-height:1.45;overflow:hidden;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
-.lastmsg.amsgprev .lmtext{-webkit-line-clamp:1}
 .lastmsg .lmwho.user{color:var(--blue)}
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
@@ -908,9 +907,13 @@ function agentRow(a){
     <span class="aopen">›</span>
   </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px"
     onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
-    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext">${esc(a.last_msg.text)}</span></div>`:''}`;
+    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext" style="-webkit-line-clamp:${clampA()}">${esc(a.last_msg.text)}</span></div>`:''}`;
 }
-const previewAgents=()=>!!((last&&last.settings)||{}).preview_agents;
+const setg=()=>((last&&last.settings)||{});
+const previewAgents=()=>!!setg().preview_agents;
+const previewSessions=()=>setg().preview_sessions!==false;
+const clampS=()=>Math.max(1,Math.min(6,setg().preview_session_lines??2));
+const clampA=()=>Math.max(1,Math.min(6,setg().preview_agent_lines??1));
 
 function sessionCard(s){
   const needs=s.state==='needs_you'||s.state==='stalled_or_prompt';
@@ -980,7 +983,7 @@ function sessionCard(s){
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
-    ${s.last_msg?`<div class="lastmsg"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext">${esc(s.last_msg.text)}</span></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
     ${peek&&ctxHtml?`<div class="dhead chead">recent conversation
       <button class="expandbtn" title="open the full conversation"
         onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
@@ -1015,9 +1018,13 @@ function renderSettings(){
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
-    <div class="dhead" style="margin-top:12px">display</div>
+    <div class="dhead" style="margin-top:12px">conversation peek</div>
+    <label class="setrow"><input type="checkbox" ${st.preview_sessions!==false?'checked':''}
+      onchange="setBool('preview_sessions',this.checked)">on session cards<span class="setnum">
+      — ${num('preview_session_lines',1)} line(s)</span></label>
     <label class="setrow"><input type="checkbox" ${st.preview_agents?'checked':''}
-      onchange="setBool('preview_agents',this.checked)">last-message preview on subagent rows too<span class="setnum"> — sessions always show one</span></label>
+      onchange="setBool('preview_agents',this.checked)">on subagent rows<span class="setnum">
+      — ${num('preview_agent_lines',1)} line(s)</span></label>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
 async function setNotify(k,v){
@@ -1036,7 +1043,8 @@ async function setNum(k,v){
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({[k]:parseFloat(v)})});
     const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';
+      uiRefresh();}   // a peek-line change must repaint the cards, not wait for the poll
     else if(msg)msg.textContent='✗ '+(d.error||'failed');
   }catch(e){if(msg)msg.textContent='✗ '+e;}
 }
