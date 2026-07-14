@@ -46,8 +46,8 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   it large.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
-  session whose statusline hasn't rendered yet shows the model alone. Subagent effort isn't
-  observable anywhere, so agent rows show the model only.
+  session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
+  the agent definition's frontmatter pin, or the parent session's effort when it pins none.
 - **"open"** on each card header (desktop only): brings that session's iTerm tab to the front.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info

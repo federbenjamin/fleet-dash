@@ -179,8 +179,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     cannot derive it. `~/.claude/statusline-command.sh` side-writes it to
     `fleet-dash/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
     `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
-    alone. Subagent effort is NOT observable at all (it lives in agent frontmatter) — never fake
-    it on an agent row.
+    alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
+    (`.claude/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
+    the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
+    types (`plugin:agent`) have no local file: fall back to the parent.
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     finds its transcript through the LEDGER's `cwd`. Its overlay is read-only — no send box, no
     stop, no mute (there is no tty to write to).

@@ -580,6 +580,7 @@ class Engine:
         self.cfg = cfg
         self.tails = {}                 # path -> Tail
         self.velocity = {}              # path -> deque[(t, total_tokens)]
+        self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self.db = None
         self.notified = {}              # dedupe keys -> t
         self.seeded = False             # first pass registers pre-existing states silently
@@ -632,8 +633,10 @@ class Engine:
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status in ("idle", "waiting")
             agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now, parent_idle)
+            sess_effort = self.effort_for(sid)
             for a in agents:            # the agent chat overlay acts through the parent
                 a["session_id"] = sid
+                a["effort"] = self.agent_effort(a.get("agent_type"), cwd, sess_effort)
             # long tool calls freeze an agent's transcript ("stalled"); still active
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
 
@@ -1145,6 +1148,36 @@ class Engine:
             return None, None
         return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
 
+    def agent_effort(self, agent_type, cwd, parent_effort):
+        """Effort for a subagent.
+
+        A subagent's effort is never in its transcript, but agent definitions PIN it
+        in frontmatter (`effort: high`). An agent with no pin inherits the parent
+        session's effort — which is exactly what the runtime does, so reporting the
+        parent's value is accurate, not a guess. Plugin-namespaced types
+        (`plugin:agent`) have no local file: fall back to the parent."""
+        if not agent_type or ":" in agent_type:
+            return parent_effort
+        for root in (os.path.join(cwd, ".claude"), os.path.join(HOME, ".claude")):
+            p = os.path.join(root, "agents", f"{agent_type}.md")
+            try:
+                mtime = os.path.getmtime(p)
+            except OSError:
+                continue
+            hit = self._agent_eff.get(p)
+            if hit and hit[0] == mtime:
+                return hit[1] or parent_effort
+            try:
+                with open(p, errors="replace") as f:
+                    head = f.read(2000)
+            except OSError:
+                continue
+            m = re.search(r"^effort:\s*(\w+)", head, re.M)
+            eff = m.group(1) if m and m.group(1) in self.EFFORTS else None
+            self._agent_eff[p] = (mtime, eff)
+            return eff or parent_effort
+        return parent_effort
+
     @staticmethod
     def effort_for(sid):
         """Effort level ('high', 'max', …) for a session.
@@ -1285,10 +1318,14 @@ class Engine:
             t.poll()
             msgs = [dict(m) for m in t.convo]
             fam = model_family(t.model)
+            reg = next((r for r in self.live_sessions()
+                        if r.get("sessionId") == sid), None) or {}
             info = {"agent_id": aid, "agent_type": meta.get("agentType", "?"),
                     "description": meta.get("description", ""),
                     "depth": meta.get("spawnDepth", 0),
                     "model": t.model, "family": fam,
+                    "effort": self.agent_effort(meta.get("agentType"), reg.get("cwd", ""),
+                                                self.effort_for(sid)),
                     "tokens": {"in": t.ti, "cache_write": t.tw,
                                "cache_read": t.tr, "out": t.to},
                     "total_tokens": t.total_tokens, "cost": round(t.cost(self.cfg), 4),
