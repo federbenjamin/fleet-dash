@@ -171,13 +171,16 @@ td.r,th.r{text-align:right}
 .insfold{margin:3px 0}
 .insfold summary{cursor:pointer;color:var(--dim);font-size:12.5px;padding:5px 2px;user-select:none}
 .squiet{margin-left:auto;color:var(--dim);font-size:12px;font-weight:400;white-space:nowrap}
-.detailstrip{margin:8px 0 14px}
-.detail details.dfold:last-of-type{margin-bottom:2px}
+.stripbox{background:var(--card);border:1px solid var(--line);border-radius:8px;
+  padding:8px 10px;margin:8px 0 0}
+.dsep{border-top:1px solid var(--line);margin:12px 0}
+.detail>.dhead:first-child{margin-top:0}
 /* touch screens: more breathing room between the detail panel's blocks */
 @media (pointer:coarse){
   .detail details.dfold{margin:14px 0}
   .detail .dhead{margin-top:16px}
-  .detail .detailstrip{margin:14px 0 18px}
+  .detail .stripbox{margin-top:14px}
+  .detail .dsep{margin:14px 0}
   .detail .ctxbox{margin-bottom:12px}
 }
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
@@ -520,7 +523,7 @@ function sessionCard(s){
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
-      ${ctxFiles.length?`<div class="fstrip detailstrip">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
+      ${ctxFiles.length?`<div class="stripbox"><div class="fstrip">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div></div><div class="dsep"></div>`:''}
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
         ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>session info</summary>
@@ -548,7 +551,7 @@ function sessionCard(s){
         <summary>completed agents (${done.length})</summary>
         <div class="foldscroll">${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}</div>
       </details>
-      ${s.bridge_url?`<div style="padding:2px 0 0"><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
+      ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
     </div>`:'';
   return`<div class="card ${cls}" data-sid="${s.session_id}">
     <div class="shead" onclick="toggle('${s.session_id}')">
