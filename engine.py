@@ -169,6 +169,10 @@ class Tail:
         self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
         self.last_compact_ep = 0        # epoch of the newest compact_boundary seen
         self._qa_refs = {}              # AskUserQuestion tool_use_id -> convo entry
+        # tool_use_ids whose result came back is_error — for an Agent tool_use that is
+        # the CANCELLATION record ("The user doesn't want to proceed with this tool
+        # use"), and the only place a killed subagent is unambiguously marked
+        self.errored_tools = set()
 
     def poll(self):
         try:
@@ -286,6 +290,8 @@ class Tail:
             if kind == "tool_result" and isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
+                        if b.get("is_error") and b.get("tool_use_id"):
+                            self.errored_tools.add(b["tool_use_id"])
                         p = self.pending.pop(b.get("tool_use_id"), None)
                         if p:           # result size = context the tool injected
                             self._stat((self._day(ts), "tool",
@@ -632,7 +638,8 @@ class Engine:
             reg_status = reg.get("status")  # 'busy' | 'idle' | 'waiting' | None
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status in ("idle", "waiting")
-            agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now, parent_idle)
+            agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now,
+                                      parent_idle, parent=mt)
             sess_effort = self.effort_for(sid)
             for a in agents:            # the agent chat overlay acts through the parent
                 a["session_id"] = sid
@@ -749,9 +756,10 @@ class Engine:
             self.snapshot_cache = fleet
         return fleet
 
-    def scan_agents(self, subdir, now, parent_idle=False):
+    def scan_agents(self, subdir, now, parent_idle=False, parent=None):
         out = []
         cfg = self.cfg
+        killed = parent.errored_tools if parent else set()
         for meta_path in glob.glob(os.path.join(subdir, "*.meta.json")):
             agent_id = os.path.basename(meta_path)[:-len(".meta.json")]
             jl = os.path.join(subdir, agent_id + ".jsonl")
@@ -780,7 +788,16 @@ class Engine:
                      else cfg["agent_idle_done_seconds"])
             done = settled and quiet > grace
             state = "done" if done else ("stalled" if quiet > cfg["stall_seconds"] else "running")
-            if not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
+
+            # CANCELLED is authoritative and immediate: the parent's tool_result for
+            # this agent came back is_error ("the user doesn't want to proceed with
+            # this tool use"). A killed agent's own transcript ends on a USER row, so
+            # `settled` (assistant-last) can never see it and it would otherwise sit
+            # "running" until it rotted into red "stalled" forever. (Verified
+            # 2026-07-14 on session b5996cb1: two agents rejected mid-flight.)
+            if meta.get("toolUseId") in killed:
+                state, done = "ended", True
+            elif not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
                 state = "ended"         # canceled/interrupted: no end_turn will ever come
                 done = True             # finalize its spend in the ledger
 

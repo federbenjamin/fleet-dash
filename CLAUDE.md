@@ -83,10 +83,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    with no end_turn are `ended` (canceled) and finalize to the ledger. Sessions: registry
    `status` is authoritative (waiting → needs_you; idle → turn_done if fresh end_turn else
    idle; busy → running/stalled).
-   Two non-signals, both checked and rejected 2026-07-14: the parent's `tool_result` for the
-   Agent tool_use fires at SPAWN for a background agent ("Async agent launched successfully"),
-   so its presence proves nothing; and the `task-notification` rows that do carry a real
-   `<status>completed</status>` aren't written while the parent is mid-turn, so they lag.
+   **CANCELLED is separate, authoritative and immediate:** the parent's `tool_result` for that
+   Agent tool_use comes back `is_error: true` ("The user doesn't want to proceed with this tool
+   use"). `Tail.errored_tools` collects those ids; `scan_agents` flips any agent whose
+   `meta.toolUseId` is among them to `ended` with no timing heuristic. This is NOT optional: a
+   killed agent's own transcript ends on a USER row (the rejection), so the assistant-last
+   `settled` rule structurally cannot see it and it would sit "running" → red "stalled" forever
+   (verified 2026-07-14 on session b5996cb1).
+   Two non-signals, both checked and rejected 2026-07-14: the *presence* of the parent's
+   `tool_result` proves nothing about completion (a background agent gets one at SPAWN —
+   "Async agent launched successfully"; only its `is_error` flag is meaningful); and the
+   `task-notification` rows carrying a real `<status>completed</status>` aren't written while
+   the parent is mid-turn, so they lag exactly when you need them.
 8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
    daemon start. Spend pushes fire only on the highest crossed multiple.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
