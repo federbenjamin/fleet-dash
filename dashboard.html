@@ -498,9 +498,14 @@ const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
 // lastMove — programmatic scrolls (sticky-bottom restores) fire scroll events
 // too, and feeding those into the render guard would starve re-renders.
 let sbFade;
+let fstripScroll=0;   // shared so the file strip keeps its position across the md
+                      // viewer ↔ full chat view switch (a fresh DOM element each side)
 document.addEventListener('scroll',e=>{
   const el=e.target===document?document.documentElement:e.target;
-  if(el.classList)el.classList.add('scrolling');
+  if(el.classList){
+    el.classList.add('scrolling');
+    if(el.classList.contains('fstrip'))fstripScroll=el.scrollLeft;   // remember it live
+  }
   clearTimeout(sbFade);
   sbFade=setTimeout(()=>document.querySelectorAll('.scrolling').forEach(x=>x.classList.remove('scrolling')),700);
 },{passive:true,capture:true});
@@ -664,13 +669,14 @@ function fileStrip(sid,files){
     ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
     onclick="viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`).join('')}</div></div>`;
 }
-// horizontal scroll position survives the 2s re-render
+// horizontal scroll position survives the 2s re-render AND the viewer↔chat switch
+// (fstripScroll is a shared global, updated live on scroll)
 function keepStripScroll(root,fn){
   const old=root.querySelector('.fstrip');
-  const sl=old?old.scrollLeft:0;
+  if(old)fstripScroll=old.scrollLeft;
   fn();
   const ns=root.querySelector('.fstrip');
-  if(ns)ns.scrollLeft=sl;
+  if(ns)ns.scrollLeft=fstripScroll;
 }
 function renderViewerBar(force){
   if(!viewerSid)return;
