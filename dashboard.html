@@ -68,8 +68,10 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;color:var(--dim);margin-bottom:8px}
 .kv b{color:var(--fg);font-weight:500;word-break:break-all}
 /* flex, NOT float: a floated ⤢ button narrows the conversation box that follows it */
-.dhead{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px;
+.dhead{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 10px;
   display:flex;align-items:center;justify-content:space-between;gap:8px}
+/* the skill / slash command this turn is running */
+.runskill{color:var(--amber);font-weight:700;white-space:nowrap}
 .dhead .expandbtn{float:none;flex:0 0 auto}
 /* the needs-you conversation renders OUTSIDE .detail (which supplies the gutter),
    so its header carries the card's own padding + the ctxbox's top border */
@@ -926,7 +928,8 @@ function sessionCard(s){
     </div>
     <div class="smeta">
       <span class="m amodel">${modelLabel(s)}</span>
-      <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
+      <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>${s.ctx_pct??'?'}%</span></span>
+      ${s.running?`<span class="m runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>

@@ -164,6 +164,7 @@ class Tail:
         self.stats = {}                 # (day, kind, name) -> [uses, chars, ti, tw, tr, to]
         self.stats_dirty = set()
         self.active_skill = None        # skill turn-cost attribution (most recent wins)
+        self.active_command = None       # slash command running this turn (/implement, …)
         self.prev_usage = None          # (epoch, model, cache_read+cache_write) of last API call
         self.saw_compaction = False     # compaction marker since last API call
         self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
@@ -283,7 +284,7 @@ class Tail:
                     self._convo_add("assistant", txt, ts)
             if m.get("stop_reason") in ("end_turn", "stop_sequence"):
                 self.pending.clear()    # turn over: unanswered tool_uses were canceled
-                self.active_skill = None
+                self.active_skill = self.active_command = None
             self.last_shape = ("assistant", m.get("stop_reason"), ctypes)
         elif role == "user":
             kind = "tool_result" if "tool_result" in ctypes else "prompt"
@@ -305,7 +306,7 @@ class Tail:
                             self._qa_resolve(qa, b)
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
-                self.active_skill = None
+                self.active_skill = self.active_command = None
                 if not o.get("isMeta"):
                     if isinstance(content, str):
                         utxt = content
@@ -429,7 +430,9 @@ class Tail:
         if not name:
             return
         args = (args.group(1) if args else "").strip()
-        self._event_add("command", name if name.startswith("/") else "/" + name, args, ts)
+        name = name if name.startswith("/") else "/" + name
+        self.active_command = name      # runs until this turn ends
+        self._event_add("command", name, args, ts)
 
     def _qa_add(self, b, ts):
         qs = [{"header": q.get("header", ""), "q": q.get("question", ""), "a": None}
@@ -708,6 +711,11 @@ class Engine:
                 "branch": mt.git_branch,
                 "model": mt.model, "family": fam,
                 "effort": self.effort_for(sid),
+                # what this turn is running: a Skill beats the slash command that
+                # launched it (a /command whose body invokes a skill shows the skill)
+                "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
+                           if state in ("running", "stalled", "stalled_or_prompt",
+                                        "needs_you") else None,
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
