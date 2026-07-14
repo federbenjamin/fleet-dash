@@ -153,6 +153,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   (`mqSel[sid] = {nonce, qi, a, other}`, ‹ › nav, single-select picks auto-advance `qi`).
   User-action handlers call `uiRefresh()` (forced card render + forced viewer-bar render) —
   a plain `render(last,true)` leaves the viewer bar un-repainted under the touch guard.
+  The render guard covers desktop too: `wheel` feeds the same `lastMove` window as
+  `touchmove` (a poll re-render mid-wheel kills scroll momentum). Scrollbar auto-hide is a
+  separate `scroll`-capture listener toggling `.scrolling` — deliberately NOT fed into
+  `lastMove`, because programmatic sticky-bottom restores fire scroll events and would
+  starve re-renders. Scrollbar styling uses standard `scrollbar-color`/`scrollbar-width`
+  ONLY — in Chrome, setting `scrollbar-color` disables `::-webkit-scrollbar` styling, so
+  never mix the two.
   Question-file pairing is engine-side (`_paired_files`, window `question_file_pair_seconds`
   anchored to the hook capture ts) so chips work on collapsed cards without an /api/context
   fetch.

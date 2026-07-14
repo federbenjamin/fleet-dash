@@ -62,6 +62,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.
+- Scrollbars (vertical + horizontal) auto-hide when idle and appear while scrolling; the 2s
+  refresh pauses during any scroll gesture or tap (touch and desktop wheel/trackpad alike) so
+  it never yanks a scrollbox out from under you.
 
 ## Companion command
 

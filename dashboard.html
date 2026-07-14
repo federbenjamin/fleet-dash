@@ -11,6 +11,12 @@
   --green:#3fb950; --amber:#d29922; --red:#f85149; --blue:#58a6ff; --purple:#bc8cff;
 }
 *{box-sizing:border-box;margin:0;padding:0}
+/* scrollbars hide when idle (vertical + horizontal): transparent by default,
+   thumb appears only while the element carries .scrolling (JS scroll listener).
+   Standard properties only — in Chrome, setting scrollbar-color disables
+   ::-webkit-scrollbar styling, so never mix the two. */
+*{scrollbar-width:thin;scrollbar-color:transparent transparent}
+.scrolling{scrollbar-color:#4a545f transparent}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,sans-serif;
      padding:12px 12px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
 .pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
@@ -225,15 +231,29 @@ const $=q=>document.querySelector(q);
         history.replaceState(null,'',location.pathname);}})();
 const open=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
-// touch guard, two windows: a swipe (touchmove) holds POLL re-renders 1500ms so
-// the scrollbox isn't replaced mid-gesture; a tap (touchstart) holds them 800ms
-// so the 2s tick can't detach a button between touch and its click event
-// (detached node = swallowed click). User-action renders pass force=true and
-// bypass the guard — tap feedback must paint immediately.
+// input guard, two windows: a scroll gesture (touchmove OR desktop wheel/trackpad)
+// holds POLL re-renders 1500ms so the scrollbox isn't replaced mid-gesture (a
+// replaced node kills wheel momentum: "scroll stops after a second"); a tap
+// (touchstart) holds them 800ms so the 2s tick can't detach a button between
+// touch and its click event (detached node = swallowed click). User-action
+// renders pass force=true and bypass the guard — tap feedback must paint
+// immediately.
 let lastMove=0,lastTap=0;
 document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
 document.addEventListener('touchmove',()=>{lastMove=Date.now()},{passive:true});
+document.addEventListener('wheel',()=>{lastMove=Date.now()},{passive:true});
 const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
+// scrollbar auto-hide: thumbs are transparent until the element actually scrolls
+// (class fades 700ms after the last scroll event). Deliberately NOT tied into
+// lastMove — programmatic scrolls (sticky-bottom restores) fire scroll events
+// too, and feeding those into the render guard would starve re-renders.
+let sbFade;
+document.addEventListener('scroll',e=>{
+  const el=e.target===document?document.documentElement:e.target;
+  if(el.classList)el.classList.add('scrolling');
+  clearTimeout(sbFade);
+  sbFade=setTimeout(()=>document.querySelectorAll('.scrolling').forEach(x=>x.classList.remove('scrolling')),700);
+},{passive:true,capture:true});
 const fmt$=v=>'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
 const fmtTok=v=>v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
 const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
@@ -711,9 +731,9 @@ function render(f,force){
     document.querySelectorAll('#sessions .convo').forEach(el=>{
       const s0=scrolls[el.dataset.sid];
       el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
+    $('#closed').innerHTML=closedSection(f.closed,f.t);
+    $('#rollup').innerHTML=rollupTable(f.rollup);
   }
-  $('#closed').innerHTML=closedSection(f.closed,f.t);
-  $('#rollup').innerHTML=rollupTable(f.rollup);
   renderViewerBar();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
