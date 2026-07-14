@@ -68,13 +68,17 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   button (right of "show conversation") takes you straight back. The two are built to resemble
   each other — same docked bar, same file strip (one shared builder), same send box — so
   swapping feels like changing what's on screen, not changing screens.
-- **Tap a card** → detail panel, top to bottom: recent conversation, a **free-text send box**
-  (types the message into that session's terminal and submits it), a one-line horizontal strip
-  of delivered-file chips (quick open), then the "session info" (full session id, pid, cwd,
+- **Tap a card** → detail panel, top to bottom: recent conversation (with its ⤢ full-view
+  button), a one-line horizontal strip of delivered-file chips (quick open), then the "session
+  info" (full session id, pid, cwd,
   exact model, started-ago, CLI status, tokens in context, spend split), "delivered files"
   (caption + age) and "completed agents" dropdowns (the latter two scroll internally past
   ~220px), and the open-in-claude.ai link.
-- **Amber interaction box** when a session is waiting on you:
+- **Amber interaction box** when a session is waiting on you. On the CARD a question is only a
+  **signal** — "multi-part question (3) — waiting on you", any read-first chip, and an
+  **answer ⤢** button that opens the full view with the question expanded; the controls
+  themselves live in the full-screen views (they used to swamp the fleet list). Permission
+  prompts are small, so they still answer inline on the card:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit), plus an
     **"Other" free-text input** (types your own answer into the TUI's "Type something" row) and
     a **✕ dismiss button** (= the TUI's "Chat about this": the session hears "user declined"
