@@ -140,6 +140,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     submitted the literal text, popup gone). The dashboard's `/` menu only ever INSERTS text
     (never sends) — every send goes through `sendText`, which confirms first for
     `DANGER_COMMANDS` (clear/compact/quit/exit/logout/rewind).
+19. **A subagent has NO tty — there is nothing to inject into.** It runs inside the parent's
+    process; the only channel to it is the parent Claude calling `SendMessage`. So `act`'s
+    `relay` type types a tagged line into the **parent's** input box and lets the parent
+    forward it — never present this as a direct channel, and never "fix" it by trying to write
+    to the agent. The relay is refused when the parent's status is `waiting` (that input box is
+    the ask TUI: the relay would answer the question). `agent_id` is client-supplied → it is
+    hard-whitelisted (`agent-[A-Za-z0-9_-]{1,64}`, basename only) before any path is built, or
+    `/api/agent_context` becomes an arbitrary-file read.
 
 ## Dev workflow
 
@@ -176,8 +184,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
-- `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
-  + `/api/commands` (token-gated: it reads names/descriptions off disk),
+- `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
+  + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
+  + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   POST `/api/act` + `/api/settings` (both token-gated; settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
   the stalled STATE, not just the push), and `muted_sessions` (sid → ts, pruned at 30d;
@@ -217,7 +226,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   one `/api/commands` fetch per session) hangs under each freetext input; rows carry
   `onmousedown="event.preventDefault()"` so the input keeps focus — the blur would otherwise
   drop the `typing` render guard and a poll tick could destroy the button between mousedown
-  and click.
+  and click. The subagent chat overlay (`#aview`, `openAgent`/`renderAgent`/`closeAgent`,
+  `agentCache` keyed on the agent's `convo_v`) mirrors the file viewer's shape minus the file
+  strip; tapping an agent row opens it (the old inline info dropdown is gone — the info block
+  now lives inside the overlay). It repaints from the 2s tick with its own focus/touch guard.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).

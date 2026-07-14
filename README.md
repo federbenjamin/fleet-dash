@@ -31,9 +31,16 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
   running-agent count, quiet time, 🔔 mute, and — while a session is mid-turn — an **⎋
   interrupt button** (confirms first, then sends Esc: the remote "stop this turn").
-- **Running subagents inline** (type, description, model, tokens/sec sparkline, live $); tap
-  any agent row — running here or in "completed agents" — for its info block (full id,
-  description, exact model, state, started/last-activity, token split, $).
+- **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
+- **Tap any agent row — running or completed — for its own full-screen chat view:** the
+  subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
+  dropdown (id, type, description, model, state, started/last activity, token split, $), and a
+  **relay box**. A subagent has **no terminal of its own** — the only channel to it is the
+  parent Claude calling `SendMessage`. So the box types a tagged relay line into the **parent
+  session's** input (`[fleet-dash relay to subagent … ] your text`), and the parent forwards it.
+  Delivery is the parent's call, not a guarantee — the view says so above the box. It's refused
+  outright while the parent is blocked on a prompt (that input box is the question UI, and the
+  relay would answer it).
 - **Session events in the conversation**, the way the terminal shows them, so a remote read of
   the transcript isn't missing what the TUI told you:
   - **⧉ compaction** — `manual compaction · 289k → 14k tokens · 141s`, plus a live **"⧉
@@ -224,7 +231,9 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
   links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.
 - Conversation context and file chips exist only for live sessions (closed sessions: use the
-  claude.ai deep link).
+  claude.ai deep link). Subagent chats are reachable only while their parent session is live.
+- Messaging a subagent is a **relay through the parent**, never a direct channel — there is no
+  such thing as typing into a subagent (no tty; `SendMessage` from the parent is the only path).
 - Screen-peek ("show me what this stalled session's terminal displays") is proven as a technique
   (`contents of session` osascript) but not built into the UI yet.
 - Fable pricing placeholder; ledger has no backfill from pre-daemon transcripts.

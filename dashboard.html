@@ -118,8 +118,6 @@ details.insfold>summary:hover{color:var(--fg)}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
 .arow:first-child{border-top:none}
-.agentinfo{background:var(--card2);border-top:1px solid #20262e;padding:8px 12px;font-size:12px}
-.agentinfo .kv{margin:0}
 .copyable{cursor:copy}
 .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .dot.running{background:var(--green);animation:pulse 1.2s infinite}
@@ -247,6 +245,23 @@ td.r,th.r{text-align:right}
 #vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+/* subagent chat overlay — same shape as the file viewer, no file strip */
+#aview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:55;flex-direction:column}
+#ahead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+       padding-top:calc(10px + env(safe-area-inset-top))}
+#atitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#atitle small{color:var(--dim);font-weight:400;margin-left:8px}
+#aclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+        font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+#abody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
+#aact{border-top:1px solid var(--line);background:var(--card);
+      padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+#aact .dfold{margin-top:10px}
+.aconvo{max-width:760px}
+.relaynote{font-size:11px;color:var(--dim);background:#12161c;border:1px solid var(--line);
+  border-radius:8px;padding:6px 9px;margin-bottom:8px;line-height:1.45}
+.relaynote b{color:var(--amber)}
+.arow .aopen{color:var(--faint);font-size:14px;padding-left:2px}
 #vbody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
 #vact{border-top:1px solid var(--line);background:var(--card);padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
 #vact:empty{display:none}
@@ -306,6 +321,11 @@ read-only: this device has no act token — buttons won't work until you open th
   <div id="vfiles"></div>
   <div id="vbody"></div>
   <div id="vact"></div>
+</div>
+<div id="aview">
+  <div id="ahead"><button id="aclose" onclick="closeAgent()">✕</button><span id="atitle"></span></div>
+  <div id="abody"></div>
+  <div id="aact"></div>
 </div>
 <script>
 const $=q=>document.querySelector(q);
@@ -544,19 +564,101 @@ function viewFile(sid,ep,en,kind,ecap){
 }
 function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
   $('#vfiles').innerHTML='';viewerSid=null;viewerPath=null;}
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();closeAgent();}});
 
-const agentInfoOpen=new Set();   // per-agent info blocks, survives re-renders
-function toggleAgent(id){
-  agentInfoOpen.has(id)?agentInfoOpen.delete(id):agentInfoOpen.add(id);render(last,true);
+// ---- subagent chat overlay -------------------------------------------------
+// A subagent has NO tty: its "send" box relays through the PARENT session (the
+// parent forwards with SendMessage), so it is labelled as a relay, not a channel.
+let agentView=null;              // {sid, aid} of the open overlay
+const agentCache={};             // aid -> {v, messages, info}
+let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
+function openAgent(sid,aid){
+  agentView={sid,aid};
+  $('#aview').style.display='flex';
+  renderAgent(true);
+}
+function closeAgent(){
+  agentView=null;agentInfoOpen2=false;
+  $('#aview').style.display='none';$('#abody').innerHTML='';$('#aact').innerHTML='';
+}
+function agentMeta(){
+  if(!agentView||!last)return null;
+  const s=(last.sessions||[]).find(x=>x.session_id===agentView.sid);
+  return s?(s.agents||[]).find(a=>a.agent_id===agentView.aid):null;
+}
+async function ensureAgentCtx(){
+  if(!agentView)return;
+  const a=agentMeta(),aid=agentView.aid;
+  const v=a?a.convo_v:0;
+  const c=agentCache[aid];
+  if(c&&c.v===v)return;
+  if(c&&c.fetching)return;
+  agentCache[aid]={...(c||{}),fetching:true};
+  try{
+    const r=await fetch(`/api/agent_context?sid=${encodeURIComponent(agentView.sid)}&aid=${encodeURIComponent(aid)}`,{cache:'no-store'});
+    const d=await r.json();
+    agentCache[aid]=d.ok?{v,messages:d.messages||[],info:d.info||{}}:{v,messages:[],info:{}};
+  }catch(e){delete agentCache[aid];}
+  renderAgent(true);
+}
+function renderAgent(force){
+  if(!agentView)return;
+  ensureAgentCtx();
+  const a=agentMeta(),c=agentCache[agentView.aid];
+  const info=(c&&c.info)||{};
+  const done=a?['done','ended'].includes(a.state):true;
+  $('#atitle').innerHTML=`<b>${esc(info.agent_type||(a&&a.agent_type)||'subagent')}</b>
+    <small>${esc(info.description||(a&&a.description)||'')}</small>`;
+  const ae=document.activeElement;
+  const typing=ae&&ae.tagName==='INPUT'&&$('#aview').contains(ae);
+  if(!force&&(typing||touching()))return;
+  const body=$('#abody');
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
+  else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid)}</div>`;
+  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  if(!typing){
+    const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
+    const tk=info.tokens||{};
+    $('#aact').innerHTML=`
+      <div class="relaynote">${done?'this agent has finished — ':''}subagents have no terminal of their own:
+        your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage</div>
+      <div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
+        onkeydown="if(event.key==='Enter')sendRelay()">
+        <button class="pbtn send" onclick="sendRelay()">relay</button></div>
+      <div class="actmsg" id="amsg"></div>
+      <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
+        <summary>agent info</summary>
+        <div class="kv">
+          <span>agent</span>${cpb(info.agent_id||agentView.aid)}
+          <span>type</span><b>${esc(info.agent_type||'?')}</b>
+          <span>description</span><b>${esc(info.description||'—')}</b>
+          <span>model</span><b>${esc(info.model||'?')}</b>
+          <span>state</span><b>${a?a.state:'closed'}${a&&!done?` · quiet ${fmtAge(a.quiet_s)}`:''}</b>
+          <span>parent</span>${cpb(agentView.sid)}
+          <span>started</span><b>${ago(info.started)}</b>
+          <span>last activity</span><b>${ago(info.last)}</b>
+          <span>tokens</span><b>${fmtTok(tk.in||0)} in · ${fmtTok(tk.cache_write||0)} cache write · ${fmtTok(tk.cache_read||0)} cache read · ${fmtTok(tk.out||0)} out</b>
+          <span>cost</span><b>${fmt$(info.cost||0)}</b>
+        </div>
+      </details>`;
+  }
+}
+function sendRelay(){
+  if(!agentView)return;
+  const inp=$('#aft'),v=(inp&&inp.value||'').trim();
+  if(!v)return;
+  act(agentView.sid,{type:'relay',agent_id:agentView.aid,text:v},'amsg');
+  if(inp)inp.value='';
 }
 function agentRow(a){
   const done=['done','ended'].includes(a.state);
-  const open=agentInfoOpen.has(a.agent_id);
   const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   const tk=a.tokens||{};
   return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
-    onclick="toggleAgent('${a.agent_id}')">
+    title="open this subagent's conversation"
+    onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
     <span class="dot ${a.state}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>
@@ -565,18 +667,8 @@ function agentRow(a){
     ${!done?spark(a.spark):''}
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
-  </div>${open?`<div class="agentinfo"><div class="kv">
-    <span>agent</span>${cpb(a.agent_id)}
-    <span>type</span><b>${esc(a.agent_type)}</b>
-    <span>description</span><b>${esc(a.description||'—')}</b>
-    <span>model</span><b>${esc(a.model||'?')}</b>
-    <span>state</span><b>${a.state}${!done?` · quiet ${fmtAge(a.quiet_s)}`:''}</b>
-    <span>started</span><b>${ago(a.started)}</b>
-    <span>last activity</span><b>${ago(a.last)}</b>
-    <span>tokens</span><b>${fmtTok(tk.in||0)} in · ${fmtTok(tk.cache_write||0)} cache write · ${fmtTok(tk.cache_read||0)} cache read · ${fmtTok(tk.out||0)} out</b>
-    <span>total</span><b>${fmtTok(a.total_tokens)}${!done&&a.tok_per_s>0?` · ${fmtTok(Math.round(a.tok_per_s))}/s`:''}</b>
-    <span>cost</span><b>${fmt$(a.cost)}</b>
-  </div></div>`:''}`;
+    <span class="aopen">›</span>
+  </div>`;
 }
 
 function sessionCard(s){
@@ -1036,6 +1128,7 @@ function render(f,force){
     $('#rollup').innerHTML=insightsSection();
   }
   renderViewerBar();
+  renderAgent();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
 

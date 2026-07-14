@@ -631,6 +631,8 @@ class Engine:
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status in ("idle", "waiting")
             agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now, parent_idle)
+            for a in agents:            # the agent chat overlay acts through the parent
+                a["session_id"] = sid
             # long tool calls freeze an agent's transcript ("stalled"); still active
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
 
@@ -788,6 +790,7 @@ class Engine:
                 "tok_per_s": round(rate, 1),
                 "spark": [k for _, k in vel],
                 "started": t.first_ts, "last": t.last_ts,
+                "convo_v": t.convo_rev,     # cache key for the agent chat overlay
             })
             if done:
                 self.ledger_finalize(subdir, agent_id, meta, t)
@@ -1139,6 +1142,44 @@ class Engine:
             out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
         return {"ok": True, "messages": msgs, "files": out_files}
 
+    def _agent_paths(self, sid, aid):
+        """Resolve a subagent transcript. aid is client-supplied — hard-whitelist
+        its shape and keep it a basename, or it becomes a path-traversal read."""
+        if not re.fullmatch(r"agent-[A-Za-z0-9_-]{1,64}", str(aid or "")):
+            return None, None
+        reg, path = self._reg_main_path(sid)
+        if not reg:
+            return None, None
+        subdir = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), sid, "subagents")
+        jl = os.path.join(subdir, aid + ".jsonl")
+        if not os.path.isfile(jl):
+            return None, None
+        return jl, os.path.join(subdir, aid + ".meta.json")
+
+    def agent_context(self, sid, aid):
+        """Conversation + info for ONE subagent (same fold as a session)."""
+        jl, meta_path = self._agent_paths(sid, aid)
+        if not jl:
+            return {"ok": False, "error": "no such subagent"}
+        try:
+            meta = json.load(open(meta_path))
+        except Exception:
+            meta = {}
+        with self.scan_lock:
+            t = self.tail_for(jl)
+            t.poll()
+            msgs = [dict(m) for m in t.convo]
+            fam = model_family(t.model)
+            info = {"agent_id": aid, "agent_type": meta.get("agentType", "?"),
+                    "description": meta.get("description", ""),
+                    "depth": meta.get("spawnDepth", 0),
+                    "model": t.model, "family": fam,
+                    "tokens": {"in": t.ti, "cache_write": t.tw,
+                               "cache_read": t.tr, "out": t.to},
+                    "total_tokens": t.total_tokens, "cost": round(t.cost(self.cfg), 4),
+                    "started": t.first_ts, "last": t.last_ts}
+        return {"ok": True, "messages": msgs, "info": info}
+
     def file_content(self, sid, fpath):
         """Serve a delivered file. WHITELIST: only paths recorded from this session's
         own SendUserFile tool_use rows — never a free-form client path."""
@@ -1176,6 +1217,9 @@ class Engine:
         {type:'dismiss', session_id, nonce}   (Esc = the TUI's "Chat about this") |
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
+        {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
+                                              tagged line into the PARENT for it to
+                                              forward with SendMessage) |
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
@@ -1192,6 +1236,11 @@ class Engine:
                     "this question may have been blocked or already answered"}
         if action.get("type") == "interrupt" and reg.get("status") != "busy":
             return {"ok": False, "error": "session isn't mid-turn — nothing to interrupt"}
+        # a relay is typed into the PARENT's input box: if the parent is blocked on
+        # a prompt, that box is the ask TUI and the relay would answer the question
+        if action.get("type") == "relay" and reg.get("status") == "waiting":
+            return {"ok": False, "error": "the parent session is waiting on a prompt — "
+                    "answer that first, then relay"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
         with self.scan_lock:            # freshness check against the live transcript
             mt = self.tail_for(path)
@@ -1296,6 +1345,26 @@ class Engine:
                 steps = [("\x1b", False)]
             elif typ == "noop":         # TCC/AppleScript path probe: delivers nothing
                 steps = [("", False)]
+            elif typ == "relay":
+                # A subagent has NO tty — the only channel to it is the parent
+                # calling SendMessage. So a "message to a subagent" is a tagged
+                # line typed into the PARENT's input box; the parent forwards it.
+                # Delivery is the parent's call, never guaranteed by us.
+                jl, meta_path = self._agent_paths(sid, action.get("agent_id"))
+                if not jl:
+                    return {"ok": False, "error": "no such subagent"}
+                body = re.sub(r"[\x00-\x1f\x7f]+", " ", str(action.get("text", ""))).strip()[:1500]
+                if not body:
+                    return {"ok": False, "error": "empty text"}
+                try:
+                    desc = (json.load(open(meta_path)) or {}).get("description", "")
+                except Exception:
+                    desc = ""
+                aid = action.get("agent_id")
+                steps = [(f"[fleet-dash relay to subagent {aid}"
+                          f"{f' — “{desc}”' if desc else ''}] {body} "
+                          f"(forward it with SendMessage; if that agent can't be "
+                          f"resumed, say so instead of acting on this yourself)", True)]
             elif typ == "text":
                 txt = str(action.get("text", ""))[:2000].strip()
                 if not txt:
