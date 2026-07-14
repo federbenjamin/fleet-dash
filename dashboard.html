@@ -71,6 +71,10 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .dhead{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px;
   display:flex;align-items:center;justify-content:space-between;gap:8px}
 .dhead .expandbtn{float:none;flex:0 0 auto}
+/* the needs-you conversation renders OUTSIDE .detail (which supplies the gutter),
+   so its header carries the card's own padding + the ctxbox's top border */
+.chead{border-top:1px solid var(--line);background:#10141b;padding:8px 12px 0;margin:0}
+.chead+.ctxbox{border-top:none;padding-top:4px}
 /* dropdowns: no native marker; a rotating chevron + quiet card-styled summaries */
 details.foldbox summary,details.dfold summary,details.insfold summary{list-style:none;cursor:pointer;user-select:none}
 details.foldbox summary::-webkit-details-marker,details.dfold summary::-webkit-details-marker,
@@ -929,7 +933,9 @@ function sessionCard(s){
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
-    ${needs?ctxHtml:''}
+    ${needs&&ctxHtml?`<div class="dhead chead">recent conversation
+      <button class="expandbtn" title="open the full conversation"
+        onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${running.map(agentRow).join('')}</div>`:''}
     ${detail}
