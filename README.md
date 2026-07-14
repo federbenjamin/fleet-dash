@@ -41,7 +41,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **File viewer** extras: a ☀︎/☾ button toggles a light "paper" theme for the document
   (persisted per device), and a **docked action bar** at the bottom carries the owning session's
   pending question buttons + free-text send — you read the file and answer/type without closing
-  it.
+  it. A "▸ show conversation" toggle in the bar expands the session's recent conversation right
+  there (scrollable); the input box stays visible either way.
+- The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
+  panel's "recent conversation" is the tall one.
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.

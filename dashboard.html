@@ -98,6 +98,7 @@ td.r,th.r{text-align:right}
 .empty{color:var(--faint);padding:18px;text-align:center}
 .ctxbox{border-top:1px solid var(--line);background:#10141b;padding:8px 12px}
 .convo{max-height:280px;overflow-y:auto;display:flex;flex-direction:column;padding:2px 0;-webkit-overflow-scrolling:touch}
+.convo.short{max-height:150px}
 .cmsg{margin:8px 0}
 .cmsg .crole{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
 .cmsg .cbody{border-radius:8px;padding:6px 9px;font-size:12.5px;overflow-wrap:break-word}
@@ -137,6 +138,10 @@ td.r,th.r{text-align:right}
 #vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
 #vact .optbtn{margin:4px 0;padding:6px 9px;font-size:12px}
 #vact .freetext{margin-top:8px}
+.vchat-toggle{display:block;background:none;border:none;color:var(--dim);font:inherit;font-size:12px;
+              cursor:pointer;padding:4px 0 2px;user-select:none}
+.vconvo{max-height:34vh;border:1px solid var(--line);border-radius:8px;background:#10141b;
+        padding:4px 9px;margin-top:4px}
 #vbody.light{background:#f7f8fa;color:#1c2128}
 #vbody.light .mdoc code{background:#eff1f3;border-color:#d0d7de}
 #vbody.light .mdoc pre{background:#f0f2f4;border-color:#d0d7de}
@@ -273,13 +278,11 @@ function fchip(sid,f,cap){
   return`<button class="fchip" ${f.missing?'disabled':''} title="${esc(cap||f.path)}"
     onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
 }
-function convoBox(s){
-  const c=ctxCache[s.session_id];
-  if(!c||c.fetching&&!c.messages)return'<div class="ctxbox"><div class="ctxload">loading context…</div></div>';
-  const msgs=(c.messages||[]).map(m=>{
+function convoMsgs(c,sid){
+  return(c.messages||[]).map(m=>{
     if(m.role==='tool'){
       if(m.name==='SendUserFile')
-        return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(s.session_id,f,m.caption)).join('')}
+        return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
           ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
       return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div>
         ${m.result?`<div class="tres">⎿ ${esc(m.result)}</div>`:''}</div>`;
@@ -287,8 +290,13 @@ function convoBox(s){
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':'claude'}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
+}
+function convoBox(s,short){
+  const c=ctxCache[s.session_id];
+  if(!c||c.fetching&&!c.messages)return'<div class="ctxbox"><div class="ctxload">loading context…</div></div>';
+  const msgs=convoMsgs(c,s.session_id);
   if(!msgs)return'';
-  return`<div class="ctxbox"><div class="convo" data-sid="${s.session_id}">${msgs}</div></div>`;
+  return`<div class="ctxbox"><div class="convo${short?' short':''}" data-sid="${s.session_id}">${msgs}</div></div>`;
 }
 let viewerSid=null;
 function toggleTheme(){
@@ -298,12 +306,15 @@ function toggleTheme(){
   try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
 }
 (()=>{try{if(localStorage.getItem('viewer_light')==='1'){$('#vbody').classList.add('light');$('#vtheme').textContent='☾';}}catch(e){}})();
+let viewerChatOpen=false;
 function renderViewerBar(){
   if(!viewerSid)return;
   const bar=$('#vact');
   const ae=document.activeElement;
   if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
+  const old=bar.querySelector&&bar.querySelector('.vconvo');
+  const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
   let h='';
   const p=s&&s.pending;
   if(p&&p.kind==='question'&&p.questions&&p.questions.length===1){
@@ -313,12 +324,20 @@ function renderViewerBar(){
       +(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
         onclick="${ms?`toggleOpt('${viewerSid}',${i+1})`:`sendOption('${viewerSid}','${p.nonce}',[${i+1}],'','vmsg')`}">${esc(o.label)}</button>`).join('')
       +(ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${viewerSid}','${p.nonce}','vmsg')">submit selection</button></div>`:'');
+  }else if(p&&p.kind==='question'&&p.questions&&p.questions.length>1){
+    h+=`<div class="qtext">multi-part question (${p.questions.length}) — answer at the terminal or claude.ai</div>`;
   }
+  if(s)ensureCtx(viewerSid,ctxVersion(s));
+  const c=ctxCache[viewerSid];
+  h+=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar()">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+    ${viewerChatOpen?(c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'):''}`;
   h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message to this session"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg')">
       <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
   bar.innerHTML=h;
+  const nw=bar.querySelector&&bar.querySelector('.vconvo');
+  if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
 }
 function viewFile(sid,ep,en,kind,ecap){
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
@@ -361,7 +380,7 @@ function sessionCard(s){
   const activeSession=!['idle','dormant'].includes(s.state);
   // context auto-opens with the amber box; other states get it in the detail panel
   let ctxHtml='';
-  if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s);}
+  if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s,needs);}
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   const detail=isOpen?`<div class="detail">
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
@@ -531,11 +550,11 @@ function render(f){
   const typing=ae&&ae.tagName==='INPUT'&&$('#sessions').contains(ae);
   // preserve convo scroll positions across the wholesale innerHTML re-render
   const scrolls={};
-  document.querySelectorAll('.convo').forEach(el=>{
+  document.querySelectorAll('#sessions .convo').forEach(el=>{
     scrolls[el.dataset.sid]={top:el.scrollTop,atBottom:el.scrollTop+el.clientHeight>=el.scrollHeight-12};});
   if(!typing)
     $('#sessions').innerHTML=f.sessions.length?f.sessions.map(sessionCard).join(''):'<div class="empty">no live sessions</div>';
-  document.querySelectorAll('.convo').forEach(el=>{
+  document.querySelectorAll('#sessions .convo').forEach(el=>{
     const s0=scrolls[el.dataset.sid];
     el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
   $('#closed').innerHTML=closedSection(f.closed,f.t);

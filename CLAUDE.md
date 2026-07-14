@@ -110,7 +110,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   the 2s innerHTML re-render destroys native `<details>` state otherwise. The viewer's docked
   action bar (`renderViewerBar`, rebuilt each render tick for `viewerSid`) duplicates the card's
   act controls — its element ids are `vft-`/`vmsg-` (never `ft-`/`msg-`: the card's ids coexist
-  in the DOM and getElementById would hit the wrong one). Question-file pairing is engine-side
+  in the DOM and getElementById would hit the wrong one). The bar owns its expandable `.vconvo`
+  chat (global `viewerChatOpen`) with its own scroll preservation; the card scroll pass is
+  scoped to `#sessions .convo` so the two never fight. Question-file pairing is engine-side
   (`_paired_files`, window `question_file_pair_seconds` anchored to the hook capture ts) so
   chips work on collapsed cards without an /api/context fetch.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
