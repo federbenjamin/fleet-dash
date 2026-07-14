@@ -303,6 +303,19 @@ td.r,th.r{text-align:right}
 #ahead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
        padding-top:calc(10px + env(safe-area-inset-top))}
 #atitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#actrl{display:flex;align-items:center;gap:6px}
+/* "are you sure" interstitial for any stop */
+#confirm{display:none;position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.62);
+  align-items:center;justify-content:center;padding:20px}
+.cfbox{max-width:440px;width:100%;background:var(--card);border:1px solid var(--red);
+  border-radius:12px;padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.cftitle{font-size:15px;font-weight:700;color:var(--red);margin-bottom:8px}
+.cfbody{font-size:13px;color:var(--dim);line-height:1.5}
+.cfbody b{color:var(--fg)}
+.cfbtns{display:flex;gap:10px;margin-top:16px}
+.cfbtns .pbtn{flex:1;padding:10px;font-size:13px}
+.cfbtns .cfgo{background:#2a1517;border-color:var(--red);color:var(--red);font-weight:600}
+.cfbtns .cfgo:hover{background:var(--red);color:#0a0e14}
 #atitle small{color:var(--dim);font-weight:400;margin-left:8px}
 #aclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
@@ -419,8 +432,10 @@ read-only: this device has no act token — buttons won't work until you open th
   <div id="vbody"></div>
   <div id="vact"></div>
 </div>
+<div id="confirm"></div>
 <div id="aview">
-  <div id="ahead"><button id="aclose" onclick="closeAgent()">✕</button><span id="atitle"></span></div>
+  <div id="ahead"><button id="aclose" onclick="closeAgent()">✕</button><span id="atitle"></span>
+    <span id="actrl"></span></div>
   <div id="abody"></div>
   <div id="aact"></div>
 </div>
@@ -683,7 +698,10 @@ function viewFile(sid,ep,en,kind,ecap){
 }
 function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
   viewerSid=null;viewerPath=null;}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();closeAgent();closeSession();}});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  if(confirmYes!==null||$('#confirm').style.display==='flex')return closeConfirm();  // dismiss the ask first
+  closeViewer();closeAgent();closeSession();});
 
 // ---- full-screen session view ----------------------------------------------
 // Same overlay shape as the subagent view, but this one is a real terminal
@@ -820,6 +838,12 @@ function renderAgent(force){
   const done=a?['done','ended'].includes(a.state):true;
   $('#atitle').innerHTML=`<b>${esc(info.agent_type||(a&&a.agent_type)||'subagent')}</b>
     <small>${esc(info.description||(a&&a.description)||'')}</small>`;
+  // stop is only offered while the agent is live AND its parent is mid-turn (the
+  // engine refuses an interrupt on a non-busy session anyway)
+  const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
+  $('#actrl').innerHTML=(!done&&par&&par.reg_status==='busy')
+    ? `<button class="stopbtn" title="stop this subagent (sends Esc to its parent session)"
+         onclick="stopAgentParent('${agentView.sid}')"></button>` : '';
   const ae=document.activeElement;
   const typing=ae&&ae.tagName==='INPUT'&&$('#aview').contains(ae);
   if(!force&&(typing||touching()))return;
@@ -1174,9 +1198,36 @@ function sendDismiss(sid,nonce,pre){
 }
 // desktop only: pointless from the phone — it focuses a tab on the Mac
 function focusSession(sid){act(sid,{type:'focus'});}
+
+// in-app interstitial — a native confirm() is easy to dismiss by reflex on a phone,
+// and stopping a turn is destructive (the work in flight is lost)
+let confirmYes=null;
+function askConfirm(title,body,onYes){
+  confirmYes=onYes;
+  $('#confirm').innerHTML=`<div class="cfbox">
+    <div class="cftitle">${esc(title)}</div>
+    <div class="cfbody">${body}</div>
+    <div class="cfbtns">
+      <button class="pbtn" onclick="closeConfirm()">cancel</button>
+      <button class="pbtn cfgo" onclick="const f=confirmYes;closeConfirm();f&&f()">stop the turn</button>
+    </div></div>`;
+  $('#confirm').style.display='flex';
+}
+function closeConfirm(){confirmYes=null;$('#confirm').style.display='none';$('#confirm').innerHTML='';}
 function sendInterrupt(sid,pre='msg'){
-  if(!confirm('Interrupt this session’s current turn (sends Esc)?'))return;
-  act(sid,{type:'interrupt'},pre);
+  askConfirm('Stop this turn?',
+    'Sends <b>Esc</b> to the session. Whatever it is doing right now is abandoned — '
+    +'including any subagents it has running.',
+    ()=>act(sid,{type:'interrupt'},pre));
+}
+// A subagent has NO terminal: the only way to stop it is to Esc its PARENT, which
+// ends the parent's whole turn and every other agent under it. Say so plainly.
+function stopAgentParent(sid,pre='amsg'){
+  askConfirm('Stop this subagent?',
+    'A subagent has no terminal of its own — the only way to stop it is to send <b>Esc</b> '
+    +'to its <b>parent session</b>. That ends the parent\'s entire turn and kills '
+    +'<b>every other subagent</b> it is running, not just this one.',
+    ()=>act(sid,{type:'interrupt'},pre));
 }
 function copyTxt(ev,el){
   ev.stopPropagation();

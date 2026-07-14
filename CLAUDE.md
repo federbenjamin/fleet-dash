@@ -165,7 +165,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `relay` type types a tagged line into the **parent's** input box and lets the parent
     forward it — never present this as a direct channel, and never "fix" it by trying to write
     to the agent. The relay is refused when the parent's status is `waiting` (that input box is
-    the ask TUI: the relay would answer the question). `agent_id` is client-supplied → it is
+    the ask TUI: the relay would answer the question). **Stopping a subagent is Esc into its
+    PARENT** — there is no per-agent kill — so its interstitial must say that it ends the
+    parent's whole turn and every sibling agent; never word it as a targeted stop.
+    `agent_id` is client-supplied → it is
     hard-whitelisted (`agent-[A-Za-z0-9_-]{1,64}`, basename only) before any path is built, or
     `/api/agent_context` becomes an arbitrary-file read.
 20. **Spawn composes its command from ALLOWLISTED parts, never client text.** `act` type

@@ -61,7 +61,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   session's** input (`[fleet-dash relay to subagent … ] your text`), and the parent forwards it.
   Delivery is the parent's call, not a guarantee — the view says so above the box. It's refused
   outright while the parent is blocked on a prompt (that input box is the question UI, and the
-  relay would answer it).
+  relay would answer it). The view also has a **■ stop**, with the same caveat: a subagent has no
+  terminal, so stopping it means Esc into its **parent** — ending the parent's whole turn and
+  every other subagent under it. Every stop, anywhere, goes through an "are you sure"
+  interstitial that says what will be lost.
 - **Session events in the conversation**, the way the terminal shows them, so a remote read of
   the transcript isn't missing what the TUI told you:
   - **⧉ compaction** — `manual compaction · 289k → 14k tokens · 141s`, plus a live **"⧉
