@@ -74,6 +74,13 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self.reply(404, "text/plain", err.encode())
             self.reply(200, ctype, data)
+        elif route == "/api/commands":
+            # reads command/skill names + descriptions off disk -> token-gated
+            if not self.token_ok():
+                return self.reply(403, "application/json",
+                                  b'{"ok": false, "error": "bad or missing act token"}')
+            out = self.eng.commands(self.query("sid"))
+            self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/insights":
             try:
                 days = max(1, min(90, int(self.query("days") or 7)))

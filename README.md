@@ -34,6 +34,23 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $); tap
   any agent row — running here or in "completed agents" — for its info block (full id,
   description, exact model, state, started/last-activity, token split, $).
+- **Session events in the conversation**, the way the terminal shows them, so a remote read of
+  the transcript isn't missing what the TUI told you:
+  - **⧉ compaction** — `manual compaction · 289k → 14k tokens · 141s`, plus a live **"⧉
+    compacting 47s"** pill in the header while one is running (see the caveat below).
+  - **⇄ model fallback** — the "Fable 5's safeguards flagged this message … switched to Opus
+    4.8" notice (it's a *refusal* fallback, not a usage limit) and anything of that shape.
+  - **⚠ API errors** — `529 Overloaded`, `503 upstream connect error`, with the retry count
+    (a retry storm collapses into one row: `⚠ 529 Overloaded ×7`).
+  - **› slash commands you ran** — `/compact`, `/model`, `/login`, with their output.
+  - **☑ questions you answered** — every question and the answer you picked, in **full**, so
+    you can confirm from your phone that the right answers landed.
+- **`/` autocomplete on the send box:** type `/` and get a clickable menu of everything that
+  session can run — built-ins, your `~/.claude` skills + commands, the project's `.claude`
+  skills + commands, and every installed plugin's (104 entries on this Mac), each with its
+  description and scope. Tapping **inserts** the command (most take arguments); the send button
+  fires it. Destructive ones (`/clear`, `/compact`, `/rewind`) are tagged and ask for
+  confirmation before sending.
 - **Tap a card** → detail panel, top to bottom: recent conversation, a **free-text send box**
   (types the message into that session's terminal and submits it), a one-line horizontal strip
   of delivered-file chips (quick open), then the "session info" (full session id, pid, cwd,
@@ -188,6 +205,15 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
   row (n+2); Esc anywhere = declined/chat-about-this. Full key map: CLAUDE.md invariant 4.
 - `http.server` keeps the query string in `self.path` (`/?token=…` ≠ `/`).
 - Sandbox blocks `os.kill(pid, 0)` probes — PID-liveness tools run sandbox-off (daemon is).
+- **A compaction writes nothing to the transcript while it runs** — the `/compact` rows and the
+  boundary all flush at the end (and the command rows land *after* the boundary, carrying
+  earlier timestamps, so events are ordered by timestamp, not file order). The live "compacting"
+  pill therefore reads the **PreCompact hook's checkpoint file** mtime; a project with no
+  PreCompact hook shows no pill (its finished-compaction event still lands). The TUI's
+  `Compacting… 43%` progress bar is screen-only and needs screen-peek to mirror.
+- **Typing `/` in the TUI opens its own command popup, where Enter fires the *highlighted*
+  entry** — so injecting a bare `/foo` + Enter can run a different command. A trailing space
+  closes that popup, and the daemon appends one to any `/…` message before submitting.
 
 ## Known gaps (the "not done" list)
 

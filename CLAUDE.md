@@ -89,7 +89,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     not in the client. **Mid-turn user messages never become user rows** — they arrive as
     `type:"attachment"` rows (`attachment.type:"queued_command"`, `origin.kind:"human"`,
     prompt is a string OR content-block list) plus transient `queue-operation` rows; fold the
-    attachment only, or the message is invisible in the convo.
+    attachment only, or the message is invisible in the convo. **`type:"system"` rows become
+    event rows** (`role:"event"`): `compact_boundary`, `model_refusal_fallback` (the "Fable 5's
+    safeguards flagged this … switched to Opus 4.8" notice — a refusal fallback, NOT a usage
+    limit), `api_error` (consecutive retries collapse into one row with a count), and
+    `local_command` (its stdout attaches to the preceding `/command` event). `turn_duration` /
+    `stop_hook_summary` are noise — never surface them. `AskUserQuestion` gets a `qa` event
+    carrying every question and the chosen answer, parsed from the tool_result's
+    `"<question>"="<answer>"` pairs; it renders in FULL (never truncated) — the user reads it
+    to confirm the right answers landed.
 12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
     Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
     2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
@@ -116,6 +124,22 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Side calls with a tiny prefix must not become the next call's baseline (the 0.3× guard).
     Cause priority: compaction > model switch > idle/ttl > skill > tail-rewrite (read still
     ≥50% of prev prefix = breakpoint drift) > deep bust.
+17. **A compaction writes NOTHING to the transcript while it runs.** The whole block — the
+    `/compact` command rows AND the `compact_boundary` — is flushed when it FINISHES, so the
+    command rows land *after* the boundary in file order while carrying *earlier* timestamps.
+    Two consequences: (a) `_event_add` inserts by timestamp, not append order, or `/compact`
+    renders below the compaction it triggered; (b) "issued but no boundary yet" is undetectable
+    from the transcript — the live pill reads the **PreCompact hook's checkpoint file mtime**
+    (`~/.claude/compaction/<project>/checkpoint-<sid>.md`) = compaction start, suppressed once
+    a boundary lands or after 900s. Projects with no PreCompact hook get no pill (the finished
+    event row still lands). Don't "fix" the pill by inferring from transcript silence.
+18. **A leading `/` opens the TUI's OWN command popup, where Enter fires the HIGHLIGHTED entry
+    — not the typed text.** Injecting a bare `/foo` + CR can therefore run a *different*
+    command. A trailing space closes the popup, so `act()` appends one to any `/…` text with no
+    space (sandbox-proven 2026-07-14: `/status`+CR ran the highlighted match; `/status `+CR
+    submitted the literal text, popup gone). The dashboard's `/` menu only ever INSERTS text
+    (never sends) — every send goes through `sendText`, which confirms first for
+    `DANGER_COMMANDS` (clear/compact/quit/exit/logout/rewind).
 
 ## Dev workflow
 
@@ -147,10 +171,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 - `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
   counters), Engine (scan/state/ledger/ntfy/act/hook_pending/session_context/file_content/
-  insights), spend CLI (`spend --cwd|--session`, used by the global `/subagent-spend`
-  command). GET `/api/insights?days=N` aggregates agent_runs + session_runs + usage_stats.
+  insights/commands/compacting_secs), spend CLI (`spend --cwd|--session`, used by the global
+  `/subagent-spend` command). GET `/api/insights?days=N` aggregates agent_runs + session_runs
+  + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
+  + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
+  namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
-  (token-gated), POST `/api/act` + `/api/settings` (both token-gated; settings persists the
+  + `/api/commands` (token-gated: it reads names/descriptions off disk),
+  POST `/api/act` + `/api/settings` (both token-gated; settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
   the stalled STATE, not just the push), and `muted_sessions` (sid → ts, pruned at 30d;
   muted sessions skip all per-session pushes) into config.json via `Engine.update_settings`.
@@ -185,7 +213,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   never mix the two.
   Question-file pairing is engine-side (`_paired_files`, window `question_file_pair_seconds`
   anchored to the hook capture ts) so chips work on collapsed cards without an /api/context
-  fetch.
+  fetch. The `/` autocomplete (`slashInput`/`slashPick`/`slashClose`, `cmdCache` per session,
+  one `/api/commands` fetch per session) hangs under each freetext input; rows carry
+  `onmousedown="event.preventDefault()"` so the input keeps focus — the blur would otherwise
+  drop the `typing` render guard and a poll tick could destroy the button between mousedown
+  and click.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).

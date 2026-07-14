@@ -153,6 +153,40 @@ td.r,th.r{text-align:right}
 .cmsg .cbody p:last-child,.cmsg .cbody>*:last-child{margin-bottom:2px}
 .cmsg.user .cbody{background:#132030;border:1px solid #1f3a5f}
 .cmsg.assistant .cbody{background:var(--card);border:1px solid var(--line)}
+/* system events folded into the convo: compaction, model fallback, API errors,
+   slash commands, and the full text of questions you answered */
+.cevt{margin:8px 0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);
+  border-left:3px solid var(--dim);background:#12161c}
+.cevt.warning{border-left-color:var(--amber);background:#1c1810}
+.cevt.error{border-left-color:var(--red);background:#1e1414}
+.cevt .evline{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px}
+.cevt .evline b{color:var(--fg);font-weight:600}
+.cevt.warning .evline b{color:var(--amber)}
+.cevt.error .evline b{color:var(--red)}
+.cevt .evi{opacity:.8}
+.cevt .evn{font-size:11px;color:var(--faint)}
+.cevt .evd{font-size:11.5px;color:var(--dim);margin-top:3px;overflow-wrap:break-word}
+.qawrap{margin-top:6px;display:flex;flex-direction:column;gap:6px}
+.qarow{border-left:2px solid var(--line);padding-left:8px}
+.qaq{font-size:11.5px;color:var(--dim);overflow-wrap:break-word}
+.qah{color:var(--faint);text-transform:uppercase;letter-spacing:.4px;font-size:10px;margin-right:5px}
+.qaa{font-size:12.5px;color:var(--green);font-weight:600;overflow-wrap:break-word}
+.compacting{color:var(--purple)!important}
+/* "/" autocomplete over the message input */
+.slashwrap{position:relative}
+.slashmenu{position:absolute;left:0;right:0;top:2px;z-index:40;max-height:280px;overflow-y:auto;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.slashrow{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;cursor:pointer;
+  background:none;border:0;border-bottom:1px solid var(--line);padding:7px 10px;color:var(--fg)}
+.slashrow:last-child{border-bottom:0}
+.slashrow:hover{background:#1b2230}
+.slashrow .scmd{font-weight:600;font-size:12.5px;white-space:nowrap}
+.slashrow .sdesc{flex:1;min-width:0;font-size:11px;color:var(--dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slashrow .sscope{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
+.sdanger{color:var(--red);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.slashempty{padding:8px 10px;font-size:11.5px;color:var(--faint)}
 .ctool{margin:2px 0 2px 4px}
 .ctool .tline{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ctool .tline b{color:var(--fg);font-weight:600}
@@ -390,8 +424,22 @@ function fchip(sid,f,cap){
   return`<button class="fchip" ${f.missing?'disabled':''} title="${esc(cap||f.path)}"
     onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
 }
+const EVT_ICON={compact:'⧉',model:'⇄',api_error:'⚠',command:'›',qa:'☑'};
+function eventRow(m){
+  if(m.kind==='qa'){
+    const rows=(m.qa||[]).map(q=>`<div class="qarow">
+      <div class="qaq">${q.header?`<span class="qah">${esc(q.header)}</span>`:''}${esc(q.q)}</div>
+      <div class="qaa">${esc(q.a||'—')}</div></div>`).join('');
+    return`<div class="cevt info"><div class="evline"><span class="evi">☑</span> <b>You answered Claude's questions</b></div>
+      <div class="qawrap">${rows}</div></div>`;
+  }
+  return`<div class="cevt ${m.level||'info'}">
+    <div class="evline"><span class="evi">${EVT_ICON[m.kind]||'•'}</span> <b>${esc(m.title)}</b>${m.n>1?`<span class="evn">×${m.n}</span>`:''}</div>
+    ${m.detail?`<div class="evd">${esc(m.detail)}</div>`:''}</div>`;
+}
 function convoMsgs(c,sid){
   return(c.messages||[]).map(m=>{
+    if(m.role==='event')return eventRow(m);
     if(m.role==='tool'){
       if(m.name==='SendUserFile')
         return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
@@ -468,9 +516,11 @@ function renderViewerBar(force){
     h+=`<button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question (waiting on you)'}</button>`;
     if(viewerQOpen)h+=p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg');
   }
-  h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message to this session"
-      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg')">
+  h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / for commands" autocomplete="off"
+      oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
+      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
       <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>
+    <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
   bar.innerHTML=h;
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
@@ -542,9 +592,12 @@ function sessionCard(s){
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   const detail=isOpen?`<div class="detail">
       ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
-      <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message to this session"
-        onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
+      <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message  ·  / for commands" autocomplete="off"
+        oninput="slashInput('${s.session_id}','ft')"
+        onfocus="slashInput('${s.session_id}','ft')"
+        onkeydown="if(event.key==='Enter')sendText('${s.session_id}');if(event.key==='Escape')slashClose()">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
+      <div class="slashwrap" id="slash-ft-${s.session_id}"></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
       ${ctxFiles.length?`<div class="stripbox"><div class="fstrip">${ctxFiles.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div></div><div class="dsep"></div>`:''}
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
@@ -585,6 +638,7 @@ function sessionCard(s){
       <span class="m">${esc(s.family)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
+      ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
       ${s.reg_status==='busy'?`<button class="xbtn" title="interrupt the current turn (Esc)"
         onclick="event.stopPropagation();sendInterrupt('${s.session_id}')">⎋</button>`:''}
@@ -798,7 +852,57 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
   const inp=document.getElementById(ftPre+'-'+sid);
   const v=(inp&&inp.value||'').trim();
   if(!v)return;
+  const cmd=v.startsWith('/')?(cmdCache[sid]||[]).find(c=>c.name===v.split(/\s+/)[0]):null;
+  if(cmd&&cmd.danger&&!confirm(`${cmd.name} destroys this session's conversation state.\n\n${cmd.desc}\n\nSend it?`))return;
+  slashClose();
   act(sid,{type:'text',text:v},msgPre);if(inp)inp.value='';
+}
+
+// ---- slash-command autocomplete -------------------------------------------
+// Menu INSERTS (never sends): most skills take args, and it keeps the send path
+// — with its destructive-command confirm — as the single way anything fires.
+const cmdCache={};          // sessionId -> [{name,desc,scope,danger}]
+let slashBox=null;          // id of the open menu's container, or null
+function slashClose(){
+  if(!slashBox)return;
+  const el=document.getElementById(slashBox);
+  if(el)el.innerHTML='';
+  slashBox=null;
+}
+async function slashInput(sid,pre){
+  const inp=document.getElementById(pre+'-'+sid);
+  const v=(inp&&inp.value)||'';
+  // menu lives while the text is a single "/word" — a space means args are being typed
+  if(!v.startsWith('/')||/\s/.test(v))return slashClose();
+  if(!cmdCache[sid]){
+    cmdCache[sid]=[];       // in-flight guard: one fetch per session
+    try{
+      const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
+      const d=await r.json();
+      cmdCache[sid]=d.commands||[];
+    }catch(e){cmdCache[sid]=[];}
+  }
+  const q=v.slice(1).toLowerCase();
+  const hits=cmdCache[sid].filter(c=>c.name.slice(1).toLowerCase().includes(q))
+    .sort((a,b)=>(a.name.slice(1).toLowerCase().startsWith(q)?0:1)-(b.name.slice(1).toLowerCase().startsWith(q)?0:1))
+    .slice(0,40);
+  const box=document.getElementById('slash-'+pre+'-'+sid);
+  if(!box)return;
+  slashBox='slash-'+pre+'-'+sid;
+  box.innerHTML=hits.length?`<div class="slashmenu">${hits.map(c=>`
+    <button class="slashrow" onmousedown="event.preventDefault()" onclick="slashPick('${sid}','${pre}','${enc(c.name)}')">
+      <span class="scmd">${esc(c.name)}${c.danger?' <span class="sdanger">destructive</span>':''}</span>
+      <span class="sdesc">${esc(c.desc||'')}</span>
+      <span class="sscope">${esc(c.scope)}</span>
+    </button>`).join('')}</div>`
+    :`<div class="slashmenu"><div class="slashempty">no command matches “${esc(v)}”</div></div>`;
+}
+function slashPick(sid,pre,name){
+  const inp=document.getElementById(pre+'-'+sid);
+  if(!inp)return;
+  inp.value=decodeURIComponent(name)+' ';   // trailing space: args go right here
+  slashClose();
+  inp.focus();
 }
 let closedOpen=false,closedFilter='';
 const closedInfoOpen=new Set();   // closed-session info blocks, survives re-renders

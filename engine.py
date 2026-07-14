@@ -93,6 +93,40 @@ def cwd_to_project_dir(cwd):
 KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
+# slash commands that destroy conversation state — the page confirms before sending
+DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
+
+# built-in commands the TUI offers (name, description). Skills + custom commands
+# are enumerated off disk per session; these have no file to read.
+BUILTIN_COMMANDS = [
+    ("compact", "Summarize the conversation and free context"),
+    ("clear", "Wipe the conversation and start fresh"),
+    ("context", "Show the context window breakdown"),
+    ("cost", "Show token cost for this session"),
+    ("usage", "Show session cost, plan usage, and activity stats"),
+    ("status", "Version, model, account, API connectivity"),
+    ("model", "Change the model for this session"),
+    ("agents", "Manage subagent definitions"),
+    ("todos", "Show the current todo list"),
+    ("memory", "Edit CLAUDE.md memory files"),
+    ("resume", "Resume a previous conversation"),
+    ("rewind", "Rewind the conversation to an earlier point"),
+    ("review", "Review a pull request"),
+    ("pr-comments", "Fetch comments from a GitHub PR"),
+    ("mcp", "Manage MCP servers"),
+    ("hooks", "Manage hook configuration"),
+    ("permissions", "Manage tool permissions"),
+    ("config", "Open the config panel"),
+    ("doctor", "Diagnose the installation"),
+    ("export", "Export the conversation"),
+    ("help", "List available commands"),
+]
+
+
+def ktok(n):
+    n = int(n or 0)
+    return f"{round(n / 1000)}k" if n >= 1000 else str(n)
+
 
 def iso_epoch(ts):
     try:
@@ -132,6 +166,8 @@ class Tail:
         self.prev_usage = None          # (epoch, model, cache_read+cache_write) of last API call
         self.saw_compaction = False     # compaction marker since last API call
         self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
+        self.last_compact_ep = 0        # epoch of the newest compact_boundary seen
+        self._qa_refs = {}              # AskUserQuestion tool_use_id -> convo entry
 
     def poll(self):
         try:
@@ -165,6 +201,9 @@ class Tail:
             self.last_ts = ts
         if o.get("isCompactSummary"):
             self.saw_compaction = True
+        if o.get("type") == "system":
+            self._system_event(o, ts)
+            return
         if o.get("type") == "attachment":
             # mid-turn user messages never become user rows — they arrive as
             # queued_command attachments (plus transient queue-operation rows,
@@ -229,6 +268,8 @@ class Tail:
                             for fp in (inp.get("files") or [])[:6]:
                                 if isinstance(fp, str):
                                     self._file_add(fp, inp.get("caption", ""), ts)
+                        if b.get("name") == "AskUserQuestion":
+                            self._qa_add(b, ts)
                         if b.get("name") in KEY_TOOLS:
                             self._tool_add(b, ts)
                 txt = "\n\n".join(b.get("text", "") for b in content
@@ -252,6 +293,9 @@ class Tail:
                         if ref is not None:
                             ref["result"] = self._result_summary(b, ref.get("name"))
                             self.convo_rev += 1
+                        qa = self._qa_refs.pop(b.get("tool_use_id"), None)
+                        if qa is not None:
+                            self._qa_resolve(qa, b)
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
                 self.active_skill = None
@@ -264,6 +308,8 @@ class Tail:
                     utxt = re.sub(r"<system-reminder>.*?</system-reminder>", "", utxt, flags=re.S).strip()
                     if utxt.startswith("This session is being continued"):
                         self.saw_compaction = True
+                    if "<command-name>" in utxt:
+                        self._command_event(utxt, ts)
                     if utxt and not utxt.startswith(("<command-", "<local-command", "Caveat:",
                                                      "This session is being continued from",
                                                      "[SYSTEM NOTIFICATION", "<task-notification")):
@@ -312,6 +358,105 @@ class Tail:
             elif "created successfully" in txt:
                 txt = "created ✓"
         return ("✗ " if b.get("is_error") else "") + txt[:140] if txt else ""
+
+    def _event_add(self, kind, title, detail, ts, level="info"):
+        """Append a system-event row. Insert by TIMESTAMP, not file order: a
+        compaction flushes its whole block at completion, so the `/compact`
+        command row is written AFTER the boundary row it preceded in time."""
+        e = {"role": "event", "kind": kind, "title": title,
+             "detail": detail or "", "level": level, "ts": ts}
+        self.convo_rev += 1
+        ep = iso_epoch(ts) or 0
+        if len(self.convo) == self.convo.maxlen:
+            self.convo.popleft()        # a full deque raises on insert()
+        for i in range(len(self.convo) - 1, max(-1, len(self.convo) - 9), -1):
+            prev_ep = iso_epoch(self.convo[i].get("ts")) or 0
+            if prev_ep <= ep:
+                self.convo.insert(i + 1, e)
+                return
+        self.convo.append(e)
+
+    def _system_event(self, o, ts):
+        st = o.get("subtype")
+        if st == "compact_boundary":
+            self.saw_compaction = True
+            self.last_compact_ep = max(self.last_compact_ep, iso_epoch(ts) or 0)
+            m = o.get("compactMetadata") or {}
+            bits = [f"{m.get('trigger') or '?'} compaction"]
+            if m.get("preTokens"):
+                bits.append(f"{ktok(m['preTokens'])} → {ktok(m.get('postTokens') or 0)} tokens")
+            if m.get("durationMs"):
+                bits.append(f"{round(m['durationMs'] / 1000)}s")
+            self._event_add("compact", "Conversation compacted", " · ".join(bits), ts)
+        elif st == "model_refusal_fallback":
+            title = f"Switched to {o.get('fallbackModel') or 'another model'}"
+            if o.get("originalModel"):
+                title = f"{o['originalModel']} → {o.get('fallbackModel')}"
+            self._event_add("model", title, str(o.get("content") or "")[:600], ts,
+                            level="warning")
+        elif st == "api_error":
+            err = o.get("error") or {}
+            msg = str(err.get("formatted") or err.get("message") or "API error")[:120]
+            detail = f"retry {o.get('retryAttempt')}/{o.get('maxRetries')}"
+            last = self.convo[-1] if self.convo else None
+            if last and last.get("role") == "event" and last.get("kind") == "api_error" \
+               and last.get("title") == msg:     # retry storm: collapse into one row
+                last["n"] = last.get("n", 1) + 1
+                last["detail"], last["ts"] = detail, ts
+                self.convo_rev += 1
+                return
+            self._event_add("api_error", msg, detail, ts, level="error")
+        elif st == "local_command":
+            out = re.sub(r"</?local-command-[a-z]+>", "", str(o.get("content") or "")).strip()
+            for e in reversed(self.convo):       # attach stdout to the command that ran
+                if e.get("role") == "event" and e.get("kind") == "command":
+                    if out and not e.get("detail"):
+                        e["detail"] = out[:400]
+                        self.convo_rev += 1
+                    return
+
+    def _command_event(self, utxt, ts):
+        name = re.search(r"<command-name>(.*?)</command-name>", utxt, re.S)
+        args = re.search(r"<command-args>(.*?)</command-args>", utxt, re.S)
+        name = (name.group(1) if name else "").strip()
+        if not name:
+            return
+        args = (args.group(1) if args else "").strip()
+        self._event_add("command", name if name.startswith("/") else "/" + name, args, ts)
+
+    def _qa_add(self, b, ts):
+        qs = [{"header": q.get("header", ""), "q": q.get("question", ""), "a": None}
+              for q in ((b.get("input") or {}).get("questions") or [])[:8]]
+        e = {"role": "event", "kind": "qa", "title": "You answered", "level": "info",
+             "detail": "", "qa": qs, "ts": ts}
+        self.convo.append(e)
+        self.convo_rev += 1
+        if b.get("id"):
+            self._qa_refs[b["id"]] = e
+            if len(self._qa_refs) > 60:
+                for k in list(self._qa_refs)[:30]:
+                    self._qa_refs.pop(k, None)
+
+    def _qa_resolve(self, e, b):
+        """Fill each question's chosen answer from the tool_result, which reads
+        'Your questions have been answered: "<question>"="<answer>", ...'."""
+        c = b.get("content")
+        if isinstance(c, list):
+            c = " ".join(x.get("text", "") for x in c
+                         if isinstance(x, dict) and x.get("type") == "text")
+        txt = str(c or "")
+        if "declined" in txt.lower():
+            for q in e["qa"]:
+                q["a"] = "(declined to answer)"
+        else:
+            got = dict(re.findall(r'"([^"]+)"="([^"]*)"', txt))
+            for q in e["qa"]:
+                q["a"] = got.pop(q["q"], None)
+            leftovers = list(got.values())      # question text drifted: fill in order
+            for q in e["qa"]:
+                if q["a"] is None and leftovers:
+                    q["a"] = leftovers.pop(0)
+        self.convo_rev += 1
 
     def _convo_add(self, role, text, ts):
         if len(text) > 4000:
@@ -558,6 +703,7 @@ class Engine:
                                if reg.get("bridgeSessionId") else None),
                 "started_ms": reg.get("startedAt"),
                 "pending": pending,
+                "compacting": self.compacting_secs(sid, cwd, mt),
                 "muted": sid in (cfg.get("muted_sessions") or {}),
                 # cache keys: the page refetches /api/context only when these move
                 # (a rev counter, not last-ts: tool results mutate entries in place)
@@ -896,6 +1042,81 @@ class Engine:
             return None, None
         return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
 
+    def compacting_secs(self, sid, cwd, mt):
+        """Seconds a compaction has been running, or None.
+
+        The transcript is SILENT during a compaction: the whole block (the
+        /compact command rows AND the boundary) is flushed only when it
+        finishes, so 'issued but no boundary yet' is undetectable there. The
+        PreCompact hook's checkpoint file is the one live artifact — its mtime
+        is the compaction's start. Sessions whose project has no PreCompact
+        hook simply never show the pill (the finished-event row still lands)."""
+        p = os.path.join(HOME, ".claude", "compaction",
+                         os.path.basename(cwd_to_project_dir(cwd)), f"checkpoint-{sid}.md")
+        try:
+            started = os.path.getmtime(p)
+        except OSError:
+            return None
+        if started <= mt.last_compact_ep:       # that compaction already landed
+            return None
+        elapsed = time.time() - started
+        if elapsed > 900:                       # stale checkpoint, not a live run
+            return None
+        return round(elapsed)
+
+    def commands(self, sid):
+        """Slash-command catalog for one session: built-ins + skills + custom
+        commands, user- and project-scoped (the session's own cwd)."""
+        reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
+        cwd = reg.get("cwd", "") if reg else ""
+        out, seen = [], set()
+
+        def add(name, desc, scope):
+            if name in seen:
+                return
+            seen.add(name)
+            out.append({"name": name, "desc": (desc or "")[:120], "scope": scope,
+                        "danger": name.lstrip("/").split(":")[-1] in DANGER_COMMANDS})
+
+        def desc_of(path):
+            try:
+                with open(path, errors="replace") as f:
+                    head = f.read(2500)
+            except OSError:
+                return ""
+            m = re.search(r"^description:\s*(.+)$", head, re.M)
+            if m:
+                return m.group(1).strip().strip("'\"")
+            body = re.sub(r"^---.*?^---", "", head, flags=re.S | re.M).strip()
+            return body.split("\n")[0].lstrip("# ").strip()
+
+        def scan_dir(root, scope, prefix=""):
+            for p in sorted(glob.glob(os.path.join(root, "commands", "**", "*.md"),
+                                      recursive=True)):
+                rel = os.path.relpath(p, os.path.join(root, "commands"))
+                add("/" + prefix + rel[:-3].replace(os.sep, ":"), desc_of(p), scope)
+            for p in sorted(glob.glob(os.path.join(root, "skills", "*", "SKILL.md"))):
+                add("/" + prefix + os.path.basename(os.path.dirname(p)), desc_of(p), scope)
+
+        for name, desc in BUILTIN_COMMANDS:
+            add("/" + name, desc, "built-in")
+        if cwd:
+            scan_dir(os.path.join(cwd, ".claude"), "project")
+        scan_dir(os.path.join(HOME, ".claude"), "user")
+        try:
+            with open(os.path.join(HOME, ".claude", "plugins",
+                                   "installed_plugins.json")) as f:
+                plugins = json.load(f).get("plugins") or {}
+        except Exception:
+            plugins = {}
+        for key, installs in plugins.items():
+            plug = key.split("@")[0]
+            for inst in installs or []:
+                p = inst.get("installPath")
+                if p and os.path.isdir(p):
+                    scan_dir(p, "plugin", prefix=plug + ":")
+        return {"ok": True, "commands": out}
+
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
         reg, path = self._reg_main_path(sid)
@@ -1079,6 +1300,13 @@ class Engine:
                 txt = str(action.get("text", ""))[:2000].strip()
                 if not txt:
                     return {"ok": False, "error": "empty text"}
+                # a leading "/" opens the TUI's OWN command popup, where Enter fires
+                # the HIGHLIGHTED entry — not necessarily what was typed. A space
+                # closes that popup, so the CR submits the literal text
+                # (sandbox-proven 2026-07-14: "/status" + CR ran the highlighted
+                # match; "/status " + CR submitted the text with no popup open).
+                if txt.startswith("/") and " " not in txt:
+                    txt += " "
                 steps = [(txt, True)]
             else:
                 return {"ok": False, "error": "unknown action type"}
