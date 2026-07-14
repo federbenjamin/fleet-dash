@@ -6,3 +6,5 @@ inject-result.txt
 FleetDashInjector.app/
 config.json
 __pycache__/
+effort/
+usage.json
