@@ -805,36 +805,38 @@ class Engine:
         return email
 
     def read_usage(self):
-        # Claude Code plan-usage snapshot for the logged-in account, written by the
-        # statusline (~/.claude/.statusline-usage-cache, key=value). Kept fresh by any
-        # active session's statusline; we just read whatever's there. None if absent.
-        path = os.path.expanduser("~/.claude/.statusline-usage-cache")
+        # Plan-usage for the LOGGED-IN account: 5-hour + 7-day utilization, written by
+        # the Claude Code statusline into ~/.claude/fleet-dash/usage.json (see the
+        # fleet-dash side-write in statusline-command.sh). This is the ONLY per-login
+        # correct source — the Claude Usage extension's cache is a DIFFERENT account.
+        # None if absent (no session has reached its first API response yet).
+        path = os.path.expanduser("~/.claude/fleet-dash/usage.json")
         try:
-            kv = {}
             with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        kv[k] = v
-        except OSError:
+                d = json.load(f)
+        except (OSError, ValueError):
             return None
 
-        def num(k):
+        def pct(v):
             try:
-                return int(kv.get(k, ""))
-            except ValueError:
+                return round(float(v))
+            except (TypeError, ValueError):
                 return None
-        five, weekly = num("UTILIZATION"), num("WEEKLY_UTILIZATION")
+
+        def iso(v):
+            try:
+                return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(v)))
+            except (TypeError, ValueError):
+                return None
+        five, weekly = pct(d.get("five_hour_pct")), pct(d.get("seven_day_pct"))
         if five is None and weekly is None:
             return None
         return {
             "five_hour_pct": five,
-            "five_hour_reset": kv.get("RESETS_AT") or None,
+            "five_hour_reset": iso(d.get("five_hour_reset")),
             "weekly_pct": weekly,
-            "weekly_reset": kv.get("WEEKLY_RESETS_AT") or None,
+            "weekly_reset": iso(d.get("seven_day_reset")),
             "email": self.account_email(),
-            "fetched_ts": num("TIMESTAMP"),
         }
 
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):

@@ -212,14 +212,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
-26. **Plan-usage is READ, never fetched.** `Engine.read_usage` parses `~/.claude/.statusline-usage-cache`
-    (key=value: `UTILIZATION`/`RESETS_AT` = 5-hour, `WEEKLY_UTILIZATION`/`WEEKLY_RESETS_AT`) into
-    `/api/fleet` `usage` (null if the file is absent/unparseable); the dashboard's `usageBar` renders
-    it as three stacked lines (account email, 5-hour, weekly). The cache is written by the Claude Code
-    statusline — the daemon does NOT call the usage API or hold a session key, so accuracy tracks how
-    recently any session's statusline rendered. Don't add a fetcher here. The email comes from
-    `Engine.account_email` (`~/.claude.json` → `oauthAccount.emailAddress`), read ONCE and cached —
-    the cache PROFILE_NAME is a cosmetic statusline label, NOT account identity, so it's not used.
+26. **Plan-usage is READ from the statusline, never fetched — and MUST be the logged-in account.**
+    The only per-login-correct source is the Claude Code statusline payload's `rate_limits`
+    (`five_hour`/`seven_day` → `used_percentage` + `resets_at` epoch secs), present only after a
+    session's first API response. `statusline-command.sh` (fleet-dash side-write, next to the effort
+    one) extracts it via jq to `~/.claude/fleet-dash/usage.json` (write-on-change, account-global so
+    any session writes it). `Engine.read_usage` reads THAT file (epoch resets → ISO; 7-day shown as
+    "weekly") into `/api/fleet` `usage`; `usageBar` renders three stacked lines (email, 5-hour,
+    weekly). The email is `Engine.account_email` (`~/.claude.json` → `oauthAccount.emailAddress`),
+    read once and cached. **Do NOT use `~/.claude/.statusline-usage-cache`** — that's the Claude Usage
+    extension keyed to a DIFFERENT account/org (verified 2026-07-14: extension org ≠ the `~/.claude.json`
+    login org), and its `PROFILE_NAME` is a cosmetic label, not account identity. Don't add an API
+    fetcher (needs a session key we don't hold).
 27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
     viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
