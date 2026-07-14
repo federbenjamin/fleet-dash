@@ -254,6 +254,7 @@ td.r,th.r{text-align:right}
 #vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+#vtheme{font-size:28px;line-height:1;padding:2px 12px}
 /* full-screen session view — the card's chat, question block and controls,
    with room to actually read (same overlay shape as the subagent view) */
 #sview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:52;flex-direction:column}
@@ -270,10 +271,10 @@ td.r,th.r{text-align:right}
 #sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
 #sact .dfold{margin-top:10px}
 #sact .stripbox{margin-bottom:8px}
-.expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:7px;
-  color:var(--dim);font:inherit;font-size:11px;padding:2px 8px;cursor:pointer;text-transform:none;
-  letter-spacing:0}
-.expandbtn:hover{color:var(--fg);border-color:var(--dim)}
+.expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:8px;
+  color:var(--fg);font:inherit;font-size:13px;font-weight:600;padding:7px 14px;cursor:pointer;
+  text-transform:none;letter-spacing:0;white-space:nowrap}
+.expandbtn:hover{border-color:var(--blue);color:var(--blue)}
 /* subagent chat overlay — same shape as the file viewer, no file strip */
 #aview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:55;flex-direction:column}
 #ahead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
@@ -301,13 +302,17 @@ td.r,th.r{text-align:right}
 #vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
 #vact .optbtn{margin:4px 0;padding:6px 9px;font-size:12px}
 #vact .freetext{margin-top:8px}
-/* each disclosure lives in its OWN container so the tap target is a real button */
+/* each disclosure is a CONTAINER: the header row is the tap target, and the
+   conversation / question it discloses lives INSIDE it */
 .togbox{background:var(--card2);border:1px solid var(--line);border-radius:9px;
   padding:2px 10px;margin:6px 0}
 .togbox.waiting{border-color:var(--amber);background:#1c1810}
 .togbox.waiting .vchat-toggle{color:var(--amber);font-weight:600}
+.togbody{border-top:1px solid var(--line);margin:0 -10px;padding:8px 10px 6px}
+.togbox.waiting .togbody{border-top-color:#3a2f16}
+.togbody .pend{border:none;background:none;padding:0;margin:0}
 .vchat-toggle{display:block;width:100%;text-align:left;background:none;border:none;color:var(--dim);
-              font:inherit;font-size:12.5px;cursor:pointer;padding:8px 0;user-select:none}
+              font:inherit;font-size:12.5px;cursor:pointer;padding:9px 0;user-select:none}
 .togrow{display:flex;align-items:center;gap:8px}
 .togrow .vchat-toggle{flex:1;width:auto}
 .togrow .expandbtn{float:none;flex:0 0 auto}
@@ -583,18 +588,20 @@ function renderViewerBar(force){
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
   if(s)ensureCtx(viewerSid,ctxVersion(s));
   const c=ctxCache[viewerSid];
-  let h=`<div class="togbox togrow">
-      <button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
-      <button class="expandbtn" title="open the full conversation (closes this file)"
-        onclick="openSession('${viewerSid}')">⤢ full view</button>
-    </div>
-    ${viewerChatOpen?(c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'):''}`;
+  let h=`<div class="togbox">
+      <div class="togrow">
+        <button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+        <button class="expandbtn" title="open the full conversation (closes this file)"
+          onclick="openSession('${viewerSid}')">⤢ full view</button>
+      </div>
+      ${viewerChatOpen?`<div class="togbody">${c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'}</div>`:''}
+    </div>`;
   const p=s&&s.pending;
   if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
-    h+=`<div class="togbox ${viewerQOpen?'':'waiting'}">
+    h+=`<div class="togbox waiting">
       <button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
+      ${viewerQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg')}</div>`:''}
     </div>`;
-    if(viewerQOpen)h+=`<div class="pend">${p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg')}</div>`;
   }
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     <div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / for commands" autocomplete="off"
@@ -666,10 +673,10 @@ function renderSession(force){
   if(typing)return;                        // never replace the input being typed into
   const p=s.pending;
   const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
-  const qHtml=hasQ?`<div class="togbox ${sessQOpen?'':'waiting'}">
+  const qHtml=hasQ?`<div class="togbox waiting">
       <button class="vchat-toggle" onclick="sessQOpen=!sessQOpen;renderSession(true)">${sessQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
-    </div>
-    ${sessQOpen?`<div class="pend">${p.questions.length>1?mqBlock(s,p,'smsg'):singleQBlock(s,p,'smsg')}</div>`:''}`
+      ${sessQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'smsg'):singleQBlock(s,p,'smsg')}</div>`:''}
+    </div>`
     :pendingBox(s,'smsg');   // permission prompts render whole
   const act=$('#sact');
   keepStripScroll(act,()=>{act.innerHTML=`
