@@ -213,11 +213,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
 26. **Plan-usage is READ, never fetched.** `Engine.read_usage` parses `~/.claude/.statusline-usage-cache`
-    (key=value: `UTILIZATION`/`RESETS_AT` = 5-hour, `WEEKLY_UTILIZATION`/`WEEKLY_RESETS_AT`,
-    `PROFILE_NAME`) into `/api/fleet` `usage` (null if the file is absent/unparseable); the
-    dashboard's `usageBar` renders it. The cache is written by the Claude Code statusline — the
-    daemon does NOT call the usage API or hold a session key, so accuracy tracks how recently any
-    session's statusline rendered. Don't add a fetcher here.
+    (key=value: `UTILIZATION`/`RESETS_AT` = 5-hour, `WEEKLY_UTILIZATION`/`WEEKLY_RESETS_AT`) into
+    `/api/fleet` `usage` (null if the file is absent/unparseable); the dashboard's `usageBar` renders
+    it as three stacked lines (account email, 5-hour, weekly). The cache is written by the Claude Code
+    statusline — the daemon does NOT call the usage API or hold a session key, so accuracy tracks how
+    recently any session's statusline rendered. Don't add a fetcher here. The email comes from
+    `Engine.account_email` (`~/.claude.json` → `oauthAccount.emailAddress`), read ONCE and cached —
+    the cache PROFILE_NAME is a cosmetic statusline label, NOT account identity, so it's not used.
 27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
     viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)

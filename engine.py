@@ -788,6 +788,22 @@ class Engine:
             self.snapshot_cache = fleet
         return fleet
 
+    def account_email(self):
+        # Logged-in Claude account email (~/.claude.json → oauthAccount.emailAddress).
+        # Cached: that file is large and the login rarely changes within a daemon's life
+        # (a re-login needs a daemon restart to reflect — fine for a personal tool).
+        cached = getattr(self, "_account_email", False)
+        if cached is not False:
+            return cached
+        email = None
+        try:
+            with open(os.path.expanduser("~/.claude.json")) as f:
+                email = (json.load(f).get("oauthAccount") or {}).get("emailAddress")
+        except (OSError, ValueError):
+            email = None
+        self._account_email = email
+        return email
+
     def read_usage(self):
         # Claude Code plan-usage snapshot for the logged-in account, written by the
         # statusline (~/.claude/.statusline-usage-cache, key=value). Kept fresh by any
@@ -817,7 +833,7 @@ class Engine:
             "five_hour_reset": kv.get("RESETS_AT") or None,
             "weekly_pct": weekly,
             "weekly_reset": kv.get("WEEKLY_RESETS_AT") or None,
-            "profile": kv.get("PROFILE_NAME") or None,
+            "email": self.account_email(),
             "fetched_ts": num("TIMESTAMP"),
         }
 

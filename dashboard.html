@@ -36,12 +36,12 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 #totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
 #totals .sep{color:var(--faint);font-style:normal;margin:0 7px}
-/* Claude Code plan-usage for the logged-in account (5-hour + weekly) */
-#usage{display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;
+/* Claude Code plan-usage for the logged-in account — 3 stacked lines: email, 5-hour, weekly */
+#usage{display:flex;flex-direction:column;align-items:flex-start;gap:6px;
   background:var(--card);border:1px solid var(--line);border-radius:9px;
   padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--dim)}
 #usage.empty{display:none}
-.uprofile{color:var(--fg);font-weight:600}
+.uemail{color:var(--fg);font-weight:600}
 .ugauge{display:flex;align-items:center;gap:8px;min-width:0}
 .ugauge .ulabel{color:var(--faint);text-transform:uppercase;letter-spacing:.4px;font-size:10px}
 .ugauge .upct{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:600}
@@ -569,7 +569,7 @@ function usageBar(u){
   const el=$('#usage');
   if(!u||(u.five_hour_pct==null&&u.weekly_pct==null)){el.className='empty';el.innerHTML='';return;}
   el.className='';
-  el.innerHTML=`${u.profile?`<span class="uprofile" title="logged-in Claude account">${esc(u.profile)}</span>`:''}
+  el.innerHTML=`${u.email?`<span class="uemail" title="logged-in Claude account">${esc(u.email)}</span>`:''}
     ${ugauge('5-hour',u.five_hour_pct,usageReset(u.five_hour_reset))}
     ${ugauge('weekly',u.weekly_pct,usageReset(u.weekly_reset))}`;
 }

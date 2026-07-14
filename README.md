@@ -37,11 +37,12 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
-- **Plan-usage header** (top of the page, under the totals): the logged-in Claude account's
-  utilization for the **5-hour** session and the **weekly** window — a percent, a bar
-  (green → amber ≥70% → red ≥90%), and when each resets (local time + time-left). Read from
-  `~/.claude/.statusline-usage-cache` (written by the statusline; whatever's freshest across
-  your active sessions). Hidden entirely if the cache is absent.
+- **Plan-usage header** (top of the page, under the totals): three stacked lines — the logged-in
+  account email, then utilization for the **5-hour** session and the **weekly** window (each a
+  percent, a bar green → amber ≥70% → red ≥90%, and when it resets: local time + time-left). The
+  percentages/resets are read from `~/.claude/.statusline-usage-cache` (written by the statusline;
+  whatever's freshest across your active sessions); the email comes from `~/.claude.json`. Hidden
+  entirely if the usage cache is absent.
 - **Per card meta line** — two groups on one row: **left** is activity (running-agent count ·
   quiet time, plus the running skill / compaction when active); **right**, right-adjusted, is
   the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working
