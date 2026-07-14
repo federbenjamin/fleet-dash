@@ -773,6 +773,7 @@ class Engine:
                 "session_cost": round(sum(s["cost"] for s in sessions), 2),
                 "agent_cost": round(sum(s["agent_cost"] for s in sessions), 2),
             },
+            "usage": self.read_usage(),
             "closed": self.closed_sessions(),
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
@@ -786,6 +787,39 @@ class Engine:
         with self.lock:
             self.snapshot_cache = fleet
         return fleet
+
+    def read_usage(self):
+        # Claude Code plan-usage snapshot for the logged-in account, written by the
+        # statusline (~/.claude/.statusline-usage-cache, key=value). Kept fresh by any
+        # active session's statusline; we just read whatever's there. None if absent.
+        path = os.path.expanduser("~/.claude/.statusline-usage-cache")
+        try:
+            kv = {}
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        kv[k] = v
+        except OSError:
+            return None
+
+        def num(k):
+            try:
+                return int(kv.get(k, ""))
+            except ValueError:
+                return None
+        five, weekly = num("UTILIZATION"), num("WEEKLY_UTILIZATION")
+        if five is None and weekly is None:
+            return None
+        return {
+            "five_hour_pct": five,
+            "five_hour_reset": kv.get("RESETS_AT") or None,
+            "weekly_pct": weekly,
+            "weekly_reset": kv.get("WEEKLY_RESETS_AT") or None,
+            "profile": kv.get("PROFILE_NAME") or None,
+            "fetched_ts": num("TIMESTAMP"),
+        }
 
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):
         out = []

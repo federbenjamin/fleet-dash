@@ -37,9 +37,16 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
-- **Per card:** model, context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive
-  and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
-  running-agent count, quiet time, and 🔔 mute. (The ■ stop button lives in the full view.)
+- **Plan-usage header** (top of the page, under the totals): the logged-in Claude account's
+  utilization for the **5-hour** session and the **weekly** window — a percent, a bar
+  (green → amber ≥70% → red ≥90%), and when each resets (local time + time-left). Read from
+  `~/.claude/.statusline-usage-cache` (written by the statusline; whatever's freshest across
+  your active sessions). Hidden entirely if the cache is absent.
+- **Per card meta line** — two groups on one row: **left** is activity (running-agent count ·
+  quiet time, plus the running skill / compaction when active); **right**, right-adjusted, is
+  the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working
+  context, so this is your cue to wrap up or `/compact` deliberately) · `model - effort`. 🔔 mute
+  sits in the tail. (The ■ stop button lives in the full view.)
 - **Conversation peek** on every card: the newest actual message (prose only — tool calls and
   system events are skipped), tagged YOU / CLAUDE, between the meta row and the subagent rows.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
@@ -132,7 +139,8 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
 - **File viewer** extras: a ☀︎/☾ button toggles a light "paper" theme for the document
-  (persisted per device); a **📄 files strip** (header button) expands a one-line horizontally
+  (persisted per device, and shared with the full chat view's own ☀︎/☾ button — one theme for
+  both surfaces); a **📄 files strip** (header button) expands a one-line horizontally
   scrolling selector of everything the session delivered, for switching files without leaving
   the viewer; and a **docked action bar** at the bottom carries, top to bottom: a
   "▸ show conversation" toggle (expands the session's recent conversation, scrollable), the

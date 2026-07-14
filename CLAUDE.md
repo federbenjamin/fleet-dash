@@ -212,6 +212,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
+26. **Plan-usage is READ, never fetched.** `Engine.read_usage` parses `~/.claude/.statusline-usage-cache`
+    (key=value: `UTILIZATION`/`RESETS_AT` = 5-hour, `WEEKLY_UTILIZATION`/`WEEKLY_RESETS_AT`,
+    `PROFILE_NAME`) into `/api/fleet` `usage` (null if the file is absent/unparseable); the
+    dashboard's `usageBar` renders it. The cache is written by the Claude Code statusline — the
+    daemon does NOT call the usage API or hold a session key, so accuracy tracks how recently any
+    session's statusline rendered. Don't add a fetcher here.
+27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
+    viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
+    persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
+    so it applies in either container. `#stheme` is fixed 40×32 so the glyph swap can't resize the
+    chat header (`#vtheme` stays the big 28px viewer button).
 
 ## Dev workflow
 
@@ -260,15 +271,24 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
   closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
-  bootstrap (`?token=`), typing-focus render guard, convo scroll preservation across re-renders
-  (sticky-bottom unless the user scrolled up). UI open/closed state must live in JS globals
+  bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
   (`open`/`infoOpen`/`doneOpen`/`filesOpen`/`closedOpen`/`rollupOpen`) re-applied at render —
-  the 2s innerHTML re-render destroys native `<details>` state otherwise. The viewer's docked
+  a full innerHTML re-render destroys native `<details>` state otherwise.
+  **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
+  `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
+  header/meta/peek/pending/running-agents/more-btn, in a `.ctop` wrapper rebuilt every poll,
+  no `<details>` so replacing it can't flash) and `cardDetail(s)` (the `.detail` "more" tail
+  with the native `<details>` folds). The tail is rebuilt ONLY when `detailSig(s)` changes —
+  a signature that EXCLUDES per-second time fields (started/delivered ages) so a ticking clock
+  never remounts it. That is what stops an expanded card's open dropdown from blinking every
+  2s. Trade-off: completed-agent/spend text in an open panel can be up to a few seconds stale
+  until a material field changes. `sessionCard(s)` (= `.ctop`+detail wholesale) survives only
+  for the dormant fold, which is still innerHTML-rendered. The viewer's docked
   action bar (`renderViewerBar`, rebuilt each render tick for `viewerSid`) duplicates the card's
   act controls — its element ids are `vft-`/`vmsg-` (never `ft-`/`msg-`: the card's ids coexist
   in the DOM and getElementById would hit the wrong one). The bar owns its expandable `.vconvo`
-  chat (global `viewerChatOpen`) with its own scroll preservation; the card scroll pass is
-  scoped to `#sessions .convo` so the two never fight. Bar order: conversation toggle, then
+  chat (global `viewerChatOpen`) with its own scroll preservation (the card body no longer
+  hosts a conversation — it lives only in the full-screen view). Bar order: conversation toggle, then
   the collapsible question block (`viewerQOpen`), then the always-visible freetext. The
   header's 📄 strip (`#vfiles`, `viewerFilesOpen`, current file `viewerPath`) is a one-line
   horizontal file switcher rebuilt by `renderVFiles()` (preserves scrollLeft). `singleQBlock`
