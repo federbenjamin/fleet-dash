@@ -616,6 +616,10 @@ class Engine:
                 pass
             return None
         if d.get("kind") == "question":
+            # ghost guard: a PreToolUse capture can outlive an ask another hook
+            # blocked — hide it unless the session is (or just became) waiting
+            if reg_status != "waiting" and time.time() - d.get("ts", 0) > 5:
+                return None
             return {"kind": "question", "nonce": d["nonce"], "questions": d.get("questions", []),
                     "_ts": d.get("ts")}
         if d.get("kind") == "permission":
@@ -706,6 +710,13 @@ class Engine:
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live"}
+        # a prompt answer may only go to a session actually blocked on a prompt —
+        # a hook-blocked ask leaves a ghost pending file but the session stays
+        # 'busy', and injected digits would land in its main input box
+        if action.get("type") in ("option", "multiq", "permission") \
+           and reg.get("status") != "waiting":
+            return {"ok": False, "error": "session isn't waiting on a prompt — "
+                    "this question may have been blocked or already answered"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
         with self.scan_lock:            # freshness check against the live transcript
             mt = self.tail_for(path)
