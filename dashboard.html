@@ -118,6 +118,8 @@ details.insfold>summary:hover{color:var(--fg)}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
 .arow:first-child{border-top:none}
+/* spawn marker — reads as a branch off the session, like the TUI's tool tree */
+.tree{color:var(--faint);flex-shrink:0;margin-right:-2px;font-size:13px;line-height:1}
 .copyable{cursor:copy}
 .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .dot.running{background:var(--green);animation:pulse 1.2s infinite}
@@ -224,19 +226,18 @@ td.r,th.r{text-align:right}
 .ptool .ptlabel{flex:1;min-width:0}
 .xbtn{background:none;border:1px solid var(--line);border-radius:8px;color:var(--dim);
       font:inherit;font-size:12px;padding:2px 9px;cursor:pointer;white-space:nowrap}
-/* stop, like the square on a remote */
-.stopbtn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;
-  padding:0;line-height:1;font-size:16px;cursor:pointer;border-radius:6px;
-  background:#2a1517;border:1px solid var(--red);color:var(--red)}
-.stopbtn:hover{background:var(--red);color:#0a0e14}
-#vfiles:empty{display:none}
-#vfiles{border-bottom:1px solid var(--line);padding:6px 12px}
+/* stop, like the square on a remote. The square is DRAWN (::before), not a glyph:
+   ■ carries font metrics that never center exactly inside the button. */
+.stopbtn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;
+  padding:0;cursor:pointer;border-radius:7px;background:#2a1517;border:1px solid var(--red)}
+.stopbtn::before{content:"";display:block;width:15px;height:15px;border-radius:2px;
+  background:var(--red)}
+.stopbtn:hover{background:var(--red)}
+.stopbtn:hover::before{background:#0a0e14}
 .fstrip{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;
         overscroll-behavior-x:contain;padding-bottom:2px}
 .fstrip .fchip{flex:0 0 auto}
 .fstrip .fchip.cur{border-color:var(--blue);background:#101c2c}
-#vfilesbtn{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
-        font:inherit;font-size:13px;padding:5px 12px;cursor:pointer;white-space:nowrap}
 .ctxload{color:var(--faint);font-size:12px;padding:6px 0}
 .fchips{display:flex;gap:6px;flex-wrap:wrap;padding:7px 0 2px}
 .fchip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:5px 11px;
@@ -344,9 +345,7 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
-  <div id="vhead"><button id="vclose" onclick="closeViewer()">✕</button><span id="vtitle"></span><button id="vfilesbtn"
-    onclick="viewerFilesOpen=!viewerFilesOpen;renderVFiles()">📄 ▸</button><button id="vtheme" onclick="toggleTheme()">☀︎</button></div>
-  <div id="vfiles"></div>
+  <div id="vhead"><button id="vclose" onclick="closeViewer()">✕</button><span id="vtitle"></span><button id="vtheme" onclick="toggleTheme()">☀︎</button></div>
   <div id="vbody"></div>
   <div id="vact"></div>
 </div>
@@ -519,7 +518,7 @@ function toggleTheme(){
   try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
 }
 (()=>{try{if(localStorage.getItem('viewer_light')==='1'){$('#vbody').classList.add('light');$('#vtheme').textContent='☾';}}catch(e){}})();
-let viewerChatOpen=false,viewerQOpen=true,viewerFilesOpen=false,viewerPath=null;
+let viewerChatOpen=false,viewerQOpen=true,viewerPath=null;
 // one question's full interaction block (options + descriptions + Other + ✕ dismiss);
 // shared by the card's amber box (pre='msg') and the viewer's docked bar (pre='vmsg')
 function singleQBlock(s,p,pre){
@@ -539,24 +538,28 @@ function singleQBlock(s,p,pre){
       ${ms?'':`<button class="pbtn send" onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>
     ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
 }
-function renderVFiles(){
-  const el=$('#vfiles'),btn=$('#vfilesbtn');
-  if(btn)btn.textContent=viewerFilesOpen?'📄 ▾':'📄 ▸';
-  if(!viewerSid||!viewerFilesOpen){el.innerHTML='';return;}
-  const c=ctxCache[viewerSid],fs=(c&&c.files)||[];
-  const oldStrip=el.querySelector('.fstrip'),sl=oldStrip?oldStrip.scrollLeft:0;
-  el.innerHTML=fs.length?`<div class="fstrip">${fs.map(f=>`<button class="fchip ${f.path===viewerPath?'cur':''}"
-      ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
-      onclick="viewFile('${viewerSid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}</button>`).join('')}</div>`
-    :'<div class="ctxload">no delivered files yet</div>';
-  const ns=el.querySelector('.fstrip');
+// The delivered-file strip: identical markup and position (docked bar, directly
+// above the send box) in BOTH full-screen surfaces, so they read as one screen.
+// `cur` marks the file the viewer currently shows.
+function fileStrip(sid,files){
+  if(!files||!files.length)return'';
+  return`<div class="stripbox"><div class="fstrip">${files.map(f=>`<button class="fchip ${f.path===viewerPath?'cur':''}"
+    ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
+    onclick="viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`).join('')}</div></div>`;
+}
+// horizontal scroll position survives the 2s re-render
+function keepStripScroll(root,fn){
+  const old=root.querySelector('.fstrip');
+  const sl=old?old.scrollLeft:0;
+  fn();
+  const ns=root.querySelector('.fstrip');
   if(ns)ns.scrollLeft=sl;
 }
 function renderViewerBar(force){
   if(!viewerSid)return;
   const bar=$('#vact');
   const ae=document.activeElement;
-  if(ae&&ae.tagName==='INPUT'&&(bar.contains(ae)||$('#vfiles').contains(ae)))return; // don't clobber typing
+  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
   if(!force&&touching())return;                           // or a swipe/tap in flight
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
   const old=bar.querySelector&&bar.querySelector('.vconvo');
@@ -574,16 +577,16 @@ function renderViewerBar(force){
     h+=`<button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question (waiting on you)'}</button>`;
     if(viewerQOpen)h+=p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg');
   }
-  h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / for commands" autocomplete="off"
+  h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
+    <div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / for commands" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
       <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
-  bar.innerHTML=h;
+  keepStripScroll(bar,()=>{bar.innerHTML=h;});
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
   if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
-  renderVFiles();
 }
 function viewFile(sid,ep,en,kind,ecap){
   closeSession();          // the two full-screen surfaces are mutually exclusive
@@ -602,7 +605,7 @@ function viewFile(sid,ep,en,kind,ecap){
   }).catch(e=>{vb.textContent='✗ '+e;});
 }
 function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
-  $('#vfiles').innerHTML='';viewerSid=null;viewerPath=null;}
+  viewerSid=null;viewerPath=null;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();closeAgent();closeSession();}});
 
 // ---- full-screen session view ----------------------------------------------
@@ -632,9 +635,7 @@ function renderSession(force){
   $('#stitle2').innerHTML=`<b>${esc(s.title||s.project)}</b>
     <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.family)}</small>`;
   $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
-      onclick="sendInterrupt('${s.session_id}','smsg')">■</button>`:''}
-    <button class="bell ${s.muted?'muted':''}" title="${s.muted?'unmute pushes':'mute pushes'}"
-      onclick="toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>`;
+      onclick="sendInterrupt('${s.session_id}','smsg')"></button>`:''}`;
   if(!force&&(typing||touching()))return;
   const body=$('#sbody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
@@ -643,16 +644,16 @@ function renderSession(force){
   else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
   body.scrollTop=old.atBottom?body.scrollHeight:old.top;
   if(typing)return;                        // never replace the input being typed into
-  const files=(c&&c.files)||[];
-  $('#sact').innerHTML=`
+  const act=$('#sact');
+  keepStripScroll(act,()=>{act.innerHTML=`
     ${pendingBox(s,'smsg')}
-    ${files.length?`<div class="stripbox"><div class="fstrip">${files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div></div>`:''}
+    ${fileStrip(s.session_id,(c&&c.files)||[])}
     <div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / for commands" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
       onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
       <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
-    <div class="actmsg" id="smsg-${s.session_id}"></div>`;
+    <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
 }
 
 // ---- subagent chat overlay -------------------------------------------------
@@ -748,6 +749,7 @@ function agentRow(a){
   return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
     title="open this subagent's conversation"
     onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
+    <span class="tree">⎿</span>
     <span class="dot ${a.state}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>

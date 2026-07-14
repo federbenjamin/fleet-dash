@@ -59,13 +59,15 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   confirmation before sending.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
-  autocomplete), the amber question block when it's blocked on you, delivered-file chips, and
+  autocomplete), the amber question block when it's blocked on you, a delivered-file strip, and
   — in the header — the **■ stop button** (confirms first, then sends Esc: the remote "stop this
-  turn"; only offered while the session is mid-turn) plus 🔔 mute. The card keeps its inline
-  conversation for scanning; this is for actually reading and working a session.
+  turn"; only offered while the session is mid-turn). The card keeps its inline conversation for
+  scanning; this is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
-  button (right of "show conversation") takes you straight back.
+  button (right of "show conversation") takes you straight back. The two are built to resemble
+  each other — same docked bar, same file strip (one shared builder), same send box — so
+  swapping feels like changing what's on screen, not changing screens.
 - **Tap a card** → detail panel, top to bottom: recent conversation, a **free-text send box**
   (types the message into that session's terminal and submits it), a one-line horizontal strip
   of delivered-file chips (quick open), then the "session info" (full session id, pid, cwd,
