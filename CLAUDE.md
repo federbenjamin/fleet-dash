@@ -174,9 +174,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
     labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
     ourselves would defeat a security gate from a remote device — don't.
-22. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
+22. **Effort exists ONLY in the statusline payload.** `"effort":{"level":…}` is piped to the
+    statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
+    cannot derive it. `~/.claude/statusline-command.sh` side-writes it to
+    `fleet-dash/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
+    `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
+    alone. Subagent effort is NOT observable at all (it lives in agent frontmatter) — never fake
+    it on an agent row.
+23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     finds its transcript through the LEDGER's `cwd`. Its overlay is read-only — no send box, no
     stop, no mute (there is no tty to write to).
+24. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
+    window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
+    command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
+    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
 
 ## Dev workflow
 

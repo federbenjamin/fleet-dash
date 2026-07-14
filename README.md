@@ -40,7 +40,15 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Per card:** model, context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive
   and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
   running-agent count, quiet time, and 🔔 mute. (The ■ stop button lives in the full view.)
-- **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
+- **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
+  `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
+  included** — so it is a liveness signal (is it moving?), not output speed; a big context makes
+  it large.
+- **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
+  statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
+  session whose statusline hasn't rendered yet shows the model alone. Subagent effort isn't
+  observable anywhere, so agent rows show the model only.
+- **"open"** on each card header (desktop only): brings that session's iTerm tab to the front.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
   dropdown (id, type, description, model, state, started/last activity, token split, $), and a

@@ -270,7 +270,10 @@ td.r,th.r{text-align:right}
       padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
 #sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
 #sact .dfold{margin-top:10px}
-#sact .stripbox{margin-bottom:8px}
+/* one rule for BOTH docked bars: the file strip → send box gap must match, or the
+   two full-screen surfaces stop looking like the same screen */
+#sact .stripbox,#vact .stripbox{margin:0 0 8px}
+#sact .freetext,#vact .freetext{margin-top:8px}
 .expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:8px;
   color:var(--fg);font:inherit;font-size:13px;font-weight:600;padding:7px 14px;cursor:pointer;
   text-transform:none;letter-spacing:0;white-space:nowrap}
@@ -301,7 +304,6 @@ td.r,th.r{text-align:right}
 #vact:empty{display:none}
 #vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
 #vact .optbtn{margin:4px 0;padding:6px 9px;font-size:12px}
-#vact .freetext{margin-top:8px}
 /* each disclosure is a CONTAINER: the header row is the tap target, and the
    conversation / question it discloses lives INSIDE it */
 .togbox{background:var(--card2);border:1px solid var(--line);border-radius:9px;
@@ -333,6 +335,11 @@ td.r,th.r{text-align:right}
 .nfwarn{background:#2b2111;border:1px solid var(--amber);color:var(--amber);border-radius:8px;
   padding:7px 9px;font-size:11.5px;margin:6px 0;line-height:1.45}
 .nfgo{width:100%;margin-top:10px;padding:10px}
+.nfcheck{display:flex;align-items:center;gap:9px;margin:10px 0 4px;font-size:13px;cursor:pointer}
+.nfcheck input{width:24px;height:24px;flex:0 0 auto;margin:0;accent-color:var(--blue);cursor:pointer}
+.nfcheck span{line-height:1}
+/* the "open" button focuses an iTerm tab — meaningless from a phone */
+@media (pointer:coarse){.deskonly{display:none}}
 /* the card's question SIGNAL: no controls, just "you're blocked — go answer" */
 .qsignal{cursor:pointer}
 .qsignal .pbtn.qanswer{margin-top:8px;width:100%;background:#2b2111;border-color:var(--amber);
@@ -512,6 +519,9 @@ async function ensureCtx(sid,v){
     render(last);
   }catch(e){delete ctxCache[sid];}
 }
+// "opus · high". Effort comes from the statusline side-write, so a session whose
+// statusline hasn't rendered yet (or isn't installed) shows the model alone.
+const modelLabel=s=>esc(s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
 const enc=v=>encodeURIComponent(v||'').replace(/'/g,'%27');  // onclick-attr-safe
 const cpb=v=>`<b class="copyable" title="tap to copy" data-copy="${esc(v)}" onclick="copyTxt(event,this)">${esc(v)}</b>`;
 function fchip(sid,f,cap){
@@ -714,7 +724,7 @@ function renderSession(force){
   const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
   const done=['done','ended'];
   $('#stitle2').innerHTML=`<b>${esc(s.title||s.project)}</b>
-    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.family)}</small>`;
+    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${modelLabel(s)}</small>`;
   $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
       onclick="sendInterrupt('${s.session_id}','smsg')"></button>`:''}`;
   if(!force&&(typing||touching()))return;
@@ -749,9 +759,10 @@ function renderSession(force){
 // parent forwards with SendMessage), so it is labelled as a relay, not a channel.
 let agentView=null;              // {sid, aid} of the open overlay
 const agentCache={};             // aid -> {v, messages, info}
-let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
+let agentInfoOpen2=true;         // the info dropdown INSIDE the overlay (open by default)
 function openAgent(sid,aid){
   agentView={sid,aid};
+  agentInfoOpen2=true;
   $('#aview').style.display='flex';
   renderAgent(true);
 }
@@ -842,7 +853,7 @@ function agentRow(a){
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>
     <span class="amodel">${esc(a.family)}</span>
-    ${!done&&a.tok_per_s>0?`<span class="anum">${fmtTok(Math.round(a.tok_per_s))}/s</span>`:''}
+    ${!done&&a.tok_per_s>0?`<span class="anum" title="throughput: tokens per second this agent is processing, cache reads included — a liveness signal, not output speed">${fmtTok(Math.round(a.tok_per_s))} tok/s</span>`:''}
     ${!done?spark(a.spark):''}
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
@@ -900,9 +911,11 @@ function sessionCard(s){
     <div class="shead" onclick="toggle('${s.session_id}')">
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
+      <button class="expandbtn deskonly" title="bring this session's terminal tab to the front"
+        onclick="event.stopPropagation();focusSession('${s.session_id}')">open</button>
     </div>
     <div class="smeta">
-      <span class="m">${esc(s.family)}</span>
+      <span class="m amodel">${modelLabel(s)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
@@ -1116,6 +1129,8 @@ function sendOther(sid,nonce,n,pre){
 function sendDismiss(sid,nonce,pre){
   act(sid,{type:'dismiss',nonce},pre);
 }
+// desktop only: pointless from the phone — it focuses a tab on the Mac
+function focusSession(sid){act(sid,{type:'focus'});}
 function sendInterrupt(sid,pre='msg'){
   if(!confirm('Interrupt this session’s current turn (sends Esc)?'))return;
   act(sid,{type:'interrupt'},pre);
@@ -1213,9 +1228,11 @@ function dormantSection(list){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newDir='',newModel='',newEffort='',newWt=false,newWtName='',spawnWait=null,spawnMsg='';
+let newOpen=false,newDir='',newModel='',newEffort='',newWt=true,newWtName='',spawnWait=null,spawnMsg='';
+const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
+  if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
   const models=(last&&last.models)||[];
   const efforts=(last&&last.efforts)||[];
   if(!newOpen)
@@ -1246,8 +1263,8 @@ function newSection(){
           ${efforts.map(e=>`<option value="${e}" ${e===newEffort?'selected':''}>${e}</option>`).join('')}
         </select></div>
     </div>
-    <label class="setrow"><input type="checkbox" ${newWt?'checked':''}
-      onchange="newWt=this.checked;render(last,true)"> new git worktree</label>
+    <label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
+      onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
     ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
       oninput="newWtName=this.value" autocomplete="off">`:''}
     <button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>

@@ -7,6 +7,7 @@
 --     flag 0 = write text raw (no newline) · 1 = write text + newline (LF)
 --     flag 2 = press Return: send a raw CR (character id 13) — what raw-mode TUIs
 --              actually treat as Enter; iTerm's own newline sends LF
+--     flag 3 = focus: select that window + tab and bring iTerm forward (types nothing)
 --   SPAWN: creates a NEW tab in the current iTerm window and runs the single
 --          line-3 payload (a `cd … && claude …` command the daemon composed from
 --          validated inputs). The daemon never passes raw user text here.
@@ -58,7 +59,11 @@ on run
 								set ln to item i of L
 								set flagChar to ""
 								if length of ln > 0 then set flagChar to character 1 of ln
-								if flagChar is "2" then
+								if flagChar is "3" then
+									tell w to select
+									tell t to select
+									activate
+								else if flagChar is "2" then
 									tell s to write text (character id 13) newline NO
 								else if length of ln > 2 then
 									set b64 to text 3 thru -1 of ln

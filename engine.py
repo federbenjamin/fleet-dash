@@ -697,6 +697,7 @@ class Engine:
                 "cwd": cwd,
                 "branch": mt.git_branch,
                 "model": mt.model, "family": fam,
+                "effort": self.effort_for(sid),
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
@@ -1144,6 +1145,21 @@ class Engine:
             return None, None
         return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
 
+    @staticmethod
+    def effort_for(sid):
+        """Effort level ('high', 'max', …) for a session.
+
+        It exists ONLY in the statusline payload Claude Code pipes to the statusline
+        command (`"effort":{"level":…}`) — not in the transcript, not in the session
+        registry. So the statusline script side-writes it here (see its
+        `fleet-dash effort side-write` block); no statusline, no effort."""
+        try:
+            with open(os.path.join(BASE, "effort", sid)) as f:
+                v = f.read().strip()
+        except OSError:
+            return None
+        return v if v in Engine.EFFORTS else None
+
     def compacting_secs(self, sid, cwd, mt):
         """Seconds a compaction has been running, or None.
 
@@ -1442,6 +1458,8 @@ class Engine:
                     steps = [(key, False)]
                     if key != "\x1b":
                         steps.append(("", True))
+            elif typ == "focus":        # bring that session's iTerm tab to the front
+                steps = [("__FOCUS__", False)]
             elif typ == "interrupt":    # Esc mid-turn = the terminal's stop key
                 steps = [("\x1b", False)]
             elif typ == "noop":         # TCC/AppleScript path probe: delivers nothing
@@ -1549,6 +1567,9 @@ class Engine:
         req_id = secrets.token_hex(8)
         lines = [tty, req_id]
         for text, nl in steps:
+            if text == "__FOCUS__":     # flag 3: select that tab, type nothing
+                lines.append("3 ")
+                continue
             if text:
                 lines.append("0 " + base64.b64encode(text.encode()).decode())
             if nl:                      # raw CR — raw-mode TUIs' Enter (LF toggles!)
