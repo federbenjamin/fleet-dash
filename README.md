@@ -17,9 +17,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Per card:** model, context-used bar, agents running/done + agent spend, quiet time,
   `open ↗` deep link to the session's claude.ai/code page.
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
-- **Tap a card** → detail panel: full session id, pid, cwd, exact model, started-ago, CLI status,
-  tokens in context, spend split, completed-agents list, and a **free-text send box** (types the
-  message into that session's terminal and submits it).
+- **Tap a card** → detail panel: a "session info" dropdown at the top (full session id, pid, cwd,
+  exact model, started-ago, CLI status, tokens in context, spend split), recent conversation,
+  a **free-text send box** (types the message into that session's terminal and submits it), and
+  a "completed agents" dropdown beneath it.
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
   - Permission request → the notification text + allow / always allow / deny buttons.

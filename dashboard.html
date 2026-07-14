@@ -48,6 +48,9 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .dhead{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:8px 0 2px}
 details.foldbox{margin-top:18px}
 details.foldbox summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 2px;user-select:none}
+details.dfold{margin:2px 0 8px}
+details.dfold summary{cursor:pointer;color:var(--dim);font-size:12px;padding:4px 0;user-select:none}
+details.dfold .kv{margin:6px 0 4px}
 .crow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px}
 .crow .cname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .crow small{color:var(--faint)}
@@ -151,6 +154,7 @@ const $=q=>document.querySelector(q);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
         history.replaceState(null,'',location.pathname);}})();
 const open=new Set();
+const infoOpen=new Set(),doneOpen=new Set();  // detail-panel fold state, survives re-renders
 const fmt$=v=>'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
 const fmtTok=v=>v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
 const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
@@ -288,22 +292,30 @@ function sessionCard(s){
   let ctxHtml='';
   if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s);}
   const detail=isOpen?`<div class="detail">
-      <div class="kv">
-        <span>session</span><b>${esc(s.session_id)}</b>
-        <span>pid</span><b>${s.pid}</b>
-        <span>cwd</span><b>${esc(s.cwd)}</b>
-        <span>model</span><b>${esc(s.model||'?')}</b>
-        <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
-        <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
-        <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
-        <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents</b>
-      </div>
-      ${done.length?`<div class="dhead">completed agents (${done.length})</div>`+done.map(agentRow).join(''):'<div class="dhead">no completed agents</div>'}
+      <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
+        ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>session info</summary>
+        <div class="kv">
+          <span>session</span><b>${esc(s.session_id)}</b>
+          <span>pid</span><b>${s.pid}</b>
+          <span>cwd</span><b>${esc(s.cwd)}</b>
+          <span>model</span><b>${esc(s.model||'?')}</b>
+          <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
+          <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
+          <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
+          <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents</b>
+        </div>
+      </details>
       ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
       <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message to this session"
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
+      <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
+        ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>completed agents (${done.length})</summary>
+        ${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}
+      </details>
     </div>`:'';
   return`<div class="card ${cls}" data-sid="${s.session_id}">
     <div class="shead" onclick="toggle('${s.session_id}')">

@@ -101,7 +101,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
   bootstrap (`?token=`), typing-focus render guard, convo scroll preservation across re-renders
-  (sticky-bottom unless the user scrolled up).
+  (sticky-bottom unless the user scrolled up). UI open/closed state must live in JS globals
+  (`open`/`infoOpen`/`doneOpen`/`closedOpen`/`rollupOpen`) re-applied at render — the 2s
+  innerHTML re-render destroys native `<details>` state otherwise.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
