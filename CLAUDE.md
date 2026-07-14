@@ -230,6 +230,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   `agentCache` keyed on the agent's `convo_v`) mirrors the file viewer's shape minus the file
   strip; tapping an agent row opens it (the old inline info dropdown is gone — the info block
   now lives inside the overlay). It repaints from the 2s tick with its own focus/touch guard.
+  The full-screen SESSION view (`#sview`, `openSession`/`renderSession`/`closeSession`, ⤢
+  button by the card's "recent conversation" header) is the same overlay with a real send box,
+  the question block, file chips and interrupt/mute. THREE act surfaces now coexist in the DOM
+  (card, file viewer, session overlay) — each needs its own element-id prefix (`ft-`/`msg-`,
+  `vft-`/`vmsg-`, `sft-`/`smsg-`) and every act builder (`pendingBox`, `singleQBlock`,
+  `mqBlock`, `sendPerm`, `sendInterrupt`) takes that prefix; a hardcoded prefix silently
+  targets the wrong surface's element (getElementById hits the card's copy).
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).

@@ -245,6 +245,26 @@ td.r,th.r{text-align:right}
 #vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+/* full-screen session view — the card's chat, question block and controls,
+   with room to actually read (same overlay shape as the subagent view) */
+#sview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:52;flex-direction:column}
+#shead2{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+        padding-top:calc(10px + env(safe-area-inset-top))}
+#stitle2{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stitle2 small{color:var(--dim);font-weight:400;margin-left:8px}
+#sctrl{display:flex;align-items:center;gap:6px}
+#sclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+        font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+#sbody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
+#sact{border-top:1px solid var(--line);background:var(--card);
+      padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
+#sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
+#sact .dfold{margin-top:10px}
+#sact .stripbox{margin-bottom:8px}
+.expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:7px;
+  color:var(--dim);font:inherit;font-size:11px;padding:2px 8px;cursor:pointer;text-transform:none;
+  letter-spacing:0}
+.expandbtn:hover{color:var(--fg);border-color:var(--dim)}
 /* subagent chat overlay — same shape as the file viewer, no file strip */
 #aview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:55;flex-direction:column}
 #ahead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
@@ -326,6 +346,12 @@ read-only: this device has no act token — buttons won't work until you open th
   <div id="ahead"><button id="aclose" onclick="closeAgent()">✕</button><span id="atitle"></span></div>
   <div id="abody"></div>
   <div id="aact"></div>
+</div>
+<div id="sview">
+  <div id="shead2"><button id="sclose" onclick="closeSession()">✕</button><span id="stitle2"></span>
+    <span id="sctrl"></span></div>
+  <div id="sbody"></div>
+  <div id="sact"></div>
 </div>
 <script>
 const $=q=>document.querySelector(q);
@@ -564,7 +590,72 @@ function viewFile(sid,ep,en,kind,ecap){
 }
 function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
   $('#vfiles').innerHTML='';viewerSid=null;viewerPath=null;}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();closeAgent();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();closeAgent();closeSession();}});
+
+// ---- full-screen session view ----------------------------------------------
+// Same overlay shape as the subagent view, but this one is a real terminal
+// channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
+// prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
+let sessionView=null;            // sessionId of the open overlay
+let sessInfoOpen=false;          // the info dropdown INSIDE the overlay
+function openSession(sid){
+  sessionView=sid;
+  $('#sview').style.display='flex';
+  renderSession(true);
+}
+function closeSession(){
+  sessionView=null;sessInfoOpen=false;slashClose();
+  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';
+}
+function renderSession(force){
+  if(!sessionView||!last)return;
+  const s=(last.sessions||[]).find(x=>x.session_id===sessionView);
+  if(!s){closeSession();return;}          // session died while open
+  ensureCtx(s.session_id,ctxVersion(s));
+  const c=ctxCache[s.session_id];
+  const ae=document.activeElement;
+  const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
+  const done=['done','ended'];
+  $('#stitle2').innerHTML=`<b>${esc(s.title||s.project)}</b>
+    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.family)}</small>`;
+  $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="xbtn" title="interrupt the current turn (Esc)"
+      onclick="sendInterrupt('${s.session_id}','smsg')">⎋</button>`:''}
+    <button class="bell ${s.muted?'muted':''}" title="${s.muted?'unmute pushes':'mute pushes'}"
+      onclick="toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>`;
+  if(!force&&(typing||touching()))return;
+  const body=$('#sbody');
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
+  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  if(typing)return;                        // never replace the input being typed into
+  const files=(c&&c.files)||[];
+  const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
+  $('#sact').innerHTML=`
+    ${pendingBox(s,'smsg')}
+    ${files.length?`<div class="stripbox"><div class="fstrip">${files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div></div>`:''}
+    <div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / for commands" autocomplete="off"
+      oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
+      onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
+      <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>
+    <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
+    <div class="actmsg" id="smsg-${s.session_id}"></div>
+    <details class="dfold" ${sessInfoOpen?'open':''} ontoggle="sessInfoOpen=this.open">
+      <summary>session info</summary>
+      <div class="kv">
+        <span>session</span>${cpb(s.session_id)}
+        <span>pid</span><b>${s.pid??'?'}</b>
+        <span>cwd</span>${cpb(s.cwd||'?')}
+        <span>model</span><b>${esc(s.model||'?')}</b>
+        <span>state</span><b>${s.state}${s.reg_status?` · ${s.reg_status}`:''} · quiet ${fmtAge(s.quiet_s)}</b>
+        <span>context</span><b>${fmtTok(s.ctx_tokens||0)} · ${s.ctx_pct??'?'}%</b>
+        <span>agents</span><b>${s.agents_running} running · ${s.agents_total} total · ${fmt$(s.agent_cost)}</b>
+        <span>cost</span><b>${fmt$(s.cost)}</b>
+      </div>
+    </details>
+    ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}`;
+}
 
 // ---- subagent chat overlay -------------------------------------------------
 // A subagent has NO tty: its "send" box relays through the PARENT session (the
@@ -683,7 +774,9 @@ function sessionCard(s){
   if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s,needs);}
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   const detail=isOpen?`<div class="detail">
-      ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
+      ${!needs&&ctxHtml?`<div class="dhead">recent conversation
+        <button class="expandbtn" title="open the full conversation"
+          onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
       <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message  ·  / for commands" autocomplete="off"
         oninput="slashInput('${s.session_id}','ft')"
         onfocus="slashInput('${s.session_id}','ft')"
@@ -749,7 +842,8 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
 let settingsOpen=false;
-function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);}
+function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
+  if(sessionView)renderSession(true);if(agentView)renderAgent(true);}
 function renderSettings(){
   const el=$('#settings');
   if(!settingsOpen){el.innerHTML='';return;}
@@ -867,24 +961,24 @@ function mqSend(sid,nonce,pre){
   }
   act(sid,{type:'multiq',nonce,answers},pre);
 }
-function pendingBox(s){
+function pendingBox(s,pre='msg'){
   const p=s.pending; if(!p)return'';
   if(p.nonce&&answered[s.session_id]===p.nonce)return'';   // sent: dismiss instantly
   if(p.kind==='question'){
     if(!p.questions||!p.questions.length)return'';
-    return`<div class="pend">${p.questions.length>1?mqBlock(s,p,'msg'):singleQBlock(s,p,'msg')}
-      <div class="actmsg" id="msg-${s.session_id}"></div></div>`;
+    return`<div class="pend">${p.questions.length>1?mqBlock(s,p,pre):singleQBlock(s,p,pre)}
+      <div class="actmsg" id="${pre}-${s.session_id}"></div></div>`;
   }
   if(p.kind==='permission'){
     return`<div class="pend">
       <div class="ptool">permission: ${esc(p.tool)} — waiting on you</div>
       <pre>${esc(p.input_summary||'')}</pre>
       <div class="pbtns">
-        <button class="pbtn allow" onclick="sendPerm('${s.session_id}','${p.nonce}','allow')">allow</button>
-        <button class="pbtn always" onclick="sendPerm('${s.session_id}','${p.nonce}','always')">always allow</button>
-        <button class="pbtn deny" onclick="sendPerm('${s.session_id}','${p.nonce}','deny')">deny</button>
+        <button class="pbtn allow" onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
+        <button class="pbtn always" onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
+        <button class="pbtn deny" onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
       </div>
-      <div class="actmsg" id="msg-${s.session_id}"></div>
+      <div class="actmsg" id="${pre}-${s.session_id}"></div>
     </div>`;
   }
   return'';
@@ -925,9 +1019,9 @@ function sendOther(sid,nonce,n,pre){
 function sendDismiss(sid,nonce,pre){
   act(sid,{type:'dismiss',nonce},pre);
 }
-function sendInterrupt(sid){
+function sendInterrupt(sid,pre='msg'){
   if(!confirm('Interrupt this session’s current turn (sends Esc)?'))return;
-  act(sid,{type:'interrupt'});
+  act(sid,{type:'interrupt'},pre);
 }
 function copyTxt(ev,el){
   ev.stopPropagation();
@@ -937,8 +1031,8 @@ function copyTxt(ev,el){
     setTimeout(()=>{el.textContent=o},900);   // UX flash only
   });
 }
-function sendPerm(sid,nonce,choice){
-  act(sid,{type:'permission',nonce,choice});
+function sendPerm(sid,nonce,choice,pre='msg'){
+  act(sid,{type:'permission',nonce,choice},pre);
 }
 function sendText(sid,ftPre='ft',msgPre='msg'){
   const inp=document.getElementById(ftPre+'-'+sid);
@@ -1129,6 +1223,7 @@ function render(f,force){
   }
   renderViewerBar();
   renderAgent();
+  renderSession();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
 

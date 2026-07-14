@@ -58,6 +58,11 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   description and scope. Tapping **inserts** the command (most take arguments); the send button
   fires it. Destructive ones (`/clear`, `/compact`, `/rewind`) are tagged and ask for
   confirmation before sending.
+- **⤢ full view** (button beside the "recent conversation" header) → the whole session
+  full-screen: the complete conversation with room to read, the send box (with `/`
+  autocomplete), the amber question block when it's blocked on you, delivered-file chips,
+  ⎋ interrupt + 🔔 mute in the header, and the session-info dropdown. The card keeps its
+  inline conversation for scanning; this is for actually reading and working a session.
 - **Tap a card** → detail panel, top to bottom: recent conversation, a **free-text send box**
   (types the message into that session's terminal and submits it), a one-line horizontal strip
   of delivered-file chips (quick open), then the "session info" (full session id, pid, cwd,
