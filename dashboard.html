@@ -290,6 +290,9 @@ td.r,th.r{text-align:right}
 #vact .freetext{margin-top:8px}
 .vchat-toggle{display:block;width:100%;text-align:left;background:none;border:none;color:var(--dim);
               font:inherit;font-size:12px;cursor:pointer;padding:4px 0 2px;user-select:none}
+.vtogrow{display:flex;align-items:center;gap:8px}
+.vtogrow .vchat-toggle{flex:1;width:auto}
+.vtogrow .expandbtn{float:none;flex:0 0 auto}
 .vconvo{max-height:34vh;border:1px solid var(--line);border-radius:8px;background:#10141b;
         padding:4px 9px;margin-top:4px}
 #vbody.light{background:#f7f8fa;color:#1c2128}
@@ -555,7 +558,11 @@ function renderViewerBar(force){
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
   if(s)ensureCtx(viewerSid,ctxVersion(s));
   const c=ctxCache[viewerSid];
-  let h=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+  let h=`<div class="vtogrow">
+      <button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+      <button class="expandbtn" title="open the full conversation (closes this file)"
+        onclick="openSession('${viewerSid}')">⤢ full view</button>
+    </div>
     ${viewerChatOpen?(c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'):''}`;
   const p=s&&s.pending;
   if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
@@ -574,6 +581,7 @@ function renderViewerBar(force){
   renderVFiles();
 }
 function viewFile(sid,ep,en,kind,ecap){
+  closeSession();          // the two full-screen surfaces are mutually exclusive
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
   $('#vtitle').textContent=name+(cap?' — '+cap:'');
@@ -599,6 +607,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();close
 let sessionView=null;            // sessionId of the open overlay
 let sessInfoOpen=false;          // the info dropdown INSIDE the overlay
 function openSession(sid){
+  closeViewer();           // never stack the file viewer and the chat view
   sessionView=sid;
   $('#sview').style.display='flex';
   renderSession(true);

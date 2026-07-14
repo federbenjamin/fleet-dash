@@ -248,7 +248,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   (card, file viewer, session overlay) — each needs its own element-id prefix (`ft-`/`msg-`,
   `vft-`/`vmsg-`, `sft-`/`smsg-`) and every act builder (`pendingBox`, `singleQBlock`,
   `mqBlock`, `sendPerm`, `sendInterrupt`) takes that prefix; a hardcoded prefix silently
-  targets the wrong surface's element (getElementById hits the card's copy).
+  targets the wrong surface's element (getElementById hits the card's copy). The session view
+  and the file viewer are MUTUALLY EXCLUSIVE — `openSession` calls `closeViewer()` and
+  `viewFile` calls `closeSession()`; they swap via the chat view's file chips and the viewer
+  bar's ⤢ button. Keep that invariant: two stacked full-screen overlays leave the lower one's
+  inputs focusable underneath.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
