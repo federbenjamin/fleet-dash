@@ -51,9 +51,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    the Next/Submit row; one bare CR advances CLEANLY (no phantom from that row). Review pane:
    bare digit "1" submits. Escape sequences and CRs are dropped when chunked into one write
    with other bytes — send each key as its own write. Engine `multiq` builds this; the client
-   sends `n_options` per answer for the walk. Debug rig: spawn a sandbox `claude --model
-   haiku` in a new iTerm tab, make it ask, drive it via scratchpad sbx.py — never experiment
-   on real sessions.
+   sends `n_options` per answer for the walk. **Other + dismiss** (sandbox-proven 2026-07-14):
+   the TUI numbers a "Type something" row at n+1 and "Chat about this" at n+2. Single-select
+   Other = digit n+1 (focuses the row, does NOT select) → raw text → CR (submits/advances,
+   clean). Multi-select Other = digit n+1 (toggles its checkbox) → DOWN×n (focus its input) →
+   text → DOWN (Next/Submit row) → CR; that ROW path opens the Review pane even on a
+   single-question multi (append the "1") whereas the right-arrow ✔ Submit TAB skips Review —
+   both verified same-day, keep the no-Other multi path on the TAB. Esc anywhere = "User
+   declined to answer questions" (same outcome as Chat about this) — the dashboard's ✕.
+   Other text is control-char-stripped server-side (a smuggled \r would fire as Enter). Debug
+   rig: spawn a sandbox `claude --model haiku` in a new iTerm tab, make it ask, drive it via
+   scratchpad sbx2.py — never experiment on real sessions.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
    (hook-file nonce or transcript tool_use_id) before writing keys, AND refuses prompt answers
    (option/multiq/permission) when the registry status isn't `waiting`. The second check is
@@ -79,9 +87,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     logical reply unless a KEY_TOOLS entry lands between them. Extend the filter list there,
     not in the client.
 12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
-    Read/Grep/Glob/task bookkeeping). Results attach in place via `_tool_refs`, so context
-    freshness rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place
-    result mutation must still bump `convo_v` or clients never refetch.
+    Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
+    2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
+    rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place result
+    mutation must still bump `convo_v` or clients never refetch.
+13. **`.card` must stay `overflow:clip`, never `hidden`.** The sticky card header
+    (`position:sticky` on `.shead`) sticks to the *viewport* only while no ancestor is a
+    scroll container; `overflow:hidden` makes the card one and silently kills the pinning.
+    `clip` keeps the border-radius clipping without creating a scroll container.
+14. **Answer suppression is client-side and nonce-keyed:** a sent answer records
+    `answered[sid]=nonce` and the selector hides immediately (the engine's pending clears a
+    poll or two later). Never suppress by sid alone — the next ask (new nonce) must render.
 
 ## Dev workflow
 
@@ -115,7 +131,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   ledger/ntfy/act/hook_pending/session_context/file_content), spend CLI (`spend --cwd|--session`,
   used by the global `/subagent-spend` command).
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
-  (token-gated), POST `/api/act` (token-gated).
+  (token-gated), POST `/api/act` + `/api/settings` (both token-gated; settings persists the
+  `notify` per-category push toggles into config.json via `Engine.update_settings`).
 - `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
   closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
@@ -127,9 +144,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   act controls — its element ids are `vft-`/`vmsg-` (never `ft-`/`msg-`: the card's ids coexist
   in the DOM and getElementById would hit the wrong one). The bar owns its expandable `.vconvo`
   chat (global `viewerChatOpen`) with its own scroll preservation; the card scroll pass is
-  scoped to `#sessions .convo` so the two never fight. Question-file pairing is engine-side
-  (`_paired_files`, window `question_file_pair_seconds` anchored to the hook capture ts) so
-  chips work on collapsed cards without an /api/context fetch.
+  scoped to `#sessions .convo` so the two never fight. Bar order: conversation toggle, then
+  the collapsible question block (`viewerQOpen`), then the always-visible freetext. The
+  header's 📄 strip (`#vfiles`, `viewerFilesOpen`, current file `viewerPath`) is a one-line
+  horizontal file switcher rebuilt by `renderVFiles()` (preserves scrollLeft). `singleQBlock`
+  is the shared single-question selector (card + viewer; descriptions, Other input backed by
+  `otherDraft`, ✕ dismiss); `mqBlock` renders multi-question asks ONE question at a time
+  (`mqSel[sid] = {nonce, qi, a, other}`, ‹ › nav, single-select picks auto-advance `qi`).
+  User-action handlers call `uiRefresh()` (forced card render + forced viewer-bar render) —
+  a plain `render(last,true)` leaves the viewer bar un-repainted under the touch guard.
+  Question-file pairing is engine-side (`_paired_files`, window `question_file_pair_seconds`
+  anchored to the hook capture ts) so chips work on collapsed cards without an /api/context
+  fetch.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
@@ -145,7 +171,6 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 - Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
   per variant; deny=Esc chosen because it cancels every variant).
-- Multi-part (2+ question) asks: render-only today. Injection would need per-tab navigation.
 - Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
 - Tailscale serve + phone onboarding (user-side), ntfy topic subscribe.
 - Fable pricing placeholder in `config.json` rates.

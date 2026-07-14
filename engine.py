@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "agent_done_quiet_seconds": 5,
     "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
+    "notify": {"needs_you": True, "stall": True, "spend": True, "fleet_quiet": True},
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -115,7 +116,7 @@ class Tail:
         self.git_branch = None
         self.ai_title = None
         self.pending = {}               # tool_use_id -> {name, input, uuid} awaiting a result
-        self.convo = deque(maxlen=48)   # recent turns + key-tool calls
+        self.convo = deque(maxlen=120)  # recent turns + key-tool calls
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
         self._tool_refs = {}            # tool_use_id -> convo entry (for result attach)
@@ -460,6 +461,7 @@ class Engine:
             },
             "rollup": self.rollup(),
             "closed": self.closed_sessions(),
+            "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -700,8 +702,10 @@ class Engine:
     # ------------------------------------------------------------ injection
     def act(self, action):
         """Inject an answer into the owning iTerm session. action:
-        {type:'option', session_id, nonce, digits:[1,..]} |
-        {type:'multiq', session_id, nonce, answers:[{digits:[..], multi:bool}, ..]} |
+        {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
+        {type:'multiq', session_id, nonce,
+         answers:[{digits:[..], multi:bool, n_options, other:'...'}, ..]} |
+        {type:'dismiss', session_id, nonce}   (Esc = the TUI's "Chat about this") |
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
@@ -713,7 +717,7 @@ class Engine:
         # a prompt answer may only go to a session actually blocked on a prompt —
         # a hook-blocked ask leaves a ghost pending file but the session stays
         # 'busy', and injected digits would land in its main input box
-        if action.get("type") in ("option", "multiq", "permission") \
+        if action.get("type") in ("option", "multiq", "permission", "dismiss") \
            and reg.get("status") != "waiting":
             return {"ok": False, "error": "session isn't waiting on a prompt — "
                     "this question may have been blocked or already answered"}
@@ -723,56 +727,91 @@ class Engine:
             mt.poll()
             typ = action.get("type")
             steps = []                  # [(text, send_newline)]
-            if typ in ("option", "permission", "multiq"):
+            # free text typed into a TUI row must never smuggle keys: strip control
+            # chars (a \r would fire as Enter, \x1b starts an escape sequence)
+            clean = lambda t: re.sub(r"[\x00-\x1f\x7f]+", " ", str(t or "")).strip()[:300]
+            if typ in ("option", "permission", "multiq", "dismiss"):
                 nonce = action.get("nonce")
                 hp = self.hook_pending(sid, reg.get("status"))
                 if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
                     return {"ok": False, "error": "stale: the prompt changed — refresh"}
-                if typ == "multiq":
-                    # multi-question TUI. Single-select: digit+CR (correct in 4/4 live
-                    # rounds). Multi-select: digit semantics proved unreliable under
-                    # injection (every digit-based variant toggled a stray option —
-                    # captures 2026-07-14), so replay the MANUALLY-captured path that
-                    # always works: focus starts on row 1; down-arrow to each target
-                    # row and Enter toggles it; down-arrow to the Submit row (options,
-                    # then "Type something", then Submit = n_options+2) and Enter
-                    # advances. Trailing CR confirms the Review pane (focus defaults to
-                    # "Submit answers"); harmless if submission already happened.
+                if typ == "dismiss":
+                    # Esc anywhere in the ask TUI = "Chat about this" (sandbox-proven
+                    # 2026-07-14: tool returns "User declined to answer questions")
+                    steps = [("\x1b", False)]
+                elif typ == "multiq":
                     answers = action.get("answers") or []
                     if not answers:
                         return {"ok": False, "error": "no answers"}
-                    # Sandbox-proven recipe (2026-07-14, every transition captured):
+                    # Sandbox-proven recipes (2026-07-14, every transition captured):
                     # single-select = BARE DIGIT (instant select + advance — a separate
                     # CR write after a digit re-fires on the next view as a "phantom
                     # Enter", which corrupted 6 live rounds; digits alone don't).
+                    #   with Other: digit n+1 focuses the "Type something" row, text
+                    #   types into it, one CR selects + advances (clean, no phantom).
                     # multi-select = digit writes toggle (focus stays row 1), then
                     # down-arrows to the Next/Submit row (options, "Type something",
                     # then it: n_options+1 downs from row 1), then one CR — advances
                     # cleanly onto question or review. Review = bare digit 1 submits.
+                    #   with Other: digit n+1 toggles the row's checkbox, DOWN×n
+                    #   focuses its input, text types in, one more DOWN reaches
+                    #   Next/Submit, CR.
                     DOWN = "\x1b[B"
                     steps = []
                     for a in answers[:8]:
                         digits = sorted({int(d) for d in (a.get("digits") or [])})[:9]
-                        if not digits:
+                        other = clean(a.get("other"))
+                        n = int(a.get("n_options") or (max(digits) if digits else 0))
+                        if not digits and not other:
                             return {"ok": False, "error": "every question needs an answer"}
+                        if other and n < 1:
+                            return {"ok": False, "error": "Other needs n_options"}
                         if a.get("multi"):
-                            n = int(a.get("n_options") or max(digits))
                             steps += [(str(d), False) for d in digits]
-                            steps += [(DOWN, False)] * (n + 1)
+                            if other:
+                                steps.append((str(n + 1), False))
+                                steps += [(DOWN, False)] * n
+                                steps.append((other, False))
+                                steps.append((DOWN, False))
+                            else:
+                                steps += [(DOWN, False)] * (n + 1)
+                            steps.append(("", True))
+                        elif other:
+                            steps.append((str(n + 1), False))
+                            steps.append((other, False))
                             steps.append(("", True))
                         else:
                             steps.append((str(digits[0]), False))
                     steps.append(("1", False))
                 elif typ == "option":
                     digits = [str(int(d)) for d in action.get("digits", [])][:8]
-                    if not digits:
+                    other = clean(action.get("other"))
+                    n = int(action.get("n_options") or 0)
+                    if not digits and not other:
                         return {"ok": False, "error": "no option chosen"}
-                    steps = [(d, False) for d in digits]
+                    if other and n < 1:
+                        return {"ok": False, "error": "Other needs n_options"}
                     if action.get("multi"):
-                        # digits toggle; Enter toggles too. Submitting = right-arrow
-                        # to the TUI's "✔ Submit" tab, then Enter.
-                        steps.append(("\x1b[C", False))
-                    steps.append(("", True))
+                        steps = [(d, False) for d in digits]
+                        if other:
+                            # Other rides the Submit ROW path (goes through the
+                            # Review pane; trailing 1 submits it) — sandbox-proven
+                            steps.append((str(n + 1), False))
+                            steps += [("\x1b[B", False)] * n
+                            steps.append((other, False))
+                            steps.append(("\x1b[B", False))
+                            steps.append(("", True))
+                            steps.append(("1", False))
+                        else:
+                            # digits toggle; Enter toggles too. Submitting = right-
+                            # arrow to the "✔ Submit" TAB + Enter (skips Review).
+                            steps.append(("\x1b[C", False))
+                            steps.append(("", True))
+                    elif other:
+                        steps = [(str(n + 1), False), (other, False), ("", True)]
+                    else:
+                        steps = [(d, False) for d in digits]
+                        steps.append(("", True))
                 else:
                     key = self.cfg.get("permission_keys", {}).get(action.get("choice"))
                     if not key:
@@ -857,25 +896,50 @@ class Engine:
 
     def check_notifications(self, fleet):
         cfg, now = self.cfg, time.time()
+        on = cfg.get("notify") or {}      # per-category toggles (dashboard ⚙ settings)
         for s in fleet["sessions"]:
             key_base = s["session_id"][:8]
-            if s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
+            if on.get("stall", True) and s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
                 self.once(f"stall:{key_base}:{s['quiet_s'] // 300}", "Session stalled",
                           f"{s['name']}: frozen {s['quiet_s']}s mid-turn", "warning", "high")
-            if s["state"] == "needs_you" and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
+            if on.get("needs_you", True) and s["state"] == "needs_you" \
+               and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
                 self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
                           f"{s['name']}: blocked {s['quiet_s'] // 60}m", "hourglass_flowing_sand")
             mult = int((s["cost"] + s["agent_cost"]) / cfg["spend_threshold_usd"])
-            if mult >= 1:               # only the highest crossed threshold, once
+            if on.get("spend", True) and mult >= 1:   # only the highest crossed threshold, once
                 self.once(f"spend:{key_base}:{mult}", "Spend threshold",
                           f"{s['name']}: ${s['cost'] + s['agent_cost']:.2f} "
                           f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
         busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
-        if self.prev_fleet_busy and busy == 0 and fleet["totals"]["sessions"] > 0:
+        if on.get("fleet_quiet", True) and self.prev_fleet_busy and busy == 0 \
+           and fleet["totals"]["sessions"] > 0:
             self.once(f"quiet:{int(now) // 600}", "Fleet quiet",
                       f"All {fleet['totals']['sessions']} sessions idle — come harvest", "white_check_mark")
         self.prev_fleet_busy = busy
         self.seeded = True
+
+    NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet")
+
+    def update_settings(self, patch):
+        """Persist dashboard-editable settings (currently: notify toggles only)."""
+        nt = patch.get("notify")
+        if not isinstance(nt, dict):
+            return {"ok": False, "error": "nothing to update"}
+        cur = dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"])
+        for k, v in nt.items():
+            if k in self.NOTIFY_KEYS:
+                cur[k] = bool(v)
+        self.cfg["notify"] = cur
+        path = os.path.join(BASE, "config.json")
+        try:
+            raw = json.load(open(path))
+        except Exception:
+            raw = {}
+        raw["notify"] = cur
+        with open(path, "w") as f:
+            json.dump(raw, f, indent=2)
+        return {"ok": True, "notify": cur}
 
     def once(self, key, title, body, tags="robot", priority="default"):
         if key in self.notified:

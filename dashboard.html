@@ -13,15 +13,24 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,sans-serif;
      padding:12px 12px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
-.pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px}
+.pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
+.pagetitle span{flex:1}
+#gear{background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:2px 6px}
+.setpanel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:10px}
+.setrow{display:block;font-size:13px;color:var(--fg);padding:5px 0;cursor:pointer}
+.setrow input{margin-right:8px;accent-color:var(--blue)}
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
 #totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
 #stale{display:none;background:var(--red);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:hidden}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:clip}
 .card.needs{border-color:var(--amber)}
 .card.stalled{border-color:var(--red)}
-.shead{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none}
+/* sticky: header pins to the viewport top while its card scrolls past (so a long
+   open card can still be collapsed), then exits with the card bottom. Requires the
+   card ancestor NOT be a scroll container: overflow:clip above, never hidden. */
+.shead{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none;
+       position:sticky;top:0;z-index:5;background:var(--card)}
 .chip{font-size:11px;font-weight:600;border-radius:20px;padding:2px 9px;white-space:nowrap}
 .chip.running{background:#12261e;color:var(--green)}
 .chip.needs_you{background:#2b2111;color:var(--amber)}
@@ -113,7 +122,6 @@ td.r,th.r{text-align:right}
 .ctool .tline{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ctool .tline b{color:var(--fg);font-weight:600}
 .ctool .tdot{color:var(--green)}
-.ctool .tres{color:var(--faint);font-size:11.5px;padding-left:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ctool.cfile{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0 6px 4px}
 .fcap{flex-basis:100%;font-size:11px;color:var(--dim)}
 .frow{display:flex;align-items:center;gap:8px;padding:4px 0}
@@ -122,6 +130,24 @@ td.r,th.r{text-align:right}
 .pfiles{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px}
 .pfiles .plabel{font-size:11px;color:var(--amber);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
 .mqsum{font-size:11px;color:var(--blue);margin:2px 0 10px}
+.mqnav{display:flex;align-items:center;gap:10px;margin:2px 0 6px}
+.mqarr{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+       font:inherit;font-size:15px;padding:3px 14px;cursor:pointer}
+.mqarr:disabled{color:var(--faint);cursor:default}
+.mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
+.mqpos b{color:var(--fg)}
+.ptool{display:flex;align-items:center;gap:8px}
+.ptool .ptlabel{flex:1;min-width:0}
+.xbtn{background:none;border:1px solid var(--line);border-radius:8px;color:var(--dim);
+      font:inherit;font-size:12px;padding:2px 9px;cursor:pointer;white-space:nowrap}
+#vfiles:empty{display:none}
+#vfiles{border-bottom:1px solid var(--line);padding:6px 12px}
+.fstrip{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+        overscroll-behavior-x:contain;padding-bottom:2px}
+.fstrip .fchip{flex:0 0 auto}
+.fstrip .fchip.cur{border-color:var(--blue);background:#101c2c}
+#vfilesbtn{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+        font:inherit;font-size:13px;padding:5px 12px;cursor:pointer;white-space:nowrap}
 .ctxload{color:var(--faint);font-size:12px;padding:6px 0}
 .fchips{display:flex;gap:6px;flex-wrap:wrap;padding:7px 0 2px}
 .fchip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:5px 11px;
@@ -175,7 +201,9 @@ td.r,th.r{text-align:right}
 </style>
 </head>
 <body>
-<h1 class="pagetitle">Fleet View</h1>
+<h1 class="pagetitle"><span>Fleet View</span><button id="gear" title="settings"
+  onclick="settingsOpen=!settingsOpen;renderSettings()">⚙</button></h1>
+<div id="settings"></div>
 <header><div id="totals"></div></header>
 <div id="stale">server unreachable — showing last snapshot</div>
 <div id="notoken" style="display:none;background:#2b2111;color:#d29922;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px">
@@ -184,7 +212,9 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
-  <div id="vhead"><span id="vtitle"></span><button id="vtheme" onclick="toggleTheme()">☀︎</button><button id="vclose" onclick="closeViewer()">✕ close</button></div>
+  <div id="vhead"><span id="vtitle"></span><button id="vfilesbtn"
+    onclick="viewerFilesOpen=!viewerFilesOpen;renderVFiles()">📄 ▸</button><button id="vtheme" onclick="toggleTheme()">☀︎</button><button id="vclose" onclick="closeViewer()">✕ close</button></div>
+  <div id="vfiles"></div>
   <div id="vbody"></div>
   <div id="vact"></div>
 </div>
@@ -296,8 +326,7 @@ function convoMsgs(c,sid){
       if(m.name==='SendUserFile')
         return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
           ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
-      return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div>
-        ${m.result?`<div class="tres">⎿ ${esc(m.result)}</div>`:''}</div>`;
+      return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div></div>`;
     }
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':'claude'}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
@@ -318,32 +347,57 @@ function toggleTheme(){
   try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
 }
 (()=>{try{if(localStorage.getItem('viewer_light')==='1'){$('#vbody').classList.add('light');$('#vtheme').textContent='☾';}}catch(e){}})();
-let viewerChatOpen=false;
+let viewerChatOpen=false,viewerQOpen=true,viewerFilesOpen=false,viewerPath=null;
+// one question's full interaction block (options + descriptions + Other + ✕ dismiss);
+// shared by the card's amber box (pre='msg') and the viewer's docked bar (pre='vmsg')
+function singleQBlock(s,p,pre){
+  const sid=s.session_id;
+  const q=p.questions[0],ms=q.multiSelect,n=(q.options||[]).length;
+  const sel=multiSel[sid]=multiSel[sid]||new Set();
+  return`<div class="ptool"><span class="ptlabel">${esc(q.header||'question')} — waiting on you</span>
+      <button class="xbtn" title="dismiss — chat about this instead" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+    ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
+    <div class="qtext">${esc(q.question)}</div>
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
+        onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
+        ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+    <div class="freetext"><input id="oth-${pre}-${sid}" placeholder="Other — type your own answer"
+      value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
+      ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
+      ${ms?'':`<button class="pbtn send" onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>
+    ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
+}
+function renderVFiles(){
+  const el=$('#vfiles'),btn=$('#vfilesbtn');
+  if(btn)btn.textContent=viewerFilesOpen?'📄 ▾':'📄 ▸';
+  if(!viewerSid||!viewerFilesOpen){el.innerHTML='';return;}
+  const c=ctxCache[viewerSid],fs=(c&&c.files)||[];
+  const oldStrip=el.querySelector('.fstrip'),sl=oldStrip?oldStrip.scrollLeft:0;
+  el.innerHTML=fs.length?`<div class="fstrip">${fs.map(f=>`<button class="fchip ${f.path===viewerPath?'cur':''}"
+      ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
+      onclick="viewFile('${viewerSid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}</button>`).join('')}</div>`
+    :'<div class="ctxload">no delivered files yet</div>';
+  const ns=el.querySelector('.fstrip');
+  if(ns)ns.scrollLeft=sl;
+}
 function renderViewerBar(force){
   if(!viewerSid)return;
   const bar=$('#vact');
   const ae=document.activeElement;
-  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  if(ae&&ae.tagName==='INPUT'&&(bar.contains(ae)||$('#vfiles').contains(ae)))return; // don't clobber typing
   if(!force&&touching())return;                           // or a swipe/tap in flight
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
   const old=bar.querySelector&&bar.querySelector('.vconvo');
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
-  let h='';
-  const p=s&&s.pending;
-  if(p&&p.kind==='question'&&p.questions&&p.questions.length===1){
-    const q=p.questions[0];const ms=q.multiSelect;
-    const sel=multiSel[viewerSid]=multiSel[viewerSid]||new Set();
-    h+=`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}</div>`
-      +(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
-        onclick="${ms?`toggleOpt('${viewerSid}',${i+1})`:`sendOption('${viewerSid}','${p.nonce}',[${i+1}],'','vmsg')`}">${esc(o.label)}</button>`).join('')
-      +(ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${viewerSid}','${p.nonce}','vmsg')">submit selection</button></div>`:'');
-  }else if(p&&p.kind==='question'&&p.questions&&p.questions.length>1){
-    h+=mqBlock(s,p,'vmsg',true);
-  }
   if(s)ensureCtx(viewerSid,ctxVersion(s));
   const c=ctxCache[viewerSid];
-  h+=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+  let h=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
     ${viewerChatOpen?(c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'):''}`;
+  const p=s&&s.pending;
+  if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
+    h+=`<button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question (waiting on you)'}</button>`;
+    if(viewerQOpen)h+=p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg');
+  }
   h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message to this session"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg')">
       <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>
@@ -351,13 +405,14 @@ function renderViewerBar(force){
   bar.innerHTML=h;
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
   if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
+  renderVFiles();
 }
 function viewFile(sid,ep,en,kind,ecap){
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
   $('#vtitle').textContent=name+(cap?' — '+cap:'');
   $('#viewer').style.display='flex';
-  viewerSid=sid;renderViewerBar(true);
+  viewerSid=sid;viewerPath=path;renderViewerBar(true);
   const vb=$('#vbody');
   if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
   vb.textContent='loading…';
@@ -367,7 +422,8 @@ function viewFile(sid,ep,en,kind,ecap){
     vb.innerHTML=/\.(md|markdown)$/i.test(name)?'<div class="mdoc">'+md(t)+'</div>':'<pre class="raw">'+esc(t)+'</pre>';
   }).catch(e=>{vb.textContent='✗ '+e;});
 }
-function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';viewerSid=null;}
+function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
+  $('#vfiles').innerHTML='';viewerSid=null;viewerPath=null;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer();});
 
 function agentRow(a){
@@ -450,64 +506,97 @@ function sessionCard(s){
 }
 
 const multiSel={};   // sessionId -> Set of chosen digits (multiSelect questions)
-const mqSel={};      // sessionId -> {nonce, a:{qIdx:Set(digits)}} (multi-question asks)
-function mqBlock(s,p,pre,compact){
+const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qIdx:text}}
+const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
+const answered={};   // sessionId -> nonce already sent: hide the selector instantly
+let settingsOpen=false;
+function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);}
+function renderSettings(){
+  const el=$('#settings');
+  if(!settingsOpen){el.innerHTML='';return;}
+  const nt=(last&&last.notify)||{};
+  const row=(k,lbl)=>`<label class="setrow"><input type="checkbox" ${nt[k]!==false?'checked':''}
+    onchange="setNotify('${k}',this.checked)">${lbl}</label>`;
+  el.innerHTML=`<div class="setpanel"><div class="dhead">push notifications (ntfy)</div>
+    ${row('needs_you','waiting on you — session blocked on a question/permission')}
+    ${row('stall','session stalled — transcript frozen mid-turn')}
+    ${row('spend','spend threshold crossed')}
+    ${row('fleet_quiet','fleet gone quiet — everything idle')}
+    <div class="actmsg" id="setmsg"></div></div>`;
+}
+async function setNotify(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({notify:{[k]:v}})});
+    const d=await r.json();
+    if(d.ok){if(last)last.notify=d.notify;if(msg)msg.textContent='saved ✓';}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+// multi-question asks: ONE question on screen at a time, ‹ › to move between them
+// (keeps a 3-question ask from swallowing the whole screen)
+function mqBlock(s,p,pre){
   const sid=s.session_id;
   let st=mqSel[sid];
-  if(!st||st.nonce!==p.nonce)st=mqSel[sid]={nonce:p.nonce,a:{}};
-  return p.questions.map((q,qi)=>{
-    const sel=st.a[qi]||new Set();
-    const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label).join(', ');
-    return`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${q.multiSelect?' <small>(pick all that apply)</small>':''}</div>`
-      +(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
-        onclick="mqToggle('${sid}',${qi},${i+1},${!!q.multiSelect})">${esc(o.label)}${!compact&&o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')
-      +`<div class="mqsum">selected: ${picked?esc(picked):'—'}</div>`;
-  }).join('')
-  +`<div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
+  if(!st||st.nonce!==p.nonce)st=mqSel[sid]={nonce:p.nonce,qi:0,a:{},other:{}};
+  const qs=p.questions;
+  if(st.qi>=qs.length)st.qi=qs.length-1;
+  const qi=st.qi,q=qs[qi],ms=!!q.multiSelect;
+  const sel=st.a[qi]||new Set();
+  const ansd=i=>((st.a[i]&&st.a[i].size)||(st.other[i]||'').trim())?1:0;
+  const donecnt=qs.reduce((a,_,i)=>a+ansd(i),0);
+  const oth=(st.other[qi]||'').trim();
+  const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label)
+    .concat(oth?['“'+oth+'”']:[]).join(', ');
+  return`<div class="ptool"><span class="ptlabel">multi-part question (${qs.length}) — waiting on you</span>
+      <button class="xbtn" title="dismiss — chat about this instead" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+    ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
+    <div class="mqnav"><button class="mqarr" ${qi===0?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
+      <span class="mqpos"><b>${qi+1}</b> of ${qs.length} · ${donecnt}/${qs.length} answered</span>
+      <button class="mqarr" ${qi===qs.length-1?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
+    <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
+        onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+    <div class="freetext"><input placeholder="Other — type your own answer" value="${esc(st.other[qi]||'')}"
+      oninput="mqOther('${sid}',${qi},this.value)"></div>
+    <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
+    <div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
 }
-function mqToggle(sid,qi,d,multi){
+function mqToggle(sid,qi,d,multi,total){
   const st=mqSel[sid];if(!st)return;
   const sel=st.a[qi]||(st.a[qi]=new Set());
   if(multi){sel.has(d)?sel.delete(d):sel.add(d);}
-  else{st.a[qi]=new Set([d]);}
-  render(last,true);
+  else{st.a[qi]=new Set([d]);st.other[qi]='';
+       if(st.qi<total-1)st.qi++;}      // picked → advance, like the TUI
+  uiRefresh();
 }
+function mqNav(sid,d){const st=mqSel[sid];if(!st)return;st.qi=Math.max(0,st.qi+d);uiRefresh();}
+function mqOther(sid,qi,v){const st=mqSel[sid];if(st)st.other[qi]=v;}
 function mqSend(sid,nonce,pre){
   const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
   const p=s&&s.pending;const st=mqSel[sid];
   if(!p||!st||st.nonce!==nonce)return alert('the prompt changed — refresh');
   const answers=[];
   for(let qi=0;qi<p.questions.length;qi++){
-    const sel=[...(st.a[qi]||[])].sort();
-    if(!sel.length)return alert('answer question '+(qi+1)+' first');
-    answers.push({digits:sel,multi:!!p.questions[qi].multiSelect,
-                  n_options:(p.questions[qi].options||[]).length});
+    const digits=[...(st.a[qi]||[])].sort();
+    const other=(st.other[qi]||'').trim();
+    if(!digits.length&&!other){st.qi=qi;uiRefresh();return alert('answer question '+(qi+1)+' first');}
+    const a={multi:!!p.questions[qi].multiSelect,n_options:(p.questions[qi].options||[]).length};
+    if(a.multi){if(digits.length)a.digits=digits;if(other)a.other=other;}
+    else if(other)a.other=other;
+    else a.digits=digits;
+    answers.push(a);
   }
   act(sid,{type:'multiq',nonce,answers},pre);
-  delete mqSel[sid];
 }
 function pendingBox(s){
   const p=s.pending; if(!p)return'';
+  if(p.nonce&&answered[s.session_id]===p.nonce)return'';   // sent: dismiss instantly
   if(p.kind==='question'){
     if(!p.questions||!p.questions.length)return'';
-    if(p.questions.length>1)
-      return`<div class="pend"><div class="ptool">multi-part question (${p.questions.length}) — waiting on you</div>
-        ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
-        ${mqBlock(s,p,'msg',false)}
-        <div class="actmsg" id="msg-${s.session_id}"></div></div>`;
-    const q=p.questions[0];
-    const ms=q.multiSelect;
-    const sel=multiSel[s.session_id]=multiSel[s.session_id]||new Set();
-    return`<div class="pend">
-      <div class="ptool">${esc(q.header||'question')} — waiting on you</div>
-      ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
-      <div class="qtext">${esc(q.question)}</div>
-      ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
-          onclick="${ms?`toggleOpt('${s.session_id}',${i+1})`:`sendOption('${s.session_id}','${p.nonce}',[${i+1}],'${esc(o.label).replace(/'/g,'')}')`}">
-          ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-      ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${s.session_id}','${p.nonce}')">submit selection</button></div>`:''}
-      <div class="actmsg" id="msg-${s.session_id}"></div>
-    </div>`;
+    return`<div class="pend">${p.questions.length>1?mqBlock(s,p,'msg'):singleQBlock(s,p,'msg')}
+      <div class="actmsg" id="msg-${s.session_id}"></div></div>`;
   }
   if(p.kind==='permission'){
     return`<div class="pend">
@@ -525,24 +614,39 @@ function pendingBox(s){
 }
 async function act(sid,payload,pre='msg'){
   const el=document.getElementById(pre+'-'+sid);
+  if(el&&payload.type!=='ping')el.textContent='sending…';
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
     const d=await r.json();
     if(el)el.textContent=d.ok?'sent ✓':'✗ '+(d.error||'failed');
     if(!d.ok&&!el)alert(d.error||'failed');
+    if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss'].includes(payload.type)){
+      answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
+      delete otherDraft[sid];delete mqSel[sid];multiSel[sid]=new Set();
+      uiRefresh();
+    }
   }catch(e){if(el)el.textContent='✗ '+e;}
 }
-function sendOption(sid,nonce,digits,label,pre){
+function sendOption(sid,nonce,digits,pre){
   act(sid,{type:'option',nonce,digits},pre);
 }
 function toggleOpt(sid,d){
-  const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);render(last,true);
+  const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);uiRefresh();
 }
-function sendMulti(sid,nonce,pre){
+function sendMulti(sid,nonce,n,pre){
   const digits=[...(multiSel[sid]||[])].sort();
-  if(!digits.length)return alert('pick at least one option');
-  act(sid,{type:'option',nonce,digits,multi:true},pre);multiSel[sid]=new Set();
+  const other=(otherDraft[sid]||'').trim();
+  if(!digits.length&&!other)return alert('pick at least one option');
+  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre);
+}
+function sendOther(sid,nonce,n,pre){
+  const other=(otherDraft[sid]||'').trim();
+  if(!other)return alert('type your answer first');
+  act(sid,{type:'option',nonce,n_options:n,other},pre);
+}
+function sendDismiss(sid,nonce,pre){
+  act(sid,{type:'dismiss',nonce},pre);
 }
 function sendPerm(sid,nonce,choice){
   act(sid,{type:'permission',nonce,choice});

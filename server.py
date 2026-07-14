@@ -32,10 +32,11 @@ class Handler(BaseHTTPRequestHandler):
                          or self.headers.get("X-Act-Token") == want)
 
     def do_POST(self):
-        if self.path != "/api/act":
+        route = self.path.split("?", 1)[0]
+        if route not in ("/api/act", "/api/settings"):
             return self.reply(404, "text/plain", b"not found")
         if not self.token_ok():
-            print("act denied: no/bad token (open the ?token= URL once on this device)",
+            print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
                   file=sys.stderr, flush=True)
             return self.reply(403, "application/json",
                               b'{"ok": false, "error": "bad or missing act token"}')
@@ -44,6 +45,10 @@ class Handler(BaseHTTPRequestHandler):
             action = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
         except Exception:
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
+        if route == "/api/settings":
+            result = self.eng.update_settings(action)
+            print(f"settings: {json.dumps(action)[:200]}", file=sys.stderr, flush=True)
+            return self.reply(200, "application/json", json.dumps(result).encode())
         if action.get("type") != "ping":    # audit trail: exactly what was requested
             print(f"act: {json.dumps(action)[:300]}", file=sys.stderr, flush=True)
         result = self.eng.act(action)

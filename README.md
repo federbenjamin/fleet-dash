@@ -10,7 +10,11 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 ## What it shows
 
 - **One card per live session**, sorted needs-you-first, headed by the session's AI tab title
-  (same string as your iTerm tab), with project · branch beneath.
+  (same string as your iTerm tab), with project · branch beneath. On an open card the header
+  pins to the top of the screen while you scroll the card body (collapse from anywhere), and
+  scrolls away past the card's end.
+- **⚙ settings** (top right): per-category toggles for the ntfy pushes (waiting-on-you,
+  stalled, spend threshold, fleet quiet) — persisted to `config.json`, token required.
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
@@ -22,18 +26,24 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   a **free-text send box** (types the message into that session's terminal and submits it), then
   "delivered files" and "completed agents" dropdowns (both scroll internally past ~220px).
 - **Amber interaction box** when a session is waiting on you:
-  - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
-    Multi-question asks (2+) render every question with a per-question "selected:" line and
-    one "submit all answers" button.
+  - AskUserQuestion → full question + option buttons (multi-select = toggles + submit), plus an
+    **"Other" free-text input** (types your own answer into the TUI's "Type something" row) and
+    a **✕ dismiss button** (= the TUI's "Chat about this": the session hears "user declined"
+    and returns to normal chat).
+  - Multi-question asks (2+) show **one question at a time** with ‹ › arrows and an
+    answered-count, a per-question "selected:" line + Other input, and one "submit all
+    answers" button (single-select picks auto-advance, like the terminal).
   - Permission request → the notification text + allow / always allow / deny buttons.
+  - The selector disappears the moment an answer sends — no waiting on the next poll.
   - If a file was delivered shortly before the question (the deliver-then-ask pattern), the box
     leads with a **"read first" chip** — visible even on a collapsed card. Window:
     `question_file_pair_seconds`.
 - **Conversation context**: the session's recent turns (your prompts + Claude's replies,
   markdown-rendered) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
-  Key tool calls appear inline terminal-style (`● Edit(path)` with a `⎿ result` line) —
+  Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
+  The buffer keeps the last ~120 entries per session.
 - **Delivered files**: anything the session sent you via SendUserFile appears as a tappable chip
   (📄 md/text, 🖼 images) **inline in the conversation at the point it was delivered**, with its
   caption — so the message explaining the file sits right with it. The detail panel also has a
@@ -41,10 +51,12 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
 - **File viewer** extras: a ☀︎/☾ button toggles a light "paper" theme for the document
-  (persisted per device), and a **docked action bar** at the bottom carries the owning session's
-  pending question buttons + free-text send — you read the file and answer/type without closing
-  it. A "▸ show conversation" toggle in the bar expands the session's recent conversation right
-  there (scrollable); the input box stays visible either way.
+  (persisted per device); a **📄 files strip** (header button) expands a one-line horizontally
+  scrolling selector of everything the session delivered, for switching files without leaving
+  the viewer; and a **docked action bar** at the bottom carries, top to bottom: a
+  "▸ show conversation" toggle (expands the session's recent conversation, scrollable), the
+  pending question (collapsible via "▾ hide question"; full option descriptions, Other input,
+  ✕ dismiss), and the always-visible free-text send box.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
@@ -89,7 +101,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
    `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash/config.json'))['act_token'])"`).
 4. Push notifications: install the **ntfy** app, subscribe to topic `fleet-efe34e31d4ca2b81`
    (server ntfy.sh). Events: session stalled, spend threshold crossed ($5 steps), fleet gone
-   quiet, blocked-on-you >3 min. Topic/server/threshold all in `config.json`.
+   quiet, blocked-on-you >3 min. Topic/server/threshold in `config.json`; per-category
+   on/off via the dashboard's ⚙ settings.
 
 ## Config (`config.json`)
 
@@ -102,6 +115,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `awaiting_input_notify_seconds` | 180 | blocked-on-you push debounce |
 | `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
+| `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
@@ -127,6 +141,8 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - launchd-context osascript **hangs forever** on the TCC check (can't show the dialog) → applet.
 - TUI keys: digits toggle; **Enter toggles the focused row in multi-select** (does NOT submit);
   submit = right-arrow to the `✔ Submit` tab + Enter; Enter must be raw CR (iTerm newline = LF).
+  The ask TUI also numbers a "Type something" row (n+1, the Other path) and a "Chat about this"
+  row (n+2); Esc anywhere = declined/chat-about-this. Full key map: CLAUDE.md invariant 4.
 - `http.server` keeps the query string in `self.path` (`/?token=…` ≠ `/`).
 - Sandbox blocks `os.kill(pid, 0)` probes — PID-liveness tools run sandbox-off (daemon is).
 
@@ -134,7 +150,6 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
-- Multi-part (2+ question) asks render read-only — answer those at the terminal/claude.ai.
 - VS Code extension sessions have no tty → view-only (injection reports "no terminal").
 - "Recently closed" only records sessions the daemon saw alive (fills from 2026-07-13 onward).
 - The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
