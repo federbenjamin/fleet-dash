@@ -77,7 +77,7 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .smeta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:0 12px 10px;font-size:12px;color:var(--dim)}
 .smeta .m{white-space:nowrap}
 .ctxwrap{flex:0 0 auto;display:flex;align-items:center;gap:5px}
-.ctxbar{width:80px;height:5px;background:var(--card2);border-radius:3px;overflow:hidden}
+.ctxbar{width:96px;height:6px;background:var(--card2);border-radius:3px;overflow:hidden}
 .ctxbar i{display:block;height:100%;background:var(--blue);border-radius:3px}
 a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
@@ -1033,7 +1033,7 @@ function sessionCard(s){
     </div>
     <div class="smeta">
       <span class="m amodel">${modelLabel(s)}</span>
-      <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>${s.ctx_pct??'?'}%</span></span>
+      <span class="ctxwrap"><span>${s.ctx_pct??'?'}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>
       ${s.running?`<span class="m runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
