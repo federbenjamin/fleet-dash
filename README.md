@@ -209,6 +209,11 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 ## Hard-won platform facts baked into the design
 
 - Pending AskUserQuestions are **invisible in the transcript** (rows flush on answer) → hooks.
+- A finished agent **often never writes an `end_turn`** — a long final report ends on a
+  stop_reason-less text row. So "done" is judged by whether anything is in flight (a tool call
+  awaiting its result), not by `stop_reason`; "stalled" means frozen mid-tool. A background
+  agent's `tool_result` in the parent arrives at *spawn* ("Async agent launched successfully"),
+  so it can't be used as a completion signal either.
 - The input-needed Notification (~6s after a question) must not clobber the question capture.
 - launchd-context osascript **hangs forever** on the TCC check (can't show the dialog) → applet.
 - TUI keys: digits toggle; **Enter toggles the focused row in multi-select** (does NOT submit);

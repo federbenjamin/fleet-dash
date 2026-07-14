@@ -71,10 +71,22 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    non-waiting session for the same reason. `interrupt` (Esc mid-turn) has the mirror gate: it
    requires status `busy`, so an Esc can never land in an idle session's input box.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
-7. **Agent state semantics:** long tool calls freeze transcripts — "stalled" (>240s) agents are
-   still counted active; agents whose PARENT went idle/waiting with no end_turn are `ended`
-   (canceled) and finalize to the ledger. Sessions: registry `status` is authoritative
-   (waiting → needs_you; idle → turn_done if fresh end_turn else idle; busy → running/stalled).
+7. **Agent state semantics: "stalled" means frozen mid-TOOL, nothing else.** An agent is
+   working only while something is in flight — a `tool_use` awaiting its result, or a
+   `tool_result` it hasn't answered. If its last row is assistant prose with no tool call it
+   has SETTLED: mark it done after `agent_idle_done_seconds` (30) even with no end_turn.
+   **Never gate done on `stop_reason` alone** — a long final report routinely ends on a
+   stop_reason-less text row (`('assistant', None, ['text'])`), and the old end_turn-only rule
+   left those agents decaying into red "stalled" forever, out of "completed agents" and never
+   finalized to the ledger (383 agents across the history, 0 of them actually mid-tool).
+   `stop_reason: end_turn` still gets the fast 5s grace. Agents whose PARENT went idle/waiting
+   with no end_turn are `ended` (canceled) and finalize to the ledger. Sessions: registry
+   `status` is authoritative (waiting → needs_you; idle → turn_done if fresh end_turn else
+   idle; busy → running/stalled).
+   Two non-signals, both checked and rejected 2026-07-14: the parent's `tool_result` for the
+   Agent tool_use fires at SPAWN for a background agent ("Async agent launched successfully"),
+   so its presence proves nothing; and the `task-notification` rows that do carry a real
+   `<status>completed</status>` aren't written while the parent is mid-turn, so they lag.
 8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
    daemon start. Spend pushes fire only on the highest crossed multiple.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test

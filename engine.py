@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "dormant_seconds": 7200,
     "turn_done_window_seconds": 900,
     "agent_done_quiet_seconds": 5,
+    "agent_idle_done_seconds": 30,      # settled-but-no-end_turn agent: done after this
     "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
     "notify": {"needs_you": True, "stall": True, "spend": True, "fleet_quiet": True},
@@ -760,9 +761,18 @@ class Engine:
             mtime = os.path.getmtime(jl)
             quiet = now - mtime
 
-            done = (t.last_shape and t.last_shape[0] == "assistant"
-                    and t.last_shape[1] in ("end_turn", "stop_sequence")
-                    and quiet > cfg["agent_done_quiet_seconds"])
+            # An agent is WORKING only while something is in flight: a tool_use waiting
+            # on its result, or a tool_result it hasn't answered yet. If its last row is
+            # assistant prose with no tool call, nothing is running — it finished, even
+            # when no end_turn was ever written. (Verified 2026-07-14: a long final
+            # report often ends on a stop_reason-less text row, which used to decay into
+            # "stalled" forever. "stalled" must mean frozen mid-TOOL, nothing else.)
+            role, stop, ctypes = (t.last_shape or (None, None, []))[:3]
+            settled = role == "assistant" and "tool_use" not in (ctypes or [])
+            grace = (cfg["agent_done_quiet_seconds"]
+                     if stop in ("end_turn", "stop_sequence")
+                     else cfg["agent_idle_done_seconds"])
+            done = settled and quiet > grace
             state = "done" if done else ("stalled" if quiet > cfg["stall_seconds"] else "running")
             if not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
                 state = "ended"         # canceled/interrupted: no end_turn will ever come
