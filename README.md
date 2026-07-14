@@ -14,7 +14,14 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
 - **⚙ settings** (top right): per-category toggles for the ntfy pushes (waiting-on-you,
-  stalled, spend threshold, fleet quiet) — persisted to `config.json`, token required.
+  stalled, spend threshold, fleet quiet) **and their thresholds** (blocked seconds, stall
+  seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes) — persisted
+  to `config.json`, token required.
+- **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
+  pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
+  across daemon restarts and auto-expire 30 days after being set.
+- Collapsed cards stay lean: total spend, done-agent count, and agent spend appear once the
+  card is open (running-agent count stays visible everywhere).
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
@@ -119,6 +126,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
 | `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
+| `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
+| `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |

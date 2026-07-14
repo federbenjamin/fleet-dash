@@ -132,7 +132,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   used by the global `/subagent-spend` command).
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
   (token-gated), POST `/api/act` + `/api/settings` (both token-gated; settings persists the
-  `notify` per-category push toggles into config.json via `Engine.update_settings`).
+  `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
+  the stalled STATE, not just the push), and `muted_sessions` (sid → ts, pruned at 30d;
+  muted sessions skip all per-session pushes) into config.json via `Engine.update_settings`.
+  Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
+  transition (`Engine.quiet_since`), not on a time-bucket dedupe).
 - `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
   closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie

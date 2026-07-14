@@ -24,7 +24,12 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
 #gear{background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:2px 6px}
 .setpanel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:10px}
 .setrow{display:block;font-size:13px;color:var(--fg);padding:5px 0;cursor:pointer}
-.setrow input{margin-right:8px;accent-color:var(--blue)}
+.setrow input[type=checkbox]{margin-right:8px;accent-color:var(--blue)}
+.setnum{color:var(--dim)}
+.setnum input{width:72px;background:var(--card2);border:1px solid var(--line);border-radius:6px;
+              color:var(--fg);padding:3px 6px;font:inherit;font-size:13px;margin:0 4px}
+.bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.35}
+.bell.muted{opacity:1}
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
 #totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
@@ -509,12 +514,15 @@ function sessionCard(s){
     <div class="shead" onclick="toggle('${s.session_id}')">
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
-      <span class="scost">${fmt$(s.cost+s.agent_cost)}</span>
+      <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
+        onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
+      ${isOpen?`<span class="scost">${fmt$(s.cost+s.agent_cost)}</span>`:''}
     </div>
     <div class="smeta">
       <span class="m">${esc(s.family)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
-      ${s.agents_total?`<span class="m">${s.agents_running?`<b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b> · `:''}${done.length} done · ${fmt$(s.agent_cost)} on agents</span>`:''}
+      ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
+      ${isOpen&&s.agents_total?`<span class="m">${done.length} done · ${fmt$(s.agent_cost)} on agents</span>`:''}
       <span class="m">quiet ${fmtAge(s.quiet_s)}</span>
       ${s.bridge_url?`<a class="jump" href="${s.bridge_url}" target="_blank" onclick="event.stopPropagation()">open ↗</a>`:''}
     </div>
@@ -535,13 +543,17 @@ function renderSettings(){
   const el=$('#settings');
   if(!settingsOpen){el.innerHTML='';return;}
   const nt=(last&&last.notify)||{};
-  const row=(k,lbl)=>`<label class="setrow"><input type="checkbox" ${nt[k]!==false?'checked':''}
-    onchange="setNotify('${k}',this.checked)">${lbl}</label>`;
+  const st=(last&&last.settings)||{};
+  const num=(k,step)=>`<input type="number" value="${st[k]??''}" min="0" step="${step}"
+    onchange="setNum('${k}',this.value)">`;
+  const row=(k,lbl,tail)=>`<label class="setrow"><input type="checkbox" ${nt[k]!==false?'checked':''}
+    onchange="setNotify('${k}',this.checked)">${lbl}${tail?`<span class="setnum"> — ${tail}</span>`:''}</label>`;
   el.innerHTML=`<div class="setpanel"><div class="dhead">push notifications (ntfy)</div>
-    ${row('needs_you','waiting on you — session blocked on a question/permission')}
-    ${row('stall','session stalled — transcript frozen mid-turn')}
-    ${row('spend','spend threshold crossed')}
-    ${row('fleet_quiet','fleet gone quiet — everything idle')}
+    ${row('needs_you','waiting on you',`after ${num('awaiting_input_notify_seconds',30)} s blocked`)}
+    ${row('stall','session stalled',`frozen > ${num('stall_seconds',30)} s (also drives the chip)`)}
+    ${row('spend','spend threshold',`every $ ${num('spend_threshold_usd',1)}`)}
+    ${row('fleet_quiet','fleet gone quiet',`idle ${num('fleet_quiet_minutes',1)} min first (0 = right away)`)}
+    <div class="setnum" style="padding:4px 0">per-session mute: tap the 🔔 on a card</div>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
 async function setNotify(k,v){
@@ -553,6 +565,27 @@ async function setNotify(k,v){
     if(d.ok){if(last)last.notify=d.notify;if(msg)msg.textContent='saved ✓';}
     else if(msg)msg.textContent='✗ '+(d.error||'failed');
   }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setNum(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:parseFloat(v)})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function toggleMute(sid,mute){
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mute_session:sid,muted:mute})});
+    const d=await r.json();
+    if(!d.ok)return alert(d.error||'failed');
+    const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
+    if(s)s.muted=mute;
+    uiRefresh();
+  }catch(e){alert(e);}
 }
 // multi-question asks: ONE question on screen at a time, ‹ › to move between them
 // (keeps a 3-question ask from swallowing the whole screen)

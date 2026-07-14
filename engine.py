@@ -28,6 +28,8 @@ DEFAULT_CONFIG = {
     "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
     "notify": {"needs_you": True, "stall": True, "spend": True, "fleet_quiet": True},
+    "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
+    "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -316,6 +318,7 @@ class Engine:
         self.notified = {}              # dedupe keys -> t
         self.seeded = False             # first pass registers pre-existing states silently
         self.prev_fleet_busy = None
+        self.quiet_since = None         # when the fleet last went fully idle
         self.lock = threading.Lock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
@@ -434,6 +437,7 @@ class Engine:
                                if reg.get("bridgeSessionId") else None),
                 "started_ms": reg.get("startedAt"),
                 "pending": pending,
+                "muted": sid in (cfg.get("muted_sessions") or {}),
                 # cache keys: the page refetches /api/context only when these move
                 # (a rev counter, not last-ts: tool results mutate entries in place)
                 "convo_v": mt.convo_rev,
@@ -462,6 +466,9 @@ class Engine:
             "rollup": self.rollup(),
             "closed": self.closed_sessions(),
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
+            "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
+                         ("awaiting_input_notify_seconds", "stall_seconds",
+                          "spend_threshold_usd", "fleet_quiet_minutes")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -898,6 +905,8 @@ class Engine:
         cfg, now = self.cfg, time.time()
         on = cfg.get("notify") or {}      # per-category toggles (dashboard ⚙ settings)
         for s in fleet["sessions"]:
+            if s.get("muted"):            # 🔕 on the card: no per-session pushes
+                continue
             key_base = s["session_id"][:8]
             if on.get("stall", True) and s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
                 self.once(f"stall:{key_base}:{s['quiet_s'] // 300}", "Session stalled",
@@ -912,34 +921,66 @@ class Engine:
                           f"{s['name']}: ${s['cost'] + s['agent_cost']:.2f} "
                           f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
         busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
-        if on.get("fleet_quiet", True) and self.prev_fleet_busy and busy == 0 \
+        if busy > 0:
+            self.quiet_since = None
+        elif self.prev_fleet_busy:          # busy -> idle transition starts the clock
+            self.quiet_since = now
+        if on.get("fleet_quiet", True) and busy == 0 and self.quiet_since \
+           and now - self.quiet_since >= float(cfg.get("fleet_quiet_minutes") or 0) * 60 \
            and fleet["totals"]["sessions"] > 0:
-            self.once(f"quiet:{int(now) // 600}", "Fleet quiet",
+            # keyed on the episode start: one push per quiet stretch
+            self.once(f"quiet:{int(self.quiet_since)}", "Fleet quiet",
                       f"All {fleet['totals']['sessions']} sessions idle — come harvest", "white_check_mark")
         self.prev_fleet_busy = busy
         self.seeded = True
 
     NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet")
+    #                key                              type  min  max
+    NUM_KEYS = {"awaiting_input_notify_seconds": (int,   0,    86400),
+                "stall_seconds":                 (int,   30,   86400),
+                "spend_threshold_usd":           (float, 0.5,  10000),
+                "fleet_quiet_minutes":           (float, 0,    1440)}
 
     def update_settings(self, patch):
-        """Persist dashboard-editable settings (currently: notify toggles only)."""
+        """Persist dashboard-editable settings: notify toggles, notification
+        thresholds, per-session mutes."""
+        changed = {}
         nt = patch.get("notify")
-        if not isinstance(nt, dict):
+        if isinstance(nt, dict):
+            cur = dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"])
+            for k, v in nt.items():
+                if k in self.NOTIFY_KEYS:
+                    cur[k] = bool(v)
+            self.cfg["notify"] = changed["notify"] = cur
+        for k, (typ, lo, hi) in self.NUM_KEYS.items():
+            if k in patch:
+                try:
+                    v = typ(float(patch[k]))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"bad value for {k}"}
+                if not lo <= v <= hi:
+                    return {"ok": False, "error": f"{k} must be {lo}–{hi}"}
+                self.cfg[k] = changed[k] = v
+        ms = patch.get("mute_session")
+        if ms:
+            mu = dict(self.cfg.get("muted_sessions") or {})
+            if patch.get("muted"):
+                mu[str(ms)] = time.time()
+            else:
+                mu.pop(str(ms), None)
+            mu = {k: v for k, v in mu.items() if time.time() - v < 30 * 86400}
+            self.cfg["muted_sessions"] = changed["muted_sessions"] = mu
+        if not changed:
             return {"ok": False, "error": "nothing to update"}
-        cur = dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"])
-        for k, v in nt.items():
-            if k in self.NOTIFY_KEYS:
-                cur[k] = bool(v)
-        self.cfg["notify"] = cur
         path = os.path.join(BASE, "config.json")
         try:
             raw = json.load(open(path))
         except Exception:
             raw = {}
-        raw["notify"] = cur
+        raw.update(changed)
         with open(path, "w") as f:
             json.dump(raw, f, indent=2)
-        return {"ok": True, "notify": cur}
+        return {"ok": True, **changed}
 
     def once(self, key, title, body, tags="robot", priority="default"):
         if key in self.notified:
