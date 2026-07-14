@@ -76,7 +76,11 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .ctxbar i{display:block;height:100%;background:var(--blue);border-radius:3px}
 a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
-.detail{border-top:1px solid var(--line);background:var(--card2);padding:10px 12px;font-size:12px}
+.detail{border-top:1px solid var(--line);background:var(--card2);padding:8px 12px 10px;font-size:12px}
+.detail .actmsg:empty{display:none}
+/* top gap above the first fold == the gap between folds (no separator, no empty
+   actmsg contributing space) */
+.detail>details.dfold:first-of-type{margin-top:0}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;color:var(--dim);margin-bottom:8px}
 .kv b{color:var(--fg);font-weight:500;word-break:break-all}
 /* flex, NOT float: a floated ⤢ button narrows the conversation box that follows it */
@@ -94,9 +98,9 @@ details.foldbox summary,details.dfold summary,details.insfold summary{list-style
 details.foldbox summary::-webkit-details-marker,details.dfold summary::-webkit-details-marker,
 details.insfold summary::-webkit-details-marker{display:none}
 details.foldbox summary::before,details.dfold summary::before,details.insfold summary::before{
-  content:'▸';display:inline-block;width:15px;color:var(--faint);transition:transform .15s ease}
+  content:'▸';display:inline-block;width:15px;color:var(--faint)}
 details.foldbox[open]>summary::before,details.dfold[open]>summary::before,
-details.insfold[open]>summary::before{transform:rotate(90deg)}
+details.insfold[open]>summary::before{content:'▾'}
 details.foldbox{margin-top:14px;background:var(--card);border:1px solid var(--line);
   border-radius:10px;overflow:clip}
 details.foldbox>summary{color:var(--fg);font-size:13px;font-weight:500;padding:10px 12px}
@@ -238,7 +242,9 @@ td.r,th.r{text-align:right}
 .detail>.dhead:first-child{margin-top:0}
 /* touch screens: more breathing room between the detail panel's blocks */
 @media (pointer:coarse){
+  .detail{padding-top:14px}
   .detail details.dfold{margin:14px 0}
+  .detail>details.dfold:first-of-type{margin-top:0}
   .detail .dhead{margin-top:16px}
   .detail .stripbox{margin-top:14px}
   .detail .dsep{margin:28px 0 14px}
@@ -297,7 +303,7 @@ td.r,th.r{text-align:right}
 #sact .freetext,#vact .freetext{margin-top:8px}
 /* card tail reveal: session info / files / completed agents / claude.ai link */
 .morebtn{display:block;width:100%;background:none;border:none;border-top:1px solid var(--line);
-  color:var(--dim);font:inherit;font-size:12px;cursor:pointer;padding:9px;user-select:none;text-align:center}
+  color:var(--dim);font:inherit;font-size:10px;cursor:pointer;padding:6px;user-select:none;text-align:center}
 .morebtn:hover{color:var(--fg);background:var(--card2)}
 .expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:8px;
   color:var(--fg);font:inherit;font-size:13px;font-weight:600;padding:7px 14px;cursor:pointer;
@@ -935,7 +941,6 @@ function sessionCard(s){
   // peek to get there.
   const detail=isOpen?`<div class="detail">
       <div class="actmsg" id="msg-${s.session_id}"></div>
-      <div class="dsep"></div>
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
         ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>session info</summary>
