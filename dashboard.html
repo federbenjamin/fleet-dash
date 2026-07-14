@@ -93,6 +93,43 @@ td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-v
 th{color:var(--faint);font-weight:600}
 td.r,th.r{text-align:right}
 .empty{color:var(--faint);padding:18px;text-align:center}
+.ctxbox{border-top:1px solid var(--line);background:#10141b;padding:8px 12px}
+.convo{max-height:250px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:2px 0;-webkit-overflow-scrolling:touch}
+.cmsg .crole{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
+.cmsg .cbody{border-radius:8px;padding:6px 9px;font-size:12.5px;overflow-wrap:break-word}
+.cmsg.user .cbody{background:#132030;border:1px solid #1f3a5f}
+.cmsg.assistant .cbody{background:var(--card);border:1px solid var(--line)}
+.ctxload{color:var(--faint);font-size:12px;padding:6px 0}
+.fchips{display:flex;gap:6px;flex-wrap:wrap;padding:7px 0 2px}
+.fchip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:5px 11px;
+       color:var(--blue);font:inherit;font-size:12px;cursor:pointer;max-width:100%;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fchip:disabled{color:var(--faint);cursor:default}
+.fchip:active{background:var(--card2)}
+#viewer{display:none;position:fixed;inset:0;background:#0a0e14;z-index:50;flex-direction:column}
+#vhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+       padding-top:calc(10px + env(safe-area-inset-top))}
+#vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#vclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+        font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
+#vbody{flex:1;overflow:auto;padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+#vbody img{max-width:100%;height:auto;border-radius:6px}
+#vbody pre.raw{white-space:pre-wrap;word-break:break-word;font-size:12px}
+.mdoc{font-size:13.5px;line-height:1.55;max-width:720px}
+.mdoc h1{font-size:19px;margin:14px 0 6px}
+.mdoc h2{font-size:16px;margin:14px 0 6px}
+.mdoc h3,.mdoc h4,.mdoc h5,.mdoc h6{font-size:14px;margin:12px 0 4px}
+.mdoc p{margin:6px 0}
+.mdoc ul,.mdoc ol{margin:6px 0;padding-left:22px}
+.mdoc li{margin:3px 0}
+.mdoc code{background:#0b0e13;border:1px solid var(--line);border-radius:4px;padding:1px 4px;font-size:.92em}
+.mdoc pre{background:#0b0e13;border:1px solid var(--line);border-radius:6px;padding:9px;
+          overflow-x:auto;margin:8px 0}
+.mdoc pre code{background:none;border:none;padding:0;white-space:pre;font-size:12px}
+.mdoc blockquote{border-left:3px solid var(--line);margin:8px 0;padding:2px 12px;color:var(--dim)}
+.mdoc table{margin:8px 0;display:block;overflow-x:auto;width:max-content;max-width:100%}
+.mdoc hr{border:none;border-top:1px solid var(--line);margin:12px 0}
+.mdoc a{color:var(--blue)}
 </style>
 </head>
 <body>
@@ -104,6 +141,10 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="sessions"></div>
 <div id="closed"></div>
 <div id="rollup"></div>
+<div id="viewer">
+  <div id="vhead"><span id="vtitle"></span><button id="vclose" onclick="closeViewer()">✕ close</button></div>
+  <div id="vbody"></div>
+</div>
 <script>
 const $=q=>document.querySelector(q);
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
@@ -122,6 +163,105 @@ function spark(pts,w=64,h=16){
   const p=pts.map((v,i)=>`${(i/(pts.length-1)*w).toFixed(1)},${(h-2-(v-min)/r*(h-4)).toFixed(1)}`).join(' ');
   return`<svg class="spark" width="${w}" height="${h}"><polyline points="${p}" fill="none" stroke="#58a6ff" stroke-width="1.5"/></svg>`;
 }
+
+// ---- tiny markdown renderer (self-contained: no CDN on the tailnet path) ----
+function mdInline(s){
+  return esc(s).split(/(`[^`]*`)/).map(p=>{
+    if(p.length>1&&p.startsWith('`')&&p.endsWith('`'))return'<code>'+p.slice(1,-1)+'</code>';
+    return p
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
+      .replace(/\*([^*\n]+)\*/g,'<i>$1</i>');
+  }).join('');
+}
+function md(src){
+  const lines=(src||'').replace(/\r/g,'').split('\n');
+  let html='',i=0,m;
+  const isList=l=>/^\s*([-*+]|\d+\.)\s+/.test(l);
+  const cells=r=>r.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|').map(c=>c.trim());
+  const isTableSep=l=>/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l)&&l.includes('-');
+  while(i<lines.length){
+    const l=lines[i];
+    if(/^\s*```/.test(l)){
+      const buf=[];i++;
+      while(i<lines.length&&!/^\s*```/.test(lines[i]))buf.push(lines[i++]);
+      i++;html+='<pre><code>'+esc(buf.join('\n'))+'</code></pre>';continue;
+    }
+    if(!l.trim()){i++;continue;}
+    if(m=l.match(/^(#{1,6})\s+(.*)/)){const n=m[1].length;html+=`<h${n}>${mdInline(m[2])}</h${n}>`;i++;continue;}
+    if(/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)){html+='<hr>';i++;continue;}
+    if(/^\s*>/.test(l)){
+      const buf=[];while(i<lines.length&&/^\s*>/.test(lines[i]))buf.push(lines[i++].replace(/^\s*>\s?/,''));
+      html+='<blockquote>'+md(buf.join('\n'))+'</blockquote>';continue;
+    }
+    if(isList(l)){
+      const ord=/^\s*\d+\./.test(l),items=[];
+      while(i<lines.length&&isList(lines[i])){
+        let it=lines[i].replace(/^\s*([-*+]|\d+\.)\s+/,'');i++;
+        while(i<lines.length&&/^\s{2,}\S/.test(lines[i])&&!isList(lines[i]))it+=' '+lines[i++].trim();
+        items.push(it);
+      }
+      html+=(ord?'<ol>':'<ul>')+items.map(x=>'<li>'+mdInline(x)+'</li>').join('')+(ord?'</ol>':'</ul>');continue;
+    }
+    if(l.includes('|')&&i+1<lines.length&&isTableSep(lines[i+1])){
+      const head=cells(l);i+=2;let rows='';
+      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())
+        rows+='<tr>'+cells(lines[i++]).map(c=>'<td>'+mdInline(c)+'</td>').join('')+'</tr>';
+      html+='<table><tr>'+head.map(c=>'<th>'+mdInline(c)+'</th>').join('')+'</tr>'+rows+'</table>';continue;
+    }
+    const buf=[l];i++;
+    while(i<lines.length&&lines[i].trim()&&!/^\s*(#{1,6}\s|```|>)/.test(lines[i])
+          &&!isList(lines[i])&&!(lines[i].includes('|')&&i+1<lines.length&&isTableSep(lines[i+1])))
+      buf.push(lines[i++]);
+    html+='<p>'+buf.map(mdInline).join('<br>')+'</p>';
+  }
+  return html;
+}
+
+// ---- conversation context + delivered files (fetched per session on demand) ----
+const ctxCache={};   // sid -> {v, messages, files} | {fetching:true}
+const ctxVersion=s=>(s.convo_v||'')+':'+(s.files_n||0);
+async function ensureCtx(sid,v){
+  const c=ctxCache[sid];
+  if(c&&(c.v===v||c.fetching))return;
+  ctxCache[sid]={...(c||{}),fetching:true};
+  try{
+    const r=await fetch('/api/context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+    const d=await r.json();
+    ctxCache[sid]=d.ok?{v,messages:d.messages||[],files:d.files||[]}:{v,messages:[],files:[]};
+    render(last);
+  }catch(e){delete ctxCache[sid];}
+}
+function convoBox(s){
+  const c=ctxCache[s.session_id];
+  if(!c||c.fetching&&!c.messages)return'<div class="ctxbox"><div class="ctxload">loading context…</div></div>';
+  const msgs=(c.messages||[]).map(m=>`<div class="cmsg ${m.role}">
+      <span class="crole">${m.role==='user'?'you':'claude'}</span>
+      <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div>
+    </div>`).join('');
+  const chips=(c.files||[]).map((f,idx)=>`<button class="fchip" ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
+      onclick="event.stopPropagation();viewFile('${s.session_id}',${idx})">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`).join('');
+  if(!msgs&&!chips)return'';
+  return`<div class="ctxbox">${msgs?`<div class="convo" data-sid="${s.session_id}">${msgs}</div>`:''}
+    ${chips?`<div class="fchips">${chips}</div>`:''}</div>`;
+}
+function viewFile(sid,idx){
+  const f=((ctxCache[sid]||{}).files||[])[idx];
+  if(!f)return;
+  const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(f.path);
+  $('#vtitle').textContent=f.name+(f.caption?' — '+f.caption:'');
+  $('#viewer').style.display='flex';
+  const vb=$('#vbody');
+  if(f.kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(f.name)}">`;return;}
+  vb.textContent='loading…';
+  fetch(url,{cache:'no-store'}).then(async r=>{
+    if(!r.ok){vb.textContent=(r.status===403?'read-only device — open the ?token= URL once to view files. ':'')+await r.text();return;}
+    const t=await r.text();
+    vb.innerHTML=/\.(md|markdown)$/i.test(f.name)?'<div class="mdoc">'+md(t)+'</div>':'<pre class="raw">'+esc(t)+'</pre>';
+  }).catch(e=>{vb.textContent='✗ '+e;});
+}
+function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer();});
 
 function agentRow(a){
   const done=['done','ended'].includes(a.state);
@@ -144,6 +284,9 @@ function sessionCard(s){
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const done=s.agents.filter(a=>['done','ended'].includes(a.state));
   const activeSession=!['idle','dormant'].includes(s.state);
+  // context auto-opens with the amber box; other states get it in the detail panel
+  let ctxHtml='';
+  if(needs||isOpen){ensureCtx(s.session_id,ctxVersion(s));ctxHtml=convoBox(s);}
   const detail=isOpen?`<div class="detail">
       <div class="kv">
         <span>session</span><b>${esc(s.session_id)}</b>
@@ -156,6 +299,7 @@ function sessionCard(s){
         <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents</b>
       </div>
       ${done.length?`<div class="dhead">completed agents (${done.length})</div>`+done.map(agentRow).join(''):'<div class="dhead">no completed agents</div>'}
+      ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
       <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message to this session"
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
@@ -174,6 +318,7 @@ function sessionCard(s){
       <span class="m">quiet ${fmtAge(s.quiet_s)}</span>
       ${s.bridge_url?`<a class="jump" href="${s.bridge_url}" target="_blank" onclick="event.stopPropagation()">open ↗</a>`:''}
     </div>
+    ${needs?ctxHtml:''}
     ${pendingBox(s)}
     ${activeSession&&running.length?`<div class="agents">${running.map(agentRow).join('')}</div>`:''}
     ${detail}
@@ -290,8 +435,15 @@ function render(f){
     <span>agents <b>${fmt$(t.agent_cost)}</b></span><span>sessions <b>${fmt$(t.session_cost)}</b></span>`;
   const ae=document.activeElement;
   const typing=ae&&ae.tagName==='INPUT'&&$('#sessions').contains(ae);
+  // preserve convo scroll positions across the wholesale innerHTML re-render
+  const scrolls={};
+  document.querySelectorAll('.convo').forEach(el=>{
+    scrolls[el.dataset.sid]={top:el.scrollTop,atBottom:el.scrollTop+el.clientHeight>=el.scrollHeight-12};});
   if(!typing)
     $('#sessions').innerHTML=f.sessions.length?f.sessions.map(sessionCard).join(''):'<div class="empty">no live sessions</div>';
+  document.querySelectorAll('.convo').forEach(el=>{
+    const s0=scrolls[el.dataset.sid];
+    el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
   $('#closed').innerHTML=closedSection(f.closed,f.t);
   $('#rollup').innerHTML=rollupTable(f.rollup);
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';

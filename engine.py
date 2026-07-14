@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, sys, glob, time, sqlite3, secrets, subprocess, threading, urllib.request
+import json, os, re, sys, glob, time, sqlite3, secrets, subprocess, threading, urllib.request
 from collections import deque
 
 HOME = os.path.expanduser("~")
@@ -100,6 +100,8 @@ class Tail:
         self.git_branch = None
         self.ai_title = None
         self.pending = {}               # tool_use_id -> {name, input, uuid} awaiting a result
+        self.convo = deque(maxlen=14)   # recent turns: {role, text, ts}
+        self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
 
     def poll(self):
         try:
@@ -155,6 +157,15 @@ class Tail:
                     if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
                         self.pending[b["id"]] = {"name": b.get("name"),
                                                  "input": b.get("input"), "uuid": o.get("uuid")}
+                        if b.get("name") == "SendUserFile":
+                            inp = b.get("input") or {}
+                            for fp in (inp.get("files") or [])[:6]:
+                                if isinstance(fp, str):
+                                    self._file_add(fp, inp.get("caption", ""), ts)
+                txt = "\n\n".join(b.get("text", "") for b in content
+                                  if isinstance(b, dict) and b.get("type") == "text").strip()
+                if txt:
+                    self._convo_add("assistant", txt, ts)
             if m.get("stop_reason") in ("end_turn", "stop_sequence"):
                 self.pending.clear()    # turn over: unanswered tool_uses were canceled
             self.last_shape = ("assistant", m.get("stop_reason"), ctypes)
@@ -166,7 +177,37 @@ class Tail:
                         self.pending.pop(b.get("tool_use_id"), None)
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
+                if not o.get("isMeta"):
+                    if isinstance(content, str):
+                        utxt = content
+                    else:
+                        utxt = "\n\n".join(b.get("text", "") for b in content
+                                           if isinstance(b, dict) and b.get("type") == "text")
+                    utxt = re.sub(r"<system-reminder>.*?</system-reminder>", "", utxt, flags=re.S).strip()
+                    if utxt and not utxt.startswith(("<command-", "<local-command", "Caveat:",
+                                                     "This session is being continued from")):
+                        self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
+
+    def _convo_add(self, role, text, ts):
+        if len(text) > 4000:
+            text = text[:4000] + "\n…"
+        # merge assistant rows within one work stretch into one logical reply
+        if self.convo and role == "assistant" and self.convo[-1]["role"] == "assistant":
+            prev = self.convo[-1]
+            if len(prev["text"]) < 8000:
+                prev["text"] = (prev["text"] + "\n\n" + text)[:8000]
+            prev["ts"] = ts or prev["ts"]
+            return
+        self.convo.append({"role": role, "text": text, "ts": ts})
+
+    def _file_add(self, path, caption, ts):
+        for f in self.files:
+            if f["path"] == path:       # re-delivery: refresh, don't duplicate
+                f["ts"] = ts
+                f["caption"] = caption or f["caption"]
+                return
+        self.files.append({"path": path, "caption": caption or "", "ts": ts})
 
     @property
     def total_tokens(self):
@@ -317,6 +358,9 @@ class Engine:
                                if reg.get("bridgeSessionId") else None),
                 "started_ms": reg.get("startedAt"),
                 "pending": pending,
+                # cache keys: the page refetches /api/context only when these move
+                "convo_v": (mt.convo[-1]["ts"] if mt.convo else None),
+                "files_n": len(mt.files),
                 "agents": agents,
                 "agents_running": len(agents_running),
                 "agents_total": len(agents),
@@ -501,6 +545,58 @@ class Engine:
             return {"kind": "permission", "nonce": d["nonce"], "tool": "requested tool",
                     "input_summary": d.get("message", "")}
         return None
+
+    # ------------------------------------------------------- context + files
+    def _reg_main_path(self, sid):
+        reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
+        if not reg:
+            return None, None
+        return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+
+    def session_context(self, sid):
+        """Recent conversation turns + SendUserFile deliveries for one session."""
+        reg, path = self._reg_main_path(sid)
+        if not reg or not os.path.isfile(path):
+            return {"ok": False, "error": "session not live"}
+        with self.scan_lock:
+            mt = self.tail_for(path)
+            mt.poll()
+            msgs = [dict(m) for m in mt.convo]
+            files = [dict(f) for f in mt.files]
+        out_files = []
+        for f in reversed(files):       # newest delivery first
+            p = f["path"]
+            ext = os.path.splitext(p)[1].lower()
+            kind = "image" if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg") else "text"
+            missing = not os.path.isfile(p)
+            out_files.append({"name": os.path.basename(p), "path": p, "caption": f["caption"],
+                              "ts": f["ts"], "kind": kind, "missing": missing})
+        return {"ok": True, "messages": msgs, "files": out_files}
+
+    def file_content(self, sid, fpath):
+        """Serve a delivered file. WHITELIST: only paths recorded from this session's
+        own SendUserFile tool_use rows — never a free-form client path."""
+        reg, path = self._reg_main_path(sid)
+        if not reg:
+            return None, None, "session not live"
+        with self.scan_lock:
+            mt = self.tail_for(path)
+            mt.poll()
+            allowed = {f["path"] for f in mt.files}
+        if fpath not in allowed:
+            return None, None, "not a file this session delivered"
+        try:
+            if os.path.getsize(fpath) > 8_000_000:
+                return None, None, "file too large to preview (>8MB)"
+            with open(fpath, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return None, None, f"unreadable: {e}"
+        ext = os.path.splitext(fpath)[1].lower()
+        ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".gif": "image/gif", ".webp": "image/webp",
+                 ".svg": "image/svg+xml"}.get(ext, "text/plain; charset=utf-8")
+        return ctype, data, None
 
     # ------------------------------------------------------------ injection
     def act(self, action):

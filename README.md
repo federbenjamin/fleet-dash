@@ -23,6 +23,13 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
   - Permission request → the notification text + allow / always allow / deny buttons.
+- **Conversation context**: the session's last few turns (your prompts + Claude's replies,
+  markdown-rendered) in a scrollable box — shown automatically above the amber box when a
+  session needs you; for every other state it's in the tap-detail panel ("recent conversation").
+- **Delivered files**: anything the session sent you via SendUserFile appears as tappable chips
+  (📄 md/text, 🖼 images) under the context — opens a full-screen viewer with markdown rendered
+  and images inline. Viewing file contents requires the act token (same `?token=` opt-in);
+  chips for files that were since deleted show "(gone)".
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.
@@ -112,6 +119,10 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - Multi-part (2+ question) asks render read-only — answer those at the terminal/claude.ai.
 - VS Code extension sessions have no tty → view-only (injection reports "no terminal").
 - "Recently closed" only records sessions the daemon saw alive (fills from 2026-07-13 onward).
+- The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
+  links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.
+- Conversation context and file chips exist only for live sessions (closed sessions: use the
+  claude.ai deep link).
 - Screen-peek ("show me what this stalled session's terminal displays") is proven as a technique
   (`contents of session` osascript) but not built into the UI yet.
 - Fable pricing placeholder; ledger has no backfill from pre-daemon transcripts.

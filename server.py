@@ -6,6 +6,7 @@ GET /api/fleet   latest fleet snapshot JSON
 """
 import json, os, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine import Engine, load_config, BASE  # noqa: E402
@@ -49,9 +50,24 @@ class Handler(BaseHTTPRequestHandler):
                   file=sys.stderr, flush=True)
         self.reply(200, "application/json", json.dumps(result).encode())
 
+    def query(self, key):
+        return (parse_qs(urlparse(self.path).query).get(key) or [""])[0]
+
     def do_GET(self):
         route = self.path.split("?", 1)[0]
-        if route == "/api/fleet":
+        if route == "/api/context":
+            out = self.eng.session_context(self.query("sid"))
+            self.reply(200, "application/json", json.dumps(out).encode())
+        elif route == "/api/file":
+            # reads file bytes off disk -> token-gated like /api/act
+            if not self.token_ok():
+                return self.reply(403, "text/plain",
+                                  b"missing act token (open the ?token= URL once on this device)")
+            ctype, data, err = self.eng.file_content(self.query("sid"), self.query("p"))
+            if err:
+                return self.reply(404, "text/plain", err.encode())
+            self.reply(200, ctype, data)
+        elif route == "/api/fleet":
             with self.eng.lock:
                 snap = dict(self.eng.snapshot_cache)
             try:  # page version: lets stale tabs self-reload on dashboard.html changes

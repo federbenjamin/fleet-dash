@@ -14,6 +14,10 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
 ~/.claude/fleet-dash/pending/<sid>.json          hook-captured pending prompt (the ONLY source)
         ↓ engine.py (Engine.scan, poll thread, 2s)
 snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html (fetch poll 2s, self-reloads via page_v)
+                          ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
+                          │   (SendUserFile deliveries); page refetches only when the session's
+                          │   convo_v/files_n fields in /api/fleet move
+                          ├ GET /api/file?sid=&p= (token) ─ Engine.file_content (whitelist)
                           └ POST /api/act (token) ─ Engine.act ─ inject-request.txt ─
                             open -g FleetDashInjector.app ─ iTerm write by tty ─ inject-result.txt
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
@@ -51,6 +55,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    daemon start. Spend pushes fire only on the highest crossed multiple.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
    protocol below. The auto-mode classifier blocks self-injection from the building session.
+10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
+    SendUserFile tool_use rows, and it's token-gated. Never accept a free-form client path:
+    that would turn the act token into an arbitrary-disk-read credential over the tailnet.
+11. **Convo capture filters user-row noise in `Tail._fold`** — isMeta rows, `<command-`/
+    `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
+    "This session is being continued from" blob. Consecutive assistant text rows merge into one
+    logical reply (tool calls between them don't split it). Extend the filter list there, not
+    in the client.
 
 ## Dev workflow
 
@@ -80,11 +92,16 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 ## File map (repo)
 
-- `engine.py` — Tail (incremental jsonl fold), Engine (scan/state/ledger/ntfy/act/hook_pending),
-  spend CLI (`spend --cwd|--session`, used by the global `/subagent-spend` command).
-- `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet`, POST `/api/act` (token-gated).
-- `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/closedSection/
-  rollupTable, act client, token-cookie bootstrap (`?token=`), typing-focus render guard.
+- `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers), Engine (scan/state/
+  ledger/ntfy/act/hook_pending/session_context/file_content), spend CLI (`spend --cwd|--session`,
+  used by the global `/subagent-spend` command).
+- `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
+  (token-gated), POST `/api/act` (token-gated).
+- `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
+  closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
+  (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
+  bootstrap (`?token=`), typing-focus render guard, convo scroll preservation across re-renders
+  (sticky-bottom unless the user scrolled up).
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
