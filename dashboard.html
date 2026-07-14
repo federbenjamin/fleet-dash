@@ -17,6 +17,8 @@
    ::-webkit-scrollbar styling, so never mix the two. */
 *{scrollbar-width:thin;scrollbar-color:transparent transparent}
 .scrolling{scrollbar-color:#4a545f transparent}
+/* iOS Safari auto-zooms any focused input with font-size < 16px */
+@media (pointer:coarse){input[type=text],input:not([type]),input[type=number]{font-size:16px}}
 body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,sans-serif;
      padding:12px 12px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
 .pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
@@ -28,8 +30,8 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
 .setnum{color:var(--dim)}
 .setnum input{width:72px;background:var(--card2);border:1px solid var(--line);border-radius:6px;
               color:var(--fg);padding:3px 6px;font:inherit;font-size:13px;margin:0 4px}
-.bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.35}
-.bell.muted{opacity:1}
+.bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
+.bell.muted{opacity:.4}
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
 #totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
@@ -145,6 +147,8 @@ td.r,th.r{text-align:right}
 .mqarr{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
        font:inherit;font-size:15px;padding:3px 14px;cursor:pointer}
 .mqarr:disabled{color:var(--faint);cursor:default}
+.mqarr.cur{border-color:var(--blue);color:var(--blue)}
+.insbar{display:flex;align-items:center;gap:8px;padding:6px 0;flex-wrap:wrap}
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
 .ptool{display:flex;align-items:center;gap:8px}
@@ -488,9 +492,10 @@ function sessionCard(s){
           <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
           <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
           <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
-          <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents</b>
+          <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}</b>
         </div>
       </details>
+      ${s.bridge_url?`<div style="padding:4px 0"><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
       ${!needs&&ctxHtml?`<div class="dhead">recent conversation</div>${ctxHtml}`:''}
       <div class="freetext"><input id="ft-${s.session_id}" placeholder="send a message to this session"
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
@@ -516,14 +521,12 @@ function sessionCard(s){
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
-      ${isOpen?`<span class="scost">${fmt$(s.cost+s.agent_cost)}</span>`:''}
     </div>
     <div class="smeta">
       <span class="m">${esc(s.family)}</span>
       <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       <span class="m">quiet ${fmtAge(s.quiet_s)}</span>
-      ${s.bridge_url?`<a class="jump" href="${s.bridge_url}" target="_blank" onclick="event.stopPropagation()">open ↗</a>`:''}
     </div>
     ${needs?ctxHtml:''}
     ${pendingBox(s)}
@@ -741,21 +744,51 @@ function closedSection(list,now){
 
 function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,true);}
 
-let rollupOpen=false;
-function rollupTable(rows){
-  if(!rows||!rows.length)return'';
-  const byDay={};
-  rows.forEach(r=>{(byDay[r.day]=byDay[r.day]||[]).push(r)});
-  const total=rows.reduce((a,r)=>a+r.cost,0);
-  let h=`<details class="foldbox" ${rollupOpen?'open':''} ontoggle="rollupOpen=this.open">
-    <summary>agent spend · last 7 days (${fmt$(total)})</summary>
-    <table><tr><th>day</th><th>agent</th><th>model</th><th class="r">runs</th><th class="r">$</th></tr>`;
-  for(const day of Object.keys(byDay)){
-    const rs=byDay[day];const tot=rs.reduce((a,r)=>a+r.cost,0);
-    rs.forEach((r,i)=>{h+=`<tr><td>${i?'':day}</td><td>${esc(r.agent_type)}</td><td>${esc((r.model||'').split('-').find(x=>['haiku','sonnet','opus','fable'].includes(x))||r.model)}</td><td class="r">${r.runs}</td><td class="r">${r.cost.toFixed(2)}</td></tr>`});
-    h+=`<tr><td></td><td colspan="3" style="color:var(--faint)">day total</td><td class="r"><b>${tot.toFixed(2)}</b></td></tr>`;
-  }
-  return h+'</table></details>';
+let insightsOpen=false,insightsDays=7;
+const insightsCache={};   // days -> {t, data, fetching}
+function loadInsights(force){
+  const c=insightsCache[insightsDays];
+  if(!force&&c&&(c.fetching||(c.data&&Date.now()-c.t<60000)))return;
+  insightsCache[insightsDays]={...(c||{}),fetching:true};
+  fetch('/api/insights?days='+insightsDays,{cache:'no-store'}).then(r=>r.json()).then(d=>{
+    insightsCache[insightsDays]={t:Date.now(),data:d};
+    render(last,true);
+  }).catch(()=>{delete insightsCache[insightsDays];});
+}
+function setInsightsDays(n){insightsDays=n;render(last,true);loadInsights();}
+function insTable(heads,rows){
+  if(!rows||!rows.length)return'<div class="setnum" style="padding:2px 8px 8px">no data in window</div>';
+  return`<table><tr>${heads.map(h=>`<th${h[1]?' class="r"':''}>${h[0]}</th>`).join('')}</tr>${rows.join('')}</table>`;
+}
+function insightsSection(){
+  const c=insightsCache[insightsDays],d=c&&c.data;
+  let body='<div class="ctxload">crunching…</div>';
+  if(d&&d.ok){
+    body=`<div class="insbar">${[7,30,90].map(n=>`<button class="mqarr${insightsDays===n?' cur':''}" onclick="setInsightsDays(${n})">${n}d</button>`).join('')}
+        <span class="setnum">agents ${fmt$(d.totals.agent_cost)} · sessions active in window ${fmt$(d.totals.session_cost)} (lifetime $)</span></div>
+      <div class="dhead">by agent type</div>
+      ${insTable([['agent'],['runs',1],['total $',1],['avg $',1],['cache hit',1]],
+        d.agents.map(a=>`<tr><td>${esc(a.name)}</td><td class="r">${a.runs}</td><td class="r">${a.cost.toFixed(2)}</td><td class="r">${a.avg.toFixed(3)}</td><td class="r">${a.cache_pct}%</td></tr>`))}
+      <div class="dhead">by skill — attributed cost of turns run while the skill was active</div>
+      ${insTable([['skill'],['uses',1],['total $',1],['avg $/use',1]],
+        d.skills.map(s=>`<tr><td>${esc(s.name)}</td><td class="r">${s.uses}</td><td class="r">${s.cost.toFixed(2)}</td><td class="r">${s.avg.toFixed(3)}</td></tr>`))}
+      <div class="dhead">by tool — context injected by tool results (est tokens)</div>
+      ${insTable([['tool'],['uses',1],['tokens in',1],['avg/use',1]],
+        d.tools.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.uses}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${fmtTok(x.avg_tokens)}</td></tr>`))}
+      <div class="dhead">by model</div>
+      ${insTable([['model'],['agents $',1],['sessions $',1]],
+        d.models.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${m.agents.toFixed(2)}</td><td class="r">${m.sessions.toFixed(2)}</td></tr>`))}
+      <div class="dhead">by project (sessions active in window; lifetime $)</div>
+      ${insTable([['project'],['agents $',1],['sessions $',1]],
+        d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`))}
+      <div class="dhead">agent $ by day</div>
+      ${insTable([['day'],['$',1]],d.by_day.map(x=>`<tr><td>${x.day}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`))}
+      <div class="dhead">top sessions (lifetime $)</div>
+      ${insTable([['session'],['project'],['$',1]],
+        d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`))}`;
+  }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
+  return`<details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
+    <summary>cost insights</summary>${body}</details>`;
 }
 
 let last=null;
@@ -778,7 +811,7 @@ function render(f,force){
       const s0=scrolls[el.dataset.sid];
       el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
     $('#closed').innerHTML=closedSection(f.closed,f.t);
-    $('#rollup').innerHTML=rollupTable(f.rollup);
+    $('#rollup').innerHTML=insightsSection();
   }
   renderViewerBar();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';

@@ -98,6 +98,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 14. **Answer suppression is client-side and nonce-keyed:** a sent answer records
     `answered[sid]=nonce` and the selector hides immediately (the engine's pending clears a
     poll or two later). Never suppress by sid alone — the next ask (new nonce) must render.
+15. **`usage_stats` rows are CUMULATIVE per transcript path, flushed with INSERT OR
+    REPLACE.** Tails re-read whole files at daemon start, so cumulative+replace is the
+    idempotency mechanism — switching the drain to additive upserts double-counts every
+    restart. Skill $ is turn-cost attribution (Skill tool_use → end_turn, most recent skill
+    wins); tool "tokens in" is result chars/4 — both estimates, unlike the ledger's real $.
 
 ## Dev workflow
 
@@ -127,9 +132,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 ## File map (repo)
 
-- `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers), Engine (scan/state/
-  ledger/ntfy/act/hook_pending/session_context/file_content), spend CLI (`spend --cwd|--session`,
-  used by the global `/subagent-spend` command).
+- `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
+  counters), Engine (scan/state/ledger/ntfy/act/hook_pending/session_context/file_content/
+  insights), spend CLI (`spend --cwd|--session`, used by the global `/subagent-spend`
+  command). GET `/api/insights?days=N` aggregates agent_runs + session_runs + usage_stats.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context` + `/api/file`
   (token-gated), POST `/api/act` + `/api/settings` (both token-gated; settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives

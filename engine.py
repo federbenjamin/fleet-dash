@@ -122,6 +122,12 @@ class Tail:
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
         self._tool_refs = {}            # tool_use_id -> convo entry (for result attach)
+        # usage stats, CUMULATIVE since file start (drained via INSERT OR REPLACE —
+        # a daemon restart re-reads the whole file, so cumulative+replace is
+        # idempotent and backfills history; additive upserts would double-count)
+        self.stats = {}                 # (day, kind, name) -> [uses, chars, ti, tw, tr, to]
+        self.stats_dirty = set()
+        self.active_skill = None        # skill turn-cost attribution (most recent wins)
 
     def poll(self):
         try:
@@ -172,11 +178,22 @@ class Tail:
                 self.to += u.get("output_tokens", 0)
                 self.last_usage = u
                 self.model = m.get("model") or self.model
+                if self.active_skill:   # attribute this turn's spend to the running skill
+                    st = self._stat((self._day(ts), "skill", self.active_skill))
+                    st[2] += u.get("input_tokens", 0)
+                    st[3] += u.get("cache_creation_input_tokens", 0)
+                    st[4] += u.get("cache_read_input_tokens", 0)
+                    st[5] += u.get("output_tokens", 0)
             if isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
                         self.pending[b["id"]] = {"name": b.get("name"),
                                                  "input": b.get("input"), "uuid": o.get("uuid")}
+                        self._stat((self._day(ts), "tool", b.get("name") or "?"))[0] += 1
+                        if b.get("name") == "Skill":
+                            sk = (b.get("input") or {}).get("skill") or "?"
+                            self._stat((self._day(ts), "skill", sk))[0] += 1
+                            self.active_skill = sk
                         if b.get("name") == "SendUserFile":
                             inp = b.get("input") or {}
                             for fp in (inp.get("files") or [])[:6]:
@@ -190,19 +207,24 @@ class Tail:
                     self._convo_add("assistant", txt, ts)
             if m.get("stop_reason") in ("end_turn", "stop_sequence"):
                 self.pending.clear()    # turn over: unanswered tool_uses were canceled
+                self.active_skill = None
             self.last_shape = ("assistant", m.get("stop_reason"), ctypes)
         elif role == "user":
             kind = "tool_result" if "tool_result" in ctypes else "prompt"
             if kind == "tool_result" and isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
-                        self.pending.pop(b.get("tool_use_id"), None)
+                        p = self.pending.pop(b.get("tool_use_id"), None)
+                        if p:           # result size = context the tool injected
+                            self._stat((self._day(ts), "tool",
+                                        p.get("name") or "?"))[1] += self._chars(b)
                         ref = self._tool_refs.pop(b.get("tool_use_id"), None)
                         if ref is not None:
                             ref["result"] = self._result_summary(b, ref.get("name"))
                             self.convo_rev += 1
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
+                self.active_skill = None
                 if not o.get("isMeta"):
                     if isinstance(content, str):
                         utxt = content
@@ -272,6 +294,23 @@ class Tail:
             prev["ts"] = ts or prev["ts"]
             return
         self.convo.append({"role": role, "text": text, "ts": ts})
+
+    def _day(self, ts):
+        return str(ts)[:10] if ts else time.strftime("%Y-%m-%d")
+
+    def _stat(self, key):
+        st = self.stats.get(key)
+        if st is None:
+            st = self.stats[key] = [0, 0, 0, 0, 0, 0]
+        self.stats_dirty.add(key)
+        return st
+
+    @staticmethod
+    def _chars(b):
+        c = b.get("content")
+        if isinstance(c, list):
+            return sum(len(x.get("text", "")) for x in c if isinstance(x, dict))
+        return len(str(c or ""))
 
     def _file_add(self, path, caption, ts):
         for f in self.files:
@@ -358,6 +397,7 @@ class Engine:
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
+            self.drain_stats(mt)
             mtime = os.path.getmtime(main_path)
             quiet = now - mtime
 
@@ -463,7 +503,6 @@ class Engine:
                 "session_cost": round(sum(s["cost"] for s in sessions), 2),
                 "agent_cost": round(sum(s["agent_cost"] for s in sessions), 2),
             },
-            "rollup": self.rollup(),
             "closed": self.closed_sessions(),
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
@@ -488,6 +527,7 @@ class Engine:
                 meta = {}
             t = self.tail_for(jl)
             grew = t.poll()
+            self.drain_stats(t)
             mtime = os.path.getmtime(jl)
             quiet = now - mtime
 
@@ -545,7 +585,28 @@ class Engine:
                 self.db.execute("ALTER TABLE session_runs ADD COLUMN title TEXT")
             except sqlite3.OperationalError:
                 pass
+            # rows are CUMULATIVE per transcript (path) — see Tail.stats
+            self.db.execute("""CREATE TABLE IF NOT EXISTS usage_stats(
+                path TEXT, day TEXT, kind TEXT, name TEXT,
+                uses INT, chars INT, t_in INT, t_cw INT, t_cr INT, t_out INT, fam TEXT,
+                PRIMARY KEY(path, day, kind, name))""")
         return self.db
+
+    def drain_stats(self, t):
+        """Flush a tail's dirty usage stats. INSERT OR REPLACE of cumulative
+        counts keeps restarts idempotent (never switch this to additive)."""
+        if not t.stats_dirty:
+            return
+        try:
+            db = self.ensure_db()
+            fam = model_family(t.model)
+            db.executemany(
+                "INSERT OR REPLACE INTO usage_stats VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [(t.path, k[0], k[1], k[2], *t.stats[k], fam) for k in t.stats_dirty])
+            t.stats_dirty.clear()
+            db.commit()
+        except Exception as e:
+            print(f"usage stats error: {e}", file=sys.stderr, flush=True)
 
     def ledger_finalize(self, subdir, agent_id, meta, t):
         # subdir = .../projects/<proj>/<sid>/subagents
@@ -598,16 +659,85 @@ class Engine:
         except Exception:
             return []
 
-    def rollup(self):
+    def insights(self, days=7):
+        """Aggregated where-does-the-money-go view: agent_runs + session_runs
+        (real $ from the ledger) + usage_stats (tool/skill volumes; skill $ is
+        the attributed cost of turns run while that skill was active)."""
+        cfg = self.cfg
+        db = self.ensure_db()
+        since_d = f"-{int(days)} days"
+        since_e = int(time.time()) - int(days) * 86400
+        out = {"days": days}
         try:
-            db = self.ensure_db()
-            rows = db.execute("""SELECT date(started) d, agent_type, model, count(*), sum(cost)
-                                 FROM agent_runs WHERE started >= date('now','-7 days')
-                                 GROUP BY d, agent_type, model ORDER BY d DESC, sum(cost) DESC""").fetchall()
-            return [{"day": r[0], "agent_type": r[1], "model": r[2], "runs": r[3],
-                     "cost": round(r[4] or 0, 3)} for r in rows]
-        except Exception:
-            return []
+            rows = db.execute("""SELECT agent_type, count(*), sum(cost), sum(in_tok),
+                sum(cw_tok), sum(cr_tok), sum(out_tok) FROM agent_runs
+                WHERE started >= date('now', ?) GROUP BY agent_type
+                ORDER BY sum(cost) DESC""", (since_d,)).fetchall()
+            out["agents"] = [{"name": r[0], "runs": r[1], "cost": round(r[2] or 0, 2),
+                              "avg": round((r[2] or 0) / max(r[1], 1), 3),
+                              "cache_pct": round(100 * (r[5] or 0) /
+                                                 max((r[3] or 0) + (r[4] or 0) + (r[5] or 0), 1))}
+                             for r in rows]
+            # skills: price the attributed tokens at each transcript's model rates
+            sk = {}
+            for name, fam, uses, ti, tw, tr, to_ in db.execute(
+                    """SELECT name, fam, sum(uses), sum(t_in), sum(t_cw), sum(t_cr),
+                       sum(t_out) FROM usage_stats WHERE kind='skill' AND day >= date('now', ?)
+                       GROUP BY name, fam""", (since_d,)):
+                e = sk.setdefault(name, {"name": name, "uses": 0, "cost": 0.0})
+                e["uses"] += uses or 0
+                e["cost"] += usd(cfg, fam, ti or 0, tw or 0, tr or 0, to_ or 0)
+            out["skills"] = sorted(
+                [{**e, "cost": round(e["cost"], 2),
+                  "avg": round(e["cost"] / max(e["uses"], 1), 3)} for e in sk.values()],
+                key=lambda x: -x["cost"])
+            out["tools"] = [{"name": r[0], "uses": r[1] or 0, "tokens": round((r[2] or 0) / 4),
+                             "avg_tokens": round((r[2] or 0) / 4 / max(r[1] or 1, 1))}
+                            for r in db.execute(
+                    """SELECT name, sum(uses), sum(chars) FROM usage_stats
+                       WHERE kind='tool' AND day >= date('now', ?)
+                       GROUP BY name ORDER BY sum(chars) DESC""", (since_d,))]
+            fams = {}
+            for model, cost in db.execute(
+                    "SELECT model, sum(cost) FROM agent_runs WHERE started >= date('now', ?) "
+                    "GROUP BY model", (since_d,)):
+                f = fams.setdefault(model_family(model), {"agents": 0.0, "sessions": 0.0})
+                f["agents"] += cost or 0
+            for model, cost in db.execute(
+                    "SELECT model, sum(cost) FROM session_runs WHERE last_seen >= ? "
+                    "GROUP BY model", (since_e,)):
+                f = fams.setdefault(model_family(model), {"agents": 0.0, "sessions": 0.0})
+                f["sessions"] += cost or 0
+            out["models"] = sorted(
+                [{"name": k, "agents": round(v["agents"], 2), "sessions": round(v["sessions"], 2)}
+                 for k, v in fams.items()],
+                key=lambda x: -(x["agents"] + x["sessions"]))
+            out["projects"] = [{"name": r[0] or "?", "agents": round(r[1] or 0, 2),
+                                "sessions": round(r[2] or 0, 2)}
+                               for r in db.execute(
+                    """SELECT project, sum(agent_cost), sum(cost) FROM session_runs
+                       WHERE last_seen >= ? GROUP BY project
+                       ORDER BY sum(cost)+sum(agent_cost) DESC""", (since_e,))]
+            out["by_day"] = [{"day": r[0], "cost": round(r[1] or 0, 2)}
+                             for r in db.execute(
+                    """SELECT date(started) d, sum(cost) FROM agent_runs
+                       WHERE started >= date('now', ?) GROUP BY d ORDER BY d DESC""",
+                    (since_d,))]
+            out["top_sessions"] = [{"title": r[0] or r[1], "project": r[2],
+                                    "cost": round((r[3] or 0) + (r[4] or 0), 2)}
+                                   for r in db.execute(
+                    """SELECT title, name, project, cost, agent_cost FROM session_runs
+                       WHERE last_seen >= ? ORDER BY cost + agent_cost DESC LIMIT 12""",
+                    (since_e,))]
+            out["totals"] = {
+                "agent_cost": round(sum(a["cost"] for a in out["agents"]), 2),
+                "session_cost": round(sum(p["sessions"] for p in out["projects"]), 2),
+            }
+            out["ok"] = True
+        except Exception as e:
+            print(f"insights error: {e}", file=sys.stderr, flush=True)
+            out.update(ok=False, error=str(e))
+        return out
 
     def hook_pending(self, sid, reg_status):
         """Pending prompt captured by the PreToolUse/Notification hooks."""

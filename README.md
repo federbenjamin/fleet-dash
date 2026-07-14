@@ -70,7 +70,18 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **closed sessions** dropdown: every closed session the daemon ever saw (title, final spend,
   agents, closed-ago); tap a row for its info block (full id, cwd, branch, model, lifetime,
   spend split).
-- **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
+- **cost insights** dropdown (7/30/90-day window): where the tokens and money actually go —
+  - **by agent type**: runs, total $, avg $/run, cache-hit % (exact, from the agent ledger);
+  - **by skill**: uses + the attributed cost of turns run while that skill was active
+    (heuristic: from a `Skill` invocation to end-of-turn; overlapping skills attribute to the
+    most recent);
+  - **by tool**: uses + estimated tokens injected by tool results (chars/4) — the
+    context-bloat view; a huge "tokens in" here is paid again on every later turn;
+  - **by model**, **by project**, **agent $ by day**, **top sessions**.
+  Session-level $ figures are lifetime costs of sessions active in the window (per-day
+  session attribution isn't recorded). Tool/skill volumes accumulate from transcripts the
+  daemon has tailed — history starts when this feature landed (2026-07-14) plus whatever
+  live-session transcripts it re-read.
 - Browser-tab badge `(n)` = sessions needing you.
 - Scrollbars (vertical + horizontal) auto-hide when idle and appear while scrolling; the 2s
   refresh pauses during any scroll gesture or tap (touch and desktop wheel/trackpad alike) so
