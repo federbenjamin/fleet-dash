@@ -44,6 +44,8 @@ class Handler(BaseHTTPRequestHandler):
             action = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
         except Exception:
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
+        if action.get("type") != "ping":    # audit trail: exactly what was requested
+            print(f"act: {json.dumps(action)[:300]}", file=sys.stderr, flush=True)
         result = self.eng.act(action)
         if not result.get("ok"):
             print(f"act failed: {json.dumps(action)[:200]} -> {result.get('error')}",

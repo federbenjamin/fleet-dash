@@ -44,7 +44,7 @@ on run
 								else if flagChar is "1" then
 									tell s to write text "" newline YES
 								end if
-								delay 0.15
+								delay 0.4
 							end repeat
 							set outcome to "ok"
 						end if

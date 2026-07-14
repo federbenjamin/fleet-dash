@@ -208,7 +208,8 @@ class Tail:
                                            if isinstance(b, dict) and b.get("type") == "text")
                     utxt = re.sub(r"<system-reminder>.*?</system-reminder>", "", utxt, flags=re.S).strip()
                     if utxt and not utxt.startswith(("<command-", "<local-command", "Caveat:",
-                                                     "This session is being continued from")):
+                                                     "This session is being continued from",
+                                                     "[SYSTEM NOTIFICATION", "<task-notification")):
                         self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
 
@@ -696,6 +697,7 @@ class Engine:
     def act(self, action):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..]} |
+        {type:'multiq', session_id, nonce, answers:[{digits:[..], multi:bool}, ..]} |
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
@@ -710,12 +712,47 @@ class Engine:
             mt.poll()
             typ = action.get("type")
             steps = []                  # [(text, send_newline)]
-            if typ in ("option", "permission"):
+            if typ in ("option", "permission", "multiq"):
                 nonce = action.get("nonce")
                 hp = self.hook_pending(sid, reg.get("status"))
                 if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
                     return {"ok": False, "error": "stale: the prompt changed — refresh"}
-                if typ == "option":
+                if typ == "multiq":
+                    # multi-question TUI. Single-select: digit+CR (correct in 4/4 live
+                    # rounds). Multi-select: digit semantics proved unreliable under
+                    # injection (every digit-based variant toggled a stray option —
+                    # captures 2026-07-14), so replay the MANUALLY-captured path that
+                    # always works: focus starts on row 1; down-arrow to each target
+                    # row and Enter toggles it; down-arrow to the Submit row (options,
+                    # then "Type something", then Submit = n_options+2) and Enter
+                    # advances. Trailing CR confirms the Review pane (focus defaults to
+                    # "Submit answers"); harmless if submission already happened.
+                    answers = action.get("answers") or []
+                    if not answers:
+                        return {"ok": False, "error": "no answers"}
+                    # Sandbox-proven recipe (2026-07-14, every transition captured):
+                    # single-select = BARE DIGIT (instant select + advance — a separate
+                    # CR write after a digit re-fires on the next view as a "phantom
+                    # Enter", which corrupted 6 live rounds; digits alone don't).
+                    # multi-select = digit writes toggle (focus stays row 1), then
+                    # down-arrows to the Next/Submit row (options, "Type something",
+                    # then it: n_options+1 downs from row 1), then one CR — advances
+                    # cleanly onto question or review. Review = bare digit 1 submits.
+                    DOWN = "\x1b[B"
+                    steps = []
+                    for a in answers[:8]:
+                        digits = sorted({int(d) for d in (a.get("digits") or [])})[:9]
+                        if not digits:
+                            return {"ok": False, "error": "every question needs an answer"}
+                        if a.get("multi"):
+                            n = int(a.get("n_options") or max(digits))
+                            steps += [(str(d), False) for d in digits]
+                            steps += [(DOWN, False)] * (n + 1)
+                            steps.append(("", True))
+                        else:
+                            steps.append((str(digits[0]), False))
+                    steps.append(("1", False))
+                elif typ == "option":
                     digits = [str(int(d)) for d in action.get("digits", [])][:8]
                     if not digits:
                         return {"ok": False, "error": "no option chosen"}

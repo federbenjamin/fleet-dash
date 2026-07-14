@@ -23,6 +23,8 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   "delivered files" and "completed agents" dropdowns (both scroll internally past ~220px).
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
+    Multi-question asks (2+) render every question with a per-question "selected:" line and
+    one "submit all answers" button.
   - Permission request → the notification text + allow / always allow / deny buttons.
   - If a file was delivered shortly before the question (the deliver-then-ask pattern), the box
     leads with a **"read first" chip** — visible even on a collapsed card. Window:

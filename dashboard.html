@@ -58,7 +58,8 @@ details.dfold .kv{margin:6px 0 4px}
 .pend .ptool{color:var(--amber);font-weight:600;font-size:12px;margin-bottom:6px}
 .pend .qtext{font-size:13px;margin:4px 0 8px;white-space:pre-wrap}
 .pend pre{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:11px;
-          max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin-bottom:8px}
+          max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin-bottom:8px;
+          overscroll-behavior:contain}
 .optbtn{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);
         border-radius:8px;padding:8px 10px;margin:6px 0;color:var(--fg);font:inherit;font-size:13px;cursor:pointer}
 .optbtn small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
@@ -97,7 +98,8 @@ th{color:var(--faint);font-weight:600}
 td.r,th.r{text-align:right}
 .empty{color:var(--faint);padding:18px;text-align:center}
 .ctxbox{border-top:1px solid var(--line);background:#10141b;padding:8px 12px}
-.convo{max-height:280px;overflow-y:auto;display:flex;flex-direction:column;padding:2px 0;-webkit-overflow-scrolling:touch}
+.convo{max-height:280px;overflow-y:auto;display:flex;flex-direction:column;padding:2px 0;
+       -webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .convo.short{max-height:150px}
 .cmsg{margin:8px 0}
 .cmsg .crole{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
@@ -116,9 +118,10 @@ td.r,th.r{text-align:right}
 .fcap{flex-basis:100%;font-size:11px;color:var(--dim)}
 .frow{display:flex;align-items:center;gap:8px;padding:4px 0}
 .frow .fmeta{flex:1;min-width:0;color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.foldscroll{max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.foldscroll{max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .pfiles{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px}
 .pfiles .plabel{font-size:11px;color:var(--amber);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.mqsum{font-size:11px;color:var(--blue);margin:2px 0 10px}
 .ctxload{color:var(--faint);font-size:12px;padding:6px 0}
 .fchips{display:flex;gap:6px;flex-wrap:wrap;padding:7px 0 2px}
 .fchip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:5px 11px;
@@ -132,7 +135,7 @@ td.r,th.r{text-align:right}
 #vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
-#vbody{flex:1;overflow:auto;padding:14px}
+#vbody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
 #vact{border-top:1px solid var(--line);background:var(--card);padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
 #vact:empty{display:none}
 #vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
@@ -192,6 +195,15 @@ const $=q=>document.querySelector(q);
         history.replaceState(null,'',location.pathname);}})();
 const open=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
+// touch guard, two windows: a swipe (touchmove) holds POLL re-renders 1500ms so
+// the scrollbox isn't replaced mid-gesture; a tap (touchstart) holds them 800ms
+// so the 2s tick can't detach a button between touch and its click event
+// (detached node = swallowed click). User-action renders pass force=true and
+// bypass the guard — tap feedback must paint immediately.
+let lastMove=0,lastTap=0;
+document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
+document.addEventListener('touchmove',()=>{lastMove=Date.now()},{passive:true});
+const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
 const fmt$=v=>'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
 const fmtTok=v=>v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
 const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
@@ -307,11 +319,12 @@ function toggleTheme(){
 }
 (()=>{try{if(localStorage.getItem('viewer_light')==='1'){$('#vbody').classList.add('light');$('#vtheme').textContent='☾';}}catch(e){}})();
 let viewerChatOpen=false;
-function renderViewerBar(){
+function renderViewerBar(force){
   if(!viewerSid)return;
   const bar=$('#vact');
   const ae=document.activeElement;
   if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  if(!force&&touching())return;                           // or a swipe/tap in flight
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
   const old=bar.querySelector&&bar.querySelector('.vconvo');
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
@@ -325,11 +338,11 @@ function renderViewerBar(){
         onclick="${ms?`toggleOpt('${viewerSid}',${i+1})`:`sendOption('${viewerSid}','${p.nonce}',[${i+1}],'','vmsg')`}">${esc(o.label)}</button>`).join('')
       +(ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${viewerSid}','${p.nonce}','vmsg')">submit selection</button></div>`:'');
   }else if(p&&p.kind==='question'&&p.questions&&p.questions.length>1){
-    h+=`<div class="qtext">multi-part question (${p.questions.length}) — answer at the terminal or claude.ai</div>`;
+    h+=mqBlock(s,p,'vmsg',true);
   }
   if(s)ensureCtx(viewerSid,ctxVersion(s));
   const c=ctxCache[viewerSid];
-  h+=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar()">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+  h+=`<button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
     ${viewerChatOpen?(c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'):''}`;
   h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message to this session"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg')">
@@ -344,7 +357,7 @@ function viewFile(sid,ep,en,kind,ecap){
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
   $('#vtitle').textContent=name+(cap?' — '+cap:'');
   $('#viewer').style.display='flex';
-  viewerSid=sid;renderViewerBar();
+  viewerSid=sid;renderViewerBar(true);
   const vb=$('#vbody');
   if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
   vb.textContent='loading…';
@@ -437,14 +450,51 @@ function sessionCard(s){
 }
 
 const multiSel={};   // sessionId -> Set of chosen digits (multiSelect questions)
+const mqSel={};      // sessionId -> {nonce, a:{qIdx:Set(digits)}} (multi-question asks)
+function mqBlock(s,p,pre,compact){
+  const sid=s.session_id;
+  let st=mqSel[sid];
+  if(!st||st.nonce!==p.nonce)st=mqSel[sid]={nonce:p.nonce,a:{}};
+  return p.questions.map((q,qi)=>{
+    const sel=st.a[qi]||new Set();
+    const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label).join(', ');
+    return`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${q.multiSelect?' <small>(pick all that apply)</small>':''}</div>`
+      +(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
+        onclick="mqToggle('${sid}',${qi},${i+1},${!!q.multiSelect})">${esc(o.label)}${!compact&&o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')
+      +`<div class="mqsum">selected: ${picked?esc(picked):'—'}</div>`;
+  }).join('')
+  +`<div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
+}
+function mqToggle(sid,qi,d,multi){
+  const st=mqSel[sid];if(!st)return;
+  const sel=st.a[qi]||(st.a[qi]=new Set());
+  if(multi){sel.has(d)?sel.delete(d):sel.add(d);}
+  else{st.a[qi]=new Set([d]);}
+  render(last,true);
+}
+function mqSend(sid,nonce,pre){
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
+  const p=s&&s.pending;const st=mqSel[sid];
+  if(!p||!st||st.nonce!==nonce)return alert('the prompt changed — refresh');
+  const answers=[];
+  for(let qi=0;qi<p.questions.length;qi++){
+    const sel=[...(st.a[qi]||[])].sort();
+    if(!sel.length)return alert('answer question '+(qi+1)+' first');
+    answers.push({digits:sel,multi:!!p.questions[qi].multiSelect,
+                  n_options:(p.questions[qi].options||[]).length});
+  }
+  act(sid,{type:'multiq',nonce,answers},pre);
+  delete mqSel[sid];
+}
 function pendingBox(s){
   const p=s.pending; if(!p)return'';
   if(p.kind==='question'){
     if(!p.questions||!p.questions.length)return'';
     if(p.questions.length>1)
-      return`<div class="pend"><div class="ptool">multi-part question (${p.questions.length}) — answer at the terminal or claude.ai</div>
+      return`<div class="pend"><div class="ptool">multi-part question (${p.questions.length}) — waiting on you</div>
         ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
-        ${p.questions.map(q=>`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}</div>`).join('')}</div>`;
+        ${mqBlock(s,p,'msg',false)}
+        <div class="actmsg" id="msg-${s.session_id}"></div></div>`;
     const q=p.questions[0];
     const ms=q.multiSelect;
     const sel=multiSel[s.session_id]=multiSel[s.session_id]||new Set();
@@ -487,7 +537,7 @@ function sendOption(sid,nonce,digits,label,pre){
   act(sid,{type:'option',nonce,digits},pre);
 }
 function toggleOpt(sid,d){
-  const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);render(last);
+  const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);render(last,true);
 }
 function sendMulti(sid,nonce,pre){
   const digits=[...(multiSel[sid]||[])].sort();
@@ -518,7 +568,7 @@ function closedSection(list,now){
   </details>`;
 }
 
-function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last);}
+function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,true);}
 
 let rollupOpen=false;
 function rollupTable(rows){
@@ -538,7 +588,7 @@ function rollupTable(rows){
 }
 
 let last=null;
-function render(f){
+function render(f,force){
   if(!f||!f.sessions)return;
   const t=f.totals;
   $('#totals').innerHTML=`<span><b>${t.sessions}</b> sessions</span><span><b>${t.busy}</b> busy</span>
@@ -552,11 +602,12 @@ function render(f){
   const scrolls={};
   document.querySelectorAll('#sessions .convo').forEach(el=>{
     scrolls[el.dataset.sid]={top:el.scrollTop,atBottom:el.scrollTop+el.clientHeight>=el.scrollHeight-12};});
-  if(!typing)
+  if(!typing&&(force||!touching())){
     $('#sessions').innerHTML=f.sessions.length?f.sessions.map(sessionCard).join(''):'<div class="empty">no live sessions</div>';
-  document.querySelectorAll('#sessions .convo').forEach(el=>{
-    const s0=scrolls[el.dataset.sid];
-    el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
+    document.querySelectorAll('#sessions .convo').forEach(el=>{
+      const s0=scrolls[el.dataset.sid];
+      el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
+  }
   $('#closed').innerHTML=closedSection(f.closed,f.t);
   $('#rollup').innerHTML=rollupTable(f.rollup);
   renderViewerBar();

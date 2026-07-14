@@ -43,6 +43,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    digits toggle (focus stays), Enter toggles the FOCUSED row (not submit!); submit =
    `\x1b[C` (right-arrow → "✔ Submit" tab) + CR. Enter must be raw CR — request-file flag `2`
    → applet sends `character id 13`; iTerm's `newline YES` sends LF (toggles, doesn't submit).
+   **Multi-question asks** (sandbox-proven 2026-07-14 after 6 corrupted live rounds): tab bar
+   `← ☐ Q1 ☐ Q2 ✔ Submit →`. Single-select: BARE DIGIT instant-selects and advances — never
+   follow it with a separate CR write: that CR re-fires on the next view as it mounts (the
+   "phantom Enter": toggles row 1 of a multi, auto-answers option 1 of a single, cascades).
+   Multi-select: digit writes toggle (focus stays row 1); `\x1b[B` × (n_options+1) walks to
+   the Next/Submit row; one bare CR advances CLEANLY (no phantom from that row). Review pane:
+   bare digit "1" submits. Escape sequences and CRs are dropped when chunked into one write
+   with other bytes — send each key as its own write. Engine `multiq` builds this; the client
+   sends `n_options` per answer for the walk. Debug rig: spawn a sandbox `claude --model
+   haiku` in a new iTerm tab, make it ask, drive it via scratchpad sbx.py — never experiment
+   on real sessions.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
    (hook-file nonce or transcript tool_use_id) before writing keys. Keep this — it's the only
    guard against answering a prompt that changed.
