@@ -24,6 +24,16 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
   The running-agent count stays visible everywhere.
+- **➕ new Claude Code session** (button under the live list): pick a directory (recent ones the
+  daemon has seen, or type a path under `~`), a model, an effort level (`low`…`max`), and
+  optionally a **new git worktree** — it opens a fresh iTerm tab running `claude` with those
+  flags, then auto-opens that session's full chat view here once it appears, so you can send
+  the first prompt from your phone. Untrusted folders are flagged: Claude Code asks "do you
+  trust the files in this folder?" at startup and **only your Mac can answer that** — trust is
+  inherited from a parent dir, so worktrees under a trusted repo start clean.
+- **Dormant sessions** get their own fold above closed sessions. Dormant = the transcript
+  hasn't moved in over 2h (`dormant_seconds`) AND no agents are running — forgotten panes and
+  VS Code backends. They're kept out of the live list and can never "need you".
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
@@ -249,8 +259,8 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - "Recently closed" only records sessions the daemon saw alive (fills from 2026-07-13 onward).
 - The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
   links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.
-- Conversation context and file chips exist only for live sessions (closed sessions: use the
-  claude.ai deep link). Subagent chats are reachable only while their parent session is live.
+- Closed sessions are read-only: the ⤢ button opens their conversation (recovered from the
+  transcript via the ledger's cwd), but there's no terminal left to send to. Subagent chats are reachable only while their parent session is live.
 - Messaging a subagent is a **relay through the parent**, never a direct channel — there is no
   such thing as typing into a subagent (no tty; `SendMessage` from the parent is the only path).
 - Screen-peek ("show me what this stalled session's terminal displays") is proven as a technique

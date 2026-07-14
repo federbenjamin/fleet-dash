@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, sqlite3, secrets, subprocess, threading, urllib.request
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, subprocess, threading, urllib.request
 from collections import deque
 
 HOME = os.path.expanduser("~")
@@ -734,6 +734,8 @@ class Engine:
                 "agent_cost": round(sum(s["agent_cost"] for s in sessions), 2),
             },
             "closed": self.closed_sessions(),
+            "recent_dirs": self.recent_dirs(),
+            "models": list(self.MODELS), "efforts": list(self.EFFORTS),
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
@@ -898,6 +900,93 @@ class Engine:
             return [dict(zip(cols, r)) for r in rows]
         except Exception:
             return []
+
+    def closed_context(self, sid):
+        """Conversation of a CLOSED session: its process is gone, so the registry
+        can't resolve it — the ledger's cwd is the only path back to the file."""
+        row = None
+        try:
+            row = self.ensure_db().execute(
+                "SELECT cwd, model, cost, title, project, branch FROM session_runs "
+                "WHERE session_id = ?", (sid,)).fetchone()
+        except Exception:
+            pass
+        if not row:
+            return {"ok": False, "error": "unknown session"}
+        path = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
+        if not os.path.isfile(path):
+            return {"ok": False, "error": "transcript is gone"}
+        with self.scan_lock:
+            t = self.tail_for(path)
+            t.poll()
+            msgs = [dict(m) for m in t.convo]
+        for m in msgs:              # file chips need the same metadata the live view builds
+            if m.get("role") == "tool" and m.get("files"):
+                m["files"] = [{"name": os.path.basename(p), "path": p,
+                               "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
+                               "missing": not os.path.isfile(p)} for p in m["files"]]
+        return {"ok": True, "messages": msgs, "closed": True,
+                "info": {"session_id": sid, "cwd": row[0], "model": row[1],
+                         "cost": row[2], "title": row[3], "project": row[4],
+                         "branch": row[5]}}
+
+    @staticmethod
+    def trusted_dirs():
+        """Dirs where Claude Code's "do you trust this folder?" prompt is already
+        answered (~/.claude.json `projects[dir].hasTrustDialogAccepted`). A spawn
+        into an UNTRUSTED dir stops at that prompt, which only the Mac can answer —
+        so the picker flags them instead of pretending a remote start will work. We
+        never WRITE this flag: it is a security gate, not a preference."""
+        try:
+            with open(os.path.join(HOME, ".claude.json")) as f:
+                projects = (json.load(f) or {}).get("projects") or {}
+        except Exception:
+            return set()
+        return {d for d, v in projects.items()
+                if isinstance(v, dict) and v.get("hasTrustDialogAccepted")}
+
+    def is_trusted(self, path, trusted=None):
+        """Trust is INHERITED: a git worktree under a trusted repo has no entry of
+        its own in ~/.claude.json yet never prompts (verified 2026-07-14 — every
+        Quirk worktree is absent from `projects` and starts clean), while a fresh
+        dir with no trusted ancestor does prompt. So walk up to /."""
+        trusted = self.trusted_dirs() if trusted is None else trusted
+        p = os.path.realpath(path)
+        while True:
+            if p in trusted:
+                return True
+            parent = os.path.dirname(p)
+            if parent == p:
+                return False
+            p = parent
+
+    def recent_dirs(self, limit=25):
+        """Directories the daemon has actually seen sessions in — the new-session
+        picker's menu (a phone has no file browser). Only offers dirs a spawn would
+        actually accept: never list what spawn_session will refuse."""
+        home = os.path.realpath(HOME)
+        trusted = self.trusted_dirs()
+
+        def ok(d):
+            if not d or not os.path.isdir(d):
+                return False
+            rp = os.path.realpath(d)
+            return rp == home or rp.startswith(home + os.sep)
+
+        paths = []
+        try:
+            rows = self.ensure_db().execute(
+                "SELECT cwd, MAX(COALESCE(last_seen, 0)) t FROM session_runs "
+                "WHERE cwd IS NOT NULL AND cwd != '' GROUP BY cwd "
+                "ORDER BY t DESC LIMIT ?", (limit,)).fetchall()
+            paths = [r[0] for r in rows if ok(r[0])]
+        except Exception:
+            pass
+        for r in self.live_sessions():           # live cwds first, even if unledgered
+            cwd = r.get("cwd")
+            if ok(cwd) and cwd not in paths:
+                paths.insert(0, cwd)
+        return [{"path": p, "trusted": self.is_trusted(p, trusted)} for p in paths]
 
     def insights(self, days=7):
         """Aggregated where-does-the-money-go view: agent_runs + session_runs
@@ -1233,6 +1322,8 @@ class Engine:
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if action.get("type") == "spawn":    # no session yet — it makes one
+            return self.spawn_session(action)
         sid = action.get("session_id")
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
@@ -1397,6 +1488,57 @@ class Engine:
         if not tty or tty == "??":
             return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
         return self._iterm_write(f"/dev/{tty}", steps)
+
+    MODELS = ("opus", "sonnet", "haiku", "fable")
+    EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+    def spawn_session(self, action):
+        """Start a NEW Claude Code session in a fresh iTerm tab.
+
+        Every value that reaches the shell is allowlisted or quoted: the model and
+        effort must be members of the fixed sets above, the worktree name is regex-
+        bounded, and the directory must be an existing dir under $HOME. Nothing the
+        client sends is interpolated raw — the act token opens a terminal here, so a
+        free-form command string would be a remote shell."""
+        cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
+        home = os.path.realpath(HOME)
+        if not cwd or not os.path.isdir(cwd):
+            return {"ok": False, "error": "no such directory"}
+        if cwd != home and not cwd.startswith(home + os.sep):
+            return {"ok": False, "error": "directory must be under your home folder"}
+        model = str(action.get("model") or "").strip()
+        if model and model not in self.MODELS:
+            return {"ok": False, "error": "unknown model"}
+        effort = str(action.get("effort") or "").strip()
+        if effort and effort not in self.EFFORTS:
+            return {"ok": False, "error": "unknown effort level"}
+        name = str(action.get("worktree_name") or "").strip()
+        if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+            return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
+        worktree = bool(action.get("worktree"))
+        if worktree and not os.path.isdir(os.path.join(cwd, ".git")):
+            # a worktree needs a repo; a linked worktree has .git as a FILE, so
+            # only the main checkout qualifies as a spawn point
+            if not os.path.isfile(os.path.join(cwd, ".git")):
+                return {"ok": False, "error": "not a git repo — can't make a worktree"}
+
+        cmd = f"cd {shlex.quote(cwd)} && claude"
+        if model:
+            cmd += f" --model {model}"
+        if effort:
+            cmd += f" --effort {effort}"
+        if worktree:
+            cmd += " --worktree" + (f" {name}" if name else "")
+        r = self._iterm_write("SPAWN", [(cmd, False)])
+        if r.get("ok"):
+            print(f"spawn: {cmd}", file=sys.stderr, flush=True)
+            r["command"] = cmd
+            r["cwd"] = cwd
+            # an untrusted dir stops at "do you trust the files in this folder?",
+            # which only the Mac can answer — say so instead of leaving the phone
+            # waiting for a session that never starts
+            r["trust_prompt"] = not self.is_trusted(cwd)
+        return r
 
     def _iterm_write(self, tty, steps):
         # launchd-context osascript can never summon the automation-permission

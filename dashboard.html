@@ -316,6 +316,23 @@ td.r,th.r{text-align:right}
 .togrow{display:flex;align-items:center;gap:8px}
 .togrow .vchat-toggle{flex:1;width:auto}
 .togrow .expandbtn{float:none;flex:0 0 auto}
+/* new-session launcher */
+.newbtn{display:block;width:100%;background:var(--card);border:1px dashed var(--line);
+  border-radius:10px;color:var(--dim);font:inherit;font-size:13px;font-weight:600;
+  padding:12px;cursor:pointer;margin:10px 0}
+.newbtn:hover{border-color:var(--blue);color:var(--blue)}
+.newform{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
+.nfhead{display:flex;align-items:center;justify-content:space-between;font-weight:600;
+  font-size:13px;margin-bottom:8px}
+.nflab{display:block;font-size:10px;color:var(--faint);text-transform:uppercase;
+  letter-spacing:.4px;margin:8px 0 3px}
+.nfsel,.nfin{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:8px;
+  color:var(--fg);font:inherit;font-size:13px;padding:8px 9px;margin-bottom:4px}
+.nfrow{display:flex;gap:10px}
+.nfcol{flex:1;min-width:0}
+.nfwarn{background:#2b2111;border:1px solid var(--amber);color:var(--amber);border-radius:8px;
+  padding:7px 9px;font-size:11.5px;margin:6px 0;line-height:1.45}
+.nfgo{width:100%;margin-top:10px;padding:10px}
 /* the card's question SIGNAL: no controls, just "you're blocked — go answer" */
 .qsignal{cursor:pointer}
 .qsignal .pbtn.qanswer{margin-top:8px;width:100%;background:#2b2111;border-color:var(--amber);
@@ -364,6 +381,8 @@ td.r,th.r{text-align:right}
 <div id="notoken" style="display:none;background:#2b2111;color:#d29922;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px">
 read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
 <div id="sessions"></div>
+<div id="newsess"></div>
+<div id="dormant"></div>
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
@@ -638,21 +657,56 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeViewer();close
 // Same overlay shape as the subagent view, but this one is a real terminal
 // channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
 // prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
-let sessionView=null;            // sessionId of the open overlay
+let sessionView=null;            // {sid, closed} of the open overlay
 let sessQOpen=true;              // the question block inside the chat view
+const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
 function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
-  sessionView=sid;
+  sessionView={sid,closed:false};
   $('#sview').style.display='flex';
   renderSession(true);
+}
+// a closed session has no process: read its transcript, offer no controls
+function openClosed(sid){
+  closeViewer();
+  sessionView={sid,closed:true};
+  $('#sview').style.display='flex';
+  renderClosed(true);
 }
 function closeSession(){
   sessionView=null;slashClose();
   $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';
 }
+async function renderClosed(){
+  if(!sessionView||!sessionView.closed)return;
+  const sid=sessionView.sid;
+  const body=$('#sbody');
+  $('#sctrl').innerHTML='';
+  $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
+    so there is nothing to send to. The conversation is read-only.</div>`;
+  if(!closedCtx[sid]){
+    body.innerHTML='<div class="ctxload">loading conversation…</div>';
+    try{
+      const r=await fetch('/api/closed_context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+      const d=await r.json();
+      closedCtx[sid]=d.ok?{messages:d.messages||[],info:d.info||{}}
+                         :{messages:[],info:{},error:d.error||'unavailable'};
+    }catch(e){closedCtx[sid]={messages:[],info:{},error:String(e)};}
+    if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
+  }
+  const c=closedCtx[sid],info=c.info||{};
+  const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
+  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>
+    <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
+  if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
+  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid)}</div>`;
+  body.scrollTop=body.scrollHeight;
+}
 function renderSession(force){
   if(!sessionView||!last)return;
-  const s=(last.sessions||[]).find(x=>x.session_id===sessionView);
+  if(sessionView.closed)return renderClosed(force);
+  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid);
   if(!s){closeSession();return;}          // session died while open
   ensureCtx(s.session_id,ctxVersion(s));
   const c=ctxCache[s.session_id];
@@ -1144,6 +1198,89 @@ function updClosedRows(){
   const el=document.getElementById('closedrows');
   if(el&&last)el.innerHTML=closedRows(last.closed||[],last.t);
 }
+// DORMANT = transcript hasn't moved in >dormant_seconds (2h) AND no running
+// agents. Forgotten panes and VS Code backends: real sessions, but nothing is
+// happening — they get their own fold instead of padding the live list.
+let dormantOpen=false;
+function dormantSection(list){
+  if(!list||!list.length)return'';
+  return`<details class="foldbox" ${dormantOpen?'open':''} ontoggle="dormantOpen=this.open">
+    <summary>dormant sessions (${list.length}) <small>— idle over 2h, no agents running</small></summary>
+    <div>${list.map(sessionCard).join('')}</div>
+  </details>`;
+}
+
+// ---- new session -----------------------------------------------------------
+// form state lives in globals: the 2s poll re-renders this section, so anything
+// held only in the DOM (typed path, status line) would be wiped mid-use
+let newOpen=false,newDir='',newModel='',newEffort='',newWt=false,newWtName='',spawnWait=null,spawnMsg='';
+function newSection(){
+  const dirs=(last&&last.recent_dirs)||[];
+  const models=(last&&last.models)||[];
+  const efforts=(last&&last.efforts)||[];
+  if(!newOpen)
+    return`<button class="newbtn" onclick="newOpen=true;render(last,true)">+ new Claude Code session</button>
+      ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}`;
+  const cur=dirs.find(d=>d.path===newDir);
+  const untrusted=newDir&&(!cur||!cur.trusted);
+  return`<div class="newform">
+    <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
+    <label class="nflab">directory</label>
+    <select class="nfsel" onchange="newDir=this.value;render(last,true)">
+      <option value="">— pick a recent directory —</option>
+      ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
+    </select>
+    <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
+      oninput="newDir=this.value" autocomplete="off">
+    ${untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
+      “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
+    <div class="nfrow">
+      <div class="nfcol"><label class="nflab">model</label>
+        <select class="nfsel" onchange="newModel=this.value">
+          <option value="">default</option>
+          ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
+        </select></div>
+      <div class="nfcol"><label class="nflab">effort</label>
+        <select class="nfsel" onchange="newEffort=this.value">
+          <option value="">default</option>
+          ${efforts.map(e=>`<option value="${e}" ${e===newEffort?'selected':''}>${e}</option>`).join('')}
+        </select></div>
+    </div>
+    <label class="setrow"><input type="checkbox" ${newWt?'checked':''}
+      onchange="newWt=this.checked;render(last,true)"> new git worktree</label>
+    ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
+      oninput="newWtName=this.value" autocomplete="off">`:''}
+    <button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
+    ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
+  </div>`;
+}
+async function doSpawn(){
+  if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
+  spawnMsg='starting…';render(last,true);
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'spawn',cwd:newDir,model:newModel,effort:newEffort,
+                           worktree:newWt,worktree_name:newWtName})});
+    const d=await r.json();
+    if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}
+    spawnMsg=d.trust_prompt
+      ? '⚠ started — but it is waiting on the trust prompt on your Mac ("do you trust the files in this folder?")'
+      : 'started ✓ — opening it here as soon as it appears…';
+    // a `-w` spawn lands in a NEW dir under the repo, so match by prefix — but only
+    // against sessions that did NOT already exist, or we'd hijack a sibling session
+    spawnWait={cwd:d.cwd,worktree:newWt,until:Date.now()+120000,
+               known:new Set(((last||{}).sessions||[]).map(x=>x.session_id))};
+    newOpen=false;render(last,true);
+  }catch(e){spawnMsg='✗ '+e;render(last,true);}
+}
+// a spawned session only enters the fleet once it writes a transcript
+function checkSpawn(f){
+  if(!spawnWait)return;
+  if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
+  const s=(f.sessions||[]).find(x=>!spawnWait.known.has(x.session_id)&&
+    (x.cwd===spawnWait.cwd||(spawnWait.worktree&&(x.cwd||'').startsWith(spawnWait.cwd+'/'))));
+  if(s){spawnWait=null;spawnMsg='';openSession(s.session_id);}
+}
 function closedSection(list,now){
   if(!list||!list.length)return'';
   return`<details class="foldbox" ${closedOpen?'open':''} ontoggle="closedOpen=this.open">
@@ -1165,6 +1302,8 @@ function closedRows(list,now){
       <span class="anum">${c.agents_total||0} agents</span>
       <span class="anum">${fmtAge(Math.max(0,Math.round(now-c.closed_at)))} ago</span>
       <span class="acost">${fmt$((c.cost||0)+(c.agent_cost||0))}</span>
+      <button class="expandbtn" title="read this session's conversation"
+        onclick="event.stopPropagation();openClosed('${c.session_id}')">⤢</button>
       ${c.bridge_url?`<a class="jump" href="${c.bridge_url}" target="_blank" onclick="event.stopPropagation()">↗</a>`:''}
     </div>${open?`<div class="detail"><div class="kv">
       <span>session</span>${cpb(c.session_id)}
@@ -1256,14 +1395,20 @@ function render(f,force){
   const scrolls={};
   document.querySelectorAll('#sessions .convo').forEach(el=>{
     scrolls[el.dataset.sid]={top:el.scrollTop,atBottom:el.scrollTop+el.clientHeight>=el.scrollHeight-12};});
+  const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
   if(!typing&&(force||!touching())){
-    $('#sessions').innerHTML=f.sessions.length?f.sessions.map(sessionCard).join(''):'<div class="empty">no live sessions</div>';
+    const live=f.sessions.filter(s=>s.state!=='dormant');
+    const dorm=f.sessions.filter(s=>s.state==='dormant');
+    $('#sessions').innerHTML=live.length?live.map(sessionCard).join(''):'<div class="empty">no live sessions</div>';
     document.querySelectorAll('#sessions .convo').forEach(el=>{
       const s0=scrolls[el.dataset.sid];
       el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
+    if(!typingNew)$('#newsess').innerHTML=newSection();
+    $('#dormant').innerHTML=dormantSection(dorm);
     if(!typingClosed)$('#closed').innerHTML=closedSection(f.closed,f.t);
     $('#rollup').innerHTML=insightsSection();
   }
+  checkSpawn(f);
   renderViewerBar();
   renderAgent();
   renderSession();

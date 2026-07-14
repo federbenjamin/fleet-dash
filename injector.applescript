@@ -1,12 +1,15 @@
 -- FleetDashInjector: reads ~/.claude/fleet-dash/inject-request.txt and types the
 -- requested keystrokes into the iTerm session owning the requested tty.
 -- Request format (plain text lines):
---   line 1: tty device path (/dev/ttysNNN)
+--   line 1: tty device path (/dev/ttysNNN), or the literal SPAWN
 --   line 2: request id
 --   lines 3+: <flag><space><base64 text>
 --     flag 0 = write text raw (no newline) · 1 = write text + newline (LF)
 --     flag 2 = press Return: send a raw CR (character id 13) — what raw-mode TUIs
 --              actually treat as Enter; iTerm's own newline sends LF
+--   SPAWN: creates a NEW tab in the current iTerm window and runs the single
+--          line-3 payload (a `cd … && claude …` command the daemon composed from
+--          validated inputs). The daemon never passes raw user text here.
 -- Writes "<request id> ok" or "<request id> <error>" to inject-result.txt.
 on run
 	set base to (POSIX path of (path to home folder)) & ".claude/fleet-dash/"
@@ -20,6 +23,30 @@ on run
 		do shell script "printf %s " & quoted form of ("read-failed " & errMsg) & " > " & quoted form of resultFile
 		return
 	end try
+	if targetTty is "SPAWN" then
+		set outcome to "spawn: no command"
+		try
+			set ln to item 3 of L
+			set cmd to my b64decode(text 3 thru -1 of ln)
+			tell application "iTerm2"
+				activate
+				if (count of windows) is 0 then
+					create window with default profile
+					tell current session of current window to write text cmd
+				else
+					tell current window
+						set t to (create tab with default profile)
+						tell current session of t to write text cmd
+					end tell
+				end if
+			end tell
+			set outcome to "ok"
+		on error errMsg
+			set outcome to errMsg
+		end try
+		do shell script "printf %s " & quoted form of (reqId & " " & outcome) & " > " & quoted form of resultFile
+		return
+	end if
 	set outcome to "session tty not found in iTerm"
 	try
 		tell application "iTerm2"

@@ -160,6 +160,23 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     the ask TUI: the relay would answer the question). `agent_id` is client-supplied → it is
     hard-whitelisted (`agent-[A-Za-z0-9_-]{1,64}`, basename only) before any path is built, or
     `/api/agent_context` becomes an arbitrary-file read.
+20. **Spawn composes its command from ALLOWLISTED parts, never client text.** `act` type
+    `spawn` → applet verb `SPAWN` (line 1 of the request file instead of a tty) → new iTerm tab
+    running `cd <dir> && claude [--model M] [--effort E] [--worktree [name]]`. Model and effort
+    must be members of `Engine.MODELS` / `EFFORTS`, the worktree name is regex-bounded, the dir
+    must exist and resolve under `$HOME`, and the path is `shlex.quote`d. Never accept a
+    free-form command string — the act token would become a remote shell.
+21. **Claude Code's folder-trust is INHERITED, and fleet-dash must never write it.**
+    `~/.claude.json` `projects[dir].hasTrustDialogAccepted` is keyed by dir, but a git worktree
+    under a trusted repo has NO entry of its own and still starts clean (verified 2026-07-14),
+    while a fresh dir with no trusted ancestor stops at "do you trust the files in this folder?"
+    — a prompt only the Mac can answer, and one a spawned session hangs on. So `is_trusted()`
+    walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
+    labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
+    ourselves would defeat a security gate from a remote device — don't.
+22. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
+    finds its transcript through the LEDGER's `cwd`. Its overlay is read-only — no send box, no
+    stop, no mute (there is no tty to write to).
 
 ## Dev workflow
 

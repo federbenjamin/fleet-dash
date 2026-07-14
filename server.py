@@ -65,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/context":
             out = self.eng.session_context(self.query("sid"))
             self.reply(200, "application/json", json.dumps(out).encode())
+        elif route == "/api/closed_context":
+            out = self.eng.closed_context(self.query("sid"))
+            self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/agent_context":
             out = self.eng.agent_context(self.query("sid"), self.query("aid"))
             self.reply(200, "application/json", json.dumps(out).encode())
