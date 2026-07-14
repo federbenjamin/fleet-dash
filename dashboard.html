@@ -35,6 +35,17 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
 #totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
 #totals b{color:var(--fg);font-variant-numeric:tabular-nums}
+#totals .sep{color:var(--faint);font-style:normal;margin:0 7px}
+/* one-line "last message" preview — the newest prose, never a tool call */
+.lastmsg{display:flex;align-items:baseline;gap:7px;padding:6px 12px;font-size:12px;
+  color:var(--dim);border-top:1px solid var(--line);background:#0f1319;
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lastmsg .lmwho{flex:0 0 auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
+  color:var(--faint)}
+.lastmsg .lmtext{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lastmsg .lmwho.user{color:var(--blue)}
+.lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
+  font-size:11.5px;cursor:pointer}
 #stale{display:none;background:var(--red);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;overflow:clip}
 .card.needs{border-color:var(--amber)}
@@ -869,8 +880,11 @@ function agentRow(a){
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
     <span class="aopen">›</span>
-  </div>`;
+  </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px"
+    onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
+    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext">${esc(a.last_msg.text)}</span></div>`:''}`;
 }
+const previewAgents=()=>!!((last&&last.settings)||{}).preview_agents;
 
 function sessionCard(s){
   const needs=s.state==='needs_you'||s.state==='stalled_or_prompt';
@@ -936,6 +950,7 @@ function sessionCard(s){
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
+    ${s.last_msg?`<div class="lastmsg"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext">${esc(s.last_msg.text)}</span></div>`:''}
     ${needs&&ctxHtml?`<div class="dhead chead">recent conversation
       <button class="expandbtn" title="open the full conversation"
         onclick="event.stopPropagation();openSession('${s.session_id}')">⤢ full view</button></div>${ctxHtml}`:''}
@@ -970,6 +985,9 @@ function renderSettings(){
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
+    <div class="dhead" style="margin-top:12px">display</div>
+    <label class="setrow"><input type="checkbox" ${st.preview_agents?'checked':''}
+      onchange="setBool('preview_agents',this.checked)">last-message preview on subagent rows too<span class="setnum"> — sessions always show one</span></label>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
 async function setNotify(k,v){
@@ -989,6 +1007,16 @@ async function setNum(k,v){
       body:JSON.stringify({[k]:parseFloat(v)})});
     const d=await r.json();
     if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setBool(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:v})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
     else if(msg)msg.textContent='✗ '+(d.error||'failed');
   }catch(e){if(msg)msg.textContent='✗ '+e;}
 }
@@ -1419,10 +1447,10 @@ let last=null;
 function render(f,force){
   if(!f||!f.sessions)return;
   const t=f.totals;
-  $('#totals').innerHTML=`<span><b>${t.sessions}</b> sessions</span><span><b>${t.busy}</b> busy</span>
+  $('#totals').innerHTML=`<span><b>${t.sessions}</b> sessions <i class="sep">·</i> <b>${t.busy}</b> busy</span>
     <span style="color:${t.needs_me?'var(--amber)':'inherit'}"><b>${t.needs_me}</b> need you</span>
     ${t.done?`<span style="color:var(--green)"><b>${t.done}</b> done</span>`:''}
-    <span><b>${t.agents_running}</b> agents running</span>`;
+    <span><b>${t.dormant||0}</b> dormant <i class="sep">·</i> <b>${t.agents_running}</b> subagent${t.agents_running===1?'':'s'} running</span>`;
   const ae=document.activeElement;
   const typing=ae&&ae.tagName==='INPUT'&&$('#sessions').contains(ae);
   const typingClosed=ae&&ae.tagName==='INPUT'&&$('#closed').contains(ae);

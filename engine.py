@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
+    "preview_agents": False,            # one-line last-message preview on agent rows too
     "_permission_keys_note": "keystrokes injected for permission-prompt choices; deny defaults to Esc (cancels any prompt variant)",
     "permission_keys": {"allow": "1", "always": "2", "deny": ""},
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
@@ -556,6 +557,16 @@ class Tail:
                 return
         self.files.append({"path": path, "caption": caption or "", "ts": ts})
 
+    def last_message(self, limit=160):
+        """One-line preview: the newest actual MESSAGE (user or assistant prose) —
+        tool calls and system events are not messages and are skipped."""
+        for e in reversed(self.convo):
+            if e.get("role") in ("user", "assistant") and e.get("text"):
+                txt = " ".join(str(e["text"]).split())
+                return {"role": e["role"],
+                        "text": txt[:limit] + ("…" if len(txt) > limit else "")}
+        return None
+
     @property
     def total_tokens(self):
         return self.ti + self.tw + self.tr + self.to
@@ -717,6 +728,7 @@ class Engine:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
+                "last_msg": mt.last_message(),      # one-line preview on every card
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
@@ -748,6 +760,7 @@ class Engine:
                 "sessions": len(sessions),
                 "busy": sum(1 for s in sessions if s["state"] == "running"),
                 "needs_me": sum(1 for s in sessions if s["state"] in ("needs_you", "stalled", "stalled_or_prompt")),
+                "dormant": sum(1 for s in sessions if s["state"] == "dormant"),
                 "done": sum(1 for s in sessions if s["state"] == "turn_done"),
                 "agents_running": sum(s["agents_running"] for s in sessions),
                 "session_cost": round(sum(s["cost"] for s in sessions), 2),
@@ -759,7 +772,8 @@ class Engine:
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
-                          "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url")},
+                          "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
+                          "preview_agents")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -833,6 +847,9 @@ class Engine:
                 "spark": [k for _, k in vel],
                 "started": t.first_ts, "last": t.last_ts,
                 "convo_v": t.convo_rev,     # cache key for the agent chat overlay
+                # only running agents get a preview: a finished one's last line is its
+                # final report, which the completed-agents view already shows
+                "last_msg": t.last_message(120) if not done else None,
             })
             if done:
                 self.ledger_finalize(subdir, agent_id, meta, t)
@@ -1771,6 +1788,8 @@ class Engine:
                 if not lo <= v <= hi:
                     return {"ok": False, "error": f"{k} must be {lo}–{hi}"}
                 self.cfg[k] = changed[k] = v
+        if "preview_agents" in patch:
+            self.cfg["preview_agents"] = changed["preview_agents"] = bool(patch["preview_agents"])
         if "dashboard_url" in patch:
             u = str(patch["dashboard_url"] or "").strip()[:300]
             if u and not u.startswith(("http://", "https://")):
