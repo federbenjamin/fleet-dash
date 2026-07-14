@@ -194,7 +194,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     finds its transcript through the LEDGER's `cwd`. Its overlay is read-only — no send box, no
     stop, no mute (there is no tty to write to).
-24. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
+24. **Click latency is the injection path — keep these four fixes.** Measured 2026-07-14: a
+    one-keystroke `focus` cost 850ms while a ping cost 2ms. (a) The applet delays only BETWEEN
+    steps, never after the last; (b) the delay is per-request (flag 4) — 0.4s ONLY for ask-TUI
+    key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay;
+    (c) `act()` takes `scan_lock` + re-polls the tail ONLY for prompt answers (the poll thread
+    holds that lock while folding the whole fleet, so a click used to wait out a full scan) —
+    but `mt.poll()` must stay INSIDE the lock or it races the fold and double-counts; (d) the
+    result file is polled every 20ms, not 300ms. The applet is stay-open
+    (`OSAAppletStayOpen`), so `open -g` reopens the resident process (`on reopen`) instead of
+    launching one. Net: 850ms → ~260ms. Any change here is re-verified in the SANDBOX with a
+    real multi-question ask before shipping.
+25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).

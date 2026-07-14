@@ -8,11 +8,26 @@
 --     flag 2 = press Return: send a raw CR (character id 13) — what raw-mode TUIs
 --              actually treat as Enter; iTerm's own newline sends LF
 --     flag 3 = focus: select that window + tab and bring iTerm forward (types nothing)
+--     flag 4 = set the inter-step delay in seconds (e.g. "4 0.05"). Default 0.4.
+--              The delay only ever fires BETWEEN steps — never after the last one,
+--              which is dead time the caller waits on for nothing.
 --   SPAWN: creates a NEW tab in the current iTerm window and runs the single
 --          line-3 payload (a `cd … && claude …` command the daemon composed from
 --          validated inputs). The daemon never passes raw user text here.
 -- Writes "<request id> ok" or "<request id> <error>" to inject-result.txt.
+--
+-- STAY-OPEN applet (compiled with `osacompile --ss`): the process stays resident, so
+-- the daemon's `open -g` hits `on reopen` on the LIVE app instead of paying a fresh
+-- AppleScript process launch (~450ms) on every single click.
 on run
+	handleRequest()
+end run
+
+on reopen
+	handleRequest()
+end reopen
+
+on handleRequest()
 	set base to (POSIX path of (path to home folder)) & ".claude/fleet-dash/"
 	set resultFile to base & "inject-result.txt"
 	try
@@ -55,11 +70,14 @@ on run
 				repeat with t in tabs of w
 					repeat with s in sessions of t
 						if tty of s is targetTty then
+							set stepDelay to 0.4
 							repeat with i from 3 to (count of L)
 								set ln to item i of L
 								set flagChar to ""
 								if length of ln > 0 then set flagChar to character 1 of ln
-								if flagChar is "3" then
+								if flagChar is "4" then
+									set stepDelay to (text 3 thru -1 of ln) as number
+								else if flagChar is "3" then
 									tell w to select
 									tell t to select
 									activate
@@ -76,7 +94,9 @@ on run
 								else if flagChar is "1" then
 									tell s to write text "" newline YES
 								end if
-								delay 0.4
+								-- delay BETWEEN steps only: a trailing delay is dead time the
+								-- caller sits through after the work is already done
+								if i < (count of L) then delay stepDelay
 							end repeat
 							set outcome to "ok"
 						end if
@@ -88,7 +108,7 @@ on run
 		set outcome to errMsg
 	end try
 	do shell script "printf %s " & quoted form of (reqId & " " & outcome) & " > " & quoted form of resultFile
-end run
+end handleRequest
 
 on b64decode(b64)
 	if b64 is "" then return ""

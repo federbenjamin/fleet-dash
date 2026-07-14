@@ -225,8 +225,12 @@ Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benja
 
 ## Rebuilding the injector applet
 
+The applet is **stay-open** (`OSAAppletStayOpen`), so it stays resident and `open -g` hits its
+`on reopen` handler instead of paying a process launch on every click.
+
 ```
 osacompile -o FleetDashInjector.app injector.applescript
+plutil -replace OSAAppletStayOpen -bool true FleetDashInjector.app/Contents/Info.plist
 plutil -insert CFBundleIdentifier -string com.benjaminfeder.fleet-dash.injector \
   FleetDashInjector.app/Contents/Info.plist   # only if recreated from scratch
 codesign --force --sign - FleetDashInjector.app

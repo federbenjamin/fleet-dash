@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, subprocess, threading, urllib.request
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, subprocess, threading, contextlib, urllib.request
 from collections import deque
 
 HOME = os.path.expanduser("~")
@@ -590,6 +590,7 @@ class Engine:
         self.tails = {}                 # path -> Tail
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
+        self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
         self.db = None
         self.notified = {}              # dedupe keys -> t
         self.seeded = False             # first pass registers pre-existing states silently
@@ -1421,9 +1422,18 @@ class Engine:
             return {"ok": False, "error": "the parent session is waiting on a prompt — "
                     "answer that first, then relay"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
-        with self.scan_lock:            # freshness check against the live transcript
+        # scan_lock is held by the poll thread while it folds EVERY transcript in the
+        # fleet, so taking it here made a click wait out a whole scan (~300ms of the
+        # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it
+        # validates the nonce against the live tail); typing, focusing, interrupting
+        # and relaying don't touch the tail at all — build those with no lock.
+        needs_tail = action.get("type") in ("option", "multiq", "permission", "dismiss")
+        lock = self.scan_lock if needs_tail else contextlib.nullcontext()
+        with lock:
             mt = self.tail_for(path)
-            mt.poll()
+            if needs_tail:
+                mt.poll()   # NEVER poll unlocked: it would race the poll thread's
+                            # fold of the same Tail and double-count its usage
             typ = action.get("type")
             steps = []                  # [(text, send_newline)]
             # free text typed into a TUI row must never smuggle keys: strip control
@@ -1560,14 +1570,23 @@ class Engine:
                 steps = [(txt, True)]
             else:
                 return {"ok": False, "error": "unknown action type"}
-        try:
-            tty = subprocess.run(["ps", "-p", str(reg["pid"]), "-o", "tty="],
-                                 capture_output=True, text=True, timeout=5).stdout.strip()
-        except Exception as e:
-            return {"ok": False, "error": f"tty lookup failed: {e}"}
+        tty = self._tty_cache.get(reg["pid"])     # a pid's tty never changes
+        if not tty:
+            try:
+                tty = subprocess.run(["ps", "-p", str(reg["pid"]), "-o", "tty="],
+                                     capture_output=True, text=True, timeout=5).stdout.strip()
+            except Exception as e:
+                return {"ok": False, "error": f"tty lookup failed: {e}"}
+            if tty and tty != "??":
+                self._tty_cache[reg["pid"]] = tty
         if not tty or tty == "??":
             return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
-        return self._iterm_write(f"/dev/{tty}", steps)
+        # The 0.4s inter-key delay is load-bearing ONLY for the ask-TUI key sequences
+        # (digits/arrows/CR need a render between them, or keys get dropped — invariant
+        # 4). Typing a message or focusing a tab is one or two keys with nothing to
+        # re-render, so those wait 0.05s and the click stops feeling laggy.
+        fast = typ in ("text", "relay", "focus", "interrupt", "noop")
+        return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -1620,7 +1639,7 @@ class Engine:
             r["trust_prompt"] = not self.is_trusted(cwd)
         return r
 
-    def _iterm_write(self, tty, steps):
+    def _iterm_write(self, tty, steps, step_delay=None):
         # launchd-context osascript can never summon the automation-permission
         # dialog (hangs forever), so injection runs through the FleetDashInjector
         # applet: request file -> open -g applet -> result file. The applet has its
@@ -1628,6 +1647,8 @@ class Engine:
         import base64
         req_id = secrets.token_hex(8)
         lines = [tty, req_id]
+        if step_delay is not None:      # flag 4: how long the applet waits BETWEEN keys
+            lines.append(f"4 {step_delay}")
         for text, nl in steps:
             if text == "__FOCUS__":     # flag 3: select that tab, type nothing
                 lines.append("3 ")
@@ -1660,7 +1681,7 @@ class Engine:
                     return {"ok": False, "error": verdict[:300]}
             except OSError:
                 pass
-            time.sleep(0.3)
+            time.sleep(0.02)            # the applet is done in ~200ms — don't sleep past it
         return {"ok": False, "error": "injector timed out — if a macOS permission "
                 "dialog appeared, grant it and retry"}
 

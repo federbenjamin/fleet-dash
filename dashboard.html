@@ -1168,7 +1168,8 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
   const cmd=v.startsWith('/')?(cmdCache[sid]||[]).find(c=>c.name===v.split(/\s+/)[0]):null;
   if(cmd&&cmd.danger&&!confirm(`${cmd.name} destroys this session's conversation state.\n\n${cmd.desc}\n\nSend it?`))return;
   slashClose();
-  act(sid,{type:'text',text:v},msgPre);if(inp)inp.value='';
+  if(inp)inp.value='';        // clear NOW: the round-trip is the terminal's, not yours
+  act(sid,{type:'text',text:v},msgPre);
 }
 
 // ---- slash-command autocomplete -------------------------------------------
