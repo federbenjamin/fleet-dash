@@ -224,6 +224,11 @@ td.r,th.r{text-align:right}
 .ptool .ptlabel{flex:1;min-width:0}
 .xbtn{background:none;border:1px solid var(--line);border-radius:8px;color:var(--dim);
       font:inherit;font-size:12px;padding:2px 9px;cursor:pointer;white-space:nowrap}
+/* stop, like the square on a remote */
+.stopbtn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  padding:0;line-height:1;font-size:10px;cursor:pointer;border-radius:5px;
+  background:#2a1517;border:1px solid var(--red);color:var(--red)}
+.stopbtn:hover{background:var(--red);color:#0a0e14}
 #vfiles:empty{display:none}
 #vfiles{border-bottom:1px solid var(--line);padding:6px 12px}
 .fstrip{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;
@@ -627,8 +632,8 @@ function renderSession(force){
   const done=['done','ended'];
   $('#stitle2').innerHTML=`<b>${esc(s.title||s.project)}</b>
     <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.family)}</small>`;
-  $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="xbtn" title="interrupt the current turn (Esc)"
-      onclick="sendInterrupt('${s.session_id}','smsg')">⎋</button>`:''}
+  $('#sctrl').innerHTML=`${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
+      onclick="sendInterrupt('${s.session_id}','smsg')">■</button>`:''}
     <button class="bell ${s.muted?'muted':''}" title="${s.muted?'unmute pushes':'mute pushes'}"
       onclick="toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>`;
   if(!force&&(typing||touching()))return;
@@ -662,8 +667,7 @@ function renderSession(force){
         <span>agents</span><b>${s.agents_running} running · ${s.agents_total} total · ${fmt$(s.agent_cost)}</b>
         <span>cost</span><b>${fmt$(s.cost)}</b>
       </div>
-    </details>
-    ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}`;
+    </details>`;
 }
 
 // ---- subagent chat overlay -------------------------------------------------
@@ -834,8 +838,8 @@ function sessionCard(s){
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
-      ${s.reg_status==='busy'?`<button class="xbtn" title="interrupt the current turn (Esc)"
-        onclick="event.stopPropagation();sendInterrupt('${s.session_id}')">⎋</button>`:''}
+      ${s.reg_status==='busy'?`<button class="stopbtn" title="stop the current turn (Esc)"
+        onclick="event.stopPropagation();sendInterrupt('${s.session_id}')">■</button>`:''}
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
