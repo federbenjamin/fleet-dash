@@ -28,7 +28,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
 - **Per card:** model, context-used bar, agents running/done + agent spend, quiet time,
   `open ↗` deep link to the session's claude.ai/code page.
-- **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
+- **Running subagents inline** (type, description, model, tokens/sec sparkline, live $); tap
+  any agent row — running here or in "completed agents" — for its info block (full id,
+  description, exact model, state, started/last-activity, token split, $).
 - **Tap a card** → detail panel, top to bottom: recent conversation, a **free-text send box**
   (types the message into that session's terminal and submits it), a one-line horizontal strip
   of delivered-file chips (quick open), then the "session info" (full session id, pid, cwd,
