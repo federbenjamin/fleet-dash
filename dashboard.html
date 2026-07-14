@@ -48,13 +48,13 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
 #stale{display:none;background:var(--red);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px}
-/* focus is per-card and tied only to THIS card's open state: an expanded ("less")
-   card is at full brightness, a collapsed ("more") card is recessed */
+/* active cards are always full brightness. Only IDLE and DORMANT cards recede when
+   collapsed ("more"); expanding them ("less") brings them to full. */
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;
-  overflow:clip;opacity:.7;transition:opacity .12s ease}
+  overflow:clip;opacity:1;transition:opacity .12s ease}
 .card.needs{border-color:var(--amber)}
 .card.stalled{border-color:var(--red)}
-.card.open{opacity:1}
+.card.idle{opacity:.7}
 /* sticky: header pins to the viewport top while its card scrolls past (so a long
    open card can still be collapsed), then exits with the card bottom. Requires the
    card ancestor NOT be a scroll container: overflow:clip above, never hidden. */
@@ -69,7 +69,7 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .chip.stalled_or_prompt{background:#2b2111;color:var(--amber)}
 .chip.dormant{background:var(--card2);color:var(--faint)}
 .card.dorm{opacity:.4}
-.card.dorm.open{opacity:1}   /* opening a dormant card still focuses it */
+.card.idle.open,.card.dorm.open{opacity:1}   /* expanding a dim card focuses it */
 .sname{font-weight:600;overflow:hidden;flex:1;min-width:0;line-height:1.3}
 .sname .stitle,.sname small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sname small{color:var(--dim);font-weight:400}
@@ -83,8 +83,10 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
 .detail{border-top:1px solid var(--line);background:var(--card2);padding:8px 12px 10px;font-size:12px}
 .detail .actmsg:empty{display:none}
-/* top gap above the first fold == the gap between folds (no separator, no empty
-   actmsg contributing space) */
+/* mute control at the top of the tail; equal gap to the first fold below it */
+.mutebox{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--dim);margin-bottom:8px}
+.mutebox .bell{font-size:17px}
+/* top gap above the first fold == the gap between folds */
 .detail>details.dfold:first-of-type{margin-top:0}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;color:var(--dim);margin-bottom:8px}
 .kv b{color:var(--fg);font-weight:500;word-break:break-all}
@@ -254,6 +256,10 @@ td.r,th.r{text-align:right}
   .detail .stripbox{margin-top:14px}
   .detail .dsep{margin:28px 0 14px}
   .detail .ctxbox{margin-bottom:12px}
+  /* phone: trim the dense bits — "quiet …" and the subagent row's numbers after
+     the model (throughput, sparkline, tokens, cost). The agent view has it all. */
+  .squiet{display:none}
+  .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
 }
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
@@ -970,7 +976,7 @@ const clampA=()=>Math.max(1,Math.min(6,setg().preview_agent_lines??1));
 
 function sessionCard(s){
   const needs=s.state==='needs_you'||s.state==='stalled_or_prompt';
-  const cls=s.state==='stalled'?'stalled':needs?'needs':s.state==='dormant'?'dorm':'';
+  const cls=s.state==='stalled'?'stalled':needs?'needs':s.state==='dormant'?'dorm':s.state==='idle'?'idle':'';
   const isOpen=open.has(s.session_id);
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const done=s.agents.filter(a=>['done','ended'].includes(a.state));
@@ -983,6 +989,11 @@ function sessionCard(s){
   // and the send box all live in the full-screen view now — tap the header or the
   // peek to get there.
   const detail=isOpen?`<div class="detail">
+      <div class="mutebox">
+        <button class="bell ${s.muted?'muted':''}"
+          onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
+        <span>${s.muted?'push notifications muted for this session':'notify me about this session'}</span>
+      </div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
         ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
@@ -1027,8 +1038,6 @@ function sessionCard(s){
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
-      <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
-        onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
     ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
     ${cardPending(s)}
