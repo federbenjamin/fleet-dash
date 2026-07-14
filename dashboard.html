@@ -101,6 +101,9 @@ td.r,th.r{text-align:right}
 .cmsg{margin:8px 0}
 .cmsg .crole{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
 .cmsg .cbody{border-radius:8px;padding:6px 9px;font-size:12.5px;overflow-wrap:break-word}
+.cmsg .cbody p{margin:9px 0}
+.cmsg .cbody p:first-child,.cmsg .cbody>*:first-child{margin-top:2px}
+.cmsg .cbody p:last-child,.cmsg .cbody>*:last-child{margin-bottom:2px}
 .cmsg.user .cbody{background:#132030;border:1px solid #1f3a5f}
 .cmsg.assistant .cbody{background:var(--card);border:1px solid var(--line)}
 .ctool{margin:2px 0 2px 4px}
@@ -112,6 +115,9 @@ td.r,th.r{text-align:right}
 .fcap{flex-basis:100%;font-size:11px;color:var(--dim)}
 .frow{display:flex;align-items:center;gap:8px;padding:4px 0}
 .frow .fmeta{flex:1;min-width:0;color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.foldscroll{max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.pfiles{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px}
+.pfiles .plabel{font-size:11px;color:var(--amber);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
 .ctxload{color:var(--faint);font-size:12px;padding:6px 0}
 .fchips{display:flex;gap:6px;flex-wrap:wrap;padding:7px 0 2px}
 .fchip{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:5px 11px;
@@ -123,9 +129,24 @@ td.r,th.r{text-align:right}
 #vhead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
        padding-top:calc(10px + env(safe-area-inset-top))}
 #vtitle{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#vclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
+#vclose,#vtheme{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
-#vbody{flex:1;overflow:auto;padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+#vbody{flex:1;overflow:auto;padding:14px}
+#vact{border-top:1px solid var(--line);background:var(--card);padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+#vact:empty{display:none}
+#vact .qtext{font-size:12px;margin:2px 0 4px;color:var(--dim);white-space:pre-wrap}
+#vact .optbtn{margin:4px 0;padding:6px 9px;font-size:12px}
+#vact .freetext{margin-top:8px}
+#vbody.light{background:#f7f8fa;color:#1c2128}
+#vbody.light .mdoc code{background:#eff1f3;border-color:#d0d7de}
+#vbody.light .mdoc pre{background:#f0f2f4;border-color:#d0d7de}
+#vbody.light .mdoc pre code{background:none}
+#vbody.light .mdoc blockquote{border-color:#d0d7de;color:#57606a}
+#vbody.light .mdoc a{color:#0969da}
+#vbody.light td,#vbody.light th{border-color:#d8dee4}
+#vbody.light th{color:#57606a}
+#vbody.light .mdoc hr{border-color:#d0d7de}
+#vbody.light pre.raw{color:#1c2128}
 #vbody img{max-width:100%;height:auto;border-radius:6px}
 #vbody pre.raw{white-space:pre-wrap;word-break:break-word;font-size:12px}
 .mdoc{font-size:13.5px;line-height:1.55;max-width:720px}
@@ -155,8 +176,9 @@ read-only: this device has no act token — buttons won't work until you open th
 <div id="closed"></div>
 <div id="rollup"></div>
 <div id="viewer">
-  <div id="vhead"><span id="vtitle"></span><button id="vclose" onclick="closeViewer()">✕ close</button></div>
+  <div id="vhead"><span id="vtitle"></span><button id="vtheme" onclick="toggleTheme()">☀︎</button><button id="vclose" onclick="closeViewer()">✕ close</button></div>
   <div id="vbody"></div>
+  <div id="vact"></div>
 </div>
 <script>
 const $=q=>document.querySelector(q);
@@ -268,11 +290,42 @@ function convoBox(s){
   if(!msgs)return'';
   return`<div class="ctxbox"><div class="convo" data-sid="${s.session_id}">${msgs}</div></div>`;
 }
+let viewerSid=null;
+function toggleTheme(){
+  const light=!$('#vbody').classList.contains('light');
+  $('#vbody').classList.toggle('light',light);
+  $('#vtheme').textContent=light?'☾':'☀︎';
+  try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
+}
+(()=>{try{if(localStorage.getItem('viewer_light')==='1'){$('#vbody').classList.add('light');$('#vtheme').textContent='☾';}}catch(e){}})();
+function renderViewerBar(){
+  if(!viewerSid)return;
+  const bar=$('#vact');
+  const ae=document.activeElement;
+  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
+  let h='';
+  const p=s&&s.pending;
+  if(p&&p.kind==='question'&&p.questions&&p.questions.length===1){
+    const q=p.questions[0];const ms=q.multiSelect;
+    const sel=multiSel[viewerSid]=multiSel[viewerSid]||new Set();
+    h+=`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}</div>`
+      +(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
+        onclick="${ms?`toggleOpt('${viewerSid}',${i+1})`:`sendOption('${viewerSid}','${p.nonce}',[${i+1}],'','vmsg')`}">${esc(o.label)}</button>`).join('')
+      +(ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${viewerSid}','${p.nonce}','vmsg')">submit selection</button></div>`:'');
+  }
+  h+=`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message to this session"
+      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg')">
+      <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>
+    <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
+  bar.innerHTML=h;
+}
 function viewFile(sid,ep,en,kind,ecap){
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
   $('#vtitle').textContent=name+(cap?' — '+cap:'');
   $('#viewer').style.display='flex';
+  viewerSid=sid;renderViewerBar();
   const vb=$('#vbody');
   if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
   vb.textContent='loading…';
@@ -282,7 +335,7 @@ function viewFile(sid,ep,en,kind,ecap){
     vb.innerHTML=/\.(md|markdown)$/i.test(name)?'<div class="mdoc">'+md(t)+'</div>':'<pre class="raw">'+esc(t)+'</pre>';
   }).catch(e=>{vb.textContent='✗ '+e;});
 }
-function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';}
+function closeViewer(){$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';viewerSid=null;}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer();});
 
 function agentRow(a){
@@ -330,18 +383,18 @@ function sessionCard(s){
         onkeydown="if(event.key==='Enter')sendText('${s.session_id}')">
         <button class="pbtn send" onclick="sendText('${s.session_id}')">send</button></div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
-      <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
-        ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
-        <summary>completed agents (${done.length})</summary>
-        ${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}
-      </details>
       <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
         ontoggle="filesOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>delivered files (${ctxFiles.length})</summary>
-        ${ctxFiles.length?ctxFiles.map(f=>`<div class="frow">${fchip(s.session_id,f,f.caption)}
+        <div class="foldscroll">${ctxFiles.length?ctxFiles.map(f=>`<div class="frow">${fchip(s.session_id,f,f.caption)}
           <span class="fmeta">${esc(f.caption||'')}</span>
           <span class="anum">${f.ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(f.ts))/1000)))+' ago':''}</span>
-        </div>`).join(''):'<div class="dhead">none yet</div>'}
+        </div>`).join(''):'<div class="dhead">none yet</div>'}</div>
+      </details>
+      <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
+        ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>completed agents (${done.length})</summary>
+        <div class="foldscroll">${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}</div>
       </details>
     </div>`:'';
   return`<div class="card ${cls}" data-sid="${s.session_id}">
@@ -371,12 +424,14 @@ function pendingBox(s){
     if(!p.questions||!p.questions.length)return'';
     if(p.questions.length>1)
       return`<div class="pend"><div class="ptool">multi-part question (${p.questions.length}) — answer at the terminal or claude.ai</div>
+        ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
         ${p.questions.map(q=>`<div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}</div>`).join('')}</div>`;
     const q=p.questions[0];
     const ms=q.multiSelect;
     const sel=multiSel[s.session_id]=multiSel[s.session_id]||new Set();
     return`<div class="pend">
       <div class="ptool">${esc(q.header||'question')} — waiting on you</div>
+      ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
       <div class="qtext">${esc(q.question)}</div>
       ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
           onclick="${ms?`toggleOpt('${s.session_id}',${i+1})`:`sendOption('${s.session_id}','${p.nonce}',[${i+1}],'${esc(o.label).replace(/'/g,'')}')`}">
@@ -399,8 +454,8 @@ function pendingBox(s){
   }
   return'';
 }
-async function act(sid,payload){
-  const el=document.getElementById('msg-'+sid);
+async function act(sid,payload,pre='msg'){
+  const el=document.getElementById(pre+'-'+sid);
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
@@ -409,25 +464,25 @@ async function act(sid,payload){
     if(!d.ok&&!el)alert(d.error||'failed');
   }catch(e){if(el)el.textContent='✗ '+e;}
 }
-function sendOption(sid,nonce,digits,label){
-  act(sid,{type:'option',nonce,digits});
+function sendOption(sid,nonce,digits,label,pre){
+  act(sid,{type:'option',nonce,digits},pre);
 }
 function toggleOpt(sid,d){
   const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);render(last);
 }
-function sendMulti(sid,nonce){
+function sendMulti(sid,nonce,pre){
   const digits=[...(multiSel[sid]||[])].sort();
   if(!digits.length)return alert('pick at least one option');
-  act(sid,{type:'option',nonce,digits,multi:true});multiSel[sid]=new Set();
+  act(sid,{type:'option',nonce,digits,multi:true},pre);multiSel[sid]=new Set();
 }
 function sendPerm(sid,nonce,choice){
   act(sid,{type:'permission',nonce,choice});
 }
-function sendText(sid){
-  const inp=document.getElementById('ft-'+sid);
+function sendText(sid,ftPre='ft',msgPre='msg'){
+  const inp=document.getElementById(ftPre+'-'+sid);
   const v=(inp&&inp.value||'').trim();
   if(!v)return;
-  act(sid,{type:'text',text:v});if(inp)inp.value='';
+  act(sid,{type:'text',text:v},msgPre);if(inp)inp.value='';
 }
 let closedOpen=false;
 function closedSection(list,now){
@@ -485,6 +540,7 @@ function render(f){
     el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
   $('#closed').innerHTML=closedSection(f.closed,f.t);
   $('#rollup').innerHTML=rollupTable(f.rollup);
+  renderViewerBar();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
 

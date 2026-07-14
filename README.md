@@ -19,11 +19,14 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $).
 - **Tap a card** → detail panel: a "session info" dropdown at the top (full session id, pid, cwd,
   exact model, started-ago, CLI status, tokens in context, spend split), recent conversation,
-  a **free-text send box** (types the message into that session's terminal and submits it), and
-  a "completed agents" dropdown beneath it.
+  a **free-text send box** (types the message into that session's terminal and submits it), then
+  "delivered files" and "completed agents" dropdowns (both scroll internally past ~220px).
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
   - Permission request → the notification text + allow / always allow / deny buttons.
+  - If a file was delivered shortly before the question (the deliver-then-ask pattern), the box
+    leads with a **"read first" chip** — visible even on a collapsed card. Window:
+    `question_file_pair_seconds`.
 - **Conversation context**: the session's recent turns (your prompts + Claude's replies,
   markdown-rendered) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
@@ -35,6 +38,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
+- **File viewer** extras: a ☀︎/☾ button toggles a light "paper" theme for the document
+  (persisted per device), and a **docked action bar** at the bottom carries the owning session's
+  pending question buttons + free-text send — you read the file and answer/type without closing
+  it.
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.
@@ -89,6 +96,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |
 | `awaiting_input_notify_seconds` | 180 | blocked-on-you push debounce |
 | `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
+| `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |

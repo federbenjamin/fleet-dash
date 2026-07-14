@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "turn_done_window_seconds": 900,
     "agent_done_quiet_seconds": 5,
     "spend_threshold_usd": 5.0,
+    "question_file_pair_seconds": 300,
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -87,6 +88,14 @@ def cwd_to_project_dir(cwd):
 # bookkeeping) stays hidden (user decision 2026-07-13)
 KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+
+
+def iso_epoch(ts):
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- transcripts
@@ -391,6 +400,12 @@ class Engine:
                 tid, p = list(mt.pending.items())[-1]
                 pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
                            "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
+            if pending and pending.get("kind") == "question":
+                # deliver-then-ask pattern: surface files sent shortly before the question
+                q_ts = pending.pop("_ts", None) or now
+                paired = self._paired_files(mt, q_ts)
+                if paired:
+                    pending["files"] = paired
             if pending and pending["nonce"] not in self.notified:
                 self.notified[pending["nonce"]] = now
                 print(f"pending first seen: {sid[:8]} {pending['kind']} nonce={pending['nonce'][:24]}",
@@ -600,11 +615,25 @@ class Engine:
                 pass
             return None
         if d.get("kind") == "question":
-            return {"kind": "question", "nonce": d["nonce"], "questions": d.get("questions", [])}
+            return {"kind": "question", "nonce": d["nonce"], "questions": d.get("questions", []),
+                    "_ts": d.get("ts")}
         if d.get("kind") == "permission":
             return {"kind": "permission", "nonce": d["nonce"], "tool": "requested tool",
                     "input_summary": d.get("message", "")}
         return None
+
+    def _paired_files(self, mt, q_epoch):
+        win = self.cfg.get("question_file_pair_seconds", 300)
+        out = []
+        for f in mt.files:
+            fe = iso_epoch(f["ts"])
+            if fe is None or not (q_epoch - win <= fe <= q_epoch + 30):
+                continue
+            p = f["path"]
+            out.append({"name": os.path.basename(p), "path": p, "caption": f["caption"],
+                        "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
+                        "missing": not os.path.isfile(p)})
+        return out[-3:]
 
     # ------------------------------------------------------- context + files
     def _reg_main_path(self, sid):
