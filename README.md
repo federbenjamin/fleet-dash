@@ -24,13 +24,17 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **Amber interaction box** when a session is waiting on you:
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit).
   - Permission request → the notification text + allow / always allow / deny buttons.
-- **Conversation context**: the session's last few turns (your prompts + Claude's replies,
+- **Conversation context**: the session's recent turns (your prompts + Claude's replies,
   markdown-rendered) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
-- **Delivered files**: anything the session sent you via SendUserFile appears as tappable chips
-  (📄 md/text, 🖼 images) under the context — opens a full-screen viewer with markdown rendered
-  and images inline. Viewing file contents requires the act token (same `?token=` opt-in);
-  chips for files that were since deleted show "(gone)".
+  Key tool calls appear inline terminal-style (`● Edit(path)` with a `⎿ result` line) —
+  Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
+- **Delivered files**: anything the session sent you via SendUserFile appears as a tappable chip
+  (📄 md/text, 🖼 images) **inline in the conversation at the point it was delivered**, with its
+  caption — so the message explaining the file sits right with it. The detail panel also has a
+  "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
+  markdown rendered and images inline; viewing contents requires the act token (same `?token=`
+  opt-in); files since deleted show "(gone)".
 - **recently closed** dropdown: last 20 closed sessions (title, final spend, agents, closed-ago).
 - **agent spend · last 7 days** dropdown: per-day rollup by agentType × model from the ledger.
 - Browser-tab badge `(n)` = sessions needing you.

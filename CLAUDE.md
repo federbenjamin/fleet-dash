@@ -61,8 +61,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 11. **Convo capture filters user-row noise in `Tail._fold`** — isMeta rows, `<command-`/
     `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
     "This session is being continued from" blob. Consecutive assistant text rows merge into one
-    logical reply (tool calls between them don't split it). Extend the filter list there, not
-    in the client.
+    logical reply unless a KEY_TOOLS entry lands between them. Extend the filter list there,
+    not in the client.
+12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
+    Read/Grep/Glob/task bookkeeping). Results attach in place via `_tool_refs`, so context
+    freshness rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place
+    result mutation must still bump `convo_v` or clients never refetch.
 
 ## Dev workflow
 

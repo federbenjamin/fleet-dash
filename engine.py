@@ -83,6 +83,12 @@ def cwd_to_project_dir(cwd):
     return os.path.join(PROJECTS, cwd.replace("/", "-").replace(".", "-"))
 
 
+# convo view shows these tools only — read-only chatter (Read/Grep/Glob/task
+# bookkeeping) stays hidden (user decision 2026-07-13)
+KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+
+
 # ---------------------------------------------------------------- transcripts
 
 class Tail:
@@ -100,8 +106,10 @@ class Tail:
         self.git_branch = None
         self.ai_title = None
         self.pending = {}               # tool_use_id -> {name, input, uuid} awaiting a result
-        self.convo = deque(maxlen=14)   # recent turns: {role, text, ts}
+        self.convo = deque(maxlen=48)   # recent turns + key-tool calls
+        self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
+        self._tool_refs = {}            # tool_use_id -> convo entry (for result attach)
 
     def poll(self):
         try:
@@ -162,6 +170,8 @@ class Tail:
                             for fp in (inp.get("files") or [])[:6]:
                                 if isinstance(fp, str):
                                     self._file_add(fp, inp.get("caption", ""), ts)
+                        if b.get("name") in KEY_TOOLS:
+                            self._tool_add(b, ts)
                 txt = "\n\n".join(b.get("text", "") for b in content
                                   if isinstance(b, dict) and b.get("type") == "text").strip()
                 if txt:
@@ -175,6 +185,10 @@ class Tail:
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
                         self.pending.pop(b.get("tool_use_id"), None)
+                        ref = self._tool_refs.pop(b.get("tool_use_id"), None)
+                        if ref is not None:
+                            ref["result"] = self._result_summary(b, ref.get("name"))
+                            self.convo_rev += 1
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
                 if not o.get("isMeta"):
@@ -189,10 +203,55 @@ class Tail:
                         self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
 
+    def _tool_add(self, b, ts):
+        name, inp = b.get("name"), b.get("input") or {}
+        entry = {"role": "tool", "name": name, "ts": ts}
+        if name == "SendUserFile":
+            entry["files"] = [p for p in (inp.get("files") or [])[:6] if isinstance(p, str)]
+            entry["caption"] = inp.get("caption", "")
+        else:
+            entry["arg"] = self._tool_arg(name, inp)
+        self.convo.append(entry)
+        self.convo_rev += 1
+        if b.get("id"):
+            self._tool_refs[b["id"]] = entry
+            if len(self._tool_refs) > 300:
+                for k in list(self._tool_refs)[:150]:
+                    self._tool_refs.pop(k, None)
+
+    @staticmethod
+    def _tool_arg(name, inp):
+        if name == "Bash":
+            v = inp.get("description") or (inp.get("command") or "").split("\n")[0]
+        elif name == "Agent":
+            v = inp.get("description") or inp.get("subagent_type") or ""
+        elif name == "Skill":
+            v = inp.get("skill") or ""
+        else:
+            v = inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or ""
+        v = str(v).replace(HOME, "~")
+        return v[:90] + ("…" if len(v) > 90 else "")
+
+    @staticmethod
+    def _result_summary(b, name=None):
+        c = b.get("content")
+        if isinstance(c, list):
+            c = " ".join(x.get("text", "") for x in c
+                         if isinstance(x, dict) and x.get("type") == "text")
+        txt = str(c or "").strip().split("\n")[0]
+        if not b.get("is_error") and name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+            if "updated successfully" in txt:
+                txt = "updated ✓"
+            elif "created successfully" in txt:
+                txt = "created ✓"
+        return ("✗ " if b.get("is_error") else "") + txt[:140] if txt else ""
+
     def _convo_add(self, role, text, ts):
         if len(text) > 4000:
             text = text[:4000] + "\n…"
+        self.convo_rev += 1
         # merge assistant rows within one work stretch into one logical reply
+        # (a key-tool entry in between intentionally breaks the merge)
         if self.convo and role == "assistant" and self.convo[-1]["role"] == "assistant":
             prev = self.convo[-1]
             if len(prev["text"]) < 8000:
@@ -359,7 +418,8 @@ class Engine:
                 "started_ms": reg.get("startedAt"),
                 "pending": pending,
                 # cache keys: the page refetches /api/context only when these move
-                "convo_v": (mt.convo[-1]["ts"] if mt.convo else None),
+                # (a rev counter, not last-ts: tool results mutate entries in place)
+                "convo_v": mt.convo_rev,
                 "files_n": len(mt.files),
                 "agents": agents,
                 "agents_running": len(agents_running),
@@ -563,14 +623,16 @@ class Engine:
             mt.poll()
             msgs = [dict(m) for m in mt.convo]
             files = [dict(f) for f in mt.files]
+        def fmeta(p):
+            return {"name": os.path.basename(p), "path": p,
+                    "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
+                    "missing": not os.path.isfile(p)}
+        for m in msgs:                  # enrich inline delivery entries for the client
+            if m.get("role") == "tool" and m.get("files"):
+                m["files"] = [fmeta(p) for p in m["files"]]
         out_files = []
         for f in reversed(files):       # newest delivery first
-            p = f["path"]
-            ext = os.path.splitext(p)[1].lower()
-            kind = "image" if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg") else "text"
-            missing = not os.path.isfile(p)
-            out_files.append({"name": os.path.basename(p), "path": p, "caption": f["caption"],
-                              "ts": f["ts"], "kind": kind, "missing": missing})
+            out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
         return {"ok": True, "messages": msgs, "files": out_files}
 
     def file_content(self, sid, fpath):
@@ -583,6 +645,9 @@ class Engine:
             mt = self.tail_for(path)
             mt.poll()
             allowed = {f["path"] for f in mt.files}
+            for m in mt.convo:          # inline chips can outlive the files deque
+                if m.get("role") == "tool":
+                    allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
         if fpath not in allowed:
             return None, None, "not a file this session delivered"
         try:
