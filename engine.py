@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
+    "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
     "_permission_keys_note": "keystrokes injected for permission-prompt choices; deny defaults to Esc (cancels any prompt variant)",
     "permission_keys": {"allow": "1", "always": "2", "deny": ""},
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
@@ -587,7 +588,7 @@ class Engine:
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
-                          "spend_threshold_usd", "fleet_quiet_minutes")},
+                          "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -953,6 +954,7 @@ class Engine:
          answers:[{digits:[..], multi:bool, n_options, other:'...'}, ..]} |
         {type:'dismiss', session_id, nonce}   (Esc = the TUI's "Chat about this") |
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
+        {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
@@ -967,6 +969,8 @@ class Engine:
            and reg.get("status") != "waiting":
             return {"ok": False, "error": "session isn't waiting on a prompt — "
                     "this question may have been blocked or already answered"}
+        if action.get("type") == "interrupt" and reg.get("status") != "busy":
+            return {"ok": False, "error": "session isn't mid-turn — nothing to interrupt"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
         with self.scan_lock:            # freshness check against the live transcript
             mt = self.tail_for(path)
@@ -1059,12 +1063,16 @@ class Engine:
                         steps = [(d, False) for d in digits]
                         steps.append(("", True))
                 else:
-                    key = self.cfg.get("permission_keys", {}).get(action.get("choice"))
-                    if not key:
+                    pk = self.cfg.get("permission_keys", {})
+                    if action.get("choice") not in pk:
                         return {"ok": False, "error": "unknown choice"}
+                    # an empty key means Esc (deny cancels any prompt variant)
+                    key = pk[action.get("choice")] or "\x1b"
                     steps = [(key, False)]
-                    if key not in ("\x1b",):
+                    if key != "\x1b":
                         steps.append(("", True))
+            elif typ == "interrupt":    # Esc mid-turn = the terminal's stop key
+                steps = [("\x1b", False)]
             elif typ == "noop":         # TCC/AppleScript path probe: delivers nothing
                 steps = [("", False)]
             elif typ == "text":
@@ -1130,8 +1138,10 @@ class Engine:
         if not topic:
             return
         url = f"{self.cfg['ntfy_server'].rstrip('/')}/{topic}"
-        req = urllib.request.Request(url, data=body.encode(), method="POST",
-                                     headers={"Title": title, "Tags": tags, "Priority": priority})
+        headers = {"Title": title, "Tags": tags, "Priority": priority}
+        if self.cfg.get("dashboard_url"):
+            headers["Click"] = self.cfg["dashboard_url"]
+        req = urllib.request.Request(url, data=body.encode(), method="POST", headers=headers)
         threading.Thread(target=lambda: self._post(req), daemon=True).start()
 
     def _post(self, req):
@@ -1152,8 +1162,16 @@ class Engine:
                           f"{s['name']}: frozen {s['quiet_s']}s mid-turn", "warning", "high")
             if on.get("needs_you", True) and s["state"] == "needs_you" \
                and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
+                p = s.get("pending") or {}
+                what = ""
+                if p.get("kind") == "question" and p.get("questions"):
+                    q0 = p["questions"][0]
+                    what = f" — {q0.get('header') or 'question'}: {q0.get('question', '')}"
+                elif p.get("kind") == "permission":
+                    what = f" — permission: {p.get('tool', '')}"
                 self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
-                          f"{s['name']}: blocked {s['quiet_s'] // 60}m", "hourglass_flowing_sand")
+                          f"{s['name']}: blocked {s['quiet_s'] // 60}m{what}"[:400],
+                          "hourglass_flowing_sand")
             mult = int((s["cost"] + s["agent_cost"]) / cfg["spend_threshold_usd"])
             if on.get("spend", True) and mult >= 1:   # only the highest crossed threshold, once
                 self.once(f"spend:{key_base}:{mult}", "Spend threshold",
@@ -1200,6 +1218,11 @@ class Engine:
                 if not lo <= v <= hi:
                     return {"ok": False, "error": f"{k} must be {lo}–{hi}"}
                 self.cfg[k] = changed[k] = v
+        if "dashboard_url" in patch:
+            u = str(patch["dashboard_url"] or "").strip()[:300]
+            if u and not u.startswith(("http://", "https://")):
+                return {"ok": False, "error": "dashboard_url must start with http(s)://"}
+            self.cfg["dashboard_url"] = changed["dashboard_url"] = u
         ms = patch.get("mute_session")
         if ms:
             mu = dict(self.cfg.get("muted_sessions") or {})

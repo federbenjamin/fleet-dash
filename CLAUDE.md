@@ -64,11 +64,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    scratchpad sbx2.py — never experiment on real sessions.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
    (hook-file nonce or transcript tool_use_id) before writing keys, AND refuses prompt answers
-   (option/multiq/permission) when the registry status isn't `waiting`. The second check is
-   load-bearing: a PreToolUse capture can outlive an ask that another hook BLOCKED — the ghost
-   question renders, but the session sits at its main input and injected digits would type
-   (and send) as a message. hook_pending also hides a question pending >5s old on a
-   non-waiting session for the same reason.
+   (option/multiq/permission/dismiss) when the registry status isn't `waiting`. The second
+   check is load-bearing: a PreToolUse capture can outlive an ask that another hook BLOCKED —
+   the ghost question renders, but the session sits at its main input and injected digits
+   would type (and send) as a message. hook_pending also hides a question pending >5s old on a
+   non-waiting session for the same reason. `interrupt` (Esc mid-turn) has the mirror gate: it
+   requires status `busy`, so an Esc can never land in an idle session's input box.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
 7. **Agent state semantics:** long tool calls freeze transcripts — "stalled" (>240s) agents are
    still counted active; agents whose PARENT went idle/waiting with no end_turn are `ended`

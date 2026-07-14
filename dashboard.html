@@ -120,6 +120,7 @@ details.insfold>summary:hover{color:var(--fg)}
 .arow:first-child{border-top:none}
 .agentinfo{background:var(--card2);border-top:1px solid #20262e;padding:8px 12px;font-size:12px}
 .agentinfo .kv{margin:0}
+.copyable{cursor:copy}
 .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .dot.running{background:var(--green);animation:pulse 1.2s infinite}
 .dot.done{background:var(--faint)}
@@ -384,6 +385,7 @@ async function ensureCtx(sid,v){
   }catch(e){delete ctxCache[sid];}
 }
 const enc=v=>encodeURIComponent(v||'').replace(/'/g,'%27');  // onclick-attr-safe
+const cpb=v=>`<b class="copyable" title="tap to copy" data-copy="${esc(v)}" onclick="copyTxt(event,this)">${esc(v)}</b>`;
 function fchip(sid,f,cap){
   return`<button class="fchip" ${f.missing?'disabled':''} title="${esc(cap||f.path)}"
     onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
@@ -514,7 +516,7 @@ function agentRow(a){
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
   </div>${open?`<div class="agentinfo"><div class="kv">
-    <span>agent</span><b>${esc(a.agent_id)}</b>
+    <span>agent</span>${cpb(a.agent_id)}
     <span>type</span><b>${esc(a.agent_type)}</b>
     <span>description</span><b>${esc(a.description||'—')}</b>
     <span>model</span><b>${esc(a.model||'?')}</b>
@@ -549,9 +551,9 @@ function sessionCard(s){
         ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>session info</summary>
         <div class="kv">
-          <span>session</span><b>${esc(s.session_id)}</b>
+          <span>session</span>${cpb(s.session_id)}
           <span>pid</span><b>${s.pid}</b>
-          <span>cwd</span><b>${esc(s.cwd)}</b>
+          <span>cwd</span>${cpb(s.cwd)}
           <span>model</span><b>${esc(s.model||'?')}</b>
           <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
           <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
@@ -581,9 +583,11 @@ function sessionCard(s){
     </div>
     <div class="smeta">
       <span class="m">${esc(s.family)}</span>
-      <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
+      <span class="ctxwrap"><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span><span>ctx ${s.ctx_pct??'?'}%</span></span>
       ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''} running</b></span>`:''}
       <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
+      ${s.reg_status==='busy'?`<button class="xbtn" title="interrupt the current turn (Esc)"
+        onclick="event.stopPropagation();sendInterrupt('${s.session_id}')">⎋</button>`:''}
       <button class="bell ${s.muted?'muted':''}" title="${s.muted?'pushes muted for this session — tap to unmute':'mute pushes for this session'}"
         onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
     </div>
@@ -614,7 +618,10 @@ function renderSettings(){
     ${row('stall','session stalled',`frozen > ${num('stall_seconds',30)} s (also drives the chip)`)}
     ${row('spend','spend threshold',`every $ ${num('spend_threshold_usd',1)}`)}
     ${row('fleet_quiet','fleet gone quiet',`idle ${num('fleet_quiet_minutes',1)} min first (0 = right away)`)}
-    <div class="setnum" style="padding:4px 0">per-session mute: tap the 🔔 on a card</div>
+    <div class="setnum" style="padding:6px 0 2px">tap-target for pushes (opens on tap; blank = none)</div>
+    <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
+      value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
+    <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
 async function setNotify(k,v){
@@ -632,6 +639,16 @@ async function setNum(k,v){
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({[k]:parseFloat(v)})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setStr(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:v})});
     const d=await r.json();
     if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
     else if(msg)msg.textContent='✗ '+(d.error||'failed');
@@ -762,6 +779,18 @@ function sendOther(sid,nonce,n,pre){
 function sendDismiss(sid,nonce,pre){
   act(sid,{type:'dismiss',nonce},pre);
 }
+function sendInterrupt(sid){
+  if(!confirm('Interrupt this session’s current turn (sends Esc)?'))return;
+  act(sid,{type:'interrupt'});
+}
+function copyTxt(ev,el){
+  ev.stopPropagation();
+  if(!navigator.clipboard)return;
+  navigator.clipboard.writeText(el.dataset.copy).then(()=>{
+    const o=el.textContent;el.textContent='copied ✓';
+    setTimeout(()=>{el.textContent=o},900);   // UX flash only
+  });
+}
 function sendPerm(sid,nonce,choice){
   act(sid,{type:'permission',nonce,choice});
 }
@@ -771,16 +800,32 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
   if(!v)return;
   act(sid,{type:'text',text:v},msgPre);if(inp)inp.value='';
 }
-let closedOpen=false;
+let closedOpen=false,closedFilter='';
 const closedInfoOpen=new Set();   // closed-session info blocks, survives re-renders
 function toggleClosed(sid){
   closedInfoOpen.has(sid)?closedInfoOpen.delete(sid):closedInfoOpen.add(sid);render(last,true);
+}
+// filter typing updates only the rows container — a full render would replace
+// the focused input on every keystroke
+function updClosedRows(){
+  const el=document.getElementById('closedrows');
+  if(el&&last)el.innerHTML=closedRows(last.closed||[],last.t);
 }
 function closedSection(list,now){
   if(!list||!list.length)return'';
   return`<details class="foldbox" ${closedOpen?'open':''} ontoggle="closedOpen=this.open">
     <summary>closed sessions (${list.length})</summary>
-    ${list.map(c=>{
+    <div class="freetext" style="margin:8px 10px 2px"><input placeholder="filter by title / project / branch"
+      value="${esc(closedFilter)}" oninput="closedFilter=this.value;updClosedRows()"></div>
+    <div id="closedrows">${closedRows(list,now)}</div>
+  </details>`;
+}
+function closedRows(list,now){
+  const f=closedFilter.trim().toLowerCase();
+  const shown=f?list.filter(c=>((c.title||'')+' '+(c.project||'')+' '+(c.branch||'')+' '+(c.name||''))
+    .toLowerCase().includes(f)):list;
+  if(!shown.length)return'<div class="empty">no matches</div>';
+  return shown.map(c=>{
       const open=closedInfoOpen.has(c.session_id);
       return`<div class="crow" style="cursor:pointer" onclick="toggleClosed('${c.session_id}')">
       <span class="cname">${c.title?esc(c.title)+' ':''}<small>${esc(c.project)}${c.branch&&c.branch!=='HEAD'?` · ${esc(c.branch)}`:''}</small></span>
@@ -789,16 +834,15 @@ function closedSection(list,now){
       <span class="acost">${fmt$((c.cost||0)+(c.agent_cost||0))}</span>
       ${c.bridge_url?`<a class="jump" href="${c.bridge_url}" target="_blank" onclick="event.stopPropagation()">↗</a>`:''}
     </div>${open?`<div class="detail"><div class="kv">
-      <span>session</span><b>${esc(c.session_id)}</b>
-      <span>cwd</span><b>${esc(c.cwd||'?')}</b>
+      <span>session</span>${cpb(c.session_id)}
+      <span>cwd</span>${cpb(c.cwd||'?')}
       <span>branch</span><b>${esc(c.branch||'—')}</b>
       <span>model</span><b>${esc(c.model||'?')}</b>
       <span>lifetime</span><b>${c.first_seen&&c.closed_at?fmtAge(Math.max(0,c.closed_at-c.first_seen)):'?'}</b>
       <span>closed</span><b>${fmtAge(Math.max(0,Math.round(now-c.closed_at)))} ago</b>
       <span>spend</span><b>${fmt$(c.cost||0)} session + ${fmt$(c.agent_cost||0)} agents</b>
       <span>agents</span><b>${c.agents_total||0}</b>
-    </div></div>`:''}`;}).join('')}
-  </details>`;
+    </div></div>`:''}`;}).join('');
 }
 
 function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,true);}
@@ -874,6 +918,7 @@ function render(f,force){
     <span><b>${t.agents_running}</b> agents running</span>`;
   const ae=document.activeElement;
   const typing=ae&&ae.tagName==='INPUT'&&$('#sessions').contains(ae);
+  const typingClosed=ae&&ae.tagName==='INPUT'&&$('#closed').contains(ae);
   // preserve convo scroll positions across the wholesale innerHTML re-render
   const scrolls={};
   document.querySelectorAll('#sessions .convo').forEach(el=>{
@@ -883,7 +928,7 @@ function render(f,force){
     document.querySelectorAll('#sessions .convo').forEach(el=>{
       const s0=scrolls[el.dataset.sid];
       el.scrollTop=(s0&&!s0.atBottom)?s0.top:el.scrollHeight;});
-    $('#closed').innerHTML=closedSection(f.closed,f.t);
+    if(!typingClosed)$('#closed').innerHTML=closedSection(f.closed,f.t);
     $('#rollup').innerHTML=insightsSection();
   }
   renderViewerBar();

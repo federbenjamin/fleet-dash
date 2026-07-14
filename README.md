@@ -14,9 +14,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
 - **⚙ settings** (top right): per-category toggles for the ntfy pushes (waiting-on-you,
-  stalled, spend threshold, fleet quiet) **and their thresholds** (blocked seconds, stall
-  seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes) — persisted
-  to `config.json`, token required.
+  stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
+  seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
+  **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
+  notification opens the dashboard). Persisted to `config.json`, token required.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
   across daemon restarts and auto-expire 30 days after being set.
@@ -26,8 +27,10 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
-- **Per card:** model, context-used bar, agents running/done + agent spend, quiet time,
-  `open ↗` deep link to the session's claude.ai/code page.
+- **Per card:** model, context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive
+  and costs you working context, so this is your cue to wrap up or `/compact` deliberately),
+  running-agent count, quiet time, 🔔 mute, and — while a session is mid-turn — an **⎋
+  interrupt button** (confirms first, then sends Esc: the remote "stop this turn").
 - **Running subagents inline** (type, description, model, tokens/sec sparkline, live $); tap
   any agent row — running here or in "completed agents" — for its info block (full id,
   description, exact model, state, started/last-activity, token split, $).
@@ -72,8 +75,9 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
 - **closed sessions** dropdown: every closed session the daemon ever saw (title, final spend,
-  agents, closed-ago); tap a row for its info block (full id, cwd, branch, model, lifetime,
-  spend split).
+  agents, closed-ago), with a filter box (title / project / branch); tap a row for its info
+  block (full id, cwd, branch, model, lifetime, spend split). Session ids, cwds and agent ids
+  in any info block are **tap-to-copy**.
 - **cost insights** dropdown (7/30/90-day window; each subsection its own dropdown): where
   the tokens and money actually go —
   - **cache invalidations**: every API call whose cache_read fell short of the previous
@@ -155,7 +159,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
-| `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny |
+| `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
+| `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
 | `act_token` | generated | device token for the act endpoint |
 
