@@ -1,0 +1,8 @@
+ledger.db
+fleet-dash.log
+pending/
+inject-request.txt
+inject-result.txt
+FleetDashInjector.app/
+config.json
+__pycache__/
