@@ -234,6 +234,21 @@ class CodexProtocolTest(unittest.TestCase):
         self.assertNotIn("collaborationMode", calls[1][1])
         self.assertEqual(calls[1][1]["model"], "gpt-5.4")
 
+    def test_steer_uses_active_turn_id_as_protocol_precondition(self):
+        client, _ = self.client()
+        calls = []
+        client.request = lambda method, params=None, timeout=None: calls.append(
+            (method, params)) or {"turnId": "turn-active"}
+        client.thread_state["thread-one"] = {
+            "status": "running", "turn_id": "turn-active"}
+
+        client.steer_turn("thread-one", "Focus on the failing test")
+
+        self.assertEqual(calls, [("turn/steer", {
+            "threadId": "thread-one", "expectedTurnId": "turn-active",
+            "input": [{"type": "text", "text": "Focus on the failing test"}],
+        })])
+
 
 if __name__ == "__main__":
     unittest.main()

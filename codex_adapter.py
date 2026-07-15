@@ -378,7 +378,8 @@ class CodexAppServer:
         turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
         if not turn_id:
             raise CodexError("Codex thread has no active turn to steer")
-        return self.request("turn/steer", {"threadId": thread_id, "turnId": turn_id,
+        return self.request("turn/steer", {"threadId": thread_id,
+                                            "expectedTurnId": turn_id,
                                             "input": [{"type": "text", "text": text}]})
 
     def interrupt(self, thread_id):
