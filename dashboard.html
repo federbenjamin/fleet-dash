@@ -165,7 +165,8 @@ details.insfold>summary:hover{color:var(--fg)}
 .freetext input{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
-.arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
+.arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px;
+  user-select:none;-webkit-touch-callout:none}   /* clean mobile long-press-to-pin, no text selection */
 .arow:first-child{border-top:none}
 /* spawn marker — reads as a branch off the session, like the TUI's tool tree.
    ⎿'s horizontal stroke sits at the BOTTOM of its em box, so the glyph is lifted
@@ -276,7 +277,8 @@ td.r,th.r{text-align:right}
   /* phone: trim the dense bits — "quiet …" and the subagent row's numbers after
      the model (throughput, sparkline, tokens, cost). The agent view has it all. */
   .squiet{display:none}
-  .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
+  .arow .anum,.arow .spark,.arow .acost,.arow .aopen,.arow .apin{display:none}
+  .arow .pinmark{display:inline}          /* long-press pins; this shows the pinned state */
 }
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
@@ -378,6 +380,21 @@ td.r,th.r{text-align:right}
   border-radius:8px;padding:6px 9px;margin-bottom:8px;line-height:1.45}
 .relaynote b{color:var(--amber)}
 .arow .aopen{color:var(--faint);font-size:14px;padding-left:2px}
+/* pin control (desktop, left of ›): dim 📌 until pinned */
+.arow .apin{background:none;border:none;cursor:pointer;font-size:12px;line-height:1;padding:0 2px;
+  opacity:.3;filter:grayscale(1)}
+.arow .apin:hover{opacity:.75;filter:none}
+.arow .apin.on{opacity:1;filter:none}
+.arow.pinned{background:rgba(88,166,255,.10)}
+.pinmark{font-size:11px;line-height:1}
+.arow .pinmark{display:none}                 /* desktop shows the button's 📌; mobile shows this */
+/* global pinned-agents block, directly below the usage header; stable pin order */
+#pinned{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:4px 4px 6px;margin-bottom:12px}
+#pinned.empty{display:none}
+.pinhdr{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);padding:5px 8px 4px}
+.pinrow+.pinrow{border-top:1px solid #20262e}
+.pinsess{display:block;font-size:11px;color:var(--dim);padding:4px 12px 0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* min-height:0 + a CAPPED bar: without the cap an open question grows #vact
    without limit and squeezes the document to a few px, leaving a scrollbar with
    nowhere to scroll (the "third scrollbar") */
@@ -480,6 +497,7 @@ td.r,th.r{text-align:right}
 <div id="settings"></div>
 <header><div id="totals"></div></header>
 <div id="usage"></div>
+<div id="pinned"></div>
 <div id="stale">server unreachable — showing last snapshot</div>
 <div id="notoken" style="display:none;background:#2b2111;color:#d29922;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px">
 read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
@@ -835,10 +853,11 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 // prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
 let sessionView=null;            // {sid, closed} of the open overlay
 let sessQOpen=true;              // the question block inside the chat view
+let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
 const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
 function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
-  sessionView={sid,closed:false};
+  sessionView={sid,closed:false};sessionOpened=true;
   $('#sview').style.display='flex';
   syncOverlayHistory();
   renderSession(true);
@@ -846,7 +865,7 @@ function openSession(sid){
 // a closed session has no process: read its transcript, offer no controls
 function openClosed(sid){
   closeViewer();
-  sessionView={sid,closed:true};
+  sessionView={sid,closed:true};sessionOpened=true;
   $('#sview').style.display='flex';
   syncOverlayHistory();
   renderClosed(true);
@@ -880,6 +899,8 @@ async function renderClosed(){
   else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
   else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid)}</div>`;
   body.scrollTop=body.scrollHeight;
+  if(sessionOpened){sessionOpened=false;
+    requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
 }
 function renderSession(force){
   if(!sessionView||!last)return;
@@ -897,10 +918,13 @@ function renderSession(force){
   if(!force&&(typing||touching()))return;
   const body=$('#sbody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
+  const wantBottom=sessionOpened||old.atBottom;
+  sessionOpened=false;
   if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
   else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
   else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
-  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  body.scrollTop=wantBottom?body.scrollHeight:old.top;
   if(typing)return;                        // never replace the input being typed into
   const p=s.pending;
   const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
@@ -919,6 +943,8 @@ function renderSession(force){
       <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
     <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
+  // #sact just shrank #sbody — re-pin to the true bottom after layout settles
+  if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
 
 // ---- subagent chat overlay -------------------------------------------------
@@ -1019,9 +1045,13 @@ function agentRow(a){
   const done=['done','ended'].includes(a.state);
   const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   const tk=a.tokens||{};
-  return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
-    title="open this subagent's conversation"
-    onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
+  const pinned=pinnedAgents.has(a.agent_id);
+  // tap opens the agent; desktop 📌 button (left of ›) toggles pin; mobile long-press toggles pin
+  const tap=`agentTap(event,'${a.session_id}','${a.agent_id}')`;
+  const touch=`ontouchstart="agentPressStart('${a.agent_id}')" ontouchend="agentPressEnd()" ontouchmove="agentPressEnd()"`;
+  return`<div class="arow ${done?'done-row':''}${pinned?' pinned':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
+    title="open this subagent's conversation" onclick="${tap}" ${touch}>
+    ${pinned?'<span class="pinmark">📌</span>':''}
     <span class="tree">⎿</span>
     <span class="dot ${a.state}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
@@ -1031,10 +1061,50 @@ function agentRow(a){
     ${!done?spark(a.spark):''}
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
+    <button class="apin${pinned?' on':''}" title="${pinned?'unpin':'pin to top'}"
+      onclick="event.stopPropagation();togglePin('${a.agent_id}')">📌</button>
     <span class="aopen">›</span>
   </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px"
-    onclick="event.stopPropagation();openAgent('${a.session_id}','${a.agent_id}')">
+    onclick="${tap}" ${touch}>
     <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext" style="-webkit-line-clamp:${clampA()}">${esc(a.last_msg.text)}</span></div>`:''}`;
+}
+// Pinned agents are lifted OUT of their card into the global #pinned block (below
+// the usage header) — see renderPinned. A card's own lists show only its unpinned
+// agents. In-memory, keyed by agent_id.
+const pinnedAgents=new Set();
+function agentListHtml(agents){
+  return agents.filter(a=>!pinnedAgents.has(a.agent_id)).map(agentRow).join('');
+}
+function togglePin(aid){
+  pinnedAgents.has(aid)?pinnedAgents.delete(aid):pinnedAgents.add(aid);
+  render(last,true);            // force: resort now, even under the touch guard
+  if(agentView)renderAgent(true);
+}
+// mobile: long-press toggles pin; a short tap still opens the agent chat
+let agentPressTimer=null,agentLongFired=false;
+function agentPressStart(aid){
+  agentLongFired=false;
+  agentPressTimer=setTimeout(()=>{agentLongFired=true;togglePin(aid);
+    if(navigator.vibrate)navigator.vibrate(15);},500);
+}
+function agentPressEnd(){if(agentPressTimer){clearTimeout(agentPressTimer);agentPressTimer=null;}}
+function agentTap(e,sid,aid){
+  e.stopPropagation();
+  if(agentLongFired){agentLongFired=false;return;}   // long-press just pinned — don't open
+  openAgent(sid,aid);
+}
+// The global pinned-agents block (below the usage header). Order is STABLE — the
+// order agents were pinned (Set insertion order) — never re-sorted by session
+// state (running/idle/needs-you) or by the session list's ordering.
+function renderPinned(){
+  const el=$('#pinned');
+  const byId={};
+  ((last&&last.sessions)||[]).forEach(s=>(s.agents||[]).forEach(a=>{byId[a.agent_id]={a,s};}));
+  const items=[...pinnedAgents].map(id=>byId[id]).filter(Boolean);
+  if(!items.length){el.className='empty';el.innerHTML='';return;}
+  el.className='';
+  el.innerHTML=`<div class="pinhdr">📌 pinned agents</div>`+items.map(({a,s})=>
+    `<div class="pinrow"><span class="pinsess" title="which session this agent belongs to">${esc(s.title||s.project||'session')}</span>${agentRow(a)}</div>`).join('');
 }
 const setg=()=>((last&&last.settings)||{});
 const previewAgents=()=>!!setg().preview_agents;
@@ -1076,14 +1146,15 @@ function cardTop(s){
     </div>
     ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
     ${cardPending(s)}
-    ${activeSession&&running.length?`<div class="agents">${running.map(agentRow).join('')}</div>`:''}
+    ${activeSession&&running.some(a=>!pinnedAgents.has(a.agent_id))?`<div class="agents">${agentListHtml(running)}</div>`:''}
     <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
 }
 // The card tail ("more"): reference material with native <details> folds. It is
 // rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns
 // don't remount every tick — that remount was the "blinking".
 function cardDetail(s){
-  const done=s.agents.filter(a=>['done','ended'].includes(a.state));
+  // completed agents shown here exclude any pinned ones (they live in #pinned)
+  const done=s.agents.filter(a=>['done','ended'].includes(a.state)&&!pinnedAgents.has(a.agent_id));
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   return`<div class="detail">
       <div class="mutebox">
@@ -1117,7 +1188,7 @@ function cardDetail(s){
       <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
         ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>completed agents (${done.length})</summary>
-        <div class="foldscroll">${done.length?done.map(agentRow).join(''):'<div class="dhead">none yet</div>'}</div>
+        <div class="foldscroll">${done.length?agentListHtml(done):'<div class="dhead">none yet</div>'}</div>
       </details>
       ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
     </div>`;
@@ -1127,8 +1198,10 @@ function cardDetail(s){
 function detailSig(s){
   const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
+  // pinned agents in this session change the completed list's order → resort the tail
+  const pins=s.agents.filter(a=>pinnedAgents.has(a.agent_id)).map(a=>a.agent_id).sort().join(',');
   return[s.muted,s.pid,s.model,s.effort,s.reg_status,s.ctx_tokens,
-    Math.round((s.cost+s.agent_cost)*100),done,files].join('|');
+    Math.round((s.cost+s.agent_cost)*100),done,files,pins].join('|');
 }
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
@@ -1709,6 +1782,7 @@ function render(f,force){
     // reconcile in place: persists each card node so an expanded card's open
     // <details> doesn't remount (flash) every poll
     reconcileCards($('#sessions'),live);
+    renderPinned();
     if(!typingNew)$('#newsess').innerHTML=newSection();
     $('#dormant').innerHTML=dormantSection(dorm);
     if(!typingClosed)$('#closed').innerHTML=closedSection(f.closed,f.t);

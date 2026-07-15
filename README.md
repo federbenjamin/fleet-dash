@@ -65,6 +65,13 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
   the agent definition's frontmatter pin, or the parent session's effort when it pins none.
 - **"open"** on each card header (desktop only): brings that session's iTerm tab to the front.
+- **Pin agents to a watchlist at the top:** pinning lifts an agent out of its card into a
+  **📌 pinned agents** block directly below the usage header, each row labelled with its session.
+  The order is **stable** — the order you pinned them — and never reshuffles as sessions change
+  state (running / idle / needs-you). On **desktop**, a 📌 button to the left of each row's `›`
+  toggles it; on **mobile**, **long-press** the row (a short tap still opens its chat). Works on
+  running and completed agents alike. Pins are in-memory (agents are short-lived, so they clear on
+  reload).
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
   dropdown (id, type, description, model, state, started/last activity, token split, $), and a
