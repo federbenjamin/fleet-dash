@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import atexit
 import urllib.parse
 import urllib.request
 
@@ -23,11 +24,30 @@ def request(path, payload=None, token=None):
 
 
 def main():
-    if len(sys.argv) != 2 or not sys.argv[1].startswith("codex:"):
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and not sys.argv[1].startswith("codex:")):
         raise SystemExit("usage: live_subagent_smoke.py codex:THREAD_ID")
-    sid = sys.argv[1]
     with open(os.path.join(BASE, "config.json")) as handle:
         token = json.load(handle)["act_token"]
+    created = len(sys.argv) == 1
+    if created:
+        spawned = request("/api/act", {"type": "spawn", "provider": "codex",
+            "cwd": BASE, "model": "", "effort": "", "mode": "default"}, token)
+        assert spawned["ok"], spawned
+        sid = spawned["session_id"]
+    else:
+        sid = sys.argv[1]
+    cleanup = {"done": not created}
+
+    def archive_created_thread():
+        if cleanup["done"]:
+            return
+        try:
+            request("/api/act", {"type": "archive", "session_id": sid}, token)
+        except Exception:
+            pass
+        cleanup["done"] = True
+
+    atexit.register(archive_created_thread)
     sent = request("/api/act", {"type": "text", "session_id": sid,
         "text": "Spawn exactly one subagent. Tell it to reply exactly AGENT_OK without using tools. "
                 "Wait for it, then reply exactly PARENT_OK."}, token)
@@ -39,7 +59,8 @@ def main():
         fleet = request("/api/fleet")
         parent = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
         context = request("/api/context?" + urllib.parse.urlencode({"sid": sid}))
-        text = "\n".join(str(m.get("text") or "") for m in context.get("messages", []))
+        text = "\n".join(str(m.get("text") or "") for m in context.get("messages", [])
+                         if m.get("role") == "assistant")
         if parent and parent["agents_total"] and "PARENT_OK" in text:
             break
     assert parent and parent["agents_total"] >= 1, parent
@@ -47,11 +68,24 @@ def main():
     query = urllib.parse.urlencode({"sid": sid, "aid": agent["agent_id"]})
     child = request("/api/agent_context?" + query)
     assert child["ok"], child
-    child_text = "\n".join(str(m.get("text") or "") for m in child.get("messages", []))
+    child_text = "\n".join(str(m.get("text") or "") for m in child.get("messages", [])
+                           if m.get("role") == "assistant")
     assert "AGENT_OK" in child_text, child_text
-    print(json.dumps({"ok": True, "agent_id": agent["agent_id"],
+    for _ in range(60):
+        if agent["state"] in ("done", "ended"):
+            break
+        time.sleep(0.5)
+        fleet = request("/api/fleet")
+        parent = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
+        if parent and parent.get("agents"):
+            agent = next((item for item in parent["agents"]
+                          if item["agent_id"] == agent["agent_id"]), agent)
+    assert agent["state"] in ("done", "ended"), agent
+    archive_created_thread()
+    print(json.dumps({"ok": True,
                       "agent_state": agent["state"],
-                      "child_messages": len(child["messages"])}, indent=2))
+                      "child_messages": len(child["messages"]),
+                      "archived": created}, indent=2))
 
 
 if __name__ == "__main__":

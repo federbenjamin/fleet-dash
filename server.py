@@ -4,7 +4,8 @@
 GET /            dashboard.html (re-read per request, edit without restart)
 GET /api/fleet   latest fleet snapshot JSON
 """
-import json, os, sys, time, threading
+import json, os, sys, time, threading, secrets
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -27,9 +28,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def token_ok(self):
         want = self.eng.cfg.get("act_token", "")
-        cookies = self.headers.get("Cookie", "")
-        return want and (f"act_token={want}" in cookies
-                         or self.headers.get("X-Act-Token") == want)
+        if not want:
+            return False
+        supplied = self.headers.get("X-Act-Token") or ""
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            if not supplied and cookies.get("act_token"):
+                supplied = cookies["act_token"].value
+        except CookieError:
+            return False
+        return secrets.compare_digest(str(want), str(supplied))
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
@@ -42,7 +50,12 @@ class Handler(BaseHTTPRequestHandler):
                               b'{"ok": false, "error": "bad or missing act token"}')
         try:
             n = int(self.headers.get("Content-Length", "0"))
-            action = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
+            if n < 0 or n > 65536:
+                return self.reply(413, "application/json",
+                                  b'{"ok": false, "error": "request too large"}')
+            action = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(action, dict):
+                raise ValueError("JSON body must be an object")
         except Exception:
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
         if route == "/api/settings":

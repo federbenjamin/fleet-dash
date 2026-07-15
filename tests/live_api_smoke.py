@@ -5,6 +5,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import time
 
 
 ROOT = "http://127.0.0.1:8377"
@@ -24,8 +25,15 @@ def main():
     assert status == 200 and kind == "text/html"
     assert b"new coding session" in html and b"Codex CLI" in html
 
-    status, raw, kind = get("/api/fleet")
-    fleet = json.loads(raw)
+    fleet = None
+    for _ in range(30):
+        status, raw, kind = get("/api/fleet")
+        fleet = json.loads(raw)
+        if (fleet["providers"]["codex"]["ok"] and
+                fleet["models_by_provider"]["codex"]):
+            break
+        time.sleep(0.5)
+    assert fleet is not None
     assert status == 200 and kind == "application/json"
     assert fleet["providers"]["codex"]["ok"] is True
     assert fleet["models_by_provider"]["codex"]
@@ -35,7 +43,8 @@ def main():
     query = urllib.parse.urlencode({"sid": codex["session_id"]})
     assert json.loads(get("/api/context?" + query)[1])["ok"] is True
     commands = json.loads(get("/api/commands?" + query, token)[1])
-    assert commands["ok"] and any(c["name"] == "/model" for c in commands["commands"])
+    names = {c["name"] for c in commands["commands"]}
+    assert commands["ok"] and {"/compact", "/review"} <= names, commands
     insights = json.loads(get("/api/insights?days=7")[1])
     assert insights["ok"] is True
 

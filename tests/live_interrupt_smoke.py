@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import atexit
 import urllib.parse
 import urllib.request
 
@@ -23,9 +24,28 @@ def request(path, payload=None, token=None):
 
 
 def main():
-    sid = sys.argv[1]
     with open(os.path.join(BASE, "config.json")) as handle:
         token = json.load(handle)["act_token"]
+    created = len(sys.argv) == 1
+    if created:
+        spawned = request("/api/act", {"type": "spawn", "provider": "codex",
+            "cwd": BASE, "model": "", "effort": "", "mode": "default"}, token)
+        assert spawned["ok"], spawned
+        sid = spawned["session_id"]
+    else:
+        sid = sys.argv[1]
+    cleanup = {"done": not created}
+
+    def archive_created_thread():
+        if cleanup["done"]:
+            return
+        try:
+            request("/api/act", {"type": "archive", "session_id": sid}, token)
+        except Exception:
+            pass
+        cleanup["done"] = True
+
+    atexit.register(archive_created_thread)
     prompt = "Use the sleep tool for 30 seconds. After it completes, reply INTERRUPT_FAILED."
     assert request("/api/act", {"type": "text", "session_id": sid, "text": prompt}, token)["ok"]
     running = False
@@ -50,7 +70,9 @@ def main():
     recent = "\n".join((m.get("text") or "") for m in context["messages"][-3:]
                        if m.get("role") == "assistant")
     assert "INTERRUPT_FAILED" not in recent, recent
-    print(json.dumps({"ok": True, "state": session["state"]}, indent=2))
+    archive_created_thread()
+    print(json.dumps({"ok": True, "state": session["state"],
+                      "archived": created}, indent=2))
 
 
 if __name__ == "__main__":

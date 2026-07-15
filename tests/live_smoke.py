@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import atexit
 import urllib.parse
 import urllib.request
 
@@ -26,7 +27,14 @@ def main():
     with open(os.path.join(BASE, "config.json")) as handle:
         token = json.load(handle)["act_token"]
 
-    fleet = request("/api/fleet")
+    fleet = None
+    for _ in range(30):
+        fleet = request("/api/fleet")
+        if (fleet["providers"]["codex"]["ok"] and
+                fleet["models_by_provider"]["codex"]):
+            break
+        time.sleep(0.5)
+    assert fleet is not None
     assert fleet["providers"]["claude"]["ok"] is True
     assert fleet["providers"]["codex"]["ok"] is True, fleet["providers"]["codex"]
     assert fleet["models_by_provider"]["codex"], "Codex models were not discovered"
@@ -34,10 +42,23 @@ def main():
 
     assert request("/api/act", {"type": "ping"}, token)["ok"] is True
     spawned = request("/api/act", {"type": "spawn", "provider": "codex",
-                                    "cwd": BASE, "model": "", "effort": ""}, token)
+                                    "cwd": BASE, "model": "", "effort": "",
+                                    "mode": "plan"}, token)
     assert spawned["ok"] is True, spawned
     sid = spawned["session_id"]
     assert sid.startswith("codex:")
+    cleanup = {"done": False}
+
+    def archive_created_thread():
+        if cleanup["done"]:
+            return
+        try:
+            request("/api/act", {"type": "archive", "session_id": sid}, token)
+        except Exception:
+            pass
+        cleanup["done"] = True
+
+    atexit.register(archive_created_thread)
 
     session = None
     for _ in range(15):
@@ -51,6 +72,18 @@ def main():
     assert session["cost_source"] == "unavailable"
     assert session["capabilities"]["submit"] is True
     assert session["capabilities"]["focus_terminal"] is False
+    assert session["collaboration_mode"] == "plan", session
+    assert session["capabilities"]["answer_structured"] is False
+    assert session["model"], session
+    codex_usage = (fleet.get("provider_usage") or {}).get("codex") or {}
+    assert codex_usage.get("buckets"), codex_usage
+
+    changed = request("/api/act", {"type": "mode", "session_id": sid,
+                                    "mode": "default"}, token)
+    assert changed == {"ok": True, "mode": "default"}, changed
+    changed = request("/api/act", {"type": "mode", "session_id": sid,
+                                    "mode": "plan"}, token)
+    assert changed == {"ok": True, "mode": "plan"}, changed
 
     query = urllib.parse.urlencode({"sid": sid})
     context = request("/api/context?" + query)
@@ -58,10 +91,13 @@ def main():
     commands = request("/api/commands?" + query, token=token)
     assert commands["ok"] is True
     names = {item["name"] for item in commands["commands"]}
-    assert "/model" in names and "/skills" in names
-    print(json.dumps({"ok": True, "session_id": sid,
+    assert {"/compact", "/review"} <= names, names
+    archived = request("/api/act", {"type": "archive", "session_id": sid}, token)
+    assert archived["ok"], archived
+    cleanup["done"] = True
+    print(json.dumps({"ok": True,
                       "codex_models": len(fleet["models_by_provider"]["codex"]),
-                      "commands": len(commands["commands"])}, indent=2))
+                      "commands": len(commands["commands"]), "archived": True}, indent=2))
 
 
 if __name__ == "__main__":

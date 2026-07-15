@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, subprocess, threading, contextlib, urllib.request
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request
 from collections import deque
 from codex_adapter import CodexAdapter
 
@@ -130,19 +130,6 @@ BUILTIN_COMMANDS = [
     ("export", "Export the conversation"),
     ("help", "List available commands"),
 ]
-
-CODEX_BUILTIN_COMMANDS = [
-    ("model", "Choose the active model and reasoning effort"),
-    ("permissions", "Change approval and sandbox behavior"),
-    ("agent", "Inspect or switch active agents"),
-    ("skills", "List available skills"),
-    ("mcp", "Show configured MCP servers"),
-    ("review", "Start a code review"),
-    ("compact", "Compact the current conversation"),
-    ("status", "Show session and account status"),
-    ("help", "List available commands"),
-]
-
 
 def ktok(n):
     n = int(n or 0)
@@ -635,7 +622,8 @@ class Engine:
                                            "app-server"])
             self.codex = CodexAdapter(enabled=bool(cfg.get("codex_enabled", True)),
                                       client=codex_client,
-                                      state_path=os.path.join(BASE, "codex_threads.json"))
+                                      state_path=os.path.join(BASE, "codex_threads.json"),
+                                      stall_seconds=int(cfg.get("stall_seconds") or 180))
         except Exception as exc:
             self.codex = CodexAdapter(enabled=False, client=object())
             self.codex.error = str(exc)
@@ -645,7 +633,8 @@ class Engine:
         out = []
         for p in glob.glob(os.path.join(SESSIONS, "*.json")):
             try:
-                d = json.load(open(p))
+                with open(p) as handle:
+                    d = json.load(handle)
                 os.kill(d["pid"], 0)
             except Exception:
                 continue
@@ -784,17 +773,33 @@ class Engine:
                 "agent_cost": round(sum(a["cost"] for a in agents), 4),
                 "cost_source": "calculated",
                 "capabilities": {"submit": True, "interrupt": state == "running",
+                    "close": True,
                     "focus_terminal": True, "answer_structured": True,
                     "decide_approval": True, "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
         # Codex is a second provider inside the same fleet. A failed/missing Codex
         # installation must not take down the existing Claude dashboard.
-        sessions.extend(self.codex.sessions())
+        try:
+            codex_sessions = self.codex.sessions()
+        except Exception as exc:
+            self.codex.error = str(exc)
+            codex_sessions = []
+        sessions.extend(codex_sessions)
+        muted = self.cfg.get("muted_sessions") or {}
+        for session in sessions:
+            session["muted"] = session["session_id"] in muted
         order = {"needs_you": 0, "stalled": 0, "stalled_or_prompt": 0, "turn_done": 1,
-                 "running": 2, "idle": 3, "dormant": 4}
-        sessions.sort(key=lambda s: (order.get(s["state"], 2), -s["cost"]))
+                 "running": 2, "error": 2, "stale": 2, "idle": 3,
+                 "reopenable": 4, "dormant": 5}
+        sessions.sort(key=lambda s: (order.get(s["state"], 2),
+                                     -(s.get("cost") or 0)))
         self.record_sessions(sessions, now)
+        claude_usage = self.read_usage()
+        try:
+            codex_usage = self.codex.account_usage()
+        except Exception as exc:
+            codex_usage = {"provider": "codex", "stale": True, "error": str(exc)}
         fleet = {
             "t": now,
             "sessions": sessions,
@@ -805,10 +810,13 @@ class Engine:
                 "dormant": sum(1 for s in sessions if s["state"] == "dormant"),
                 "done": sum(1 for s in sessions if s["state"] == "turn_done"),
                 "agents_running": sum(s["agents_running"] for s in sessions),
-                "session_cost": round(sum(s["cost"] for s in sessions), 2),
-                "agent_cost": round(sum(s["agent_cost"] for s in sessions), 2),
+                "session_cost": round(sum(s.get("cost") or 0 for s in sessions), 2),
+                "agent_cost": round(sum(s.get("agent_cost") or 0 for s in sessions), 2),
+                "cost_partial": any(s.get("cost") is None or s.get("agent_cost") is None
+                                    for s in sessions),
             },
-            "usage": self.read_usage(),
+            "usage": claude_usage,
+            "provider_usage": {"claude": claude_usage, "codex": codex_usage},
             "closed": self.closed_sessions(),
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
@@ -1426,31 +1434,9 @@ class Engine:
     def codex_commands(self, sid):
         session = next((s for s in self.snapshot_cache.get("sessions", [])
                         if s.get("session_id") == sid), {})
-        cwd = session.get("cwd", "")
-        out = [{"name": "/" + name, "desc": desc, "scope": "built-in",
-                "danger": name in DANGER_COMMANDS}
-               for name, desc in CODEX_BUILTIN_COMMANDS]
-        seen = {x["name"] for x in out}
-
-        def scan(root, scope):
-            for path in sorted(glob.glob(os.path.join(root, "*", "SKILL.md"))):
-                name = "$" + os.path.basename(os.path.dirname(path))
-                if name in seen:
-                    continue
-                seen.add(name)
-                try:
-                    head = open(path, errors="replace").read(2500)
-                except OSError:
-                    head = ""
-                match = re.search(r"^description:\s*(.+)$", head, re.M)
-                out.append({"name": name, "desc": (match.group(1).strip().strip("'\"")
-                            if match else "Codex skill")[:120], "scope": scope,
-                            "danger": False})
-
-        if cwd:
-            scan(os.path.join(cwd, ".agents", "skills"), "project")
-        scan(os.path.join(HOME, ".agents", "skills"), "user")
-        return {"ok": True, "commands": out}
+        if not session:
+            return {"ok": False, "error": "Codex session is unavailable"}
+        return self.codex.commands(sid, session.get("cwd", ""))
 
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
@@ -1523,6 +1509,8 @@ class Engine:
     def file_content(self, sid, fpath):
         """Serve a delivered file. WHITELIST: only paths recorded from this session's
         own SendUserFile tool_use rows — never a free-form client path."""
+        if str(sid).startswith("codex:"):
+            return self.codex.file_content(sid, fpath)
         reg, path = self._reg_main_path(sid)
         if not reg:
             return None, None, "session not live"
@@ -1549,6 +1537,63 @@ class Engine:
         return ctype, data, None
 
     # ------------------------------------------------------------ injection
+    def _close_claude_session(self, reg):
+        """Terminate only the registered Claude process; never close its terminal tab."""
+        try:
+            pid = int(reg.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 1 or pid == os.getpid():
+            return {"ok": False, "error": "refusing to terminate an invalid Claude pid"}
+
+        # Session registry entries can outlive a crashed process. Verify the PID was
+        # not reused before signalling it; a cwd containing `.claude` is deliberately
+        # insufficient evidence.
+        try:
+            command = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="], capture_output=True,
+                text=True, timeout=5).stdout.strip()
+        except Exception as exc:
+            return {"ok": False, "error": f"process lookup failed: {exc}"}
+        if not command:
+            return {"ok": False, "error": "Claude process is no longer running"}
+        if not re.search(r"(^|[/\s])claude(?:-code)?(?:[/\s]|$)", command, re.I):
+            return {"ok": False, "error": "refusing to terminate a non-Claude process"}
+
+        interrupted = False
+        interrupt_error = None
+        if reg.get("status") in ("busy", "waiting"):
+            tty = self._tty_cache.get(pid)
+            if not tty:
+                try:
+                    tty = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "tty="], capture_output=True,
+                        text=True, timeout=5).stdout.strip()
+                except Exception as exc:
+                    interrupt_error = f"tty lookup failed: {exc}"
+                if tty and tty != "??":
+                    self._tty_cache[pid] = tty
+            if tty and tty != "??":
+                result = self._iterm_write(f"/dev/{tty}", [("\x1b", False)],
+                                           step_delay=0.05)
+                interrupted = bool(result.get("ok"))
+                if not interrupted:
+                    interrupt_error = result.get("error") or "interrupt failed"
+                else:
+                    time.sleep(0.15)
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError) as exc:
+            return {"ok": False, "error": f"could not terminate Claude: {exc}"}
+        self._tty_cache.pop(pid, None)
+        result = {"ok": True, "closed": True, "interrupted": interrupted}
+        if interrupt_error:
+            result["warning"] = interrupt_error
+        return result
+
     def act(self, action):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
@@ -1557,6 +1602,7 @@ class Engine:
         {type:'dismiss', session_id, nonce}   (Esc = the TUI's "Chat about this") |
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
+        {type:'close', session_id}            (stop if active, then SIGTERM Claude) |
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
@@ -1573,6 +1619,8 @@ class Engine:
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live"}
+        if action.get("type") == "close":
+            return self._close_claude_session(reg)
         # a prompt answer may only go to a session actually blocked on a prompt —
         # a hook-blocked ask leaves a ghost pending file but the session stays
         # 'busy', and injected digits would land in its main input box
@@ -1768,7 +1816,8 @@ class Engine:
         try:
             thread = self.codex.start_thread(
                 cwd, str(action.get("model") or "").strip() or None,
-                str(action.get("effort") or "").strip() or None)
+                str(action.get("effort") or "").strip() or None,
+                str(action.get("mode") or "plan").strip())
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         tid = thread.get("id")
@@ -1909,10 +1958,12 @@ class Engine:
                 self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
                           f"{s['name']}: blocked {s['quiet_s'] // 60}m{what}"[:400],
                           "hourglass_flowing_sand")
-            mult = int((s["cost"] + s["agent_cost"]) / cfg["spend_threshold_usd"])
+            measured_cost = ((s.get("cost") or 0) + (s.get("agent_cost") or 0)
+                             if s.get("capabilities", {}).get("exact_cost") else None)
+            mult = int(measured_cost / cfg["spend_threshold_usd"]) if measured_cost else 0
             if on.get("spend", True) and mult >= 1:   # only the highest crossed threshold, once
                 self.once(f"spend:{key_base}:{mult}", "Spend threshold",
-                          f"{s['name']}: ${s['cost'] + s['agent_cost']:.2f} "
+                          f"{s['name']}: ${measured_cost:.2f} "
                           f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
         busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
         if busy > 0:

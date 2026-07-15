@@ -26,7 +26,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   The running-agent count stays visible everywhere.
 - **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
-  effort level (`low`…`max`). Claude sessions can also request a **new git worktree** — it opens
+  effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
+  by default. Claude sessions can request a **new git worktree** — it opens
   a fresh iTerm tab running `claude` with those
   flags, then auto-opens that session's full chat view here once it appears, so you can send
   the first prompt from your phone. Untrusted folders are flagged: Claude Code asks "do you
@@ -38,41 +39,66 @@ the provider's native control path. Built 2026-07-13; still evolving.
 Fleet Dash runs one long-lived `codex app-server` process and communicates through its supported
 stdio JSONL protocol. It does not scrape the Codex TUI or parse `~/.codex` rollout files.
 
-- Threads created by Fleet Dash are remembered in `codex_threads.json` and resumed after daemon
-  restarts.
+- Threads created or explicitly taken over by Fleet Dash are remembered in `codex_threads.json`,
+  including their mode and last normalized conversation, and resume after daemon restarts.
+- Independently launched top-level Codex threads are discovered through paginated `thread/list` and
+  appear as read-only `reopenable` cards inside the collapsed **headless sessions** fold. **Take over
+  thread** explicitly resumes one into Fleet Dash control. Child subagent threads never become
+  duplicate top-level cards.
 - Conversation history, prompt submission, interruption, and approval decisions use App Server
   thread/turn APIs.
 - Codex thread IDs are stored as `codex:<native-id>` so they cannot collide with Claude IDs.
-- Codex costs display as unavailable rather than being priced with Claude rates. Token usage is
-  shown when App Server reports it.
-- Existing independently launched Codex TUIs are not adopted into Fleet Dash's live control
-  process. Start the Codex thread from Fleet Dash for full interaction and event streaming.
-- Codex `request_user_input` is unavailable in Default mode. Fleet Dash implements its App Server
-  response protocol, but a normal Codex thread will ask in plain text unless Codex is operating in
-  a mode that exposes the structured tool.
-- Codex subagent conversations are visible, but direct input is read-only: App Server rejects
-  direct input to v2 subagents. Continue through the parent thread instead.
+- Codex costs display as unavailable rather than being priced with Claude rates. App Server's
+  exact per-thread token total and model context-window size drive each card's context gauge.
+- Every managed Codex chat and file view has Plan/Default controls in its top-right overflow menu.
+  The main fleet cards stay mode-free. The selected mode is
+  persisted and applied through App Server's experimental `thread/settings/update` API; the
+  installed Codex 0.144.4 behavior is covered by live and deterministic tests. Structured questions
+  appear whenever Codex actually sends a request, rather than being inferred from the selected mode.
+- Codex account rate-limit windows, reset times, plan type, reset credits, and lifetime token
+  total come directly from App Server account APIs and appear in the top usage header. The unused
+  GPT-5.3-Codex-Spark preview-model allowance remains available in the API payload but is omitted
+  from the dashboard.
+- Codex subagent conversations and lifecycle events are visible. App Server exposes no public client
+  RPC for direct subagent input or stop, so relay and stop actions go through the parent turn and are
+  labelled that way. Per-agent tokens are shown only when App Server supplies them; currency cost and
+  throughput remain unavailable instead of displaying fabricated zeroes.
+- App Server file-change and generated-image items appear as changed/generated artifacts with the
+  same root-containment, size, and preview-type checks as Claude files. They are not labelled as
+  explicitly delivered files because Codex has no SendUserFile-equivalent event.
+- `/compact` and `/review` invoke native App Server actions. `$skill-name` selections use native
+  `skills/list` metadata and `SkillUserInput`. TUI-only slash commands are not passed accidentally as
+  ordinary prompts.
+- Question, permission, command, file-change, and MCP elicitation requests use their native App
+  Server response shapes. `request_user_input` is single-select plus optional free text; MCP
+  elicitation supports provider-declared multi-select and accept/decline/cancel.
 
 Requires a `codex` executable with App Server support. Set `codex_enabled` to `false` to disable
 the provider without affecting Claude sessions.
-- **Dormant sessions** get their own fold above closed sessions. Dormant = the transcript
-  hasn't moved in over 2h (`dormant_seconds`) AND no agents are running — forgotten panes and
-  VS Code backends. They're kept out of the live list and can never "need you".
+- **Headless sessions** are independently launched Codex threads that Fleet Dash can see but does not
+  manage. Their fold stays collapsed by default; taking one over moves it into the always-visible list.
+- **Dormant sessions** get their own fold above session history. For Claude, dormant means the
+  transcript hasn't moved in over 2h (`dormant_seconds`) and no agents are running. For Codex, it
+  means App Server reports the managed thread as `notLoaded` after more than 24h of inactivity.
+  They're kept out of the live list and can never "need you".
+- **Idle sessions** remain in the always-visible list because they are managed and can accept a turn
+  immediately.
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
-- **Plan-usage header** (top of the page, under the totals): three stacked lines — the logged-in
+- **Provider-usage header** (top of the page, under the totals): Claude shows the logged-in
   account email, then utilization for the **5-hour** session and the **weekly** (7-day) window (each
   a percent, a bar green → amber ≥70% → red ≥90%, and when it resets: local time + time-left). This
   is the **account actually logged into Claude Code**: the numbers come from the statusline payload's
   `rate_limits` (the same data `/usage` shows), which `statusline-command.sh` writes to
   `~/.claude/fleet-dash/usage.json`; the email comes from `~/.claude.json`. It only populates once a
-  session has made its first API call, and is hidden entirely until then.
+  session has made its first API call. Codex appears in the same header with every App Server
+  rate-limit bucket, reset time, plan type, lifetime tokens, and available reset-credit count.
 - **Per card meta line** — two groups on one row: **left** is activity (running-agent count ·
   quiet time, plus the running skill / compaction when active); **right**, right-adjusted, is
   the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working
   context, so this is your cue to wrap up or `/compact` deliberately) · `model - effort`. 🔔 mute
-  sits in the tail. (The ■ stop button lives in the full view.)
+  sits in the tail. Codex mode and lifecycle actions live in the full-view overflow menu.
 - **Conversation peek** on every card: the newest actual message (prose only — tool calls and
   system events are skipped), tagged YOU / CLAUDE, between the meta row and the subagent rows.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
@@ -89,10 +115,12 @@ the provider without affecting Claude sessions.
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
   the agent definition's frontmatter pin, or the parent session's effort when it pins none.
 - **"open"** on each card header (desktop only): brings that session's iTerm tab to the front.
+  Codex cards show a disabled **no terminal** control because App Server exposes no focus API.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
   **📌 pinned sessions** block directly below the usage header. The order is **stable** — the
   order you pinned them — and never reshuffles as session states change. On **desktop**, use the
-  📌 button in the session header; on **mobile**, **long-press** the header (a short tap still opens
+  contained 📌 button immediately to the right of **open/no terminal** in the session header; on
+  **mobile**, **long-press** the header (a short tap still opens
   its chat). Pins are in-memory and clear on reload.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
@@ -102,7 +130,8 @@ the provider without affecting Claude sessions.
   session's** input (`[fleet-dash relay to subagent … ] your text`), and the parent forwards it.
   Delivery is the parent's call, not a guarantee — the view says so above the box. It's refused
   outright while the parent is blocked on a prompt (that input box is the question UI, and the
-  relay would answer it). The view also has a **■ stop**, with the same caveat: a subagent has no
+  relay would answer it). Its overflow menu has **light/dark mode** and **stop parent turn**, with
+  the same caveat: a subagent has no
   terminal, so stopping it means Esc into its **parent** — ending the parent's whole turn and
   every other subagent under it. Every stop, anywhere, goes through an "are you sure"
   interstitial that says what will be lost.
@@ -125,10 +154,12 @@ the provider without affecting Claude sessions.
   confirmation before sending.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
-  autocomplete), the amber question block when it's blocked on you, a delivered-file strip, and
-  — in the header — the **■ stop button** (confirms first, then sends Esc: the remote "stop this
-  turn"; only offered while the session is mid-turn). The card keeps its inline conversation for
-  scanning; this is for actually reading and working a session.
+  autocomplete), the amber question block when it's blocked on you, and a delivered-file strip.
+  Its top-right **⋮ menu** contains Codex Plan/Default (when applicable), light/dark mode, Stop turn,
+  and Close session. Stop and close both confirm first. Closing an active session stops its current
+  turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
+  Claude's iTerm tab remains open. The conversation moves to **Session history**. The card keeps its
+  inline conversation for scanning; this is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
   button (right of "show conversation") takes you straight back. The two are built to resemble
@@ -169,9 +200,10 @@ the provider without affecting Claude sessions.
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
-- **File viewer** extras: a ☀︎/☾ button toggles a light "paper" theme for the document
-  (persisted per device, and shared with the full chat view's own ☀︎/☾ button — one theme for
-  both surfaces); a **📄 files strip** (header button) expands a one-line horizontally
+- **File viewer** extras: the same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
+  actions that apply to the owning session. Light mode gives the document a paper theme; the choice
+  is persisted per device and shared with the full chat and subagent views. A **📄 files strip**
+  (header button) expands a one-line horizontally
   scrolling selector of everything the session delivered, for switching files without leaving
   the viewer; and a **docked action bar** at the bottom carries, top to bottom: a
   "▸ show conversation" toggle (expands the session's recent conversation, scrollable), the
@@ -179,7 +211,7 @@ the provider without affecting Claude sessions.
   ✕ dismiss), and the always-visible free-text send box.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
-- **closed sessions** dropdown: every closed session the daemon ever saw (title, final spend,
+- **Session history** dropdown: every closed session the daemon ever saw (title, final spend,
   agents, closed-ago), with a filter box (title / project / branch); tap a row for its info
   block (full id, cwd, branch, model, lifetime, spend split). Session ids, cwds and agent ids
   in any info block are **tap-to-copy**.
@@ -274,6 +306,20 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
 (dashboard.html changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.
 
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+npm install
+npx playwright install chromium
+npm run test:browser
+```
+
+The Python suite includes a deterministic fake App Server transport plus adapter and shared-engine
+fixtures. Playwright runs the same provider/UI matrix at desktop and 390×844 mobile sizes. Scripts
+named `tests/live_*_smoke.py` are opt-in checks against the running daemon; paid-turn scripts say so
+in their docstring and archive threads they create.
+
 ## Rebuilding the injector applet
 
 The applet is **stay-open** (`OSAAppletStayOpen`), so it stays resident and `open -g` hits its
@@ -319,6 +365,12 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
 - VS Code extension sessions have no tty → view-only (injection reports "no terminal").
+- Codex App Server has no terminal-focus RPC, direct client-to-subagent input/stop RPC, or
+  per-thread currency-cost field. Fleet Dash exposes the corresponding disabled/parent-mediated/
+  unavailable states and never substitutes zero as a measurement.
+- Codex Plan/Default mutation currently uses an experimental App Server method. It is verified
+  against the installed CLI and isolated in the adapter, but may require an adapter update if Codex
+  changes that experimental protocol.
 - "Recently closed" only records sessions the daemon saw alive (fills from 2026-07-13 onward).
 - The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
   links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.

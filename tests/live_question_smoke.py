@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Paid live smoke: one minimal Codex turn through Fleet Dash."""
+"""Paid live smoke: Plan mode structured question round-trip through Fleet Dash."""
 import json
 import os
 import time
 import atexit
-import urllib.parse
 import urllib.request
 
 
@@ -18,7 +17,7 @@ def request(path, payload=None, token=None):
     if token:
         headers["X-Act-Token"] = token
     req = urllib.request.Request(ROOT + path, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as response:
+    with urllib.request.urlopen(req, timeout=30) as response:
         return json.load(response)
 
 
@@ -26,8 +25,7 @@ def main():
     with open(os.path.join(BASE, "config.json")) as handle:
         token = json.load(handle)["act_token"]
     spawned = request("/api/act", {"type": "spawn", "provider": "codex",
-                                    "cwd": BASE, "model": "", "effort": "",
-                                    "mode": "default"}, token)
+        "cwd": BASE, "model": "", "effort": "medium", "mode": "plan"}, token)
     assert spawned["ok"], spawned
     sid = spawned["session_id"]
     cleanup = {"done": False}
@@ -43,36 +41,42 @@ def main():
 
     atexit.register(archive_created_thread)
     sent = request("/api/act", {"type": "text", "session_id": sid,
-                                 "text": "Reply with exactly TEST_OK. Do not use tools."}, token)
+        "text": "Use request_user_input now. Ask exactly one question with header Scope "
+                "and exactly two options. Do not answer it yourself."}, token)
     assert sent["ok"], sent
 
-    context = None
     session = None
-    assistant_text = ""
-    for _ in range(90):
-        time.sleep(1)
+    for _ in range(120):
+        time.sleep(0.5)
         fleet = request("/api/fleet")
         session = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
-        context = request("/api/context?" + urllib.parse.urlencode({"sid": sid}))
-        assistant_text = "\n".join(str(m.get("text") or "")
-                                   for m in context.get("messages", [])
-                                   if m.get("role") == "assistant")
-        if ("TEST_OK" in assistant_text and session and session["state"] != "running"
-                and session.get("ctx_tokens", 0) > 0):
+        if session and (session.get("pending") or {}).get("kind") == "question":
             break
-    assert context and context.get("ok"), context
-    assert "TEST_OK" in assistant_text, assistant_text
     assert session, sid
-    assert session["provider"] == "codex"
-    assert session["state"] != "running", session
-    assert session["ctx_tokens"] > 0, session
-    assert session["ctx_pct"] is not None, session
+    assert session["collaboration_mode"] == "plan", session
+    pending = session.get("pending") or {}
+    assert pending.get("kind") == "question", session
+    assert len(pending.get("questions") or []) == 1, pending
+    question = pending["questions"][0]
+    assert len(question.get("options") or []) == 2, question
+
+    answered = request("/api/act", {"type": "option", "session_id": sid,
+        "nonce": pending["nonce"], "digits": [1],
+        "n_options": len(question["options"])}, token)
+    assert answered["ok"], answered
+    for _ in range(120):
+        time.sleep(0.5)
+        fleet = request("/api/fleet")
+        session = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
+        if session and not session.get("pending") and session["state"] != "running":
+            break
+    assert session and not session.get("pending"), session
     archived = request("/api/act", {"type": "archive", "session_id": sid}, token)
     assert archived["ok"], archived
     cleanup["done"] = True
-    print(json.dumps({"ok": True, "state": session["state"],
-                      "ctx_tokens": session["ctx_tokens"],
-                      "messages": len(context["messages"]), "archived": True}, indent=2))
+    print(json.dumps({"ok": True,
+                      "mode": session["collaboration_mode"],
+                      "state": session["state"], "archived": True}, indent=2))
 
 
 if __name__ == "__main__":
