@@ -68,18 +68,19 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
 #stale{display:none;background:var(--red);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px}
-/* active cards are always full brightness. Only IDLE and DORMANT cards recede when
-   collapsed ("more"); expanding them ("less") brings them to full. */
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;
+/* Active/error cards use the raised surface. Available inventory stays on the
+   quieter base surface; only dormant/headless cards recede in opacity. */
+.card{background:var(--card2);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;
   overflow:clip;opacity:1;transition:opacity .12s ease}
+.card>.ctop{background:inherit}
 .card.needs{border-color:var(--amber)}
 .card.stalled{border-color:var(--red)}
-.card.idle{opacity:.7}
+.card.idle{background:var(--card);opacity:1}
 /* sticky: header pins to the viewport top while its card scrolls past (so a long
    open card can still be collapsed), then exits with the card bottom. Requires the
    card ancestor NOT be a scroll container: overflow:clip above, never hidden. */
 .shead{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none;
-       position:sticky;top:0;z-index:5;background:var(--card)}
+       position:sticky;top:0;z-index:5;background:inherit}
 .chip{font-size:11px;font-weight:600;border-radius:20px;padding:2px 9px;white-space:nowrap}
 .chip.running{background:#12261e;color:var(--green)}
 .chip.needs_you{background:#2b2111;color:var(--amber)}
@@ -88,8 +89,8 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .chip.stalled{background:#2d1214;color:var(--red)}
 .chip.stalled_or_prompt{background:#2b2111;color:var(--amber)}
 .chip.dormant{background:var(--card2);color:var(--faint)}
-.card.dorm{opacity:.4}
-.card.idle.open,.card.dorm.open{opacity:1}   /* expanding a dim card focuses it */
+.card.dorm{background:var(--card);opacity:.4}
+.card.dorm.open{opacity:1}   /* expanding a dim card focuses it */
 .sname{font-weight:600;overflow:hidden;flex:1;min-width:0;line-height:1.3}
 .sname .stitle,.sname small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sname small{color:var(--dim);font-weight:400}
@@ -104,7 +105,8 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .ctxbar i{display:block;height:100%;background:var(--blue);border-radius:3px}
 a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
-.detail{border-top:1px solid var(--line);background:var(--card2);padding:8px 12px 10px;font-size:12px}
+.detail{border-top:1px solid var(--line);background:var(--card);padding:8px 12px 10px;font-size:12px}
+.card.idle .detail,.card.dorm .detail{background:var(--card2)}
 .detail .actmsg:empty{display:none}
 /* mute control at the top of the tail; equal gap to the first fold below it */
 .mutebox{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--dim);margin-bottom:8px}

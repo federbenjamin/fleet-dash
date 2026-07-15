@@ -69,6 +69,53 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await page.screenshot({ path: testInfo.outputPath('artifact-preview.png'), fullPage: true });
 });
 
+test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
+  const themeSurfaces = () => page.evaluate(() => {
+    const probe = document.createElement('span');
+    document.body.appendChild(probe);
+    probe.style.background = 'var(--card)';
+    const card = getComputedStyle(probe).backgroundColor;
+    probe.style.background = 'var(--card2)';
+    const card2 = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return { card, card2 };
+  });
+  const cardStyle = locator => locator.evaluate(el => ({
+    background: getComputedStyle(el).backgroundColor,
+    opacity: getComputedStyle(el).opacity,
+  }));
+
+  await reset(page);
+  let surfaces = await themeSurfaces();
+  const idle = page.locator('[data-sid="codex:thread-one"]');
+  await expect.poll(async () => (await cardStyle(idle)).background).toBe(surfaces.card);
+  expect((await cardStyle(idle)).opacity).toBe('1');
+
+  await reset(page, 'subagent');
+  surfaces = await themeSurfaces();
+  const running = page.locator('[data-sid="codex:thread-one"]');
+  await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
+  expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
+    .toBe(surfaces.card2);
+  await running.getByRole('button', { name: /more/ }).click();
+  await expect(running.locator('.detail')).toBeVisible();
+  expect(await running.locator('.detail').evaluate(el => getComputedStyle(el).backgroundColor))
+    .toBe(surfaces.card);
+  await page.screenshot({ path: testInfo.outputPath('active-card-contrast.png'), fullPage: true });
+
+  await page.request.post('/test/reset', { data: { scenario: 'organization' } });
+  await page.goto('/?token=abcdef123456');
+  surfaces = await themeSurfaces();
+  const headless = page.locator('#headless details');
+  const dormant = page.locator('#dormant details');
+  await headless.locator('summary').click();
+  await dormant.locator('summary').click();
+  expect((await cardStyle(headless.locator('[data-sid="codex:thread-one"]'))).background)
+    .toBe(surfaces.card);
+  expect((await cardStyle(dormant.locator('[data-sid="claude-dormant"]'))).background)
+    .toBe(surfaces.card);
+});
+
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await reset(page);
   const card = page.locator('[data-sid="codex:thread-one"]');
