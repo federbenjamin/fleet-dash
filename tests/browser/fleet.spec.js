@@ -195,7 +195,10 @@ test('session card surfaces distinguish active, available, and expanded informat
   await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
   expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
     .toBe(surfaces.card2);
-  await running.getByRole('button', { name: /more/ }).click();
+  const more = running.getByRole('button', { name: /more/ });
+  expect(await more.evaluate(el => getComputedStyle(el).paddingTop)).toBe('2px');
+  expect(await more.evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(22);
+  await more.click();
   await expect(running.locator('.detail')).toBeVisible();
   expect(await running.locator('.detail').evaluate(el => getComputedStyle(el).backgroundColor))
     .toBe(surfaces.card);
