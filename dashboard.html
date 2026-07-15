@@ -1009,11 +1009,11 @@ function renderAgent(force){
     const codex=par&&par.provider==='codex';
     $('#aact').innerHTML=`
       <div class="relaynote">${done?'this agent has finished — ':''}${codex
-        ?'messages are sent directly to this Codex agent thread'
+        ?'Codex subagent conversations are read-only here; App Server does not allow direct input to v2 subagents'
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
-      <div class="freetext"><input id="aft" placeholder="${codex?'message this Codex agent':'relay a message via the parent session'}" autocomplete="off"
+      ${codex?'':`<div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
         onkeydown="if(event.key==='Enter')sendRelay()">
-        <button class="pbtn send" onclick="sendRelay()">relay</button></div>
+        <button class="pbtn send" onclick="sendRelay()">relay</button></div>`}
       <div class="actmsg" id="amsg"></div>
       <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
         <summary>agent info</summary>

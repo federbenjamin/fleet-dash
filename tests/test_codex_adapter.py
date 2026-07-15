@@ -1,6 +1,6 @@
 import unittest
 
-from codex_adapter import CodexAdapter, CodexAppServer, _conversation
+from codex_adapter import CodexAdapter, CodexAppServer, _agents, _conversation
 
 
 class ResponseClient(CodexAppServer):
@@ -36,6 +36,15 @@ class FakeClient:
     def interrupt(self, thread_id):
         self.interrupted = thread_id
 
+    def request(self, method, params):
+        self.requested = (method, params)
+        return {}
+
+
+class EmptyThreadClient(FakeClient):
+    def read_thread(self, thread_id):
+        raise RuntimeError(f"thread {thread_id} is not materialized yet")
+
 
 class CodexAdapterTest(unittest.TestCase):
     def setUp(self):
@@ -57,14 +66,32 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual([m["role"] for m in out["messages"]],
                          ["user", "assistant", "tool"])
 
+    def test_empty_unmaterialized_thread_has_empty_context(self):
+        out = CodexAdapter(client=EmptyThreadClient()).context("codex:thr-empty")
+        self.assertEqual(out, {"ok": True, "messages": [], "files": []})
+
     def test_actions_strip_provider_prefix(self):
         out = self.adapter.act({"type": "text", "session_id": "codex:thr-1",
                                 "text": "continue"})
         self.assertTrue(out["ok"])
         self.assertEqual(self.client.started, ("thr-1", "continue"))
 
+    def test_relay_reports_unsupported_codex_subagent_input(self):
+        out = self.adapter.act({"type": "relay", "session_id": "codex:parent",
+                                "agent_id": "child-1", "text": "continue"})
+        self.assertFalse(out["ok"])
+        self.assertIn("does not allow direct input", out["error"])
+
     def test_conversation_ignores_unknown_items(self):
         self.assertEqual(_conversation({"turns": [{"items": [{"type": "reasoning"}]}]}), [])
+
+    def test_subagent_activity_history_is_discovered(self):
+        agents = _agents({"turns": [{"items": [{"type": "subAgentActivity",
+            "kind": "started", "agentThreadId": "child-1", "agentPath": "/root/worker"}]}]},
+            "parent-1")
+        self.assertEqual(agents[0]["agent_id"], "child-1")
+        self.assertEqual(agents[0]["agent_type"], "worker")
+        self.assertEqual(agents[0]["session_id"], "codex:parent-1")
 
     def test_codex_question_answers_use_option_labels(self):
         client = ResponseClient()

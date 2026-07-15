@@ -55,9 +55,14 @@ class CodexAppServer:
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 return
+            env = os.environ.copy()
+            # Keep the symlink's bin directory: npm installs `codex` beside the
+            # matching `node`; resolving the symlink jumps into node_modules.
+            command_dir = os.path.dirname(os.path.abspath(self.command[0]))
+            env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
             self.proc = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=None, text=True, bufsize=1)
+                stderr=None, text=True, bufsize=1, env=env)
             self.reader = threading.Thread(target=self._read_loop, daemon=True)
             self.reader.start()
         self.request("initialize", {"clientInfo": {
@@ -333,6 +338,18 @@ class CodexAdapter:
             cwd = thread.get("cwd") or ""
             usage = live.get("token_usage") or {}
             agents = _agents(thread, tid)
+            for agent in agents:
+                try:
+                    child = self.client.read_thread(agent["agent_id"])
+                    turns = child.get("turns") or []
+                    last_status = turns[-1].get("status") if turns else None
+                    agent["state"] = ("done" if last_status == "completed" else
+                                      "ended" if last_status in ("failed", "interrupted") else
+                                      "running")
+                    agent["convo_v"] = sum(len(t.get("items") or []) for t in turns)
+                    agent["model"] = child.get("model") or agent["model"]
+                except Exception:
+                    pass
             agents_running = sum(a["state"] in ("running", "stalled") for a in agents)
             out.append({
                 "session_id": self.key(tid), "native_session_id": tid,
@@ -355,7 +372,7 @@ class CodexAdapter:
                 "capabilities": {"submit": True, "interrupt": state == "running",
                     "focus_terminal": False, "answer_structured": False,
                     "decide_approval": bool(pending), "spawn_agent": True,
-                    "relay_agent": True, "account_usage": False, "exact_cost": False},
+                    "relay_agent": False, "account_usage": False, "exact_cost": False},
             })
         with self._lock:
             self._sessions = out
@@ -415,7 +432,7 @@ class CodexAdapter:
                     "agents": [], "agents_running": 0, "agents_total": 0,
                     "agent_cost": 0.0, "capabilities": {"submit": True,
                     "interrupt": False, "focus_terminal": False, "answer_structured": False,
-                    "decide_approval": False, "spawn_agent": True, "relay_agent": True,
+                    "decide_approval": False, "spawn_agent": True, "relay_agent": False,
                     "account_usage": False, "exact_cost": False}}
             with self._lock:
                 self._sessions = [s for s in self._sessions
@@ -448,6 +465,8 @@ class CodexAdapter:
             thread = self.client.read_thread(self.native(key))
             return {"ok": True, "messages": _conversation(thread), "files": []}
         except Exception as exc:
+            if "not materialized yet" in str(exc):
+                return {"ok": True, "messages": [], "files": []}
             return {"ok": False, "error": str(exc)}
 
     def agent_context(self, key, agent_id):
@@ -476,10 +495,8 @@ class CodexAdapter:
                 answers = action.get("answers") if typ == "multiq" else [action]
                 return self.client.answer_questions(action.get("nonce"), answers or [])
             elif typ == "relay":
-                text = str(action.get("text") or "").strip()
-                if not text:
-                    return {"ok": False, "error": "empty text"}
-                self.client.start_turn(str(action.get("agent_id") or ""), text)
+                return {"ok": False, "error": "Codex App Server does not allow direct "
+                        "input to v2 subagents; message the parent thread instead"}
             else:
                 return {"ok": False, "error": f"Codex does not support {typ} here"}
             return {"ok": True}
@@ -536,6 +553,18 @@ def _agents(thread, parent_id):
     found = {}
     for turn in thread.get("turns") or []:
         for item in turn.get("items") or []:
+            if item.get("type") == "subAgentActivity":
+                aid = item.get("agentThreadId")
+                if aid:
+                    found[aid] = {"agent_id": aid, "session_id": f"codex:{parent_id}",
+                                  "agent_type": (item.get("agentPath") or "codex").split("/")[-1],
+                                  "description": item.get("agentPath") or "Codex subagent",
+                                  "depth": 0, "model": "", "family": "codex", "effort": None,
+                                  "state": "ended" if item.get("kind") == "interrupted" else "running",
+                                  "total_tokens": 0, "cost": 0.0, "tokens": {}, "spark": [],
+                                  "tok_per_s": 0, "started": None, "last": None,
+                                  "last_msg": None, "convo_v": 0}
+                continue
             if item.get("type") != "collabAgentToolCall":
                 continue
             states = item.get("agentsStates") or {}

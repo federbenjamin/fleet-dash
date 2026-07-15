@@ -47,6 +47,11 @@ stdio JSONL protocol. It does not scrape the Codex TUI or parse `~/.codex` rollo
   shown when App Server reports it.
 - Existing independently launched Codex TUIs are not adopted into Fleet Dash's live control
   process. Start the Codex thread from Fleet Dash for full interaction and event streaming.
+- Codex `request_user_input` is unavailable in Default mode. Fleet Dash implements its App Server
+  response protocol, but a normal Codex thread will ask in plain text unless Codex is operating in
+  a mode that exposes the structured tool.
+- Codex subagent conversations are visible, but direct input is read-only: App Server rejects
+  direct input to v2 subagents. Continue through the parent thread instead.
 
 Requires a `codex` executable with App Server support. Set `codex_enabled` to `false` to disable
 the provider without affecting Claude sessions.
