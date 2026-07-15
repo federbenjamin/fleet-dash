@@ -223,7 +223,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     read once and cached. **Do NOT use `~/.claude/.statusline-usage-cache`** — that's the Claude Usage
     extension keyed to a DIFFERENT account/org (verified 2026-07-14: extension org ≠ the `~/.claude.json`
     login org), and its `PROFILE_NAME` is a cosmetic label, not account identity. Don't add an API
-    fetcher (needs a session key we don't hold).
+    fetcher (needs a session key we don't hold). The adjacent **local lifetime-token** figure is a
+    different scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json` `modelUsage`
+    and sums `inputTokens` + `cacheCreationInputTokens` + `cacheReadInputTokens` + `outputTokens`
+    across models. It represents retained main-session and saved-subagent transcripts on this Mac;
+    it excludes deleted history, other computers, and claude.ai. Keep the word `local` in the UI.
 27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
     viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)

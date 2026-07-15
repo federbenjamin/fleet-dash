@@ -87,14 +87,15 @@ the provider without affecting Claude sessions.
 - **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
   finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
   `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
-- **Provider-usage header** (top of the page, under the totals): Claude shows the logged-in
-  account email, then utilization for the **5-hour** session and the **weekly** (7-day) window (each
-  a percent, a bar green → amber ≥70% → red ≥90%, and when it resets: local time + time-left). This
-  is the **account actually logged into Claude Code**: the numbers come from the statusline payload's
-  `rate_limits` (the same data `/usage` shows), which `statusline-command.sh` writes to
-  `~/.claude/fleet-dash/usage.json`; the email comes from `~/.claude.json`. It only populates once a
-  session has made its first API call. Codex appears in the same header with every App Server
-  rate-limit bucket, reset time, plan type, lifetime tokens, and available reset-credit count.
+- **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
+  use middle-dot separators. Claude shows the logged-in account email and a local lifetime-token
+  total from `~/.claude/stats-cache.json`; that total sums uncached input, cache writes, cache reads,
+  and output represented by main and saved-subagent transcripts on this Mac. It excludes deleted
+  history, other computers, and claude.ai activity. Claude's **5-hour** and **weekly** (7-day)
+  utilization comes from the statusline payload's `rate_limits` (the same data `/usage` shows), which
+  `statusline-command.sh` writes to `~/.claude/fleet-dash/usage.json`; those gauges populate after a
+  session's first API call. Codex uses App Server `account/read` for the signed-in email and plan,
+  plus every rate-limit bucket, reset time, account lifetime tokens, and available reset-credit count.
 - **Per card meta line** — two groups on one row: **left** is activity (running-agent count ·
   quiet time, plus the running skill / compaction when active); **right**, right-adjusted, is
   the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working

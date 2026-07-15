@@ -310,6 +310,9 @@ class CodexAppServer:
     def account_usage(self):
         return self.request("account/usage/read", {})
 
+    def account_info(self):
+        return self.request("account/read", {"refreshToken": False})
+
     def account_limits(self):
         result = self.request("account/rateLimits/read", {})
         with self.lock:
@@ -731,7 +734,8 @@ class CodexAdapter:
         try:
             limits = self.client.account_limits()
             tokens = self.client.account_usage()
-            account = _account_usage(limits, tokens)
+            info = self.client.account_info()
+            account = _account_usage(limits, tokens, info)
         except Exception as exc:
             with self._lock:
                 self._account_error = str(exc)
@@ -1233,7 +1237,7 @@ def _token_breakdown(usage):
             "reasoning": latest.get("reasoningOutputTokens")}
 
 
-def _account_usage(limits, tokens):
+def _account_usage(limits, tokens, info=None):
     """Normalize Codex account quota data for Fleet Dash's provider header."""
     snapshots = limits.get("rateLimitsByLimitId") or {}
     if not snapshots and limits.get("rateLimits"):
@@ -1270,8 +1274,11 @@ def _account_usage(limits, tokens):
             buckets.append({"id": f"{limit_id}:{slot}", "label": label,
                             "used_pct": int(window.get("usedPercent") or 0),
                             "reset": reset_iso, "window_minutes": minutes})
+    current = ((info or {}).get("account") or {})
+    plan_type = current.get("planType") or plan_type
     summary = tokens.get("summary") or {}
     return {"provider": "codex", "plan_type": plan_type,
+            "email": current.get("email"),
             "buckets": buckets,
             "lifetime_tokens": summary.get("lifetimeTokens"),
             "daily_usage": tokens.get("dailyUsageBuckets") or [],

@@ -158,10 +158,13 @@ class CodexAdapterTest(unittest.TestCase):
                 "windowDurationMins": 300, "resetsAt": 2_000_000_000},
             "secondary": {"usedPercent": 40, "windowDurationMins": 10080,
                 "resetsAt": 2_000_000_100}}}},
-            {"summary": {"lifetimeTokens": 1234}})
+            {"summary": {"lifetimeTokens": 1234}},
+            {"account": {"type": "chatgpt", "email": "codex@example.com",
+                         "planType": "pro"}})
         self.assertEqual([b["label"] for b in normalized["buckets"]],
                          ["5-hour", "weekly"])
         self.assertEqual(normalized["lifetime_tokens"], 1234)
+        self.assertEqual(normalized["email"], "codex@example.com")
 
     def test_file_changes_are_safe_and_not_claimed_as_deliveries(self):
         thread = {"turns": [{"items": [{"type": "fileChange", "changes": [

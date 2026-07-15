@@ -67,6 +67,9 @@ class EngineProviderTest(unittest.TestCase):
         self.base = os.path.join(self.tmp.name, "fleet")
         self.sessions = os.path.join(self.tmp.name, "sessions")
         self.projects = os.path.join(self.tmp.name, "projects")
+        self.claude_account = os.path.join(self.tmp.name, ".claude.json")
+        self.claude_usage = os.path.join(self.base, "usage.json")
+        self.claude_stats = os.path.join(self.tmp.name, "stats-cache.json")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
@@ -74,6 +77,9 @@ class EngineProviderTest(unittest.TestCase):
             mock.patch.object(engine_module, "BASE", self.base),
             mock.patch.object(engine_module, "SESSIONS", self.sessions),
             mock.patch.object(engine_module, "PROJECTS", self.projects),
+            mock.patch.object(engine_module, "CLAUDE_ACCOUNT", self.claude_account),
+            mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
+            mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -124,6 +130,25 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(codex["capabilities"]["close"])
         self.assertTrue(fleet["totals"]["cost_partial"])
         self.assertGreaterEqual(fleet["totals"]["session_cost"], 0)
+
+    def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
+        with open(self.claude_account, "w") as handle:
+            json.dump({"oauthAccount": {"emailAddress": "claude@example.com"}}, handle)
+        with open(self.claude_usage, "w") as handle:
+            json.dump({"five_hour_pct": 12, "seven_day_pct": 34}, handle)
+        with open(self.claude_stats, "w") as handle:
+            json.dump({"modelUsage": {
+                "claude-sonnet": {"inputTokens": 10,
+                    "cacheCreationInputTokens": 20, "cacheReadInputTokens": 30,
+                    "outputTokens": 40},
+                "claude-haiku": {"inputTokens": 1, "outputTokens": 2,
+                    "cacheReadInputTokens": None}}}, handle)
+
+        usage = self.engine.read_usage()
+        self.assertEqual(usage["email"], "claude@example.com")
+        self.assertEqual(usage["lifetime_tokens"], 103)
+        self.assertEqual(usage["lifetime_scope"], "local_transcripts")
+        self.assertEqual((usage["five_hour_pct"], usage["weekly_pct"]), (12, 34))
 
     def test_codex_failure_does_not_remove_claude(self):
         self.codex.fail_sessions = True

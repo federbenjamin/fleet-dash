@@ -35,6 +35,11 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(page.locator('#usage')).toContainText('Claude Code');
   await expect(page.locator('#usage')).toContainText('Codex CLI');
   await expect(page.locator('#usage')).toContainText('12k lifetime tokens');
+  const usageHeads = page.locator('#usage .uhead');
+  await expect(usageHeads.nth(0).locator('.useg')).toHaveText([
+    '·claude@example.com', '·59.59B local lifetime tokens']);
+  await expect(usageHeads.nth(1).locator('.useg')).toHaveText([
+    '·codex@example.com', '·pro', '·12k lifetime tokens']);
   await expect(page.locator('#usage')).toContainText('weekly');
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
   await expect(codex.locator('select.modesel')).toHaveCount(0);

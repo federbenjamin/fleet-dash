@@ -18,6 +18,9 @@ HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 SESSIONS = os.path.join(HOME, ".claude", "sessions")
+CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
+CLAUDE_USAGE = os.path.join(BASE, "usage.json")
+CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
 
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
@@ -847,25 +850,66 @@ class Engine:
             return cached
         email = None
         try:
-            with open(os.path.expanduser("~/.claude.json")) as f:
+            with open(CLAUDE_ACCOUNT) as f:
                 email = (json.load(f).get("oauthAccount") or {}).get("emailAddress")
         except (OSError, ValueError):
             email = None
         self._account_email = email
         return email
 
+    def claude_lifetime_tokens(self):
+        """Tokens represented by Claude transcripts retained on this Mac.
+
+        Claude's stats cache aggregates main and saved subagent transcripts by
+        model. Count uncached input, cache writes, cache reads, and output so the
+        number represents all model tokens processed, not just cache misses.
+        """
+        try:
+            stat = os.stat(CLAUDE_STATS)
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+        cached = getattr(self, "_claude_stats_cache", None)
+        if cached and cached[0] == signature:
+            return cached[1]
+        try:
+            with open(CLAUDE_STATS) as f:
+                models = (json.load(f).get("modelUsage") or {}).values()
+            total, found = 0, False
+            fields = ("inputTokens", "cacheCreationInputTokens",
+                      "cacheReadInputTokens", "outputTokens")
+            for usage in models:
+                if not isinstance(usage, dict):
+                    continue
+                for field in fields:
+                    value = usage.get(field)
+                    if isinstance(value, bool) or value is None:
+                        continue
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if value >= 0:
+                        total += value
+                        found = True
+            result = total if found else None
+        except (OSError, ValueError, AttributeError):
+            result = None
+        self._claude_stats_cache = (signature, result)
+        return result
+
     def read_usage(self):
         # Plan-usage for the LOGGED-IN account: 5-hour + 7-day utilization, written by
         # the Claude Code statusline into ~/.claude/fleet-dash/usage.json (see the
         # fleet-dash side-write in statusline-command.sh). This is the ONLY per-login
         # correct source — the Claude Usage extension's cache is a DIFFERENT account.
-        # None if absent (no session has reached its first API response yet).
-        path = os.path.expanduser("~/.claude/fleet-dash/usage.json")
+        # Quota fields remain absent until a session gets its first API response;
+        # email and local lifetime tokens can still populate the provider header.
         try:
-            with open(path) as f:
+            with open(CLAUDE_USAGE) as f:
                 d = json.load(f)
         except (OSError, ValueError):
-            return None
+            d = {}
 
         def pct(v):
             try:
@@ -879,14 +923,18 @@ class Engine:
             except (TypeError, ValueError):
                 return None
         five, weekly = pct(d.get("five_hour_pct")), pct(d.get("seven_day_pct"))
-        if five is None and weekly is None:
+        email = self.account_email()
+        lifetime_tokens = self.claude_lifetime_tokens()
+        if five is None and weekly is None and not email and lifetime_tokens is None:
             return None
         return {
             "five_hour_pct": five,
             "five_hour_reset": iso(d.get("five_hour_reset")),
             "weekly_pct": weekly,
             "weekly_reset": iso(d.get("seven_day_reset")),
-            "email": self.account_email(),
+            "email": email,
+            "lifetime_tokens": lifetime_tokens,
+            "lifetime_scope": "local_transcripts",
         }
 
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):

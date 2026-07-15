@@ -55,6 +55,12 @@ class FixtureClient:
     def account_usage(self):
         return {"summary": {"lifetimeTokens": 50}}
 
+    def account_info(self):
+        if self.fail_account:
+            raise RuntimeError("credentials expired")
+        return {"account": {"type": "chatgpt", "email": "codex@example.com",
+                            "planType": "pro"}}
+
     def list_skills(self, cwd):
         return [{"cwd": cwd, "errors": [], "skills": [{"name": "reviewer",
             "description": "Review code", "path": os.path.join(cwd, "SKILL.md"),

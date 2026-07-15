@@ -60,8 +60,10 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .uprovider+.uprovider{border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
 .uhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .uname{color:var(--fg);font-weight:700}
+.useg{display:inline-flex;align-items:baseline;gap:8px;min-width:0;max-width:100%}
+.usep{color:var(--faint);font-style:normal}
 .umeta{color:var(--faint);font-variant-numeric:tabular-nums}
-.uemail{color:var(--fg);font-weight:600}
+.uemail{color:var(--fg);font-weight:600;overflow-wrap:anywhere}
 .ugauge{display:flex;align-items:center;gap:8px;min-width:0}
 .ugauge .ulabel{color:var(--faint);text-transform:uppercase;letter-spacing:.4px;font-size:10px}
 .ugauge .upct{color:var(--fg);font-variant-numeric:tabular-nums;font-weight:600}
@@ -643,7 +645,7 @@ document.addEventListener('scroll',e=>{
   sbFade=setTimeout(()=>document.querySelectorAll('.scrolling').forEach(x=>x.classList.remove('scrolling')),700);
 },{passive:true,capture:true});
 const fmt$=v=>v==null?'unavailable':'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
-const fmtTok=v=>v==null?'—':v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
+const fmtTok=v=>v==null?'—':v>=1e9?(v/1e9).toFixed(2)+'B':v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
 const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const stateLabel={running:'running',needs_you:'needs you',turn_done:'done ✓',idle:'idle',stalled:'stalled',stalled_or_prompt:'prompt?',dormant:'dormant',reopenable:'reopenable',stale:'stale',error:'error'};
@@ -674,15 +676,18 @@ function usageBar(legacy,providers){
   // data, but omit the unused model-specific bucket from the account summary.
   const codexBuckets=(codex?.buckets||[]).filter(b=>
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
-  const claudeHtml=claude&&(claude.five_hour_pct!=null||claude.weekly_pct!=null)?`<div class="uprovider">
-    <div class="uhead"><span class="uname">Claude Code</span>${claude.email?`<span class="uemail">${esc(claude.email)}</span>`:''}</div>
+  const claudeHtml=claude&&(claude.five_hour_pct!=null||claude.weekly_pct!=null||claude.email||claude.lifetime_tokens!=null)?`<div class="uprovider">
+    <div class="uhead"><span class="uname">Claude Code</span>
+      ${claude.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(claude.email)}</span></span>`:''}
+      ${claude.lifetime_tokens!=null?`<span class="useg" title="Local Claude transcripts on this Mac, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
     ${ugauge('5-hour',claude.five_hour_pct,usageReset(claude.five_hour_reset))}
     ${ugauge('weekly',claude.weekly_pct,usageReset(claude.weekly_reset))}</div>`:'';
-  const codexHtml=codex&&(codexBuckets.length||codex.lifetime_tokens!=null||codex.error)?`<div class="uprovider">
+  const codexHtml=codex&&(codexBuckets.length||codex.email||codex.plan_type||codex.lifetime_tokens!=null||codex.reset_credits||codex.error)?`<div class="uprovider">
     <div class="uhead"><span class="uname">Codex CLI</span>
-      ${codex.plan_type?`<span class="umeta">${esc(codex.plan_type.replaceAll('_',' '))}</span>`:''}
-      ${codex.lifetime_tokens!=null?`<span class="umeta">${fmtTok(codex.lifetime_tokens)} lifetime tokens</span>`:''}
-      ${codex.reset_credits?`<span class="umeta">${codex.reset_credits} reset credit</span>`:''}</div>
+      ${codex.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(codex.email)}</span></span>`:''}
+      ${codex.plan_type?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${esc(codex.plan_type.replaceAll('_',' '))}</span></span>`:''}
+      ${codex.lifetime_tokens!=null?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(codex.lifetime_tokens)} lifetime tokens</span></span>`:''}
+      ${codex.reset_credits?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${codex.reset_credits} reset credit</span></span>`:''}</div>
     ${codex.error?`<span class="umeta">${codex.stale?'stale — ':''}${esc(codex.error)}</span>`:''}
     ${codexBuckets.map(b=>ugauge(b.label,b.used_pct,usageReset(b.reset))).join('')}</div>`:'';
   if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='';return;}
