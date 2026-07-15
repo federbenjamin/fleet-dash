@@ -46,8 +46,11 @@ def base_session(provider, sid, title):
             "pending": None, "compacting": None, "muted": False,
             "convo_v": "1:1" if codex else 1, "files_n": 1 if codex else 0,
             "agents": [], "agents_running": 0, "agents_total": 0,
+            "headless": False, "read_only": False, "read_only_reason": None,
+            "codex_source": "appServer" if codex else None,
             "capabilities": capabilities(exact_cost=not codex,
-                focus_terminal=not codex, measured_throughput=not codex)}
+                focus_terminal=True, focus_terminal_mode="attach" if codex else None,
+                measured_throughput=not codex)}
 
 
 def fresh_state():
@@ -155,13 +158,17 @@ def set_scenario(name):
                              {"label": "EU", "value": "eu"}]}],
             "decisions": ["accept", "decline", "cancel"]})
     elif name == "reopenable":
-        session.update(state="reopenable", pending=None)
-        session["capabilities"] = capabilities(submit=False, takeover=True, close=False,
-                                               archive=False, files=False, relay_agent=False)
+        session.update(state="idle", pending=None, headless=True, read_only=True,
+                       codex_source="vscode", read_only_reason=
+                       "ChatGPT Desktop and VS Code use a different App Server; this transcript is view only")
+        session["capabilities"] = capabilities(submit=False, takeover=False, close=False,
+            archive=False, files=False, relay_agent=False, focus_terminal=False)
     elif name == "organization":
-        session.update(state="reopenable", pending=None)
-        session["capabilities"] = capabilities(submit=False, takeover=True, close=False,
-                                               archive=False, files=False, relay_agent=False)
+        session.update(state="idle", pending=None, headless=True, read_only=True,
+                       codex_source="vscode", read_only_reason=
+                       "ChatGPT Desktop and VS Code use a different App Server; this transcript is view only")
+        session["capabilities"] = capabilities(submit=False, takeover=False, close=False,
+            archive=False, files=False, relay_agent=False, focus_terminal=False)
         dormant = base_session("claude", "claude-dormant", "Dormant migration")
         dormant.update(state="dormant", quiet_s=8_000,
                        last_msg={"role": "assistant", "text": "Paused for later."})
@@ -172,9 +179,13 @@ def set_scenario(name):
         session["capabilities"] = capabilities(submit=False, interrupt=False, close=False)
     elif name == "cross-client-active":
         session.update(state="running", reg_status="running", quiet_s=1,
+                       headless=True, read_only=True, codex_source="vscode",
+                       read_only_reason=
+                       "ChatGPT Desktop and VS Code use a different App Server; this transcript is view only",
                        last_msg={"role": "assistant", "text": "Working in ChatGPT desktop."})
         session["capabilities"] = capabilities(
-            submit=False, interrupt=False, close=False, compact=False, review=False)
+            submit=False, interrupt=False, close=False, compact=False, review=False,
+            focus_terminal=False)
     elif name == "markdown-peek":
         session["last_msg"] = {"role": "assistant", "text":
             "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear"}
@@ -322,9 +333,6 @@ class Handler(BaseHTTPRequestHandler):
                     if typ == "option" and not payload.get("digits") and not payload.get("other"):
                         return self.json_reply({"ok": False, "error": "invalid response"})
                     session.update(state="turn_done", pending=None)
-                elif typ == "takeover":
-                    session.update(state="idle")
-                    session["capabilities"] = capabilities(files=True)
                 return self.json_reply({"ok": True})
         return self.reply(404, "text/plain", "not found")
 

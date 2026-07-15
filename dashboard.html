@@ -968,8 +968,7 @@ function renderViewerBar(force){
     h+=pendingBox(s,'vmsg');
   }
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
-    ${s&&s.capabilities?.takeover?`<div class="relaynote">External Codex thread — take it over before sending.</div>
-      <div class="pbtns"><button class="pbtn allow" onclick="act('${viewerSid}',{type:'takeover'},'vmsg')">take over thread</button></div>`:''}
+    ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
     ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
@@ -1124,8 +1123,7 @@ function renderSession(force){
   keepStripScroll(act,()=>{act.innerHTML=`
     ${qHtml}
     ${fileStrip(s.session_id,(c&&c.files)||[])}
-    ${s.capabilities?.takeover?`<div class="relaynote">This Codex thread was created outside Fleet Dash. It is read-only here until you explicitly take it over.</div>
-      <div class="pbtns"><button class="pbtn allow" onclick="act('${s.session_id}',{type:'takeover'},'smsg')">take over thread</button></div>`:''}
+    ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
     ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
       onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
@@ -1295,6 +1293,7 @@ function applyReaderWidth(){document.documentElement.dataset.readerWidth=readerW
 
 function cardCls(s){
   const needs=s.state==='needs_you'||s.state==='stalled_or_prompt';
+  if(s.headless)return'dorm';
   return s.state==='stalled'?'stalled':needs?'needs':s.state==='dormant'?'dorm':
     s.state==='reopenable'?'dorm':s.state==='error'||s.state==='stale'?'stalled':s.state==='idle'?'idle':'';
 }
@@ -1304,7 +1303,7 @@ function cardCls(s){
 function cardTop(s){
   const isOpen=open.has(s.session_id);
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
-  const activeSession=!['idle','dormant','reopenable','stale','error'].includes(s.state);
+  const activeSession=!s.headless&&!['idle','dormant','reopenable','stale','error'].includes(s.state);
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
@@ -1314,15 +1313,13 @@ function cardTop(s){
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
-      ${s.capabilities?.focus_terminal?`<button class="expandbtn deskonly" title="bring this session's terminal tab to the front"
-        onclick="event.stopPropagation();focusSession('${s.session_id}')">open</button>`:
+      ${s.capabilities?.focus_terminal?`<button class="expandbtn deskonly" title="${esc(s.capabilities?.focus_terminal_mode==='attach'?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front")}"
+        onclick="event.stopPropagation();focusSession('${s.session_id}')">${s.capabilities?.focus_terminal_mode==='attach'?'attach':'open'}</button>`:
         s.provider==='codex'?`<button class="expandbtn deskonly" disabled
-          title="${esc(s.capabilities?.focus_terminal_reason||'Codex App Server exposes no terminal-focus API')}">no terminal</button>`:''}
+          title="${esc(s.capabilities?.focus_terminal_reason||'Codex terminal unavailable')}">${s.read_only?'view only':'no terminal'}</button>`:''}
       <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
         aria-label="${pinned?'unpin session':'pin session to top'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
-      ${s.capabilities?.takeover?`<button class="expandbtn" title="resume and manage this external Codex thread"
-        onclick="event.stopPropagation();act('${s.session_id}',{type:'takeover'})">take over</button>`:''}
     </div>
     <div class="smeta">
       <div class="smeta-l">
@@ -1894,13 +1891,13 @@ function dormantSection(list){
   </details>`;
 }
 
-// HEADLESS = a provider thread Fleet Dash can see but does not manage. It is
-// intentionally read-only until the user explicitly takes it over.
+// HEADLESS = a provider thread Fleet Dash can see but whose runtime it does not
+// own. Transcripts remain visible; actions stay in the owning client.
 let headlessOpen=false;
 function headlessSection(list){
   if(!list||!list.length)return'';
   return`<details class="foldbox" ${headlessOpen?'open':''} ontoggle="headlessOpen=this.open">
-    <summary>headless sessions (${list.length}) <small>— external Codex threads available to take over</small></summary>
+    <summary>headless sessions (${list.length}) <small>— external Codex transcripts, view only</small></summary>
     <div>${list.map(sessionCard).join('')}</div>
   </details>`;
 }
@@ -2134,9 +2131,9 @@ function render(f,force){
     const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id));
     // The main fleet is the always-visible action surface. Idle sessions stay
     // here because they are managed and immediately available for another turn.
-    const live=unpinned.filter(s=>!['dormant','reopenable'].includes(s.state));
-    const headless=unpinned.filter(s=>s.state==='reopenable');
-    const dorm=unpinned.filter(s=>s.state==='dormant');
+    const live=unpinned.filter(s=>!s.headless&&!['dormant','reopenable'].includes(s.state));
+    const headless=unpinned.filter(s=>s.headless||s.state==='reopenable');
+    const dorm=unpinned.filter(s=>!s.headless&&s.state==='dormant');
     // reconcile in place: persists each card node so an expanded card's open
     // <details> doesn't remount (flash) every poll
     reconcileCards($('#sessions'),live);

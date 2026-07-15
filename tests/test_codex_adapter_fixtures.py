@@ -17,6 +17,7 @@ class FixtureClient:
         self.fail_account = False
         self.archive_error = None
         self.interrupts = []
+        self.loaded = []
 
     def list_threads(self):
         if self.fail_list:
@@ -26,6 +27,9 @@ class FixtureClient:
     def list_models(self):
         return [{"model": "gpt-5.4", "displayName": "GPT-5.4",
                  "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]
+
+    def loaded_thread_ids(self):
+        return list(self.loaded)
 
     def read_thread(self, thread_id):
         if self.fail_read:
@@ -95,7 +99,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                                      "activeFlags": ["waitingOnApproval"]}),
             self.thread("broken", {"type": "systemError"}),
             self.thread("done", {"type": "idle"}),
-            self.thread("external", {"type": "notLoaded"}),
+            {**self.thread("external", {"type": "notLoaded"}), "source": "vscode"},
         ]
         adapter, client = self.adapter(threads)
         for item in ("running", "waiting", "broken", "done"):
@@ -105,20 +109,38 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         states = {item["native_session_id"]: item["state"] for item in adapter.sessions()}
         self.assertEqual(states, {"running": "running", "waiting": "needs_you",
                                   "broken": "error", "done": "turn_done",
-                                  "external": "reopenable"})
+                                  "external": "idle"})
         external = next(item for item in adapter.sessions()
                         if item["native_session_id"] == "external")
-        self.assertTrue(external["capabilities"]["takeover"])
+        self.assertTrue(external["headless"])
+        self.assertTrue(external["read_only"])
+        self.assertFalse(external["capabilities"]["takeover"])
         self.assertFalse(external["capabilities"]["submit"])
 
+    def test_cli_connected_to_shared_socket_is_adopted_without_resuming_a_copy(self):
+        thread = {**self.thread("attached", {"type": "active"}), "source": "cli"}
+        thread["turns"] = [{"id": "same-turn", "status": "inProgress",
+                            "startedAt": 999, "completedAt": None, "items": []}]
+        adapter, client = self.adapter([thread])
+        client.loaded = ["attached"]
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertFalse(session["headless"])
+        self.assertFalse(session["read_only"])
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertTrue(session["capabilities"]["interrupt"])
+        self.assertEqual(client.thread_state["attached"]["turn_id"], "same-turn")
+        self.assertEqual(adapter._managed(), ["attached"])
+
     def test_cross_app_server_turn_without_completion_is_running(self):
-        thread = self.thread("managed", {"type": "notLoaded"}, updated=100)
+        thread = {**self.thread("managed", {"type": "notLoaded"}, updated=100),
+                  "source": "vscode"}
         thread["turns"] = [{"id": "desktop-turn", "status": "interrupted",
                             "startedAt": 995, "completedAt": None,
                             "items": [{"id": "a1", "type": "agentMessage",
                                        "phase": "commentary", "text": "working"}]}]
         adapter, _ = self.adapter([thread], now=1000)
-        adapter._remember("managed", "default")
         adapter._refresh()
 
         session = adapter.sessions()[0]
@@ -133,27 +155,30 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(session["capabilities"]["compact"])
         self.assertFalse(session["capabilities"]["review"])
         self.assertFalse(session["capabilities"]["relay_agent"])
+        self.assertTrue(session["headless"])
+        self.assertTrue(session["read_only"])
         denied = adapter.act({"type": "text", "session_id": "codex:managed",
                               "text": "do not start a concurrent turn"})
         self.assertFalse(denied["ok"])
-        self.assertIn("another client", denied["error"])
+        self.assertIn("view only", denied["error"])
 
-    def test_cross_app_server_completed_turn_becomes_turn_done(self):
-        thread = self.thread("managed", {"type": "notLoaded"}, updated=100)
+    def test_desktop_completed_turn_stays_view_only(self):
+        thread = {**self.thread("managed", {"type": "notLoaded"}, updated=100),
+                  "source": "vscode"}
         thread["turns"] = [{"id": "desktop-turn", "status": "completed",
                             "startedAt": 950, "completedAt": 995,
                             "items": [{"id": "a1", "type": "agentMessage",
                                        "phase": "final_answer", "text": "done"}]}]
         adapter, _ = self.adapter([thread], now=1000)
-        adapter._remember("managed", "default")
         adapter._refresh()
 
         session = adapter.sessions()[0]
         self.assertEqual(session["state"], "turn_done")
         self.assertEqual(session["reg_status"], "turn_done")
         self.assertEqual(session["quiet_s"], 5)
-        self.assertTrue(session["capabilities"]["submit"])
-        self.assertTrue(session["capabilities"]["close"])
+        self.assertFalse(session["capabilities"]["submit"])
+        self.assertFalse(session["capabilities"]["close"])
+        self.assertTrue(session["headless"])
 
     def test_owned_app_server_turn_keeps_control_capabilities(self):
         thread = self.thread("managed", {"type": "active"}, updated=990)

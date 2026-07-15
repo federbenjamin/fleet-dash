@@ -7,12 +7,15 @@ Codex rollout files; their on-disk representation is not a public API.
 """
 import json
 import os
+import base64
+import struct
 import subprocess
 import threading
 import time
 import shutil
 import glob
 import hashlib
+import socket
 from collections import deque
 
 
@@ -37,13 +40,262 @@ def codex_command(configured=None):
     raise CodexError("codex executable not found; set codex_command in config.json")
 
 
-class CodexAppServer:
-    """Small synchronous client over app-server's supported stdio JSONL transport."""
+def codex_control_socket():
+    """Return Fleet's custom path for Codex's supported Unix transport."""
+    configured = os.environ.get("FLEET_DASH_CODEX_SOCKET")
+    return os.path.abspath(os.path.expanduser(
+        configured or os.path.join("~", ".claude", "fleet-dash",
+                                   "codex-app-server.sock")))
 
-    def __init__(self, command=None, timeout=8, process_factory=None, clock=None):
+
+_shared_runtime_lock = threading.Lock()
+
+
+def _socket_accepting(path):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(.25)
+    try:
+        client.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        client.close()
+
+
+def ensure_shared_codex_runtime(executable=None, socket_path=None, timeout=8,
+                                process_factory=None, sleeper=None, clock=None,
+                                probe=None):
+    """Start one detached, multi-client App Server on the supported Unix transport.
+
+    `codex app-server daemon` is only available to the standalone installer. Fleet
+    supports npm-managed Codex by owning the same Unix listener directly. The
+    detached process survives a Fleet web-daemon restart; subsequent starts reuse
+    the accepting socket instead of creating another runtime.
+    """
+    executable = executable or codex_command()
+    socket_path = socket_path or codex_control_socket()
+    process_factory = process_factory or subprocess.Popen
+    sleeper = sleeper or time.sleep
+    clock = clock or time.monotonic
+    probe = probe or _socket_accepting
+    with _shared_runtime_lock:
+        if probe(socket_path):
+            return
+        os.makedirs(os.path.dirname(socket_path), mode=0o700, exist_ok=True)
+        if os.path.lexists(socket_path):
+            os.unlink(socket_path)
+        command = [executable, "app-server", "--listen", "unix://" + socket_path]
+        env = os.environ.copy()
+        command_dir = os.path.dirname(os.path.abspath(executable))
+        env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
+        process = process_factory(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=None, text=True, start_new_session=True, env=env)
+        deadline = clock() + timeout
+        while clock() < deadline:
+            if probe(socket_path):
+                return
+            code = process.poll()
+            if code is not None:
+                raise CodexError(f"Codex shared App Server exited during startup ({code})")
+            sleeper(.05)
+        raise CodexError("Codex shared App Server socket did not become ready")
+
+
+class _WebSocketInput:
+    def __init__(self, process):
+        self.process = process
+
+    def write(self, raw):
+        for line in raw.splitlines():
+            if line:
+                self.process.send_text(line)
+        return len(raw)
+
+    def flush(self):
+        return None
+
+
+class _WebSocketOutput:
+    def __init__(self, process):
+        self.process = process
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        message = self.process.receive_text()
+        if message is None:
+            raise StopIteration
+        return message + "\n"
+
+
+class UnixWebSocketProcess:
+    """Process-shaped WebSocket client for App Server's supported Unix transport."""
+
+    GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def __init__(self, socket_path, timeout=8, connected_socket=None):
+        self.socket_path = socket_path
+        self.returncode = None
+        self._send_lock = threading.Lock()
+        self._buffer = bytearray()
+        self.sock = connected_socket or socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(timeout)
+        try:
+            if connected_socket is None:
+                self.sock.connect(socket_path)
+            self._handshake()
+            self.sock.settimeout(None)
+        except Exception:
+            self.sock.close()
+            self.returncode = 1
+            raise
+        self.stdin = _WebSocketInput(self)
+        self.stdout = _WebSocketOutput(self)
+
+    def _handshake(self):
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = ("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
+                   "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+                   f"Sec-WebSocket-Key: {key}\r\n\r\n")
+        self.sock.sendall(request.encode("ascii"))
+        while b"\r\n\r\n" not in self._buffer:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise CodexError("Codex shared App Server closed during WebSocket handshake")
+            self._buffer.extend(chunk)
+            if len(self._buffer) > 64_000:
+                raise CodexError("Codex shared App Server sent an oversized handshake")
+        end = self._buffer.index(b"\r\n\r\n") + 4
+        raw = bytes(self._buffer[:end])
+        del self._buffer[:end]
+        lines = raw.decode("latin-1").split("\r\n")
+        if not lines or " 101 " not in lines[0]:
+            raise CodexError(f"Codex WebSocket upgrade failed: {lines[0] if lines else 'empty'}")
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+        expected = base64.b64encode(hashlib.sha1(
+            (key + self.GUID).encode("ascii")).digest()).decode("ascii")
+        if headers.get("sec-websocket-accept") != expected:
+            raise CodexError("Codex WebSocket upgrade returned an invalid accept key")
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        if self.returncode is not None:
+            return
+        self.returncode = -15
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+
+    def _read_exact(self, size):
+        while len(self._buffer) < size:
+            chunk = self.sock.recv(max(4096, size - len(self._buffer)))
+            if not chunk:
+                self.returncode = 0
+                self.sock.close()
+                return None
+            self._buffer.extend(chunk)
+        out = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return out
+
+    def _send_frame(self, opcode, payload=b""):
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        length = len(payload)
+        header = bytearray([0x80 | opcode])
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", length))
+        mask = os.urandom(4)
+        header.extend(mask)
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        with self._send_lock:
+            try:
+                self.sock.sendall(bytes(header) + masked)
+            except OSError:
+                self.returncode = 1
+                raise
+
+    def send_text(self, text):
+        self._send_frame(0x1, text)
+
+    def receive_text(self):
+        fragments = bytearray()
+        text_message = False
+        while self.returncode is None:
+            head = self._read_exact(2)
+            if head is None:
+                return None
+            fin, opcode = bool(head[0] & 0x80), head[0] & 0x0F
+            masked, length = bool(head[1] & 0x80), head[1] & 0x7F
+            if length == 126:
+                raw = self._read_exact(2)
+                if raw is None:
+                    return None
+                length = struct.unpack("!H", raw)[0]
+            elif length == 127:
+                raw = self._read_exact(8)
+                if raw is None:
+                    return None
+                length = struct.unpack("!Q", raw)[0]
+            mask = self._read_exact(4) if masked else None
+            payload = self._read_exact(length)
+            if payload is None:
+                return None
+            if mask:
+                payload = bytes(value ^ mask[index % 4]
+                                for index, value in enumerate(payload))
+            if opcode == 0x8:
+                self.returncode = 0
+                self.sock.close()
+                return None
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode == 0x1:
+                fragments = bytearray(payload)
+                text_message = True
+            elif opcode == 0x0 and text_message:
+                fragments.extend(payload)
+            else:
+                continue
+            if fin:
+                try:
+                    return fragments.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise CodexError(f"Codex WebSocket sent invalid UTF-8: {exc}") from exc
+        return None
+
+
+class CodexAppServer:
+    """Synchronous JSON-RPC client over a process-shaped App Server transport."""
+
+    def __init__(self, command=None, timeout=8, process_factory=None, clock=None,
+                 startup_command=None, startup_factory=None, startup=None):
         self.command = command or [codex_command(), "app-server"]
+        self.startup_command = startup_command
+        self.startup = startup
         self.timeout = timeout
         self.process_factory = process_factory or subprocess.Popen
+        self.startup_factory = startup_factory or subprocess.run
         self.clock = clock or time.time
         self.proc = None
         self.lock = threading.RLock()
@@ -67,6 +319,27 @@ class CodexAppServer:
             # matching `node`; resolving the symlink jumps into node_modules.
             command_dir = os.path.dirname(os.path.abspath(self.command[0]))
             env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
+            if self.startup:
+                try:
+                    self.startup()
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    if isinstance(exc, CodexError):
+                        raise
+                    raise CodexError(f"Codex shared App Server failed to start: {exc}") from exc
+            elif self.startup_command:
+                try:
+                    started = self.startup_factory(
+                        self.startup_command, capture_output=True, text=True,
+                        timeout=self.timeout, env=env)
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    raise CodexError(f"Codex shared App Server failed to start: {exc}") from exc
+                if started.returncode:
+                    detail = (started.stderr or started.stdout or
+                              f"exit {started.returncode}").strip()
+                    self.last_error = detail
+                    raise CodexError(f"Codex shared App Server failed to start: {detail}")
             self.generation += 1
             self.proc = self.process_factory(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -508,7 +781,7 @@ class CodexAdapter:
         self.stall_seconds = stall_seconds
         self.error = None
         self.error_at = None
-        self._resumed = False
+        self._resumed_generation = None
         self._sessions = []
         self._refreshing = False
         self._last_refresh = 0
@@ -542,6 +815,11 @@ class CodexAdapter:
         try:
             self._resume_managed()
             threads = self.client.list_threads()
+            loaded = set()
+            if hasattr(self.client, "loaded_thread_ids"):
+                for entry in self.client.loaded_thread_ids():
+                    loaded.add(entry.get("id") if isinstance(entry, dict) else entry)
+                loaded.discard(None)
             models = self.client.list_models() if hasattr(self.client, "list_models") else []
             error = None
         except Exception as exc:
@@ -563,8 +841,9 @@ class CodexAdapter:
         self._refresh_account(now)
         persisted = self._state()
         modes = dict(persisted.get("modes") or {})
-        managed = set(persisted.get("threads") or [])
         thread_meta = dict(persisted.get("thread_meta") or {})
+        managed = {tid for tid in (persisted.get("threads") or [])
+                   if (thread_meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"}
         out = []
         listed = set()
         for thread in threads:
@@ -572,7 +851,21 @@ class CodexAdapter:
             if not tid or thread.get("parentThreadId"):
                 continue
             listed.add(tid)
-            is_managed = tid in managed
+            source = thread.get("source") or "unknown"
+            desktop_owned = source == "vscode"
+            is_managed = tid in managed and not desktop_owned
+            # A CLI connected with `codex --remote unix://...` is another client
+            # of Fleet's canonical runtime. Adopt it automatically so both
+            # surfaces steer the same live turn instead of resuming a copy.
+            if tid in loaded and not desktop_owned and not is_managed:
+                self._remember(tid, modes.get(tid) or "default", {
+                    "runtime_owner": "fleet_shared", "origin": source,
+                    "cwd": thread.get("cwd") or "", "model": thread.get("model") or "",
+                    "effort": thread.get("effort"), "name": thread.get("name"),
+                    "created_at": _epoch(thread.get("createdAt")) or now,
+                    "unmaterialized": False})
+                managed.add(tid)
+                is_managed = True
             detail_error = None
             if is_managed:
                 try:
@@ -581,7 +874,7 @@ class CodexAdapter:
                         thread = {**thread, **detail}
                 except Exception as exc:
                     detail_error = str(exc)
-            live = self.client.thread_state.get(tid, {})
+            live = self.client.thread_state.setdefault(tid, {})
             pending = self._pending(tid, live.get("pending"))
             updated = thread.get("updatedAt") or thread.get("createdAt")
             turn_lifecycle = _latest_turn_lifecycle(thread)
@@ -606,9 +899,7 @@ class CodexAdapter:
                 completed_epoch is None or turn_started is None or turn_started > completed_epoch)
             running = native_running or observed_running
             quiet = max(0, now - updated_epoch)
-            if not is_managed:
-                state = "reopenable"
-            elif detail_error or live.get("error") or recorded_type == "systemError":
+            if detail_error or live.get("error") or recorded_type == "systemError":
                 state = "error"
             elif pending or flags.intersection({"waitingOnApproval", "waitingOnUserInput"}):
                 state = "needs_you"
@@ -663,7 +954,13 @@ class CodexAdapter:
             revision = _revision(thread, live)
             if is_managed and not detail_error:
                 self._cache_snapshot(tid, messages, files, revision, thread)
-            owned_turn = bool(live.get("turn_id"))
+            canonical_turn_id = live.get("turn_id")
+            if is_managed and not canonical_turn_id and observed_running:
+                canonical_turn_id = turn_lifecycle.get("turn_id")
+                if canonical_turn_id:
+                    live["turn_id"] = canonical_turn_id
+                    live["status"] = "running"
+            owned_turn = bool(canonical_turn_id)
             can_interrupt = (is_managed and owned_turn and
                              state in ("running", "stalled", "needs_you"))
             uncontrolled_active = (state in ("running", "stalled", "needs_you") and
@@ -681,6 +978,12 @@ class CodexAdapter:
                 "collaboration_mode": mode, "running": None,
                 "last_msg": _last_message(messages, thread.get("preview")),
                 "state": state, "reg_status": reg_status,
+                "headless": not is_managed, "read_only": not is_managed,
+                "read_only_reason": ("ChatGPT Desktop and VS Code use a different App Server; "
+                                     "this transcript is view only" if desktop_owned else
+                                     "This thread is not loaded in Fleet's shared App Server; "
+                                     "its transcript is view only"),
+                "codex_source": source,
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,
@@ -694,14 +997,17 @@ class CodexAdapter:
                 "capabilities": {"submit": is_managed and
                     state not in ("error", "stale") and not uncontrolled_active,
                     "interrupt": can_interrupt,
-                    "takeover": not is_managed, "archive": is_managed,
+                    "takeover": False, "archive": is_managed,
                     "close": is_managed and not uncontrolled_active,
                     "compact": is_managed and state not in
                         ("running", "stalled", "needs_you"),
                     "review": is_managed and state not in
                         ("running", "stalled", "needs_you"),
-                    "files": bool(files), "focus_terminal": False,
-                    "focus_terminal_reason": "Codex App Server has no terminal-focus API",
+                    "files": bool(files), "focus_terminal": is_managed,
+                    "focus_terminal_mode": "attach" if is_managed else None,
+                    "focus_terminal_reason": ("Open a Codex TUI attached to Fleet's shared "
+                                              "App Server" if is_managed else
+                                              "External Codex runtime is view only"),
                     "answer_structured": bool(pending and pending.get("kind") in
                                               ("question", "elicitation")),
                     "decide_approval": bool(pending), "spawn_agent": True,
@@ -760,7 +1066,10 @@ class CodexAdapter:
             return out
 
     def _managed(self):
-        return list(self._state().get("threads") or [])
+        state = self._state()
+        meta = state.get("thread_meta") or {}
+        return [tid for tid in (state.get("threads") or [])
+                if (meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"]
 
     def _modes(self):
         return dict(self._state().get("modes") or {})
@@ -805,8 +1114,8 @@ class CodexAdapter:
             state["snapshots"] = {key: value for key, value in snapshots.items()
                                   if key in kept}
             thread_meta = dict(state.get("thread_meta") or {})
-            if meta:
-                thread_meta[tid] = dict(meta)
+            thread_meta[tid] = {**(thread_meta.get(tid) or {}), **(meta or {}),
+                                "runtime_owner": "fleet_shared"}
             state["thread_meta"] = {key: value for key, value in thread_meta.items()
                                     if key in kept}
             self._save_state(state)
@@ -844,9 +1153,11 @@ class CodexAdapter:
             self._save_state(state)
 
     def _resume_managed(self):
-        if self._resumed or not hasattr(self.client, "request"):
+        if not hasattr(self.client, "request"):
             return
-        self._resumed = True
+        generation = getattr(self.client, "generation", 0)
+        if self._resumed_generation == generation:
+            return
         for tid in self._managed():
             try:
                 if hasattr(self.client, "resume_thread"):
@@ -860,6 +1171,7 @@ class CodexAdapter:
                                          thread.get("effort"))
             except Exception:
                 continue
+        self._resumed_generation = getattr(self.client, "generation", generation)
 
     def start_thread(self, cwd, model=None, effort=None, mode="plan"):
         if mode not in ("plan", "default"):
@@ -897,11 +1209,13 @@ class CodexAdapter:
                     "ctx_pct": None, "cost": None, "cost_source": "unavailable",
                     "bridge_url": None, "started_ms": round(now * 1000), "pending": None,
                     "compacting": None, "muted": False, "convo_v": f"{int(now * 1000)}:0",
-                    "files_n": 0,
+                    "files_n": 0, "headless": False, "read_only": False,
+                    "read_only_reason": None, "codex_source": "appServer",
                     "agents": [], "agents_running": 0, "agents_total": 0,
                     "agent_cost": None, "capabilities": {"submit": True,
-                    "interrupt": False, "close": True, "focus_terminal": False,
-                    "focus_terminal_reason": "Codex App Server has no terminal-focus API",
+                    "interrupt": False, "close": True, "focus_terminal": True,
+                    "focus_terminal_mode": "attach",
+                    "focus_terminal_reason": "Open a Codex TUI attached to Fleet's shared App Server",
                     "answer_structured": False, "takeover": False,
                     "archive": True, "compact": True, "review": True, "files": False,
                     "decide_approval": False, "spawn_agent": True, "relay_agent": False,
@@ -1034,10 +1348,10 @@ class CodexAdapter:
             with self._lock:
                 known = next((s for s in self._sessions
                               if s.get("native_session_id") == tid), None)
-            if known and known.get("capabilities", {}).get("takeover") \
-               and typ not in ("takeover", "resume"):
+            if known and known.get("read_only"):
                 return {"ok": False,
-                        "error": "external Codex thread is read-only until explicitly taken over"}
+                        "error": known.get("read_only_reason") or
+                                 "external Codex thread is view only"}
             required_capability = {"text": "submit", "mode": "submit",
                                    "interrupt": "interrupt", "close": "close",
                                    "compact": "compact", "review": "review",
@@ -1090,12 +1404,6 @@ class CodexAdapter:
                 return {"ok": True, "mode": mode}
             elif typ == "interrupt":
                 self.client.interrupt(tid)
-            elif typ in ("resume", "takeover"):
-                thread = self.client.resume_thread(tid)
-                self._remember(tid, self._modes().get(tid) or "default")
-                self._last_refresh = 0
-                return {"ok": True, "session_id": self.key(tid),
-                        "model": thread.get("model")}
             elif typ in ("archive", "close"):
                 if typ == "close" and known and known.get("state") in (
                         "running", "stalled", "needs_you"):
@@ -1198,7 +1506,8 @@ def _latest_turn_lifecycle(thread):
     """
     turns = thread.get("turns") or []
     if not turns:
-        return {"active": False, "started_at": None, "completed_at": None}
+        return {"active": False, "started_at": None, "completed_at": None,
+                "turn_id": None}
     turn = turns[-1] or {}
     started_at = _epoch(turn.get("startedAt"))
     completed_at = _epoch(turn.get("completedAt"))
@@ -1207,7 +1516,8 @@ def _latest_turn_lifecycle(thread):
     active = (turn.get("completedAt") is None and
               (explicitly_active or started_at is not None))
     return {"active": active, "started_at": started_at,
-            "completed_at": completed_at, "status": turn.get("status")}
+            "completed_at": completed_at, "status": turn.get("status"),
+            "turn_id": turn.get("id")}
 
 
 def _millis(value):

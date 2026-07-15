@@ -620,9 +620,16 @@ class Engine:
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
         try:
-            from codex_adapter import CodexAppServer, codex_command
-            codex_client = CodexAppServer([codex_command(cfg.get("codex_command") or None),
-                                           "app-server"])
+            from codex_adapter import (CodexAppServer, codex_command,
+                                       codex_control_socket, ensure_shared_codex_runtime,
+                                       UnixWebSocketProcess)
+            executable = codex_command(cfg.get("codex_command") or None)
+            control_socket = codex_control_socket()
+            codex_client = CodexAppServer(
+                [executable, "app-server", "--listen", "unix://" + control_socket],
+                process_factory=lambda *args, **kwargs: UnixWebSocketProcess(
+                    control_socket, timeout=8),
+                startup=lambda: ensure_shared_codex_runtime(executable, control_socket))
             self.codex = CodexAdapter(enabled=bool(cfg.get("codex_enabled", True)),
                                       client=codex_client,
                                       state_path=os.path.join(BASE, "codex_threads.json"),
@@ -1657,6 +1664,9 @@ class Engine:
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if str(action.get("session_id") or "").startswith("codex:") \
+           and action.get("type") == "focus":
+            return self.attach_codex_terminal(action)
         if str(action.get("session_id") or "").startswith("codex:"):
             return self.codex.act(action)
         if action.get("type") == "spawn":    # no session yet — it makes one
@@ -1852,6 +1862,27 @@ class Engine:
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+    def attach_codex_terminal(self, action):
+        """Open a TUI client on the same App Server; never resume a copy."""
+        from codex_adapter import codex_command, codex_control_socket
+        sid = str(action.get("session_id") or "")
+        tid = self.codex.native(sid)
+        session = next((item for item in self.codex.sessions()
+                        if item.get("session_id") == sid), None)
+        if not session or not session.get("capabilities", {}).get("focus_terminal"):
+            return {"ok": False, "error": "this Codex thread is view only"}
+        cwd = os.path.realpath(os.path.expanduser(session.get("cwd") or HOME))
+        if not os.path.isdir(cwd):
+            return {"ok": False, "error": "session working directory no longer exists"}
+        executable = codex_command(self.cfg.get("codex_command") or None)
+        endpoint = "unix://" + codex_control_socket()
+        command = (f"cd {shlex.quote(cwd)} && {shlex.quote(executable)} resume "
+                   f"--remote {shlex.quote(endpoint)} {shlex.quote(tid)}")
+        result = self._iterm_write("SPAWN", [(command, False)])
+        if result.get("ok"):
+            result.update(command=command, session_id=sid, shared_runtime=True)
+        return result
 
     def spawn_codex_session(self, action):
         """Create a Codex thread through app-server; no terminal or TUI scraping."""

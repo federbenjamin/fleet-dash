@@ -44,13 +44,15 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
   await expect(codex.locator('select.modesel')).toHaveCount(0);
   if (testInfo.project.name === 'desktop') {
-    const terminal = codex.getByRole('button', { name: 'no terminal' });
+    const terminal = codex.getByRole('button', { name: 'attach' });
     const pin = codex.getByRole('button', { name: 'pin session to top' });
-    await expect(terminal).toBeDisabled();
+    await expect(terminal).toBeEnabled();
     await expect(pin).toBeVisible();
     expect(await terminal.evaluate((el) => el.nextElementSibling === document.querySelector(
       '[data-sid="codex:thread-one"] .spin'))).toBe(true);
     expect(await pin.evaluate((el) => getComputedStyle(el).borderStyle)).toBe('solid');
+    await terminal.click();
+    await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
   }
 
   for (let index = 0; index < 20; index += 1) await refresh(page);
@@ -244,11 +246,15 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
 });
 
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
-  await reset(page, 'cross-client-active');
+  await page.request.post('/test/reset', { data: { scenario: 'cross-client-active' } });
+  await page.goto('/?token=abcdef123456');
+  await page.locator('#headless summary').click();
   const card = page.locator('[data-sid="codex:thread-one"]');
 
   await expect(card.locator('.chip')).toContainText('running');
   await expect(card).toContainText('Working in ChatGPT desktop.');
+  if ((await page.viewportSize()).width > 700)
+    await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
   await card.locator('.shead').click();
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
@@ -410,7 +416,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
   await expect(page.locator('#aact')).toContainText('parent thread');
 });
 
-test('closed, reconnect/takeover, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
+test('closed, external view-only, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
   await reset(page);
   await page.getByText(/session history/).click();
   await page.locator('#closedrows .expandbtn').click();
@@ -423,15 +429,17 @@ test('closed, reconnect/takeover, stale, unavailable, and read-only states', asy
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   const headless = page.locator('#headless details');
   await expect(headless).not.toHaveAttribute('open', '');
-  await expect(headless.getByText(/external Codex threads/)).toBeVisible();
+  await expect(headless.getByText(/external Codex transcripts, view only/)).toBeVisible();
   await headless.locator('summary').click();
   await expect(card).toBeVisible();
-  await expect(card).toContainText('reopenable');
-  await card.getByRole('button', { name: 'take over' }).click();
-  await refresh(page);
-  await expect(page.locator('#headless details')).toHaveCount(0);
-  await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toBeVisible();
   await expect(card).toContainText('idle');
+  if (testInfo.project.name === 'desktop')
+    await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
+  await card.locator('.shead').click();
+  await expect(page.locator('#sact')).toContainText('view only');
+  await expect(page.locator('#sact input')).toHaveCount(0);
+  await expect(page.locator('#sact')).not.toContainText('take over');
+  await page.locator('#sclose').click();
 
   await page.request.post('/test/reset', { data: { scenario: 'stale' } });
   await page.reload();

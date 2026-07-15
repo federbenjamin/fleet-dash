@@ -2,14 +2,18 @@
 """Live Fleet Dash smoke test. Creates a Codex thread but starts no paid turn."""
 import json
 import os
+import sys
 import time
 import atexit
 import urllib.parse
 import urllib.request
 
-
 ROOT = "http://127.0.0.1:8377"
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE)
+
+from codex_adapter import (CodexAppServer, UnixWebSocketProcess,
+                           codex_control_socket)
 
 
 def request(path, payload=None, token=None):
@@ -71,12 +75,31 @@ def main():
     assert session["provider"] == "codex"
     assert session["cost_source"] == "unavailable"
     assert session["capabilities"]["submit"] is True
-    assert session["capabilities"]["focus_terminal"] is False
+    assert session["capabilities"]["focus_terminal"] is True
+    assert session["capabilities"]["focus_terminal_mode"] == "attach"
+    assert session["headless"] is False
+    assert session["read_only"] is False
     assert session["collaboration_mode"] == "plan", session
     assert session["capabilities"]["answer_structured"] is False
     assert session["model"], session
     codex_usage = (fleet.get("provider_usage") or {}).get("codex") or {}
     assert codex_usage.get("buckets"), codex_usage
+
+    # A second client must see the exact same loaded thread on the canonical
+    # Unix runtime. No thread/resume call is made, so this cannot create a copy.
+    socket_path = codex_control_socket()
+    peer = CodexAppServer(
+        command=["unix", socket_path], timeout=8,
+        process_factory=lambda *args, **kwargs: UnixWebSocketProcess(socket_path, 8))
+    try:
+        loaded = peer.loaded_thread_ids()
+        loaded_ids = {item.get("id") if isinstance(item, dict) else item for item in loaded}
+        assert sid.split(":", 1)[1] in loaded_ids, loaded
+        peer_thread = (peer.request("thread/read", {
+            "threadId": sid.split(":", 1)[1], "includeTurns": False}).get("thread") or {})
+        assert peer_thread["id"] == sid.split(":", 1)[1]
+    finally:
+        peer.close()
 
     changed = request("/api/act", {"type": "mode", "session_id": sid,
                                     "mode": "default"}, token)
@@ -97,7 +120,8 @@ def main():
     cleanup["done"] = True
     print(json.dumps({"ok": True,
                       "codex_models": len(fleet["models_by_provider"]["codex"]),
-                      "commands": len(commands["commands"]), "archived": True}, indent=2))
+                      "commands": len(commands["commands"]), "shared_peer": True,
+                      "archived": True}, indent=2))
 
 
 if __name__ == "__main__":

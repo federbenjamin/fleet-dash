@@ -32,6 +32,7 @@ test('running Fleet Dash renders both providers without console or network failu
   await page.evaluate(() => history.back());
   await expect(page.locator('#settingsview')).toBeHidden();
   const codex = page.locator('[data-sid^="codex:"]').first();
+  if (!(await codex.isVisible())) await page.locator('#headless summary').click();
   await expect(codex).toBeVisible();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
   await codex.locator('.shead').click();

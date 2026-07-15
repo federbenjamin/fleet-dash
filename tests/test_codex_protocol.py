@@ -1,10 +1,18 @@
 import json
+import os
+import base64
+import hashlib
 import queue
+import socket
+import struct
+import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 
-from codex_adapter import CodexAppServer, CodexError
+from codex_adapter import (CodexAppServer, CodexError, UnixWebSocketProcess,
+                           ensure_shared_codex_runtime)
 
 
 class QueueOutput:
@@ -107,6 +115,133 @@ class CodexProtocolTest(unittest.TestCase):
         self.assertEqual(got["alpha"], {"method": "alpha"})
         self.assertEqual(got["beta"], {"method": "beta"})
         client.close()
+
+    def test_startup_prerequisite_runs_before_transport(self):
+        events = []
+
+        def startup(command, **kwargs):
+            events.append(("startup", command))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        factory = ProcessFactory()
+        client = CodexAppServer(
+            command=["/bin/false", "transport"], timeout=.2,
+            process_factory=lambda *args, **kwargs: (
+                events.append(("transport", args[0])) or factory(*args, **kwargs)),
+            startup_command=["/bin/false", "prepare"],
+            startup_factory=startup)
+        client.start()
+        self.assertEqual([kind for kind, _ in events], ["startup", "transport"])
+        client.close()
+
+    def test_startup_failure_does_not_launch_transport(self):
+        factory = ProcessFactory()
+        client = CodexAppServer(
+            command=["/bin/false", "transport"], timeout=.2,
+            process_factory=factory,
+            startup_command=["/bin/false", "prepare"],
+            startup_factory=lambda *args, **kwargs: SimpleNamespace(
+                returncode=1, stdout="", stderr="permission denied"))
+        with self.assertRaisesRegex(CodexError, "permission denied"):
+            client.start()
+        self.assertEqual(factory.processes, [])
+
+    def test_npm_shared_runtime_detaches_one_unix_listener_and_reuses_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = os.path.join(tmp, "control.sock")
+            started = []
+
+            def process_factory(command, **kwargs):
+                started.append((command, kwargs))
+                return SimpleNamespace(poll=lambda: None)
+
+            probe = lambda path: bool(started)
+            ensure_shared_codex_runtime(
+                "/opt/codex", socket_path, process_factory=process_factory,
+                probe=probe, sleeper=lambda seconds: None)
+            command, kwargs = started[0]
+            self.assertEqual(command, ["/opt/codex", "app-server", "--listen",
+                                      "unix://" + socket_path])
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertEqual(kwargs["stdin"], __import__("subprocess").DEVNULL)
+            self.assertEqual(kwargs["stdout"], __import__("subprocess").DEVNULL)
+
+            ensure_shared_codex_runtime(
+                "/opt/codex", socket_path,
+                process_factory=lambda *args, **kwargs: self.fail("duplicate listener"),
+                probe=probe)
+            self.assertEqual(len(started), 1)
+
+    def test_unix_websocket_transport_handshake_masks_and_round_trips_jsonrpc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "app-server.sock")
+            client_socket, server_socket = socket.socketpair()
+            received = []
+
+            def exact(conn, size):
+                data = b""
+                while len(data) < size:
+                    data += conn.recv(size - len(data))
+                return data
+
+            def read_frame(conn):
+                head = exact(conn, 2)
+                length = head[1] & 0x7f
+                if length == 126:
+                    length = struct.unpack("!H", exact(conn, 2))[0]
+                elif length == 127:
+                    length = struct.unpack("!Q", exact(conn, 8))[0]
+                self.assertTrue(head[1] & 0x80, "client WebSocket frames must be masked")
+                mask = exact(conn, 4)
+                payload = exact(conn, length)
+                return bytes(value ^ mask[index % 4]
+                             for index, value in enumerate(payload)).decode()
+
+            def send_frame(conn, message):
+                payload = json.dumps(message).encode()
+                if len(payload) < 126:
+                    header = bytes([0x81, len(payload)])
+                else:
+                    header = bytes([0x81, 126]) + struct.pack("!H", len(payload))
+                conn.sendall(header + payload)
+
+            def serve():
+                conn = server_socket
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += conn.recv(4096)
+                key_line = next(line for line in request.decode().split("\r\n")
+                                if line.lower().startswith("sec-websocket-key:"))
+                key = key_line.split(":", 1)[1].strip()
+                accept = base64.b64encode(hashlib.sha1(
+                    (key + UnixWebSocketProcess.GUID).encode()).digest()).decode()
+                conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                              "Connection: Upgrade\r\n"
+                              f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+                while True:
+                    try:
+                        message = json.loads(read_frame(conn))
+                    except (OSError, EOFError, json.JSONDecodeError):
+                        break
+                    received.append(message)
+                    if message.get("id") is not None:
+                        send_frame(conn, {"id": message["id"], "result": {
+                            "method": message["method"]}})
+                    if message.get("method") == "echo":
+                        break
+                conn.close()
+
+            server = threading.Thread(target=serve, daemon=True)
+            server.start()
+            client = CodexAppServer(
+                command=["unix", path], timeout=.5,
+                process_factory=lambda *args, **kwargs: UnixWebSocketProcess(
+                    path, .5, connected_socket=client_socket))
+            self.assertEqual(client.request("echo"), {"method": "echo"})
+            client.close()
+            server.join(1)
+            self.assertEqual([item.get("method") for item in received[:3]],
+                             ["initialize", "initialized", "echo"])
 
     def test_timeout_clears_waiter_and_late_response_is_diagnostic(self):
         client, factory = self.client(timeout=0.03)

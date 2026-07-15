@@ -37,15 +37,25 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## Codex CLI integration
 
-Fleet Dash runs one long-lived `codex app-server` process and communicates through its supported
-stdio JSONL protocol. It does not scrape the Codex TUI or parse `~/.codex` rollout files.
+Fleet Dash owns one detached App Server as the canonical Codex runtime. It starts the documented
+`codex app-server --listen unix://…` transport, then connects as one client through the documented
+WebSocket-over-Unix protocol at `~/.claude/fleet-dash/codex-app-server.sock`. The detached listener
+survives a Fleet web daemon restart and is reused instead of duplicated. (`codex app-server daemon
+start` is not used: that manager requires Codex's standalone installer, while this machine uses the
+npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
 
-- Threads created or explicitly taken over by Fleet Dash are remembered in `codex_threads.json`,
-  including their mode and last normalized conversation, and resume after daemon restarts.
-- Independently launched top-level Codex threads are discovered through paginated `thread/list` and
-  appear as read-only `reopenable` cards inside the collapsed **headless sessions** fold. **Take over
-  thread** explicitly resumes one into Fleet Dash control. Child subagent threads never become
-  duplicate top-level cards.
+- Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
+  ownership, mode, and last normalized conversation, and resume after daemon restarts.
+- A terminal started with
+  `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
+  is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
+  active turn without resuming a second agent. The card's **attach** button opens this TUI form.
+- ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
+  transcripts through paginated `thread/list`, keeps them in the collapsed **headless sessions**
+  fold, and exposes them as view-only. There is deliberately no **take over** action: `thread/resume`
+  on Fleet's server would create a second runtime copy, not attach to Desktop's active agent.
+  Independently launched CLI threads that are not connected to Fleet's socket are likewise view-only.
+  Child subagent threads never become duplicate top-level cards.
 - Conversation history, prompt submission, interruption, and approval decisions use App Server
   thread/turn APIs.
 - Codex thread IDs are stored as `codex:<native-id>` so they cannot collide with Claude IDs.
@@ -76,8 +86,8 @@ stdio JSONL protocol. It does not scrape the Codex TUI or parse `~/.codex` rollo
 
 Requires a `codex` executable with App Server support. Set `codex_enabled` to `false` to disable
 the provider without affecting Claude sessions.
-- **Headless sessions** are independently launched Codex threads that Fleet Dash can see but does not
-  manage. Their fold stays collapsed by default; taking one over moves it into the always-visible list.
+- **Headless sessions** are external Codex transcripts that Fleet Dash can see but whose App Server it
+  does not own. Their fold stays collapsed by default and every action remains in the owning client.
 - **Dormant sessions** get their own fold above session history. For Claude, dormant means the
   transcript hasn't moved in over 2h (`dormant_seconds`) and no agents are running. For Codex, it
   means App Server reports the managed thread as `notLoaded` after more than 24h of inactivity.
@@ -118,12 +128,13 @@ the provider without affecting Claude sessions.
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
   the agent definition's frontmatter pin, or the parent session's effort when it pins none.
-- **"open"** on each card header (desktop only): brings that session's iTerm tab to the front.
-  Codex cards show a disabled **no terminal** control because App Server exposes no focus API.
+- **"open"** on a Claude card header (desktop only) brings that iTerm tab to the front. A managed
+  Codex card shows **attach**, which opens a new Codex TUI connected to the canonical shared runtime.
+  External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
   **📌 pinned sessions** block directly below the usage header. The order is **stable** — the
   order you pinned them — and never reshuffles as session states change. On **desktop**, use the
-  contained 📌 button immediately to the right of **open/no terminal** in the session header; on
+  contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
   **mobile**, **long-press** the header (a short tap still opens
   its chat). Pins are in-memory and clear on reload.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
@@ -369,10 +380,13 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
-- VS Code extension sessions have no tty → view-only (injection reports "no terminal").
-- Codex App Server has no terminal-focus RPC, direct client-to-subagent input/stop RPC, or
-  per-thread currency-cost field. Fleet Dash exposes the corresponding disabled/parent-mediated/
-  unavailable states and never substitutes zero as a measurement.
+- Claude VS Code extension sessions have no tty → view-only (injection reports "no terminal").
+- ChatGPT Desktop and Codex VS Code do not expose their private App Server endpoint to Fleet Dash, so
+  those transcripts are view-only. Managed Codex threads can open an attached TUI on Fleet's shared
+  socket, but Fleet cannot focus an already-open Codex terminal tab.
+- Codex App Server has no direct client-to-subagent input/stop RPC or per-thread currency-cost field.
+  Fleet Dash exposes the corresponding parent-mediated/unavailable states and never substitutes zero
+  as a measurement.
 - Codex Plan/Default mutation currently uses an experimental App Server method. It is verified
   against the installed CLI and isolated in the adapter, but may require an adapter update if Codex
   changes that experimental protocol.

@@ -45,6 +45,10 @@ class FakeCodex:
     def commands(self, sid, cwd):
         return {"ok": True, "commands": [{"name": "/compact"}]}
 
+    @staticmethod
+    def native(sid):
+        return sid.split(":", 1)[1]
+
 
 def codex_session():
     return {"session_id": "codex:same", "native_session_id": "same",
@@ -167,6 +171,28 @@ class EngineProviderTest(unittest.TestCase):
                          "/compact")
         self.assertEqual(self.engine.file_content("codex:same", "/work/repo/a.txt"),
                          ("text/plain", b"codex", None))
+
+    def test_codex_terminal_attaches_to_shared_runtime(self):
+        session = codex_session()
+        session["cwd"] = self.cwd
+        session["capabilities"].update(focus_terminal=True,
+                                       focus_terminal_mode="attach")
+        self.codex.session = session
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps)) or {"ok": True})
+        with mock.patch("codex_adapter.codex_command", return_value="/opt/codex"), \
+             mock.patch("codex_adapter.codex_control_socket",
+                        return_value="/Users/test/.codex/app-server-control.sock"):
+            result = self.engine.act({"type": "focus", "session_id": "codex:same"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["shared_runtime"])
+        self.assertEqual(writes[0][0], "SPAWN")
+        command = writes[0][1][0][0]
+        self.assertIn("codex resume --remote", command)
+        self.assertIn("unix:///Users/test/.codex/app-server-control.sock", command)
+        self.assertTrue(command.endswith(" same"))
+        self.assertEqual(self.codex.actions, [])
 
     def test_arbitrary_claude_file_path_is_rejected(self):
         ctype, data, error = self.engine.file_content("same", self.transcript)

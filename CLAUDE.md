@@ -243,6 +243,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     scrollTop (a tall cached convo starts at 0 → the sticky-bottom test would otherwise keep the
     top). `#sact` renders AFTER and shrinks `#sbody`, so re-pin in a `requestAnimationFrame` once
     layout settles. `wantBottom` also keeps the poll re-render stuck to the bottom when already there.
+30. **One canonical Codex runtime; ownership is never inferred from transcript access.** Engine starts
+    a detached `codex app-server --listen unix://…` process, then the adapter connects through the
+    documented WebSocket-over-Unix protocol at
+    `~/.claude/fleet-dash/codex-app-server.sock`. Do not use Codex's default control-socket path;
+    that belongs to its standalone daemon manager. Do not replace this
+    with `app-server daemon start` on the npm install: that manager requires the separate standalone
+    Codex installer. Fleet-created threads and CLI threads
+    actually loaded on that socket are persisted with `thread_meta.runtime_owner=fleet_shared` and
+    may be steered by Fleet or an attached `codex resume --remote unix://...` TUI. `source=vscode`
+    means ChatGPT Desktop/Codex VS Code and is always headless + view-only. Never restore the old
+    takeover action: resuming one of those ids on Fleet's server creates a second runtime agent.
 
 ## Dev workflow
 
@@ -279,6 +290,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
+- `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
+  Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
@@ -364,4 +377,5 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Tailscale serve + phone onboarding (user-side), ntfy topic subscribe.
 - Fable pricing placeholder in `config.json` rates.
 - Ledger backfill from surviving transcripts (pre-2026-07-13 history).
-- VS Code sessions: no tty → view-only by design.
+- Claude VS Code sessions: no tty → view-only by design. ChatGPT Desktop/Codex VS Code transcripts
+  are also view-only because their App Server is separate from Fleet's canonical Codex daemon.
