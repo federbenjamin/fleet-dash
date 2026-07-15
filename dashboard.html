@@ -67,11 +67,26 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
   color:var(--dim);border-top:1px solid var(--line);background:#0f1319;overflow:hidden}
 .lastmsg .lmwho{flex:0 0 auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
   color:var(--faint);line-height:1.45;padding-top:1px}
-/* up to TWO lines, then ellipsis */
+/* Preview height follows the user's line setting. Overflow is measured after
+   layout so the last allotted row can become an explicit expansion control. */
 .lastmsg .lmtext{flex:1;min-width:0;line-height:1.45;overflow:hidden;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
 .lastmsg .peekmd{display:block;-webkit-line-clamp:unset;
   max-height:calc(var(--peek-lines,2) * 1.45em)}
+.lastmsg .peekbody{position:relative;flex:1;min-width:0}
+.lastmsg .peekbody .lmtext{width:100%}
+.sessionpeek.expanded{overflow:visible}
+.sessionpeek.expanded .peekmd{max-height:none;overflow:visible}
+.peektoggle{display:none;border:0;font:inherit;cursor:pointer}
+.sessionpeek.truncated .peektoggle.more{display:block;position:absolute;z-index:1;
+  left:0;right:0;bottom:0;width:100%;height:1.45em;padding:0;background:#0f1319;
+  color:var(--dim);text-align:left;font-weight:700;letter-spacing:.12em}
+.sessionpeek.truncated .peektoggle.more:hover,.sessionpeek.truncated .peektoggle.more:focus-visible{
+  background:#151b23;color:var(--fg)}
+.sessionpeek.expanded .peektoggle.less{display:block;margin-top:5px;padding:0;background:none;
+  color:var(--blue);font-size:11px;font-weight:700;text-align:left}
+.sessionpeek.expanded .peektoggle.less:hover,.sessionpeek.expanded .peektoggle.less:focus-visible{
+  color:var(--fg);text-decoration:underline}
 .peekmd h1,.peekmd h2,.peekmd h3,.peekmd h4,.peekmd h5,.peekmd h6{
   color:var(--fg);font-size:1em;line-height:inherit;font-weight:700;margin:0}
 .peekmd p,.peekmd ul,.peekmd ol,.peekmd blockquote{margin:0;line-height:inherit}
@@ -584,6 +599,7 @@ const $=q=>document.querySelector(q);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
         history.replaceState(null,'',location.pathname);}})();
 const open=new Set();
+const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
 // input guard, two windows: a scroll gesture (touchmove OR desktop wheel/trackpad)
 // holds POLL re-renders 1500ms so the scrollbox isn't replaced mid-gesture (a
@@ -1302,7 +1318,7 @@ function cardTop(s){
         <span class="m amodel">${modelLabel(s)}</span>
       </div>
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><span class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</span></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
@@ -1985,6 +2001,25 @@ function closedRows(list,now){
 }
 
 function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,true);}
+function togglePeek(sid,expanded){
+  expanded?expandedPeeks.add(sid):expandedPeeks.delete(sid);
+  render(last,true);
+}
+let peekMeasurePending=false;
+function schedulePeekOverflow(){
+  if(peekMeasurePending)return;
+  peekMeasurePending=true;
+  requestAnimationFrame(()=>{
+    peekMeasurePending=false;
+    document.querySelectorAll('.sessionpeek').forEach(row=>{
+      row.classList.remove('truncated');
+      if(row.classList.contains('expanded'))return;
+      const body=row.querySelector('.peekmd');
+      if(body&&body.scrollHeight>body.clientHeight+1)row.classList.add('truncated');
+    });
+  });
+}
+window.addEventListener('resize',schedulePeekOverflow);
 
 let insightsOpen=false,insightsDays=7;
 const insightsCache={};   // days -> {t, data, fetching}
@@ -2086,6 +2121,7 @@ function render(f,force){
   renderViewerBar();
   renderAgent();
   renderSession();
+  schedulePeekOverflow();
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
 

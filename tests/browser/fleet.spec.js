@@ -77,9 +77,21 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(peek.locator('b')).toHaveText('Fit the screen');
   await expect(peek.locator('code')).toHaveText('compact code');
   await expect(peek.locator('li')).toHaveCount(2);
+  const peekRow = card.locator('.sessionpeek');
+  await expect(peekRow).toHaveClass(/truncated/);
+  const expand = peekRow.getByRole('button', { name: 'expand latest message' });
+  await expect(expand).toHaveText('...');
   const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
+  await expand.click();
+  await expect(peekRow).toHaveClass(/expanded/);
+  await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
+  const expandedBox = await peek.evaluate(el => el.getBoundingClientRect().height);
+  expect(expandedBox).toBeGreaterThan(peekBox.height);
+  await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
+  await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
+  await expect(peekRow).toHaveClass(/truncated/);
 
   const gauge = await card.locator('.ctxbar').evaluate(el => ({
     background: getComputedStyle(el).backgroundColor,
