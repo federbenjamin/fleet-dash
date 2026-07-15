@@ -163,6 +163,11 @@ def set_scenario(name):
         session.update(state="stale", error="app-server exited", stale=True,
                        stale_reason="app-server exited")
         session["capabilities"] = capabilities(submit=False, interrupt=False, close=False)
+    elif name == "cross-client-active":
+        session.update(state="running", reg_status="running", quiet_s=1,
+                       last_msg={"role": "assistant", "text": "Working in ChatGPT desktop."})
+        session["capabilities"] = capabilities(
+            submit=False, interrupt=False, close=False, compact=False, review=False)
     elif name == "subagent":
         session.update(state="running", reg_status="running", agents_running=1)
         session["agents"][0]["state"] = "running"

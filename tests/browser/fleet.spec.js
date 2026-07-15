@@ -137,6 +137,19 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(card.locator('.chip')).toContainText('done');
 });
 
+test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
+  await reset(page, 'cross-client-active');
+  const card = page.locator('[data-sid="codex:thread-one"]');
+
+  await expect(card.locator('.chip')).toContainText('running');
+  await expect(card).toContainText('Working in ChatGPT desktop.');
+  await card.locator('.shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeDisabled();
+  await expect(page.locator('#sft-codex\\:thread-one')).toHaveCount(0);
+});
+
 test('overflow menus cover chat, Markdown, subagents, theme, and close history', async ({ page }, testInfo) => {
   await reset(page);
   let card = page.locator('[data-sid="codex:thread-one"]');

@@ -580,11 +580,27 @@ class CodexAdapter:
             live = self.client.thread_state.get(tid, {})
             pending = self._pending(tid, live.get("pending"))
             updated = thread.get("updatedAt") or thread.get("createdAt")
-            updated_epoch = _epoch(updated) or live.get("updated_at") or now
+            turn_lifecycle = _latest_turn_lifecycle(thread)
+            live_completed = _epoch(live.get("completed_at"))
+            completion_times = [value for value in
+                                (turn_lifecycle.get("completed_at"), live_completed)
+                                if value is not None]
+            completed_epoch = max(completion_times) if completion_times else None
+            activity_times = [value for value in
+                              (_epoch(updated), _epoch(live.get("updated_at")),
+                               turn_lifecycle.get("started_at"), completed_epoch)
+                              if value is not None]
+            # thread.updatedAt can remain stale when ChatGPT desktop owns the turn.
+            # Prefer the newest lifecycle evidence instead of the first truthy field.
+            updated_epoch = max(activity_times) if activity_times else now
             recorded = thread.get("status") or {}
             recorded_type = recorded.get("type") if isinstance(recorded, dict) else recorded
             flags = set(recorded.get("activeFlags") or []) if isinstance(recorded, dict) else set()
-            running = live.get("status") == "running" or recorded_type == "active"
+            native_running = live.get("status") == "running" or recorded_type == "active"
+            turn_started = turn_lifecycle.get("started_at")
+            observed_running = turn_lifecycle.get("active", False) and (
+                completed_epoch is None or turn_started is None or turn_started > completed_epoch)
+            running = native_running or observed_running
             quiet = max(0, now - updated_epoch)
             if not is_managed:
                 state = "reopenable"
@@ -596,7 +612,7 @@ class CodexAdapter:
                 state = "stalled"
             elif running:
                 state = "running"
-            elif live.get("completed_at") and now - live["completed_at"] < 90:
+            elif completed_epoch is not None and 0 <= now - completed_epoch < 90:
                 state = "turn_done"
             elif recorded_type == "notLoaded" and quiet > 86400:
                 state = "dormant"
@@ -643,6 +659,14 @@ class CodexAdapter:
             revision = _revision(thread, live)
             if is_managed and not detail_error:
                 self._cache_snapshot(tid, messages, files, revision, thread)
+            owned_turn = bool(live.get("turn_id"))
+            can_interrupt = (is_managed and owned_turn and
+                             state in ("running", "stalled", "needs_you"))
+            uncontrolled_active = (state in ("running", "stalled", "needs_you") and
+                                   not can_interrupt)
+            reg_status = ("running" if state in ("running", "stalled") else
+                          "turn_done" if state == "turn_done" else
+                          live.get("status") or recorded_type)
             out.append({
                 "session_id": self.key(tid), "native_session_id": tid,
                 "provider": "codex", "name": thread.get("name") or thread.get("title"),
@@ -652,7 +676,7 @@ class CodexAdapter:
                 "model": model, "family": "codex", "effort": effort,
                 "collaboration_mode": mode, "running": None,
                 "last_msg": _last_message(messages, thread.get("preview")),
-                "state": state, "reg_status": live.get("status") or recorded_type,
+                "state": state, "reg_status": reg_status,
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,
@@ -663,18 +687,22 @@ class CodexAdapter:
                 "agents_running": agents_running, "agents_total": len(agents),
                 "agent_cost": None, "stale": False,
                 "error": detail_error or live.get("error"),
-                "capabilities": {"submit": is_managed and state not in ("error", "stale"),
-                    "interrupt": is_managed and state in ("running", "stalled", "needs_you"),
+                "capabilities": {"submit": is_managed and
+                    state not in ("error", "stale") and not uncontrolled_active,
+                    "interrupt": can_interrupt,
                     "takeover": not is_managed, "archive": is_managed,
-                    "close": is_managed,
-                    "compact": is_managed and state not in ("running", "needs_you"),
-                    "review": is_managed and state not in ("running", "needs_you"),
+                    "close": is_managed and not uncontrolled_active,
+                    "compact": is_managed and state not in
+                        ("running", "stalled", "needs_you"),
+                    "review": is_managed and state not in
+                        ("running", "stalled", "needs_you"),
                     "files": bool(files), "focus_terminal": False,
                     "focus_terminal_reason": "Codex App Server has no terminal-focus API",
                     "answer_structured": bool(pending and pending.get("kind") in
                                               ("question", "elicitation")),
                     "decide_approval": bool(pending), "spawn_agent": True,
-                    "relay_agent": is_managed, "relay_agent_direct": False,
+                    "relay_agent": is_managed and not uncontrolled_active,
+                    "relay_agent_direct": False,
                     "account_usage": bool(self._account), "exact_cost": False,
                     "measured_throughput": False},
             })
@@ -1005,6 +1033,16 @@ class CodexAdapter:
                and typ not in ("takeover", "resume"):
                 return {"ok": False,
                         "error": "external Codex thread is read-only until explicitly taken over"}
+            required_capability = {"text": "submit", "mode": "submit",
+                                   "interrupt": "interrupt", "close": "close",
+                                   "compact": "compact", "review": "review",
+                                   "relay": "relay_agent"}.get(typ)
+            if known and required_capability and not known.get("capabilities", {}).get(
+                    required_capability):
+                if known.get("state") in ("running", "stalled", "needs_you"):
+                    return {"ok": False, "error":
+                            "Codex is active in another client; control it there until the turn ends"}
+                return {"ok": False, "error": f"session does not support {typ}"}
             if typ == "text":
                 text = str(action.get("text") or "").strip()
                 if not text:
@@ -1143,6 +1181,28 @@ def _epoch(value):
         except ValueError:
             return None
     return None
+
+
+def _latest_turn_lifecycle(thread):
+    """Return lifecycle evidence that survives cross-App-Server thread reads.
+
+    ChatGPT desktop turns can appear as ``interrupted`` to Fleet Dash's separate
+    App Server while they are still running. The durable distinction is that an
+    active turn has startedAt but no completedAt; a genuinely ended turn has a
+    completion timestamp.
+    """
+    turns = thread.get("turns") or []
+    if not turns:
+        return {"active": False, "started_at": None, "completed_at": None}
+    turn = turns[-1] or {}
+    started_at = _epoch(turn.get("startedAt"))
+    completed_at = _epoch(turn.get("completedAt"))
+    status = str(turn.get("status") or "").replace("-", "").replace("_", "").lower()
+    explicitly_active = status in {"active", "inprogress", "running", "started"}
+    active = (turn.get("completedAt") is None and
+              (explicitly_active or started_at is not None))
+    return {"active": active, "started_at": started_at,
+            "completed_at": completed_at, "status": turn.get("status")}
 
 
 def _millis(value):
