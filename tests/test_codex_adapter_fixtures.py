@@ -180,6 +180,21 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(session["capabilities"]["close"])
         self.assertTrue(session["headless"])
 
+    def test_fleet_owned_vscode_source_stays_managed(self):
+        thread = {**self.thread("fleet-rich-client", {"type": "idle"}),
+                  "source": "vscode"}
+        adapter, _ = self.adapter([thread])
+        adapter._remember("fleet-rich-client", "plan", {
+            "runtime_owner": "fleet_shared", "unmaterialized": False})
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertFalse(session["headless"])
+        self.assertFalse(session["read_only"])
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertTrue(session["capabilities"]["focus_terminal"])
+        self.assertEqual(session["capabilities"]["focus_terminal_mode"], "attach")
+
     def test_owned_app_server_turn_keeps_control_capabilities(self):
         thread = self.thread("managed", {"type": "active"}, updated=990)
         adapter, client = self.adapter([thread], now=1000)

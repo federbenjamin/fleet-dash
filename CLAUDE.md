@@ -251,9 +251,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     with `app-server daemon start` on the npm install: that manager requires the separate standalone
     Codex installer. Fleet-created threads and CLI threads
     actually loaded on that socket are persisted with `thread_meta.runtime_owner=fleet_shared` and
-    may be steered by Fleet or an attached `codex resume --remote unix://...` TUI. `source=vscode`
-    means ChatGPT Desktop/Codex VS Code and is always headless + view-only. Never restore the old
-    takeover action: resuming one of those ids on Fleet's server creates a second runtime agent.
+    may be steered by Fleet or an attached `codex resume --remote unix://...` TUI. A newly created
+    Fleet thread immediately starts a visible normal `hi` turn; `thread/start` alone has no rollout
+    and cannot be resumed by the TUI. `thread/resume` aborts an active turn, so expose disabled
+    **turn active** instead of attach until the turn finishes. Keep the full-chat
+    open/attach/view-only button directly left of its overflow menu. `source=vscode` is not ownership
+    evidence: App Server uses it for Fleet's rich-client threads too. Only a thread persisted with
+    `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
+    headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
+    server creates a second runtime agent.
 
 ## Dev workflow
 

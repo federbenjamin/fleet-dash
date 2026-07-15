@@ -19,6 +19,7 @@ class FakeCodex:
         self.actions = []
         self.fail_sessions = False
         self.muted_at_call = None
+        self.started_thread = None
 
     def sessions(self):
         if self.fail_sessions:
@@ -48,6 +49,16 @@ class FakeCodex:
     @staticmethod
     def native(sid):
         return sid.split(":", 1)[1]
+
+    @staticmethod
+    def key(tid):
+        return "codex:" + tid
+
+    def start_thread(self, cwd, model=None, effort=None, mode="plan",
+                     initial_text=None):
+        self.started_thread = {"cwd": cwd, "model": model, "effort": effort,
+                               "mode": mode, "initial_text": initial_text}
+        return {"id": "new-thread"}
 
 
 def codex_session():
@@ -193,6 +204,19 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIn("unix:///Users/test/.codex/app-server-control.sock", command)
         self.assertTrue(command.endswith(" same"))
         self.assertEqual(self.codex.actions, [])
+
+    def test_codex_spawn_starts_visible_initial_hi(self):
+        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+            result = self.engine.spawn_codex_session({
+                "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
+                "effort": "high", "mode": "plan"})
+        cwd = os.path.realpath(self.cwd)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["session_id"], "codex:new-thread")
+        self.assertEqual(result["initial_message"], "hi")
+        self.assertEqual(self.codex.started_thread, {
+            "cwd": cwd, "model": "gpt-5.4", "effort": "high",
+            "mode": "plan", "initial_text": "hi"})
 
     def test_arbitrary_claude_file_path_is_rejected(self):
         ctype, data, error = self.engine.file_content("same", self.transcript)

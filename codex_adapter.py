@@ -852,8 +852,11 @@ class CodexAdapter:
                 continue
             listed.add(tid)
             source = thread.get("source") or "unknown"
-            desktop_owned = source == "vscode"
-            is_managed = tid in managed and not desktop_owned
+            # App Server also writes `source: vscode` for Fleet's own rich-client
+            # threads. Ownership comes from the runtime marker we persisted when
+            # creating/adopting the thread, never from this presentation label.
+            is_managed = tid in managed
+            desktop_owned = source == "vscode" and not is_managed
             # A CLI connected with `codex --remote unix://...` is another client
             # of Fleet's canonical runtime. Adopt it automatically so both
             # surfaces steer the same live turn instead of resuming a copy.
@@ -965,6 +968,7 @@ class CodexAdapter:
                              state in ("running", "stalled", "needs_you"))
             uncontrolled_active = (state in ("running", "stalled", "needs_you") and
                                    not can_interrupt)
+            can_attach = is_managed and state not in ("running", "stalled", "needs_you")
             reg_status = ("running" if state in ("running", "stalled") else
                           "turn_done" if state == "turn_done" else
                           live.get("status") or recorded_type)
@@ -1003,10 +1007,15 @@ class CodexAdapter:
                         ("running", "stalled", "needs_you"),
                     "review": is_managed and state not in
                         ("running", "stalled", "needs_you"),
-                    "files": bool(files), "focus_terminal": is_managed,
-                    "focus_terminal_mode": "attach" if is_managed else None,
+                    "files": bool(files), "focus_terminal": can_attach,
+                    "focus_terminal_mode": "attach" if can_attach else None,
+                    "focus_terminal_label": ("attach" if can_attach else
+                                             "view only" if not is_managed else
+                                             "turn active"),
                     "focus_terminal_reason": ("Open a Codex TUI attached to Fleet's shared "
-                                              "App Server" if is_managed else
+                                              "App Server" if can_attach else
+                                              "Wait for the current Codex turn to finish before "
+                                              "attaching" if is_managed else
                                               "External Codex runtime is view only"),
                     "answer_structured": bool(pending and pending.get("kind") in
                                               ("question", "elicitation")),
@@ -1173,7 +1182,8 @@ class CodexAdapter:
                 continue
         self._resumed_generation = getattr(self.client, "generation", generation)
 
-    def start_thread(self, cwd, model=None, effort=None, mode="plan"):
+    def start_thread(self, cwd, model=None, effort=None, mode="plan",
+                     initial_text=None):
         if mode not in ("plan", "default"):
             raise CodexError("unknown Codex collaboration mode")
         thread = self.client.start_thread(cwd, model, effort)
@@ -1193,6 +1203,39 @@ class CodexAdapter:
                 self._sessions = [s for s in self._sessions
                                   if s.get("session_id") != stub["session_id"]] + [stub]
                 self._last_refresh = 0
+            if initial_text:
+                try:
+                    self.client.start_turn(tid, initial_text, mode=mode,
+                                           model=resolved_model,
+                                           effort=resolved_effort)
+                except Exception as exc:
+                    # Do not leave a broken empty card behind when the bootstrap
+                    # turn fails. An empty App Server thread may not have a rollout
+                    # yet, so archive is best-effort and local ownership is always
+                    # removed.
+                    try:
+                        self.client.archive(tid)
+                    except Exception:
+                        pass
+                    self._forget(tid)
+                    with self._lock:
+                        self._sessions = [s for s in self._sessions
+                                          if s.get("session_id") != self.key(tid)]
+                    raise CodexError(
+                        f"failed to start initial Codex turn: {exc}") from exc
+                self._remember(tid, mode, {"unmaterialized": False})
+                with self._lock:
+                    for current in self._sessions:
+                        if current.get("native_session_id") == tid:
+                            current.update(state="running", reg_status="running",
+                                           last_msg={"role": "user",
+                                                     "text": initial_text})
+                            current["capabilities"].update(
+                                focus_terminal=False,
+                                focus_terminal_mode=None,
+                                focus_terminal_label="turn active",
+                                focus_terminal_reason=(
+                                    "Wait for the current Codex turn to finish before attaching"))
         return thread
 
     def _stub_session(self, tid, meta, mode):

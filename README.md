@@ -45,7 +45,10 @@ start` is not used: that manager requires Codex's standalone installer, while th
 npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
 
 - Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
-  ownership, mode, and last normalized conversation, and resume after daemon restarts.
+  ownership, mode, and last normalized conversation, and resume after daemon restarts. Every new
+  Fleet Codex session immediately sends a visible, normal `hi` turn. That creates the rollout the
+  TUI needs instead of leaving an empty, unresumable thread shell. **Attach** stays disabled as
+  **turn active** until that bootstrap turn finishes because resuming an active thread aborts its turn.
 - A terminal started with
   `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
   is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
@@ -131,6 +134,7 @@ the provider without affecting Claude sessions.
 - **"open"** on a Claude card header (desktop only) brings that iTerm tab to the front. A managed
   Codex card shows **attach**, which opens a new Codex TUI connected to the canonical shared runtime.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
+  The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
   **📌 pinned sessions** block directly below the usage header. The order is **stable** — the
   order you pinned them — and never reshuffles as session states change. On **desktop**, use the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live Fleet Dash smoke test. Creates a Codex thread but starts no paid turn."""
+"""Paid live Fleet Dash smoke for Codex bootstrap and shared-runtime attachment."""
 import json
 import os
 import sys
@@ -65,13 +65,22 @@ def main():
     atexit.register(archive_created_thread)
 
     session = None
-    for _ in range(15):
-        time.sleep(1)
+    context = None
+    for _ in range(120):
+        time.sleep(0.5)
         fleet = request("/api/fleet")
         session = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
-        if session:
+        context = request("/api/context?" + urllib.parse.urlencode({"sid": sid}))
+        has_hi = any(m.get("role") == "user" and m.get("text") == "hi"
+                     for m in context.get("messages") or [])
+        if (session and has_hi and session["state"] not in
+                ("running", "stalled", "needs_you") and
+                session["capabilities"]["focus_terminal"]):
             break
     assert session, f"spawned thread {sid} never appeared"
+    assert context and any(m.get("role") == "user" and m.get("text") == "hi"
+                           for m in context.get("messages") or []), context
+    assert session["state"] not in ("running", "stalled", "needs_you"), session
     assert session["provider"] == "codex"
     assert session["cost_source"] == "unavailable"
     assert session["capabilities"]["submit"] is True
@@ -85,8 +94,9 @@ def main():
     codex_usage = (fleet.get("provider_usage") or {}).get("codex") or {}
     assert codex_usage.get("buckets"), codex_usage
 
-    # A second client must see the exact same loaded thread on the canonical
-    # Unix runtime. No thread/resume call is made, so this cannot create a copy.
+    # A second client must see and resume the exact same now-idle thread on the
+    # canonical Unix runtime. Resuming while a turn is active aborts that turn,
+    # which is why Fleet disables Attach until the bootstrap turn completes.
     socket_path = codex_control_socket()
     peer = CodexAppServer(
         command=["unix", socket_path], timeout=8,
@@ -98,6 +108,8 @@ def main():
         peer_thread = (peer.request("thread/read", {
             "threadId": sid.split(":", 1)[1], "includeTurns": False}).get("thread") or {})
         assert peer_thread["id"] == sid.split(":", 1)[1]
+        resumed = peer.resume_thread(sid.split(":", 1)[1])
+        assert resumed["id"] == sid.split(":", 1)[1], resumed
     finally:
         peer.close()
 

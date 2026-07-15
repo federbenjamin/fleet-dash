@@ -307,10 +307,18 @@ class Handler(BaseHTTPRequestHandler):
                 typ = payload.get("type")
                 if typ == "text":
                     session.update(state="running", reg_status="running")
-                    session["capabilities"]["interrupt"] = True
+                    session["capabilities"].update(
+                        interrupt=True, focus_terminal=False,
+                        focus_terminal_mode=None, focus_terminal_label="turn active",
+                        focus_terminal_reason=
+                        "Wait for the current Codex turn to finish before attaching")
                 elif typ == "interrupt":
                     session.update(state="turn_done", reg_status="idle")
-                    session["capabilities"]["interrupt"] = False
+                    session["capabilities"].update(
+                        interrupt=False, focus_terminal=True,
+                        focus_terminal_mode="attach", focus_terminal_label="attach",
+                        focus_terminal_reason=
+                        "Open a Codex TUI attached to Fleet's shared App Server")
                 elif typ == "mode":
                     session["collaboration_mode"] = payload.get("mode")
                     return self.json_reply({"ok": True, "mode": payload.get("mode")})

@@ -19,6 +19,8 @@ class FakeClient:
     def __init__(self):
         self.thread_state = {}
         self.approvals = {}
+        self.fail_start = False
+        self.archived = []
 
     def list_threads(self):
         return [{"id": "thr-1", "name": "Fix parser", "cwd": "/work/app",
@@ -35,7 +37,16 @@ class FakeClient:
         ]}]}
 
     def start_turn(self, thread_id, text, **settings):
+        if self.fail_start:
+            raise RuntimeError("turn bootstrap failed")
         self.started = (thread_id, text, settings)
+
+    def start_thread(self, cwd, model=None, effort=None):
+        return {"id": "thr-new", "cwd": cwd, "model": model or "gpt-5.4",
+                "effort": effort or "high"}
+
+    def archive(self, thread_id):
+        self.archived.append(thread_id)
 
     def set_mode(self, thread_id, mode, model, effort):
         self.mode_changed = (thread_id, mode, model, effort)
@@ -90,6 +101,27 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(self.client.started, ("thr-1", "continue", {
             "mode": "default", "model": "gpt-5.4", "effort": "high"}))
+
+    def test_new_thread_sends_visible_initial_hi_and_marks_materialized(self):
+        thread = self.adapter.start_thread("/work/app", "gpt-5.4", "high",
+                                           "plan", initial_text="hi")
+        self.assertEqual(thread["id"], "thr-new")
+        self.assertEqual(self.client.started, ("thr-new", "hi", {
+            "mode": "plan", "model": "gpt-5.4", "effort": "high"}))
+        state = self.adapter._state()
+        self.assertFalse(state["thread_meta"]["thr-new"]["unmaterialized"])
+        self.assertEqual(state["thread_meta"]["thr-new"]["runtime_owner"],
+                         "fleet_shared")
+
+    def test_failed_initial_hi_removes_empty_owned_thread(self):
+        self.client.fail_start = True
+        with self.assertRaisesRegex(Exception, "failed to start initial Codex turn"):
+            self.adapter.start_thread("/work/app", "gpt-5.4", "high",
+                                      "default", initial_text="hi")
+        self.assertEqual(self.client.archived, ["thr-new"])
+        self.assertNotIn("thr-new", self.adapter._managed())
+        self.assertFalse(any(s.get("native_session_id") == "thr-new"
+                             for s in self.adapter._sessions))
 
     def test_mode_action_updates_thread_settings(self):
         self.adapter._refresh()

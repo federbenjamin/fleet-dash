@@ -398,6 +398,7 @@ td.r,th.r{text-align:right}
 .expandbtn{float:right;background:var(--card);border:1px solid var(--line);border-radius:8px;
   color:var(--fg);font:inherit;font-size:13px;font-weight:600;padding:7px 14px;cursor:pointer;
   text-transform:none;letter-spacing:0;white-space:nowrap}
+.termbtn:disabled{opacity:.38;cursor:not-allowed}
 .expandbtn:hover{border-color:var(--blue);color:var(--blue)}
 /* subagent chat overlay — same shape as the file viewer, no file strip */
 #aview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:55;flex-direction:column}
@@ -900,6 +901,22 @@ function overflowMenu(key,s,kind='session',done=false){
           <span>Close session</span><small>${canClose?'move to history':'unavailable'}</small></button>`:''}
     </span></span>`;
 }
+function terminalButton(s,card=false){
+  if(!s)return'';
+  const cls=`expandbtn termbtn${card?' deskonly':''}`;
+  if(s.capabilities?.focus_terminal){
+    const attach=s.capabilities?.focus_terminal_mode==='attach';
+    const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
+    return`<button class="${cls}" title="${esc(title)}"
+      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'attach':'open'}</button>`;
+  }
+  if(s.provider==='codex'){
+    const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
+    return`<button class="${cls}" disabled
+      title="${esc(s.capabilities?.focus_terminal_reason||'Codex terminal unavailable')}">${label}</button>`;
+  }
+  return'';
+}
 let viewerChatOpen=false,viewerQOpen=true,viewerPath=null;
 // one question's full interaction block (options + descriptions + Other + ✕ dismiss);
 // shared by the card's amber box (pre='msg') and the viewer's docked bar (pre='vmsg')
@@ -1100,7 +1117,7 @@ function renderSession(force){
   const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
   const done=['done','ended'];
   $('#stitle2').innerHTML=sessTitleBlock(s);
-  $('#sctrl').innerHTML=overflowMenu('session',s,'session');
+  $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,'session');
   if(!force&&(typing||touching()))return;
   const body=$('#sbody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
@@ -1313,10 +1330,7 @@ function cardTop(s){
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
-      ${s.capabilities?.focus_terminal?`<button class="expandbtn deskonly" title="${esc(s.capabilities?.focus_terminal_mode==='attach'?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front")}"
-        onclick="event.stopPropagation();focusSession('${s.session_id}')">${s.capabilities?.focus_terminal_mode==='attach'?'attach':'open'}</button>`:
-        s.provider==='codex'?`<button class="expandbtn deskonly" disabled
-          title="${esc(s.capabilities?.focus_terminal_reason||'Codex terminal unavailable')}">${s.read_only?'view only':'no terminal'}</button>`:''}
+      ${terminalButton(s,true)}
       <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
         aria-label="${pinned?'unpin session':'pin session to top'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>

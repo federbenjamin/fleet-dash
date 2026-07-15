@@ -228,6 +228,12 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await reset(page);
   const card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
+  const attach = page.locator('#sctrl > .termbtn');
+  await expect(attach).toHaveText('attach');
+  await expect(attach).toBeEnabled();
+  expect(await attach.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
+  await attach.click();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
   await page.getByRole('button', { name: 'Default', exact: true }).click();
   await expect.poll(async () => (await fixtureState(page)).sessions[1].collaboration_mode)
@@ -237,12 +243,16 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await input.fill('Run the deterministic check');
   await page.locator('#sact').getByRole('button', { name: 'send' }).click();
   await refresh(page);
+  await expect(page.locator('#sctrl > .termbtn')).toHaveText('turn active');
+  await expect(page.locator('#sctrl > .termbtn')).toBeDisabled();
   await page.getByRole('button', { name: 'session actions' }).click();
   await page.getByRole('menuitem', { name: /Stop turn/ }).click();
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
   await expect(card.locator('.chip')).toContainText('done');
+  await expect(page.locator('#sctrl > .termbtn')).toHaveText('attach');
+  await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
 });
 
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
@@ -256,6 +266,10 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   if ((await page.viewportSize()).width > 700)
     await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
   await card.locator('.shead').click();
+  const viewOnly = page.locator('#sctrl > .termbtn');
+  await expect(viewOnly).toHaveText('view only');
+  await expect(viewOnly).toBeDisabled();
+  expect(await viewOnly.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeDisabled();
@@ -305,6 +319,12 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await reset(page);
   const claude = page.locator('[data-sid="claude-one"]');
   await claude.locator('.shead').click();
+  const openTerminal = page.locator('#sctrl > .termbtn');
+  await expect(openTerminal).toHaveText('open');
+  await expect(openTerminal).toBeEnabled();
+  expect(await openTerminal.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
+  await openTerminal.click();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('button', { name: 'Plan', exact: true })).toHaveCount(0);
   await page.getByRole('menuitem', { name: /Close session/ }).click();

@@ -1896,12 +1896,13 @@ class Engine:
             thread = self.codex.start_thread(
                 cwd, str(action.get("model") or "").strip() or None,
                 str(action.get("effort") or "").strip() or None,
-                str(action.get("mode") or "plan").strip())
+                str(action.get("mode") or "plan").strip(), initial_text="hi")
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         tid = thread.get("id")
         return {"ok": bool(tid), "session_id": self.codex.key(tid) if tid else None,
-                "provider": "codex", "cwd": cwd}
+                "provider": "codex", "cwd": cwd,
+                "initial_message": "hi" if tid else None}
 
     def spawn_session(self, action):
         """Start a NEW Claude Code session in a fresh iTerm tab.
