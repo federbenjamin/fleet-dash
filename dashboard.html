@@ -36,6 +36,15 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
   font:inherit;font-size:12.5px;cursor:pointer}
 .setchoice button[aria-pressed="true"]{background:var(--card2);color:var(--fg);font-weight:600}
 .sethint{color:var(--faint);font-size:10.5px;line-height:1.4;margin-top:5px}
+#settingsview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:58;flex-direction:column}
+#sethead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+  padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}
+#setclose{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
+  color:var(--fg);font:inherit;font-size:18px;line-height:1;padding:7px 12px;cursor:pointer}
+#settitle{font-size:16px;font-weight:700}
+#settings{flex:1;overflow:auto;padding:14px 14px calc(18px + env(safe-area-inset-bottom));
+  overscroll-behavior:contain}
+#settings>.setpanel{width:min(100%,760px);margin-inline:auto}
 .bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
 .bell.muted{opacity:.4}
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
@@ -561,8 +570,7 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
 </head>
 <body>
 <h1 class="pagetitle"><span>Fleet View</span><button id="gear" title="settings"
-  onclick="settingsOpen=!settingsOpen;renderSettings()">⚙</button></h1>
-<div id="settings"></div>
+  onclick="openSettings()">⚙</button></h1>
 <header><div id="totals"></div></header>
 <div id="usage"></div>
 <div id="pinned"></div>
@@ -592,6 +600,11 @@ read-only: this device has no act token — buttons won't work until you open th
     <span id="sctrl"></span></div>
   <div id="sbody"></div>
   <div id="sact"></div>
+</div>
+<div id="settingsview">
+  <div id="sethead"><button id="setclose" aria-label="back to fleet" title="back to fleet"
+    onclick="dismissOverlay()">←</button><span id="settitle">Settings</span></div>
+  <div id="settings"></div>
 </div>
 <script>
 const $=q=>document.querySelector(q);
@@ -993,26 +1006,26 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
   $('#vctrl').innerHTML='';
   viewerSid=null;viewerPath=null;}
 // ---- back-gesture / Esc closes the open full-screen overlay ----------------
-// The three overlays are mutually exclusive fullscreen surfaces, so we model
+// The fullscreen surfaces are mutually exclusive, so we model
 // "an overlay is open" as ONE logical state: push a single history entry when we
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
 let histPushed=false;
-const anyOverlay=()=>['#viewer','#sview','#aview'].some(id=>$(id).style.display==='flex');
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
   if(!histPushed)return;                 // an entry we didn't push — leave it
   histPushed=false;
-  closeConfirm();closeViewer();closeAgent();closeSession();
+  closeConfirm();closeViewer();closeAgent();closeSession();closeSettings();
 });
 function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeViewer();closeAgent();closeSession();}
+  else{closeViewer();closeAgent();closeSession();closeSettings();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();});
@@ -1427,7 +1440,19 @@ const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
 let settingsOpen=false;
 function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
-  if(sessionView)renderSession(true);if(agentView)renderAgent(true);}
+  if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
+function openSettings(){
+  settingsOpen=true;
+  $('#settingsview').style.display='flex';
+  $('#settings').scrollTop=0;
+  renderSettings();
+  syncOverlayHistory();
+}
+function closeSettings(){
+  settingsOpen=false;
+  $('#settingsview').style.display='none';
+  $('#settings').innerHTML='';
+}
 function renderSettings(){
   const el=$('#settings');
   if(!settingsOpen){el.innerHTML='';return;}

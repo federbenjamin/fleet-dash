@@ -112,6 +112,21 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await page.locator('#sclose').click();
 
   await page.locator('#gear').click();
+  const settingsPage = page.locator('#settingsview');
+  await expect(settingsPage).toBeVisible();
+  await expect(settingsPage.locator('#settitle')).toHaveText('Settings');
+  await expect(settingsPage.getByRole('button', { name: 'back to fleet' })).toBeVisible();
+  expect(await settingsPage.evaluate(el => getComputedStyle(el).position)).toBe('fixed');
+  await page.screenshot({ path: testInfo.outputPath('settings-page.png'), fullPage: true });
+  await settingsPage.getByRole('button', { name: 'back to fleet' }).click();
+  await expect(settingsPage).toBeHidden();
+
+  await page.locator('#gear').click();
+  await page.evaluate(() => history.back());
+  await expect(settingsPage).toBeHidden();
+  await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+
+  await page.locator('#gear').click();
   const widthGroup = page.getByRole('group', { name: 'Full-screen reading width' });
   await expect(widthGroup.getByRole('button', { name: 'Fit the screen' }))
     .toHaveAttribute('aria-pressed', 'true');

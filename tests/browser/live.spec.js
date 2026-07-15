@@ -21,6 +21,11 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(page.locator('#usage')).toContainText('Claude Code');
   await expect(page.locator('#usage')).toContainText('Codex CLI');
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
+  await page.locator('#gear').click();
+  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page.locator('#settitle')).toHaveText('Settings');
+  await page.evaluate(() => history.back());
+  await expect(page.locator('#settingsview')).toBeHidden();
   const codex = page.locator('[data-sid^="codex:"]').first();
   await expect(codex).toBeVisible();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
