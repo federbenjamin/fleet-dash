@@ -30,6 +30,12 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
 .setnum{color:var(--dim)}
 .setnum input{width:72px;background:var(--card2);border:1px solid var(--line);border-radius:6px;
               color:var(--fg);padding:3px 6px;font:inherit;font-size:13px;margin:0 4px}
+.setchoice{display:grid;grid-template-columns:1fr 1fr;gap:4px;background:#0b0f14;
+  border:1px solid var(--line);border-radius:9px;padding:3px}
+.setchoice button{min-height:38px;border:0;border-radius:6px;background:transparent;color:var(--dim);
+  font:inherit;font-size:12.5px;cursor:pointer}
+.setchoice button[aria-pressed="true"]{background:var(--card2);color:var(--fg);font-weight:600}
+.sethint{color:var(--faint);font-size:10.5px;line-height:1.4;margin-top:5px}
 .bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
 .bell.muted{opacity:.4}
 header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
@@ -56,7 +62,7 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .modesel{background:var(--card2);border:1px solid var(--line);border-radius:6px;color:var(--fg);
   padding:2px 5px;font:inherit;font-size:11px;cursor:pointer}
 .modesel:disabled{opacity:.5;cursor:not-allowed}
-/* one-line "last message" preview — the newest prose, never a tool call */
+/* last-message peek — compact Markdown, never a tool call */
 .lastmsg{display:flex;align-items:flex-start;gap:7px;padding:6px 12px;font-size:12px;
   color:var(--dim);border-top:1px solid var(--line);background:#0f1319;overflow:hidden}
 .lastmsg .lmwho{flex:0 0 auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
@@ -64,6 +70,17 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 /* up to TWO lines, then ellipsis */
 .lastmsg .lmtext{flex:1;min-width:0;line-height:1.45;overflow:hidden;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.lastmsg .peekmd{display:block;-webkit-line-clamp:unset;
+  max-height:calc(var(--peek-lines,2) * 1.45em)}
+.peekmd h1,.peekmd h2,.peekmd h3,.peekmd h4,.peekmd h5,.peekmd h6{
+  color:var(--fg);font-size:1em;line-height:inherit;font-weight:700;margin:0}
+.peekmd p,.peekmd ul,.peekmd ol,.peekmd blockquote{margin:0;line-height:inherit}
+.peekmd ul,.peekmd ol{padding-left:18px}
+.peekmd li{margin:0}
+.peekmd code{color:var(--fg);background:#090c10;border:1px solid var(--line);
+  border-radius:3px;padding:0 3px;font-size:.92em}
+.peekmd a{color:var(--blue);text-decoration:none;pointer-events:none}
+.peekmd blockquote{border-left:2px solid var(--line);padding-left:7px}
 .lastmsg .lmwho.user{color:var(--blue)}
 .lastmsg.amsgprev{background:none;border-top:none;padding-top:0;padding-bottom:7px;
   font-size:11.5px;cursor:pointer}
@@ -101,7 +118,8 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .smeta-l>*:not(:first-child)::before,.smeta-r>*:not(:first-child)::before{content:'·';color:var(--faint);margin:0 7px}
 .smeta .m{white-space:nowrap}
 .ctxwrap{flex:0 0 auto;display:flex;align-items:center;gap:5px}
-.ctxbar{width:96px;height:6px;background:var(--card2);border-radius:3px;overflow:hidden}
+.ctxbar{width:96px;height:8px;background:#090c11;border:1px solid #566273;
+  border-radius:4px;overflow:hidden}
 .ctxbar i{display:block;height:100%;background:var(--blue);border-radius:3px}
 a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
 .agents{border-top:1px solid var(--line)}
@@ -406,7 +424,7 @@ td.r,th.r{text-align:right}
 #aact{border-top:1px solid var(--line);background:var(--card);
       padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
 #aact .dfold{margin-top:10px}
-.aconvo{max-width:760px}
+.aconvo{width:100%;max-width:none;margin-inline:auto}
 .relaynote{font-size:11px;color:var(--dim);background:#12161c;border:1px solid var(--line);
   border-radius:8px;padding:6px 9px;margin-bottom:8px;line-height:1.45}
 .relaynote b{color:var(--amber)}
@@ -499,7 +517,7 @@ td.r,th.r{text-align:right}
 .light .fcap,.light .ctxload{color:#57606a}
 #vbody img{max-width:100%;height:auto;border-radius:6px}
 #vbody pre.raw{white-space:pre-wrap;word-break:break-word;font-size:12px}
-.mdoc{font-size:13.5px;line-height:1.55;max-width:720px}
+.mdoc{font-size:13.5px;line-height:1.55;width:100%;max-width:none;margin-inline:auto}
 .mdoc h1{font-size:19px;margin:14px 0 6px}
 .mdoc h2{font-size:16px;margin:14px 0 6px}
 .mdoc h3,.mdoc h4,.mdoc h5,.mdoc h6{font-size:14px;margin:12px 0 4px}
@@ -514,6 +532,13 @@ td.r,th.r{text-align:right}
 .mdoc table{margin:8px 0;display:block;overflow-x:auto;width:max-content;max-width:100%}
 .mdoc hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 .mdoc a{color:var(--blue)}
+/* One reading-width preference spans session chat, Markdown, and subagent chat.
+   Fit is intentionally the no-attribute/default state for first load and mobile. */
+html[data-reader-width="centered"] #sbody>.aconvo,
+html[data-reader-width="centered"] #abody>.aconvo,
+html[data-reader-width="centered"] #vbody>.mdoc,
+html[data-reader-width="centered"] #vbody>pre.raw{max-width:760px;margin-inline:auto}
+html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,760px);margin-inline:auto}
 /* iOS Safari auto-zooms any focused input with font-size < 16px — must be the
    LAST rule (ties on specificity with .freetext/.setnum input sizes; later wins) */
 @media (pointer:coarse){input{font-size:16px!important}}
@@ -695,6 +720,23 @@ function md(src){
     html+='<p>'+buf.map(mdInline).join('<br>')+'</p>';
   }
   return html;
+}
+
+// Compact Markdown for card peeks. Preserve headings/emphasis/lists while
+// collapsing document-scale code and tables into short, safe prose.
+function peekMd(src){
+  const withoutCode=String(src||'').replace(/```[^\n]*\n[\s\S]*?(?:```|$)/g,'`code block`');
+  const lines=withoutCode.replace(/\r/g,'').split('\n'),out=[];
+  const tableSep=l=>/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l)&&l.includes('-');
+  for(let i=0;i<lines.length;i++){
+    if(lines[i].includes('|')&&i+1<lines.length&&tableSep(lines[i+1])){
+      out.push(lines[i].replace(/^\s*\||\|\s*$/g,'').split('|').map(x=>x.trim()).join(' · '));
+      i+=2;
+      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())i++;
+      i--;
+    }else out.push(lines[i]);
+  }
+  return md(out.join('\n'));
 }
 
 // ---- conversation context + delivered files (fetched per session on demand) ----
@@ -1171,7 +1213,7 @@ function agentRow(a){
     <span class="acost">${fmt$(a.cost)}</span>
     <span class="aopen">›</span>
   </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px" onclick="${tap}">
-    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext" style="-webkit-line-clamp:${clampA()}">${esc(a.last_msg.text)}</span></div>`:''}`;
+    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext peekmd" style="--peek-lines:${clampA()}">${peekMd(a.last_msg.text)}</span></div>`:''}`;
 }
 // Pinned sessions are lifted out of the normal live/dormant lists into #pinned.
 // Set insertion order makes the watchlist stable. Pins are intentionally in-memory.
@@ -1214,6 +1256,8 @@ const previewAgents=()=>!!setg().preview_agents;
 const previewSessions=()=>setg().preview_sessions!==false;
 const clampS=()=>Math.max(1,Math.min(6,setg().preview_session_lines??2));
 const clampA=()=>Math.max(1,Math.min(6,setg().preview_agent_lines??1));
+const readerWidth=()=>setg().reader_width==='centered'?'centered':'fit';
+function applyReaderWidth(){document.documentElement.dataset.readerWidth=readerWidth();}
 
 function cardCls(s){
   const needs=s.state==='needs_you'||s.state==='stalled_or_prompt';
@@ -1258,7 +1302,7 @@ function cardTop(s){
         <span class="m amodel">${modelLabel(s)}</span>
       </div>
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><span class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</span></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
@@ -1386,6 +1430,14 @@ function renderSettings(){
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
+    <div class="dhead" style="margin-top:12px">full-screen reading width</div>
+    <div class="setchoice" role="group" aria-label="Full-screen reading width">
+      <button aria-pressed="${(st.reader_width||'fit')==='fit'}"
+        onclick="setStr('reader_width','fit')">Fit the screen</button>
+      <button aria-pressed="${st.reader_width==='centered'}"
+        onclick="setStr('reader_width','centered')">Centered · fixed width</button>
+    </div>
+    <div class="sethint">Applies to session chat, Markdown, and subagent conversations.</div>
     <div class="dhead" style="margin-top:12px">conversation peek</div>
     <label class="setrow"><input type="checkbox" ${st.preview_sessions!==false?'checked':''}
       onchange="setBool('preview_sessions',this.checked)">on session cards<span class="setnum">
@@ -1432,7 +1484,7 @@ async function setStr(k,v){
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({[k]:v})});
     const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';}
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
     else if(msg)msg.textContent='✗ '+(d.error||'failed');
   }catch(e){if(msg)msg.textContent='✗ '+e;}
 }
@@ -2002,6 +2054,7 @@ function insightsSection(){
 let last=null;
 function render(f,force){
   if(!f||!f.sessions)return;
+  applyReaderWidth();
   const t=f.totals;
   $('#totals').innerHTML=`<span><b>${t.sessions}</b> sessions <i class="sep">·</i> <b>${t.busy}</b> busy</span>
     <span style="color:${t.needs_me?'var(--amber)':'inherit'}"><b>${t.needs_me}</b> need you</span>

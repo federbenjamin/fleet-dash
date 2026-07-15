@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "preview_session_lines": 2,
     "preview_agents": False,
     "preview_agent_lines": 1,
+    "reader_width": "fit",              # full-screen chat/docs: fit | centered
     "_permission_keys_note": "keystrokes injected for permission-prompt choices; deny defaults to Esc (cancels any prompt variant)",
     "permission_keys": {"allow": "1", "always": "2", "deny": ""},
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
@@ -564,11 +565,10 @@ class Tail:
         self.files.append({"path": path, "caption": caption or "", "ts": ts})
 
     def last_message(self, limit=160):
-        """One-line preview: the newest actual MESSAGE (user or assistant prose) —
-        tool calls and system events are not messages and are skipped."""
+        """Newest prose for the card peek, preserving Markdown block structure."""
         for e in reversed(self.convo):
             if e.get("role") in ("user", "assistant") and e.get("text"):
-                txt = " ".join(str(e["text"]).split())
+                txt = str(e["text"]).strip()
                 return {"role": e["role"],
                         "text": txt[:limit] + ("…" if len(txt) > limit else "")}
         return None
@@ -832,7 +832,7 @@ class Engine:
                          ("awaiting_input_notify_seconds", "stall_seconds",
                           "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
                           "preview_sessions", "preview_session_lines",
-                          "preview_agents", "preview_agent_lines")},
+                          "preview_agents", "preview_agent_lines", "reader_width")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -2012,6 +2012,11 @@ class Engine:
         for k in self.BOOL_KEYS:
             if k in patch:
                 self.cfg[k] = changed[k] = bool(patch[k])
+        if "reader_width" in patch:
+            width = str(patch["reader_width"] or "")
+            if width not in ("fit", "centered"):
+                return {"ok": False, "error": "reader_width must be fit or centered"}
+            self.cfg["reader_width"] = changed["reader_width"] = width
         if "dashboard_url" in patch:
             u = str(patch["dashboard_url"] or "").strip()[:300]
             if u and not u.startswith(("http://", "https://")):

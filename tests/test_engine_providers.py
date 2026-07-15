@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import DEFAULT_CONFIG, Engine
+from engine import DEFAULT_CONFIG, Engine, Tail
 from server import Handler
 
 
@@ -266,6 +266,23 @@ class EngineProviderTest(unittest.TestCase):
         fleet = self.engine.scan()
         claude = next(item for item in fleet["sessions"] if item["provider"] == "claude")
         self.assertTrue(claude["muted"])
+
+    def test_reader_width_is_persisted_validated_and_exposed(self):
+        self.assertEqual(DEFAULT_CONFIG["reader_width"], "fit")
+        changed = self.engine.update_settings({"reader_width": "centered"})
+        self.assertEqual(changed, {"ok": True, "reader_width": "centered"})
+        self.assertEqual(self.engine.scan()["settings"]["reader_width"], "centered")
+        with open(os.path.join(self.base, "config.json")) as handle:
+            self.assertEqual(json.load(handle)["reader_width"], "centered")
+        invalid = self.engine.update_settings({"reader_width": "left"})
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(self.engine.cfg["reader_width"], "centered")
+
+    def test_claude_peek_preserves_markdown_blocks(self):
+        tail = Tail(self.transcript)
+        text = "### Default width\n\nUse **Fit the screen**."
+        tail.convo.append({"role": "assistant", "text": text})
+        self.assertEqual(tail.last_message(500), {"role": "assistant", "text": text})
 
 
 if __name__ == "__main__":

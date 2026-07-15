@@ -61,7 +61,12 @@ def fresh_state():
         "last": None, "last_msg": None, "convo_v": 1}]
     codex.update(agents_running=0, agents_total=1)
     return {"sessions": [claude, codex], "closed": [], "actions": [],
-            "scenario": "base", "codex_error": None}
+            "scenario": "base", "codex_error": None,
+            "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
+                "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
+                "preview_sessions": True, "preview_session_lines": 2,
+                "preview_agents": False, "preview_agent_lines": 1,
+                "reader_width": "fit"}}
 
 
 STATE = fresh_state()
@@ -102,10 +107,7 @@ def fleet():
                                     "error": STATE.get("codex_error")}},
             "notify": {"needs_you": True, "stall": True, "spend": True,
                        "fleet_quiet": True},
-            "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
-                "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
-                "preview_sessions": True, "preview_session_lines": 2,
-                "preview_agents": False, "preview_agent_lines": 1},
+            "settings": copy.deepcopy(STATE["settings"]),
             "page_v": 1}
 
 
@@ -168,6 +170,9 @@ def set_scenario(name):
                        last_msg={"role": "assistant", "text": "Working in ChatGPT desktop."})
         session["capabilities"] = capabilities(
             submit=False, interrupt=False, close=False, compact=False, review=False)
+    elif name == "markdown-peek":
+        session["last_msg"] = {"role": "assistant", "text":
+            "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear"}
     elif name == "subagent":
         session.update(state="running", reg_status="running", agents_running=1)
         session["agents"][0]["state"] = "running"
@@ -266,6 +271,10 @@ class Handler(BaseHTTPRequestHandler):
                                 if item["session_id"] == payload.get("mute_session")), None)
                 if session:
                     session["muted"] = bool(payload.get("muted"))
+                for key in ("reader_width", "preview_sessions", "preview_session_lines",
+                            "preview_agents", "preview_agent_lines"):
+                    if key in payload:
+                        STATE["settings"][key] = payload[key]
                 STATE["actions"].append(payload)
                 return self.json_reply({"ok": True, **payload})
             if route == "/api/act":

@@ -17,7 +17,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
-  notification opens the dashboard). Persisted to `config.json`, token required.
+  notification opens the dashboard). It also selects **Fit the screen** or **Centered · fixed
+  width** for every full-screen reading surface. Persisted to `config.json`, token required.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
   across daemon restarts and auto-expire 30 days after being set.
@@ -101,6 +102,8 @@ the provider without affecting Claude sessions.
   sits in the tail. Codex mode and lifecycle actions live in the full-view overflow menu.
 - **Conversation peek** on every card: the newest actual message (prose only — tool calls and
   system events are skipped), tagged YOU / CLAUDE, between the meta row and the subagent rows.
+  Headings, emphasis, lists, links, and inline code render as compact Markdown; document-scale
+  code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
   height (1–6; defaults: sessions on at 2 lines, subagents off at 1). The line count also caps
   what the server sends, so a short peek isn't shipping long text every poll. Tapping a
@@ -163,8 +166,9 @@ the provider without affecting Claude sessions.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
   button (right of "show conversation") takes you straight back. The two are built to resemble
-  each other — same docked bar, same file strip (one shared builder), same send box — so
-  swapping feels like changing what's on screen, not changing screens.
+  each other — same docked bar, same file strip (one shared builder), same send box — so swapping
+  feels like changing what's on screen, not changing screens. Session chat, Markdown, and subagent
+  chat also share the persisted reading-width setting.
 - **Tap a card** → detail panel, top to bottom: recent conversation (with its ⤢ full-view
   button), a one-line horizontal strip of delivered-file chips (quick open), then the "session
   info" (full session id, pid, cwd,

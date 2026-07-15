@@ -69,6 +69,77 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await page.screenshot({ path: testInfo.outputPath('artifact-preview.png'), fullPage: true });
 });
 
+test('context gauge, Markdown peek, and shared reading width stay legible', async ({ page }, testInfo) => {
+  await reset(page, 'markdown-peek');
+  let card = page.locator('[data-sid="codex:thread-one"]');
+  const peek = card.locator('.peekmd');
+  await expect(peek.locator('h3')).toHaveText('Default width');
+  await expect(peek.locator('b')).toHaveText('Fit the screen');
+  await expect(peek.locator('code')).toHaveText('compact code');
+  await expect(peek.locator('li')).toHaveCount(2);
+  const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
+    line: parseFloat(getComputedStyle(el).lineHeight) }));
+  expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
+
+  const gauge = await card.locator('.ctxbar').evaluate(el => ({
+    background: getComputedStyle(el).backgroundColor,
+    border: getComputedStyle(el).borderColor,
+    borderWidth: getComputedStyle(el).borderTopWidth,
+    card: getComputedStyle(el.closest('.card')).backgroundColor,
+  }));
+  expect(gauge.background).not.toBe(gauge.card);
+  expect(gauge.border).not.toBe(gauge.card);
+  expect(gauge.borderWidth).toBe('1px');
+  await page.screenshot({ path: testInfo.outputPath('markdown-peek-context.png'), fullPage: true });
+
+  await card.locator('.shead').click();
+  let chat = page.locator('#sbody > .aconvo');
+  const fit = await chat.evaluate(el => ({ width: el.getBoundingClientRect().width,
+    available: el.parentElement.clientWidth - 28 }));
+  expect(Math.abs(fit.width - fit.available)).toBeLessThan(2);
+  await page.locator('#sclose').click();
+
+  await page.locator('#gear').click();
+  const widthGroup = page.getByRole('group', { name: 'Full-screen reading width' });
+  await expect(widthGroup.getByRole('button', { name: 'Fit the screen' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  await widthGroup.getByRole('button', { name: /Centered/ }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
+
+  card = page.locator('[data-sid="codex:thread-one"]');
+  await card.locator('.shead').click();
+  chat = page.locator('#sbody > .aconvo');
+  const centeredChat = await chat.evaluate(el => ({ width: el.getBoundingClientRect().width,
+    left: el.getBoundingClientRect().left,
+    right: innerWidth - el.getBoundingClientRect().right }));
+  expect(centeredChat.width).toBeLessThanOrEqual(760);
+  expect(Math.abs(centeredChat.left - centeredChat.right)).toBeLessThan(2);
+  await page.locator('#sclose').click();
+
+  await card.getByRole('button', { name: /more/ }).click();
+  await card.getByText(/changed \/ generated files/).click();
+  await card.getByRole('button', { name: /artifact.md/ }).click();
+  const doc = page.locator('#vbody > .mdoc');
+  const centeredDoc = await doc.evaluate(el => ({ width: el.getBoundingClientRect().width,
+    left: el.getBoundingClientRect().left,
+    right: innerWidth - el.getBoundingClientRect().right }));
+  expect(centeredDoc.width).toBeLessThanOrEqual(760);
+  expect(Math.abs(centeredDoc.left - centeredDoc.right)).toBeLessThan(2);
+  await page.locator('#vclose').click();
+
+  await card.getByText(/completed agents/).click();
+  await card.getByText('reviewer', { exact: true }).click();
+  const agent = page.locator('#abody > .aconvo');
+  const centeredAgent = await agent.evaluate(el => ({ width: el.getBoundingClientRect().width,
+    left: el.getBoundingClientRect().left,
+    right: innerWidth - el.getBoundingClientRect().right }));
+  expect(centeredAgent.width).toBeLessThanOrEqual(760);
+  expect(Math.abs(centeredAgent.left - centeredAgent.right)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath('centered-reading-width.png'), fullPage: true });
+});
+
 test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
   const themeSurfaces = () => page.evaluate(() => {
     const probe = document.createElement('span');

@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from codex_adapter import CodexAdapter, _elicitation_pending, _revision
+from codex_adapter import CodexAdapter, _elicitation_pending, _last_message, _revision
 
 
 class FixtureClient:
@@ -208,6 +208,11 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         live["revision"] = 2
         second = _revision(thread, live)
         self.assertNotEqual(first, second)
+
+    def test_codex_peek_preserves_markdown_blocks(self):
+        text = "### Default width\n\nUse **Fit the screen**."
+        self.assertEqual(_last_message([{"role": "assistant", "text": text}]),
+                         {"role": "assistant", "text": text})
 
     def test_native_skills_and_actions_are_intentional(self):
         adapter, _ = self.adapter([self.thread()])

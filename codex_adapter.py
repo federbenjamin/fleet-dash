@@ -1390,10 +1390,10 @@ def _revision(thread, live):
 def _last_message(messages, fallback=None):
     for message in reversed(messages):
         if message.get("role") in ("user", "assistant") and message.get("text"):
-            text = " ".join(str(message["text"]).split())
+            text = str(message["text"]).strip()
             return {"role": message["role"], "text": text[:280]}
     if fallback:
-        return {"role": "user", "text": " ".join(str(fallback).split())[:280]}
+        return {"role": "user", "text": str(fallback).strip()[:280]}
     return None
 
 
