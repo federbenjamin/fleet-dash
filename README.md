@@ -1,9 +1,9 @@
 # fleet-dash
 
-A local web dashboard for your whole Claude Code fleet: every live session across all
-projects/worktrees, their subagents, live token spend, and — the headline feature —
-**remote interaction**: pending AskUserQuestions render as tappable buttons and answers are
-keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolving.
+A local web dashboard for Claude Code and Codex CLI sessions across all
+projects/worktrees, their subagents, live token usage, and — the headline feature —
+**remote interaction**: pending questions render as tappable buttons and answers are sent through
+the provider's native control path. Built 2026-07-13; still evolving.
 
 **Dashboard:** http://127.0.0.1:8377 (always on — launchd daemon, starts at login)
 
@@ -24,13 +24,32 @@ keystroke-injected back into the owning iTerm tab. Built 2026-07-13; still evolv
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
   The running-agent count stays visible everywhere.
-- **➕ new Claude Code session** (button under the live list): pick a directory (recent ones the
-  daemon has seen, or type a path under `~`), a model, an effort level (`low`…`max`), and
-  optionally a **new git worktree** — it opens a fresh iTerm tab running `claude` with those
+- **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
+  pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
+  effort level (`low`…`max`). Claude sessions can also request a **new git worktree** — it opens
+  a fresh iTerm tab running `claude` with those
   flags, then auto-opens that session's full chat view here once it appears, so you can send
   the first prompt from your phone. Untrusted folders are flagged: Claude Code asks "do you
   trust the files in this folder?" at startup and **only your Mac can answer that** — trust is
   inherited from a parent dir, so worktrees under a trusted repo start clean.
+
+## Codex CLI integration
+
+Fleet Dash runs one long-lived `codex app-server` process and communicates through its supported
+stdio JSONL protocol. It does not scrape the Codex TUI or parse `~/.codex` rollout files.
+
+- Threads created by Fleet Dash are remembered in `codex_threads.json` and resumed after daemon
+  restarts.
+- Conversation history, prompt submission, interruption, and approval decisions use App Server
+  thread/turn APIs.
+- Codex thread IDs are stored as `codex:<native-id>` so they cannot collide with Claude IDs.
+- Codex costs display as unavailable rather than being priced with Claude rates. Token usage is
+  shown when App Server reports it.
+- Existing independently launched Codex TUIs are not adopted into Fleet Dash's live control
+  process. Start the Codex thread from Fleet Dash for full interaction and event streaming.
+
+Requires a `codex` executable with App Server support. Set `codex_enabled` to `false` to disable
+the provider without affecting Claude sessions.
 - **Dormant sessions** get their own fold above closed sessions. Dormant = the transcript
   hasn't moved in over 2h (`dormant_seconds`) AND no agents are running — forgotten panes and
   VS Code backends. They're kept out of the live list and can never "need you".
@@ -230,6 +249,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | key | default | meaning |
 |---|---|---|
 | `poll_seconds` | 2 | scan cadence |
+| `codex_enabled` | true | start the Codex App Server adapter |
+| `codex_command` | "" | optional absolute Codex executable path; auto-detected from PATH or `~/.nvm` |
 | `stall_seconds` | 240 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
 | `dormant_seconds` | 7200 | quiet sessions demote to dormant |
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |

@@ -560,7 +560,7 @@ const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':
 const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const stateLabel={running:'running',needs_you:'needs you',turn_done:'done ✓',idle:'idle',stalled:'stalled',stalled_or_prompt:'prompt?',dormant:'dormant'};
 
-// ---- Claude Code plan-usage header (5-hour + weekly, logged-in account) ----
+// ---- provider plan-usage header (currently Claude supplies these account gauges) ----
 function usageReset(iso){
   if(!iso)return'';
   const t=Date.parse(iso);if(isNaN(t))return'';
@@ -664,7 +664,7 @@ async function ensureCtx(sid,v){
 }
 // "opus · high". Effort comes from the statusline side-write, so a session whose
 // statusline hasn't rendered yet (or isn't installed) shows the model alone.
-const modelLabel=s=>esc(s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
+const modelLabel=s=>esc(s.model||s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
 const enc=v=>encodeURIComponent(v||'').replace(/'/g,'%27');  // onclick-attr-safe
 const cpb=v=>`<b class="copyable" title="tap to copy" data-copy="${esc(v)}" onclick="copyTxt(event,this)">${esc(v)}</b>`;
 function fchip(sid,f,cap){
@@ -672,12 +672,12 @@ function fchip(sid,f,cap){
     onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
 }
 const EVT_ICON={compact:'⧉',model:'⇄',api_error:'⚠',command:'›',qa:'☑'};
-function eventRow(m){
+function eventRow(m,provider='claude'){
   if(m.kind==='qa'){
     const rows=(m.qa||[]).map(q=>`<div class="qarow">
       <div class="qaq">${q.header?`<span class="qah">${esc(q.header)}</span>`:''}${esc(q.q)}</div>
       <div class="qaa">${esc(q.a||'—')}</div></div>`).join('');
-    return`<div class="cevt info"><div class="evline"><span class="evi">☑</span> <b>You answered Claude's questions</b></div>
+    return`<div class="cevt info"><div class="evline"><span class="evi">☑</span> <b>You answered ${esc(provider)}'s questions</b></div>
       <div class="qawrap">${rows}</div></div>`;
   }
   return`<div class="cevt ${m.level||'info'}">
@@ -685,15 +685,16 @@ function eventRow(m){
     ${m.detail?`<div class="evd">${esc(m.detail)}</div>`:''}</div>`;
 }
 function convoMsgs(c,sid){
+  const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
   return(c.messages||[]).map(m=>{
-    if(m.role==='event')return eventRow(m);
+    if(m.role==='event')return eventRow(m,provider);
     if(m.role==='tool'){
       if(m.name==='SendUserFile')
         return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
           ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
       return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div></div>`;
     }
-    return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':'claude'}</span>
+    return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
 }
@@ -990,7 +991,7 @@ function renderAgent(force){
   // stop is only offered while the agent is live AND its parent is mid-turn (the
   // engine refuses an interrupt on a non-busy session anyway)
   const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
-  $('#actrl').innerHTML=(!done&&par&&par.reg_status==='busy')
+  $('#actrl').innerHTML=(!done&&par&&par.provider!=='codex'&&par.reg_status==='busy')
     ? `<button class="stopbtn" title="stop this subagent (sends Esc to its parent session)"
          onclick="stopAgentParent('${agentView.sid}')"></button>` : '';
   const ae=document.activeElement;
@@ -1005,10 +1006,12 @@ function renderAgent(force){
   if(!typing){
     const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
     const tk=info.tokens||{};
+    const codex=par&&par.provider==='codex';
     $('#aact').innerHTML=`
-      <div class="relaynote">${done?'this agent has finished — ':''}subagents have no terminal of their own:
-        your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage</div>
-      <div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
+      <div class="relaynote">${done?'this agent has finished — ':''}${codex
+        ?'messages are sent directly to this Codex agent thread'
+        :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
+      <div class="freetext"><input id="aft" placeholder="${codex?'message this Codex agent':'relay a message via the parent session'}" autocomplete="off"
         onkeydown="if(event.key==='Enter')sendRelay()">
         <button class="pbtn send" onclick="sendRelay()">relay</button></div>
       <div class="actmsg" id="amsg"></div>
@@ -1120,8 +1123,9 @@ function cardTop(s){
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
-      <button class="expandbtn deskonly" title="bring this session's terminal tab to the front"
-        onclick="event.stopPropagation();focusSession('${s.session_id}')">open</button>
+      <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
+      ${s.capabilities?.focus_terminal?`<button class="expandbtn deskonly" title="bring this session's terminal tab to the front"
+        onclick="event.stopPropagation();focusSession('${s.session_id}')">open</button>`:''}
     </div>
     <div class="smeta">
       <div class="smeta-l">
@@ -1131,11 +1135,11 @@ function cardTop(s){
         <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
       </div>
       <div class="smeta-r">
-        <span class="ctxwrap"><span>${s.ctx_pct??'?'}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>
-        <span class="m amodel">${esc(s.family||'?')}${s.effort?` - ${esc(s.effort)}`:''}</span>
+        ${s.ctx_pct==null?`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`:`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
+        <span class="m amodel">${modelLabel(s)}</span>
       </div>
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
     <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
@@ -1158,13 +1162,14 @@ function cardDetail(s){
         <summary>session info</summary>
         <div class="kv">
           <span>session</span>${cpb(s.session_id)}
+          <span>provider</span><b>${esc(s.provider||'claude')}</b>
           <span>pid</span><b>${s.pid}</b>
           <span>cwd</span>${cpb(s.cwd)}
           <span>model</span><b>${esc(s.model||'?')}${s.effort?` · ${esc(s.effort)}`:''}</b>
           <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
           <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
           <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
-          <span>spend</span><b>${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}</b>
+          <span>spend</span><b>${s.cost_source==='unavailable'?'unavailable':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}`}</b>
         </div>
       </details>
       <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
@@ -1576,21 +1581,30 @@ function dormantSection(list){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newDir='',newModel='',newEffort='',newWt=true,newWtName='',spawnWait=null,spawnMsg='';
+let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newWt=true,newWtName='',spawnWait=null,spawnMsg='';
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
   if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
-  const models=(last&&last.models)||[];
-  const efforts=(last&&last.efforts)||[];
+  const catalog=(((last&&last.models_by_provider)||{})[newProvider])||[];
+  const models=catalog.length?catalog.map(m=>m.id):
+    (newProvider==='claude'?((last&&last.models)||[]):[]);
+  const picked=catalog.find(m=>m.id===newModel);
+  const efforts=(picked&&picked.efforts&&picked.efforts.length)?picked.efforts:
+    ((last&&last.efforts)||[]);
   if(!newOpen)
-    return`<button class="newbtn" onclick="newOpen=true;render(last,true)">+ new Claude Code session</button>
+    return`<button class="newbtn" onclick="newOpen=true;render(last,true)">+ new coding session</button>
       ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
       <div class="dsep"></div>`;
   const cur=dirs.find(d=>d.path===newDir);
   const untrusted=newDir&&(!cur||!cur.trusted);
   return`<div class="newform">
     <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
+    <label class="nflab">provider</label>
+    <select class="nfsel" onchange="newProvider=this.value;newModel='';render(last,true)">
+      <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
+      <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
+    </select>
     <label class="nflab">directory</label>
     <select class="nfsel" onchange="newDir=this.value;render(last,true)">
       <option value="">— pick a recent directory —</option>
@@ -1598,7 +1612,7 @@ function newSection(){
     </select>
     <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
       oninput="newDir=this.value" autocomplete="off">
-    ${untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
+    ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
     <div class="nfrow">
       <div class="nfcol"><label class="nflab">model</label>
@@ -1612,10 +1626,10 @@ function newSection(){
           ${efforts.map(e=>`<option value="${e}" ${e===newEffort?'selected':''}>${e}</option>`).join('')}
         </select></div>
     </div>
-    <label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
+    ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
       onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
     ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
-      oninput="newWtName=this.value" autocomplete="off">`:''}
+      oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
     <button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
     ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
   </div>
@@ -1626,7 +1640,7 @@ async function doSpawn(){
   spawnMsg='starting…';render(last,true);
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type:'spawn',cwd:newDir,model:newModel,effort:newEffort,
+      body:JSON.stringify({type:'spawn',provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,
                            worktree:newWt,worktree_name:newWtName})});
     const d=await r.json();
     if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}

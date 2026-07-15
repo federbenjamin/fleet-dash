@@ -12,6 +12,7 @@ CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
 """
 import json, os, re, sys, glob, time, shlex, sqlite3, secrets, subprocess, threading, contextlib, urllib.request
 from collections import deque
+from codex_adapter import CodexAdapter
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -34,6 +35,8 @@ DEFAULT_CONFIG = {
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
+    "codex_enabled": True,
+    "codex_command": "",
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
@@ -125,6 +128,18 @@ BUILTIN_COMMANDS = [
     ("config", "Open the config panel"),
     ("doctor", "Diagnose the installation"),
     ("export", "Export the conversation"),
+    ("help", "List available commands"),
+]
+
+CODEX_BUILTIN_COMMANDS = [
+    ("model", "Choose the active model and reasoning effort"),
+    ("permissions", "Change approval and sandbox behavior"),
+    ("agent", "Inspect or switch active agents"),
+    ("skills", "List available skills"),
+    ("mcp", "Show configured MCP servers"),
+    ("review", "Start a code review"),
+    ("compact", "Compact the current conversation"),
+    ("status", "Show session and account status"),
     ("help", "List available commands"),
 ]
 
@@ -614,6 +629,16 @@ class Engine:
         self.lock = threading.Lock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
+        try:
+            from codex_adapter import CodexAppServer, codex_command
+            codex_client = CodexAppServer([codex_command(cfg.get("codex_command") or None),
+                                           "app-server"])
+            self.codex = CodexAdapter(enabled=bool(cfg.get("codex_enabled", True)),
+                                      client=codex_client,
+                                      state_path=os.path.join(BASE, "codex_threads.json"))
+        except Exception as exc:
+            self.codex = CodexAdapter(enabled=False, client=object())
+            self.codex.error = str(exc)
 
     # -- live sessions from the CLI registry
     def live_sessions(self):
@@ -719,6 +744,8 @@ class Engine:
             cw = cfg["context_windows"].get(fam, cfg["context_windows"]["default"])
             sessions.append({
                 "session_id": sid,
+                "native_session_id": sid,
+                "provider": "claude",
                 "pid": reg.get("pid"),
                 "name": reg.get("name"),
                 "title": mt.ai_title,
@@ -755,7 +782,15 @@ class Engine:
                 "agents_running": len(agents_running),
                 "agents_total": len(agents),
                 "agent_cost": round(sum(a["cost"] for a in agents), 4),
+                "cost_source": "calculated",
+                "capabilities": {"submit": True, "interrupt": state == "running",
+                    "focus_terminal": True, "answer_structured": True,
+                    "decide_approval": True, "spawn_agent": True,
+                    "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
+        # Codex is a second provider inside the same fleet. A failed/missing Codex
+        # installation must not take down the existing Claude dashboard.
+        sessions.extend(self.codex.sessions())
         order = {"needs_you": 0, "stalled": 0, "stalled_or_prompt": 0, "turn_done": 1,
                  "running": 2, "idle": 3, "dormant": 4}
         sessions.sort(key=lambda s: (order.get(s["state"], 2), -s["cost"]))
@@ -777,6 +812,13 @@ class Engine:
             "closed": self.closed_sessions(),
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
+            "models_by_provider": {"claude": [{"id": m, "name": m,
+                                                "efforts": list(self.EFFORTS)}
+                                               for m in self.MODELS],
+                                   "codex": list(self.codex.models)},
+            "providers": {"claude": {"ok": True},
+                          "codex": {"ok": not bool(self.codex.error),
+                                    "error": self.codex.error}},
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
@@ -935,6 +977,10 @@ class Engine:
                 self.db.execute("ALTER TABLE session_runs ADD COLUMN title TEXT")
             except sqlite3.OperationalError:
                 pass
+            try:
+                self.db.execute("ALTER TABLE session_runs ADD COLUMN provider TEXT DEFAULT 'claude'")
+            except sqlite3.OperationalError:
+                pass
             # rows are CUMULATIVE per transcript (path) — see Tail.stats
             self.db.execute("""CREATE TABLE IF NOT EXISTS usage_stats(
                 path TEXT, day TEXT, kind TEXT, name TEXT,
@@ -978,16 +1024,17 @@ class Engine:
             db = self.ensure_db()
             for s in sessions:
                 db.execute("""INSERT INTO session_runs(session_id,name,project,cwd,branch,
-                    model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,closed_at,title)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)
+                    model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,closed_at,title,provider)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)
                     ON CONFLICT(session_id) DO UPDATE SET
                     name=excluded.name, project=excluded.project, branch=excluded.branch,
                     model=excluded.model, cost=excluded.cost, agent_cost=excluded.agent_cost,
                     agents_total=excluded.agents_total, bridge_url=excluded.bridge_url,
-                    last_seen=excluded.last_seen, closed_at=NULL, title=excluded.title""",
+                    last_seen=excluded.last_seen, closed_at=NULL, title=excluded.title,
+                    provider=excluded.provider""",
                     (s["session_id"], s["name"], s["project"], s["cwd"], s["branch"],
                      s["model"], s["cost"], s["agent_cost"], s["agents_total"],
-                     s["bridge_url"], int(now), int(now), s["title"]))
+                     s["bridge_url"], int(now), int(now), s["title"], s.get("provider", "claude")))
             live = [s["session_id"] for s in sessions]
             marks = ",".join("?" * len(live)) or "''"
             db.execute(f"""UPDATE session_runs SET closed_at=?
@@ -1000,7 +1047,7 @@ class Engine:
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
-                "closed_at", "title")
+                "closed_at", "title", "provider")
         try:
             rows = self.ensure_db().execute(
                 f"""SELECT {','.join(cols)} FROM session_runs
@@ -1012,6 +1059,8 @@ class Engine:
     def closed_context(self, sid):
         """Conversation of a CLOSED session: its process is gone, so the registry
         can't resolve it — the ledger's cwd is the only path back to the file."""
+        if str(sid).startswith("codex:"):
+            return self.codex.context(sid)
         row = None
         try:
             row = self.ensure_db().execute(
@@ -1322,6 +1371,8 @@ class Engine:
     def commands(self, sid):
         """Slash-command catalog for one session: built-ins + skills + custom
         commands, user- and project-scoped (the session's own cwd)."""
+        if str(sid).startswith("codex:"):
+            return self.codex_commands(sid)
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         cwd = reg.get("cwd", "") if reg else ""
         out, seen = [], set()
@@ -1372,8 +1423,39 @@ class Engine:
                     scan_dir(p, "plugin", prefix=plug + ":")
         return {"ok": True, "commands": out}
 
+    def codex_commands(self, sid):
+        session = next((s for s in self.snapshot_cache.get("sessions", [])
+                        if s.get("session_id") == sid), {})
+        cwd = session.get("cwd", "")
+        out = [{"name": "/" + name, "desc": desc, "scope": "built-in",
+                "danger": name in DANGER_COMMANDS}
+               for name, desc in CODEX_BUILTIN_COMMANDS]
+        seen = {x["name"] for x in out}
+
+        def scan(root, scope):
+            for path in sorted(glob.glob(os.path.join(root, "*", "SKILL.md"))):
+                name = "$" + os.path.basename(os.path.dirname(path))
+                if name in seen:
+                    continue
+                seen.add(name)
+                try:
+                    head = open(path, errors="replace").read(2500)
+                except OSError:
+                    head = ""
+                match = re.search(r"^description:\s*(.+)$", head, re.M)
+                out.append({"name": name, "desc": (match.group(1).strip().strip("'\"")
+                            if match else "Codex skill")[:120], "scope": scope,
+                            "danger": False})
+
+        if cwd:
+            scan(os.path.join(cwd, ".agents", "skills"), "project")
+        scan(os.path.join(HOME, ".agents", "skills"), "user")
+        return {"ok": True, "commands": out}
+
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
+        if str(sid).startswith("codex:"):
+            return self.codex.context(sid)
         reg, path = self._reg_main_path(sid)
         if not reg or not os.path.isfile(path):
             return {"ok": False, "error": "session not live"}
@@ -1410,6 +1492,8 @@ class Engine:
 
     def agent_context(self, sid, aid):
         """Conversation + info for ONE subagent (same fold as a session)."""
+        if str(sid).startswith("codex:"):
+            return self.codex.agent_context(sid, aid)
         jl, meta_path = self._agent_paths(sid, aid)
         if not jl:
             return {"ok": False, "error": "no such subagent"}
@@ -1479,7 +1563,11 @@ class Engine:
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if str(action.get("session_id") or "").startswith("codex:"):
+            return self.codex.act(action)
         if action.get("type") == "spawn":    # no session yet — it makes one
+            if action.get("provider") == "codex":
+                return self.spawn_codex_session(action)
             return self.spawn_session(action)
         sid = action.get("session_id")
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
@@ -1668,6 +1756,24 @@ class Engine:
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+    def spawn_codex_session(self, action):
+        """Create a Codex thread through app-server; no terminal or TUI scraping."""
+        cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
+        home = os.path.realpath(HOME)
+        if not cwd or not os.path.isdir(cwd):
+            return {"ok": False, "error": "no such directory"}
+        if cwd != home and not cwd.startswith(home + os.sep):
+            return {"ok": False, "error": "directory must be under your home folder"}
+        try:
+            thread = self.codex.start_thread(
+                cwd, str(action.get("model") or "").strip() or None,
+                str(action.get("effort") or "").strip() or None)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        tid = thread.get("id")
+        return {"ok": bool(tid), "session_id": self.codex.key(tid) if tid else None,
+                "provider": "codex", "cwd": cwd}
 
     def spawn_session(self, action):
         """Start a NEW Claude Code session in a fresh iTerm tab.
