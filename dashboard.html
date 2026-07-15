@@ -165,8 +165,7 @@ details.insfold>summary:hover{color:var(--fg)}
 .freetext input{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
-.arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px;
-  user-select:none;-webkit-touch-callout:none}   /* clean mobile long-press-to-pin, no text selection */
+.arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
 .arow:first-child{border-top:none}
 /* spawn marker — reads as a branch off the session, like the TUI's tool tree.
    ⎿'s horizontal stroke sits at the BOTTOM of its em box, so the glyph is lifted
@@ -277,8 +276,8 @@ td.r,th.r{text-align:right}
   /* phone: trim the dense bits — "quiet …" and the subagent row's numbers after
      the model (throughput, sparkline, tokens, cost). The agent view has it all. */
   .squiet{display:none}
-  .arow .anum,.arow .spark,.arow .acost,.arow .aopen,.arow .apin{display:none}
-  .arow .pinmark{display:inline}          /* long-press pins; this shows the pinned state */
+  .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
+  .shead .spin{display:none}
 }
 .mqpos{flex:1;text-align:center;font-size:11px;color:var(--dim)}
 .mqpos b{color:var(--fg)}
@@ -380,21 +379,17 @@ td.r,th.r{text-align:right}
   border-radius:8px;padding:6px 9px;margin-bottom:8px;line-height:1.45}
 .relaynote b{color:var(--amber)}
 .arow .aopen{color:var(--faint);font-size:14px;padding-left:2px}
-/* pin control (desktop, left of ›): dim 📌 until pinned */
-.arow .apin{background:none;border:none;cursor:pointer;font-size:12px;line-height:1;padding:0 2px;
+/* session pin control (desktop; touch screens use a long press on the header) */
+.shead .spin{background:none;border:none;cursor:pointer;font-size:13px;line-height:1;padding:3px;
   opacity:.3;filter:grayscale(1)}
-.arow .apin:hover{opacity:.75;filter:none}
-.arow .apin.on{opacity:1;filter:none}
-.arow.pinned{background:rgba(88,166,255,.10)}
-.pinmark{font-size:11px;line-height:1}
-.arow .pinmark{display:none}                 /* desktop shows the button's 📌; mobile shows this */
-/* global pinned-agents block, directly below the usage header; stable pin order */
-#pinned{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:4px 4px 6px;margin-bottom:12px}
+.shead .spin:hover{opacity:.75;filter:none}
+.shead .spin.on{opacity:1;filter:none}
+.card.pinned{box-shadow:0 0 0 1px rgba(88,166,255,.35)}
+/* global pinned-sessions block, directly below the usage header; stable pin order */
+#pinned{margin-bottom:18px}
 #pinned.empty{display:none}
 .pinhdr{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);padding:5px 8px 4px}
-.pinrow+.pinrow{border-top:1px solid #20262e}
-.pinsess{display:block;font-size:11px;color:var(--dim);padding:4px 12px 0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pinned .card:last-child{margin-bottom:0}
 /* min-height:0 + a CAPPED bar: without the cap an open question grows #vact
    without limit and squeezes the document to a few px, leaving a scrollbar with
    nowhere to scroll (the "third scrollbar") */
@@ -1045,13 +1040,10 @@ function agentRow(a){
   const done=['done','ended'].includes(a.state);
   const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   const tk=a.tokens||{};
-  const pinned=pinnedAgents.has(a.agent_id);
-  // tap opens the agent; desktop 📌 button (left of ›) toggles pin; mobile long-press toggles pin
+  // tapping opens the subagent conversation
   const tap=`agentTap(event,'${a.session_id}','${a.agent_id}')`;
-  const touch=`ontouchstart="agentPressStart('${a.agent_id}')" ontouchend="agentPressEnd()" ontouchmove="agentPressEnd()"`;
-  return`<div class="arow ${done?'done-row':''}${pinned?' pinned':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
-    title="open this subagent's conversation" onclick="${tap}" ${touch}>
-    ${pinned?'<span class="pinmark">📌</span>':''}
+  return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
+    title="open this subagent's conversation" onclick="${tap}">
     <span class="tree">⎿</span>
     <span class="dot ${a.state}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
@@ -1061,50 +1053,45 @@ function agentRow(a){
     ${!done?spark(a.spark):''}
     <span class="anum">${fmtTok(a.total_tokens)}</span>
     <span class="acost">${fmt$(a.cost)}</span>
-    <button class="apin${pinned?' on':''}" title="${pinned?'unpin':'pin to top'}"
-      onclick="event.stopPropagation();togglePin('${a.agent_id}')">📌</button>
     <span class="aopen">›</span>
-  </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px"
-    onclick="${tap}" ${touch}>
+  </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px" onclick="${tap}">
     <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext" style="-webkit-line-clamp:${clampA()}">${esc(a.last_msg.text)}</span></div>`:''}`;
 }
-// Pinned agents are lifted OUT of their card into the global #pinned block (below
-// the usage header) — see renderPinned. A card's own lists show only its unpinned
-// agents. In-memory, keyed by agent_id.
-const pinnedAgents=new Set();
+// Pinned sessions are lifted out of the normal live/dormant lists into #pinned.
+// Set insertion order makes the watchlist stable. Pins are intentionally in-memory.
+const pinnedSessions=new Set();
 function agentListHtml(agents){
-  return agents.filter(a=>!pinnedAgents.has(a.agent_id)).map(agentRow).join('');
+  return agents.map(agentRow).join('');
 }
-function togglePin(aid){
-  pinnedAgents.has(aid)?pinnedAgents.delete(aid):pinnedAgents.add(aid);
+function toggleSessionPin(sid){
+  pinnedSessions.has(sid)?pinnedSessions.delete(sid):pinnedSessions.add(sid);
   render(last,true);            // force: resort now, even under the touch guard
-  if(agentView)renderAgent(true);
 }
-// mobile: long-press toggles pin; a short tap still opens the agent chat
-let agentPressTimer=null,agentLongFired=false;
-function agentPressStart(aid){
-  agentLongFired=false;
-  agentPressTimer=setTimeout(()=>{agentLongFired=true;togglePin(aid);
+// mobile: long-press a session header to pin; a short tap still opens its chat
+let sessionPressTimer=null,sessionLongFired=false;
+function sessionPressStart(sid){
+  sessionLongFired=false;
+  sessionPressTimer=setTimeout(()=>{sessionLongFired=true;toggleSessionPin(sid);
     if(navigator.vibrate)navigator.vibrate(15);},500);
 }
-function agentPressEnd(){if(agentPressTimer){clearTimeout(agentPressTimer);agentPressTimer=null;}}
+function sessionPressEnd(){if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}}
+function sessionTap(e,sid){
+  if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
+  openSession(sid);
+}
 function agentTap(e,sid,aid){
   e.stopPropagation();
-  if(agentLongFired){agentLongFired=false;return;}   // long-press just pinned — don't open
   openAgent(sid,aid);
 }
-// The global pinned-agents block (below the usage header). Order is STABLE — the
-// order agents were pinned (Set insertion order) — never re-sorted by session
-// state (running/idle/needs-you) or by the session list's ordering.
-function renderPinned(){
+// The pinned block keeps pin order, regardless of fleet state sorting.
+function renderPinned(sessions){
   const el=$('#pinned');
-  const byId={};
-  ((last&&last.sessions)||[]).forEach(s=>(s.agents||[]).forEach(a=>{byId[a.agent_id]={a,s};}));
-  const items=[...pinnedAgents].map(id=>byId[id]).filter(Boolean);
+  const byId=Object.fromEntries(sessions.map(s=>[s.session_id,s]));
+  const items=[...pinnedSessions].map(id=>byId[id]).filter(Boolean);
   if(!items.length){el.className='empty';el.innerHTML='';return;}
   el.className='';
-  el.innerHTML=`<div class="pinhdr">📌 pinned agents</div>`+items.map(({a,s})=>
-    `<div class="pinrow"><span class="pinsess" title="which session this agent belongs to">${esc(s.title||s.project||'session')}</span>${agentRow(a)}</div>`).join('');
+  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">📌 pinned sessions</div><div class="pinlist"></div>';
+  reconcileCards(el.querySelector('.pinlist'),items);
 }
 const setg=()=>((last&&last.settings)||{});
 const previewAgents=()=>!!setg().preview_agents;
@@ -1126,9 +1113,13 @@ function cardTop(s){
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
-  return`<div class="shead" title="open the full conversation" onclick="openSession('${s.session_id}')">
+  const pinned=pinnedSessions.has(s.session_id);
+  return`<div class="shead" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
+      ontouchstart="sessionPressStart('${s.session_id}')" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       <span class="chip ${s.state}">${stateLabel[s.state]||s.state}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
+      <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
+        onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
       <button class="expandbtn deskonly" title="bring this session's terminal tab to the front"
         onclick="event.stopPropagation();focusSession('${s.session_id}')">open</button>
     </div>
@@ -1146,15 +1137,14 @@ function cardTop(s){
     </div>
     ${previewSessions()&&s.last_msg?`<div class="lastmsg" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':'claude'}</span><span class="lmtext" style="-webkit-line-clamp:${clampS()}">${esc(s.last_msg.text)}</span></div>`:''}
     ${cardPending(s)}
-    ${activeSession&&running.some(a=>!pinnedAgents.has(a.agent_id))?`<div class="agents">${agentListHtml(running)}</div>`:''}
+    ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
     <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
 }
 // The card tail ("more"): reference material with native <details> folds. It is
 // rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns
 // don't remount every tick — that remount was the "blinking".
 function cardDetail(s){
-  // completed agents shown here exclude any pinned ones (they live in #pinned)
-  const done=s.agents.filter(a=>['done','ended'].includes(a.state)&&!pinnedAgents.has(a.agent_id));
+  const done=s.agents.filter(a=>['done','ended'].includes(a.state));
   const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
   return`<div class="detail">
       <div class="mutebox">
@@ -1198,10 +1188,8 @@ function cardDetail(s){
 function detailSig(s){
   const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
-  // pinned agents in this session change the completed list's order → resort the tail
-  const pins=s.agents.filter(a=>pinnedAgents.has(a.agent_id)).map(a=>a.agent_id).sort().join(',');
   return[s.muted,s.pid,s.model,s.effort,s.reg_status,s.ctx_tokens,
-    Math.round((s.cost+s.agent_cost)*100),done,files,pins].join('|');
+    Math.round((s.cost+s.agent_cost)*100),done,files].join('|');
 }
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
@@ -1225,7 +1213,7 @@ function reconcileCards(container,list){
       const top=document.createElement('div');top.className='ctop';card.appendChild(top);
       container.appendChild(card);
     }
-    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'');
+    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'')+(pinnedSessions.has(s.session_id)?' pinned':'');
     card.querySelector('.ctop').innerHTML=cardTop(s);
     let detail=card.querySelector(':scope > .detail');
     if(isOpen){
@@ -1777,12 +1765,13 @@ function render(f,force){
   const typingClosed=ae&&ae.tagName==='INPUT'&&$('#closed').contains(ae);
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
   if(!typing&&(force||!touching())){
-    const live=f.sessions.filter(s=>s.state!=='dormant');
-    const dorm=f.sessions.filter(s=>s.state==='dormant');
+    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id));
+    const live=unpinned.filter(s=>s.state!=='dormant');
+    const dorm=unpinned.filter(s=>s.state==='dormant');
     // reconcile in place: persists each card node so an expanded card's open
     // <details> doesn't remount (flash) every poll
     reconcileCards($('#sessions'),live);
-    renderPinned();
+    renderPinned(f.sessions);
     if(!typingNew)$('#newsess').innerHTML=newSection();
     $('#dormant').innerHTML=dormantSection(dorm);
     if(!typingClosed)$('#closed').innerHTML=closedSection(f.closed,f.t);

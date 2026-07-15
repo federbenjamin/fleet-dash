@@ -229,17 +229,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
     so it applies in either container. `#stheme` is fixed 40×32 so the glyph swap can't resize the
     chat header (`#vtheme` stays the big 28px viewer button).
-28. **Pinned agents (`pinnedAgents` Set, by agent_id, in-memory) live in a GLOBAL block, not the
-    card.** `renderPinned` fills `#pinned` (directly below `#usage`) by iterating the Set — so the
-    order is the **pin order** (Set insertion), deliberately NOT re-sorted by session state or the
-    session-list order. Each row is labelled with its session. `agentListHtml` (card lists) and
-    `cardDetail`'s `done` set both EXCLUDE pinned agents (no duplication); `cardTop` only renders
-    `.agents` when an unpinned running agent exists; `detailSig` includes this session's pinned ids
-    so pinning a completed agent rebuilds the signature-gated `.detail`. `togglePin` force-renders.
-    Desktop: `.apin` 📌 button left of `›`. Mobile (`pointer:coarse`): `.apin` hidden, long-press
-    toggles — `agentPressStart`/`agentPressEnd` (500ms timer) sets `agentLongFired`, and `agentTap`
-    swallows the click that follows so a long-press pins without opening; `.pinmark` shows the
-    pinned state where the button is hidden.
+28. **Pinned sessions (`pinnedSessions` Set, by session_id, in-memory) live in a GLOBAL block.**
+    `renderPinned` fills `#pinned` (directly below `#usage`) in Set insertion order, deliberately
+    not re-sorted by session state. Pinned cards are excluded from the regular live/dormant lists.
+    Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
+    `sessionTap` swallows the following click so pinning does not also open the chat.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
     `openClosed`) forces `#sbody` to `scrollHeight` on the first render regardless of prior
     scrollTop (a tall cached convo starts at 0 → the sticky-bottom test would otherwise keep the
