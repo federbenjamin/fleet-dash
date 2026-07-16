@@ -36,6 +36,7 @@
           <button data-now-filter="needs_you" onclick="setNowState('needs_you')">Needs you</button>
           <button data-now-filter="working" onclick="setNowState('working')">Working</button>
           <button data-now-filter="available" onclick="setNowState('available')">Available</button>
+          <button id="outboxchip" onclick="openOutbox()">Outbox</button>
           <span id="nowsaved" class="savedviews"></span>
           <button class="saveview" onclick="saveCurrentView('now')" title="Save this filter">＋ Save view</button>
         </div>
@@ -47,6 +48,7 @@
       <div id="providerstate"></div>
       <div id="notoken">read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
       <div id="actioninbox"></div>
+      <div id="outboxsummary"></div>
       <div id="working"></div>
       <div id="sessions"></div>
       <div id="newsess"></div>
@@ -136,6 +138,16 @@
   <div id="repohead"><button id="repoclose" aria-label="back" onclick="dismissOverlay()">←</button>
     <span id="repotitle"><b>Repository outcome</b><small>Git, tests, and pull requests</small></span></div>
   <div id="repobody"></div>
+</div>
+<div id="outboxview">
+  <div id="outboxhead"><button aria-label="back" onclick="dismissOverlay()">←</button>
+    <span><b>Message Outbox</b><small>Scheduled, waiting, sent, and blocked deliveries</small></span></div>
+  <div id="outboxbody"></div>
+</div>
+<div id="scheduleview">
+  <div id="schedulehead"><button aria-label="back" onclick="dismissOverlay()">←</button>
+    <span><b id="scheduletitle">Schedule message</b><small>One-time delivery to an exact target</small></span></div>
+  <div id="schedulebody"></div>
 </div>
 <div id="settingsview">
   <div id="sethead"><button id="setclose" aria-label="back to fleet" title="back to fleet"

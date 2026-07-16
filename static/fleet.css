@@ -432,10 +432,12 @@ details.insfold>summary:hover{color:var(--fg)}
 .pbtn.always{background:#1d4029;color:var(--green)}
 .pbtn.deny{background:#3a1518;color:var(--red)}
 .pbtn.send{background:var(--blue);color:#03121f}
+.pbtn.sendoption{background:var(--card2);border:1px solid var(--line);color:var(--dim);padding-inline:10px}
 .freetext{display:flex;gap:8px;margin-top:10px}
 .freetext input{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
+.sendpair{display:flex;gap:6px;flex:0 0 auto}.sendpair .pbtn{white-space:nowrap}
 .arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
 .arow:first-child{border-top:none}
 /* spawn marker — reads as a branch off the session, like the TUI's tool tree.
@@ -683,6 +685,42 @@ td.r,th.r{text-align:right}
 /* Editable cross-provider handoff. It stacks over the source conversation so
    one back-swipe returns to the exact place the user came from. */
 #handoffview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:61;flex-direction:column}
+#outboxview,#scheduleview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:64;flex-direction:column}
+#outboxhead,#schedulehead{display:flex;align-items:center;gap:10px;padding:10px 14px;
+  padding-top:calc(10px + env(safe-area-inset-top));border-bottom:1px solid var(--line)}
+#outboxhead button,#schedulehead button{flex:0 0 auto;background:var(--card);border:1px solid var(--line);
+  border-radius:8px;color:var(--fg);font:inherit;font-size:18px;line-height:1;padding:7px 12px;cursor:pointer}
+#outboxhead>span,#schedulehead>span{display:flex;flex-direction:column;min-width:0;gap:1px}
+#outboxhead b,#schedulehead b{font-size:14px}#outboxhead small,#schedulehead small{color:var(--faint);font-size:10.5px}
+#outboxbody,#schedulebody{flex:1;min-height:0;overflow:auto;padding:16px 18px calc(24px + env(safe-area-inset-bottom));
+  overscroll-behavior:contain}
+.outboxcompact{margin:12px 0;background:var(--card);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.outboxcompact.attention{border-color:rgba(248,81,73,.5)}
+.outboxcompacthead{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--fg);
+  padding:11px 12px;cursor:pointer;text-align:left;font:inherit}.outboxcompacthead>span{display:flex;flex:1;flex-direction:column}
+.outboxcompacthead small{color:var(--faint);font-size:10.5px;margin-top:2px}.outboxcount{color:var(--blue);font-size:12px}
+.outboxmini{display:flex;gap:8px;align-items:center;padding:7px 12px;border-top:1px solid var(--line);font-size:11px}
+.outboxmini .oboxstate{color:var(--dim);min-width:126px}.outboxmini .oboxmsg{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.outboxlayout{width:100%;max-width:1040px;margin-inline:auto}.outboxtools{display:flex;gap:6px;overflow:auto;margin-bottom:12px}
+.outboxtools button{border:1px solid var(--line);background:var(--card);color:var(--dim);border-radius:16px;
+  padding:6px 10px;font:inherit;font-size:11px;white-space:nowrap;cursor:pointer}.outboxtools button.on{color:var(--blue);border-color:#365d87;background:#101c2c}
+.outboxlist{display:flex;flex-direction:column;gap:9px}.outboxrow{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:11px 12px}
+.outboxrow.blocked,.outboxrow.failed,.outboxrow.confirmation_unknown{border-color:rgba(248,81,73,.42)}
+.outboxrow.sent,.outboxrow.cancelled{opacity:.68}.outboxtop{display:flex;align-items:center;gap:8px}.outboxstate{font-weight:700;font-size:11px;color:var(--blue)}
+.outboxrow.blocked .outboxstate,.outboxrow.failed .outboxstate,.outboxrow.confirmation_unknown .outboxstate{color:var(--red)}
+.outboxtime{margin-left:auto;color:var(--faint);font-size:10.5px}.outboxmessage{font-size:13px;line-height:1.45;margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.outboxmeta{color:var(--dim);font-size:10.5px}.outboxerror{color:var(--red);font-size:11px;margin-top:7px}.outboxactions{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+.outboxactions button{border:1px solid var(--line);background:var(--card2);color:var(--dim);border-radius:7px;padding:6px 9px;font:inherit;font-size:11px;cursor:pointer}
+.outboxactions button.primary{background:var(--blue);color:#03121f;border-color:transparent}.outboxempty{color:var(--faint);text-align:center;padding:50px 12px}
+.scheduleform{width:100%;max-width:680px;margin-inline:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.scheduleform textarea{min-height:150px;resize:vertical}.schedulemode{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:11px}
+.schedulemode button{border:1px solid var(--line);background:var(--card2);color:var(--dim);border-radius:9px;padding:9px 7px;font:inherit;font-size:11px;cursor:pointer}
+.schedulemode button.on{border-color:var(--blue);color:var(--blue);background:#101c2c}.scheduletime{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+.schedulezone{font-size:10px;color:var(--faint);padding-bottom:12px}.schedulewarn{border:1px solid var(--amber);background:#2b2111;color:var(--amber);border-radius:8px;padding:8px 9px;font-size:11px;margin:8px 0}
+.schedulesubmit{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}.schedulesubmit button{min-width:120px}
+@media(max-width:600px){#outboxbody,#schedulebody{padding:11px 10px calc(70px + env(safe-area-inset-bottom))}
+  .scheduleform{border-radius:10px;padding:11px}.schedulemode{grid-template-columns:1fr}.scheduletime{grid-template-columns:1fr}.schedulezone{padding:0}
+  .outboxmini .oboxstate{min-width:0}.outboxmini{align-items:flex-start;flex-direction:column}.nfactions{grid-template-columns:1fr}}
 #handoffhead{display:flex;align-items:center;gap:10px;padding:10px 14px;
   padding-top:calc(10px + env(safe-area-inset-top));border-bottom:1px solid var(--line)}
 #handoffclose{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
@@ -878,6 +916,8 @@ td.r,th.r{text-align:right}
 .nfwarn{background:#2b2111;border:1px solid var(--amber);color:var(--amber);border-radius:8px;
   padding:7px 9px;font-size:11.5px;margin:6px 0;line-height:1.45}
 .nfgo{width:100%;margin-top:10px;padding:10px}
+.nfmessage{min-height:86px;resize:vertical}.nfactions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.nfactions .nfgo{margin:0}
 .nfcheck{display:flex;align-items:center;gap:9px;margin:10px 0;font-size:13px;cursor:pointer}
 .nfcheck input{width:24px;height:24px;flex:0 0 auto;margin:0;accent-color:var(--blue);cursor:pointer}
 .nfcheck span{line-height:1}

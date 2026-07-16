@@ -13,7 +13,7 @@ Status: approved for sequential implementation on `codex-integration`.
 | M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
 | M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
 | M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
-| M7 — Message Outbox and light automations | Next | Add durable scheduled, available-triggered, usage-reset-triggered, and scheduled-new-session sends with a central Outbox. |
+| M7 — Message Outbox and light automations | Complete · 2026-07-16 | Durable SQLite outbox, four one-time send modes, atomic claim/lease recovery, exact target/account/session validation, central responsive UI, 139 Python tests, 70 deterministic browser checks, 10 safe running-daemon checks, and a real create/cancel smoke with no message dispatched. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -789,6 +789,33 @@ action validation, confirmation, and real opt-in repository smoke tests pass.
   claim/lease recovery, bounded retry, and audit states.
 - Add composer send options, scheduled New Session, central Outbox, pending count, filters, editing,
   send-now, retarget, retry, and cancel actions.
+
+Completed 2026-07-16. `AUTO-001`–`AUTO-012`, `UX-013`, `UX-014`, and the M7 portions of
+`DEC-006` and `DEC-013`–`DEC-017` are implemented in the shared Fleet app. The scheduler uses the
+ledger's WAL database and a separate one-second daemon loop. Exact existing-session, supported-agent,
+usage-account/window, and snapshotted-new-session destinations are revalidated at dispatch. Atomic
+claims, leases, provider backoff, crash recovery, ambiguous/nonexistent DST handling, immutable audit
+records, and explicit retry/retarget paths are covered by fake-clock and concurrency tests. Codex uses
+the saved initial message as its exact first turn; Claude reserves an exact session UUID and sends only
+after that identity appears.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 139 passed.
+- `npx playwright test tests/browser/fleet.spec.js` — 70 passed across desktop and 390×844 mobile.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377/ FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 10 safe running-daemon checks passed with no dispatch.
+- `python3 tests/live_api_smoke.py` — passed against 26 live sessions, 7 Codex models, and 2 native
+  Codex commands.
+- `python3 tests/live_outbox_smoke.py` — created a future Claude delivery, verified it persisted, then
+  cancelled it; the message was not sent.
+- `launchctl kickstart -k gui/501/com.benjaminfeder.fleet-dash` and local HTTP verification — daemon
+  restarted and returned 200.
+- The ChatGPT in-app Browser remains unavailable to this desktop root task: the current desktop log
+  records the Browser helper/socket peer being rejected as `untrusted-code-signing-identity`, and the
+  desktop exposes zero Browser surfaces. This is a current helper connection blocker, not evidence
+  that the reinstalled ChatGPT app itself has an invalid signature. Repository-native Playwright is
+  the deterministic visual fallback.
 
 Commit: `Add scheduled and state-triggered message outbox`.
 

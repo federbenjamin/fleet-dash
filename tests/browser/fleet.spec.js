@@ -250,6 +250,16 @@ test('repository details and actions are action-token protected', async ({ page 
   page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
 });
 
+test('message Outbox records are action-token protected while fleet exposes counts only', async ({ page }) => {
+  await page.request.post('/test/reset', { data: { scenario: 'base' } });
+  const denied = await page.request.get('/api/outbox');
+  expect(denied.status()).toBe(403);
+  expect((await denied.json()).ok).toBe(false);
+  const data = await (await page.request.get('/api/fleet')).json();
+  expect(data.outbox_summary).toEqual({pending: 0, attention: 0, states: {}});
+  expect(JSON.stringify(data)).not.toContain('scheduled message body');
+});
+
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
   await expect(page.locator('#totals > span')).toHaveText([
@@ -1078,6 +1088,69 @@ test('failed repository actions stay visible and retry against the same preview'
   await repo.getByRole('button', { name: 'Commit 2 files' }).click();
   await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
   await expect(repo).toContainText('Working tree is clean');
+});
+
+test('message Outbox schedules exact session delivery and exposes durable central controls', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await page.locator('[data-sid="codex:thread-one"] .primarybtn').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sft-codex\\:thread-one').fill('Send this when the Codex session is available');
+  await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
+  await expect(page.locator('#scheduleview')).toBeVisible();
+  await page.getByRole('button', { name: 'When available', exact: true }).click();
+  await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();
+  await expect(page.locator('#scheduleview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect.poll(async () => (await fixtureState(page)).outbox.length).toBe(1);
+  expect((await fixtureState(page)).outbox[0]).toMatchObject({
+    state: 'waiting_availability', target_session_id: 'codex:thread-one',
+    message: 'Send this when the Codex session is available'
+  });
+
+  await page.locator('#sclose').click();
+  await expect(page.locator('#sview')).toBeHidden();
+  await expect(page.locator('#outboxsummary')).toContainText('1 waiting to send');
+  await page.locator('#outboxchip').click();
+  await expect(page.locator('#outboxview')).toBeVisible();
+  const row = page.locator('.outboxrow').first();
+  await expect(row).toContainText('Waiting for availability');
+  await row.getByRole('button', { name: 'Edit' }).click();
+  await page.locator('#scheduleview textarea').fill('Edited queued message');
+  await page.locator('#scheduleview').getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.locator('#scheduleview')).toBeHidden();
+  await page.locator('#outboxchip').click();
+  await page.locator('.outboxrow').first().getByRole('button', { name: 'Send now' }).click();
+  await expect.poll(async () => (await fixtureState(page)).outbox[0].state).toBe('sent');
+  await page.locator('.outboxtools').getByRole('button', { name: 'Sent', exact: true }).click();
+  await expect(page.locator('.outboxrow').first()).toContainText('Sent');
+  await expect.poll(async () => (await fixtureState(page)).outbox[0].message).toBe('Edited queued message');
+  await page.screenshot({ path: testInfo.outputPath('message-outbox.png'), fullPage: true });
+});
+
+test('usage-reset and scheduled-new-session forms keep full target configuration', async ({ page }) => {
+  await reset(page, 'base');
+  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('#sft-claude-one').fill('Continue after my Claude usage resets');
+  await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
+  await page.getByRole('button', { name: 'When usage resets', exact: true }).click();
+  await expect(page.locator('#scheduleview select').last()).toContainText('Claude Code');
+  await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();
+  await expect.poll(async () => (await fixtureState(page)).outbox[0].state)
+    .toBe('waiting_usage_reset');
+  await page.locator('#sclose').click();
+
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  await page.locator('#newsess select').nth(1).selectOption('/Users/test/fleet-dash');
+  await page.locator('#newsess textarea').fill('Audit the scheduled release workflow');
+  await page.getByRole('button', { name: 'schedule session' }).click();
+  await expect(page.locator('#scheduleview')).toBeVisible();
+  await expect(page.locator('#scheduleview')).toContainText('Schedule new coding session');
+  await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();
+  await expect.poll(async () => (await fixtureState(page)).outbox.length).toBe(2);
+  const item = (await fixtureState(page)).outbox[1];
+  expect(item.kind).toBe('new_session');
+  expect(item.spawn_spec).toMatchObject({provider: 'claude', cwd: '/Users/test/fleet-dash'});
+  expect(item.message).toBe('Audit the scheduled release workflow');
 });
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {

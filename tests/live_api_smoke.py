@@ -23,7 +23,9 @@ def main():
         token = json.load(handle)["act_token"]
     status, html, kind = get("/")
     assert status == 200 and kind == "text/html"
-    assert b"new coding session" in html and b"Codex CLI" in html
+    assert b'<div id="appshell">' in html
+    assert b'<div id="outboxview">' in html
+    assert b'<script src="/static/app.js"></script>' in html
 
     fleet = None
     for _ in range(30):

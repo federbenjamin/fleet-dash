@@ -150,7 +150,7 @@ def fresh_state():
                 "preview_agents": False, "preview_agent_lines": 1,
                 "reader_width": "fit", "pinned_sessions": []},
             "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
-            "repo": repo, "repo_actions": []}
+            "repo": repo, "repo_actions": [], "outbox": []}
 
 
 STATE = fresh_state()
@@ -306,7 +306,16 @@ def fleet():
                 "agents_total": 0, "closed_at": int(time.time()) - 60,
                 "first_seen": int(time.time()) - 3600, "bridge_url": None},
                 *copy.deepcopy(STATE["closed"])]]
+    outbox_states = {}
+    for item in STATE["outbox"]:
+        outbox_states[item["state"]] = outbox_states.get(item["state"], 0) + 1
+    outbox_pending = sum(outbox_states.get(state, 0) for state in
+        ("scheduled", "waiting_availability", "waiting_usage_reset", "spawning", "sending"))
+    outbox_attention = sum(outbox_states.get(state, 0) for state in
+        ("blocked", "failed", "confirmation_unknown"))
     return {"t": time.time(), "sessions": sessions, "actions": fixture_actions(sessions),
+            "outbox_summary": {"pending": outbox_pending, "attention": outbox_attention,
+                               "states": outbox_states},
             "totals": {"sessions": len(sessions),
                 "busy": sum(item["ui_group"] == "working" for item in sessions),
                 "needs_me": sum(item["ui_group"] == "needs_you" for item in sessions),
@@ -325,11 +334,15 @@ def fleet():
                     "lifetime_scope": "local_transcripts", "source": "claude_usage",
                     "show_week": True, "show_active": True, "refresh_seconds": 30,
                     "profiles": [{"id": "one", "email": "claude@example.com",
-                        "active": True, "five_hour_pct": 20, "weekly_pct": 30},
+                        "active": True, "five_hour_pct": 20, "weekly_pct": 30,
+                        "five_hour_reset": "2099-01-01T00:00:00Z",
+                        "weekly_reset": "2099-01-07T00:00:00Z"},
                         {"id": "two", "email": "second@example.com", "active": False,
-                         "five_hour_pct": 4, "weekly_pct": 8}]},
+                         "five_hour_pct": 4, "weekly_pct": 8,
+                         "five_hour_reset": "2099-01-01T02:00:00Z",
+                         "weekly_reset": "2099-01-07T02:00:00Z"}]},
                 "codex": {"provider": "codex", "email": "codex@example.com",
-                    "plan_type": "pro",
+                    "account_id": "codex@example.com", "plan_type": "pro",
                     "lifetime_tokens": 12345, "buckets": [{"id": "codex:primary",
                     "label": "5-hour", "used_pct": 25, "reset": "2099-01-01T00:00:00Z"},
                     {"id": "codex:secondary", "label": "weekly", "used_pct": 30,
@@ -517,11 +530,23 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         with LOCK:
             if route in ("/api/search", "/api/search/status", "/api/search/context",
-                         "/api/handoff", "/api/repo"):
+                         "/api/handoff", "/api/repo", "/api/outbox"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
                 if route == "/api/repo":
                     return self.json_reply(copy.deepcopy(STATE["repo"]))
+                if route == "/api/outbox":
+                    return self.json_reply({"ok": True, "items": copy.deepcopy(STATE["outbox"]),
+                        "next_cursor": None, "summary": fleet()["outbox_summary"],
+                        "usage_options": [
+                            {"provider": "claude", "account_id": "one",
+                             "label": "claude@example.com", "windows": [
+                                {"id": "five_hour", "label": "5-hour", "reset": "2099-01-01T00:00:00Z"},
+                                {"id": "weekly", "label": "Weekly", "reset": "2099-01-07T00:00:00Z"}]},
+                            {"provider": "codex", "account_id": "codex@example.com",
+                             "label": "codex@example.com", "windows": [
+                                {"id": "codex:primary", "label": "5-hour", "reset": "2099-01-01T00:00:00Z"},
+                                {"id": "codex:secondary", "label": "weekly", "reset": "2099-01-07T00:00:00Z"}]}]})
                 if route == "/api/handoff":
                     sid = (query.get("sid") or [""])[0]
                     provider = (query.get("provider") or [""])[0]
@@ -777,6 +802,65 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("type") == "ping":
                     return self.json_reply({"ok": True})
                 STATE["actions"].append(payload)
+                if str(payload.get("type") or "").startswith("outbox_"):
+                    typ = payload["type"]
+                    item = next((row for row in STATE["outbox"]
+                                 if row["id"] == payload.get("outbox_id")), None)
+                    if typ == "outbox_create":
+                        kind = payload.get("kind")
+                        state = {"when_available": "waiting_availability",
+                                 "usage_reset": "waiting_usage_reset"}.get(kind, "scheduled")
+                        now = time.time()
+                        item = {"id": f"fixture-out-{len(STATE['outbox']) + 1}",
+                            "created_at": now, "updated_at": now,
+                            "created_zone": payload.get("created_zone") or "UTC",
+                            "local_time": payload.get("local_time"),
+                            "trigger_fold": payload.get("trigger_fold"),
+                            "kind": kind, "state": state,
+                            "state_label": {"scheduled": "Scheduled",
+                                "waiting_availability": "Waiting for availability",
+                                "waiting_usage_reset": "Waiting for usage reset"}[state],
+                            "message": payload.get("message"),
+                            "target_provider": payload.get("target_provider"),
+                            "target_session_id": payload.get("target_session_id"),
+                            "target_agent_id": payload.get("target_agent_id"),
+                            "trigger_at": now + 3600 if kind in ("at_time", "new_session") else None,
+                            "usage_account_id": payload.get("usage_account_id"),
+                            "usage_window_id": payload.get("usage_window_id"),
+                            "observed_reset_at": None, "spawn_spec": payload.get("spawn_spec"),
+                            "destination_session_id": None, "provider_receipt": None,
+                            "sent_at": None, "error": None, "blocked_reason": None,
+                            "retry_of": None, "version": 1, "editable": True,
+                            "cancellable": True, "retryable": False}
+                        STATE["outbox"].append(item)
+                    elif not item:
+                        return self.json_reply({"ok": False, "error": "outbox message not found"})
+                    elif typ == "outbox_update":
+                        patch = payload.get("patch") or {}
+                        item.update({key: value for key, value in patch.items()
+                                     if key in ("message", "kind", "target_provider",
+                                        "target_session_id", "target_agent_id", "created_zone",
+                                        "local_time", "trigger_fold", "usage_account_id",
+                                        "usage_window_id", "spawn_spec")})
+                        item["updated_at"] = time.time()
+                    elif typ == "outbox_cancel":
+                        item.update(state="cancelled", state_label="Cancelled", editable=False,
+                                    cancellable=False, retryable=False, updated_at=time.time())
+                    elif typ == "outbox_send_now":
+                        item.update(state="sent", state_label="Sent", editable=False,
+                                    cancellable=False, retryable=False, sent_at=time.time(),
+                                    provider_receipt={"accepted": True}, updated_at=time.time())
+                    elif typ in ("outbox_retry", "outbox_retarget"):
+                        patch = payload.get("patch") or {}
+                        now = time.time()
+                        item = {**item, **patch, "id": f"fixture-out-{len(STATE['outbox']) + 1}",
+                            "retry_of": item["id"], "created_at": now, "updated_at": now,
+                            "state": "waiting_availability", "state_label": "Waiting for availability",
+                            "editable": True, "cancellable": True, "retryable": False,
+                            "error": None, "blocked_reason": None}
+                        STATE["outbox"].append(item)
+                    return self.json_reply({"ok": True, "item": copy.deepcopy(item),
+                                            "summary": fleet()["outbox_summary"]})
                 if payload.get("type") in ("git_commit", "git_push", "pr_create_draft",
                                            "pr_mark_ready"):
                     repo = STATE["repo"]

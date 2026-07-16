@@ -7,6 +7,7 @@ GET /api/workstreams lazy repository/project rollup
 GET /api/evidence durable session placement history
 GET /api/handoff authenticated editable provider-handoff preview
 GET /api/repo authenticated repository outcome/action preview
+GET /api/outbox authenticated scheduled-message list and audit trail
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -35,6 +36,15 @@ def poll_loop(eng):
         except Exception as e:
             print(f"poll error: {e}", file=sys.stderr, flush=True)
         time.sleep(eng.cfg["poll_seconds"])
+
+
+def outbox_loop(eng):
+    while True:
+        try:
+            eng.run_outbox()
+        except Exception as exc:
+            print(f"outbox scheduler error: {exc}", file=sys.stderr, flush=True)
+        time.sleep(1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -106,7 +116,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff", "/api/repo"):
+                     "/api/handoff", "/api/repo", "/api/outbox"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -117,6 +127,10 @@ class Handler(BaseHTTPRequestHandler):
                 out = self.eng.repository_snapshot(
                     self.query("root"), self.query("worktree"),
                     self.query("force") in ("1", "true"))
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/outbox":
+                out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
+                                               self.query("limit") or 100)
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:
@@ -229,6 +243,7 @@ def main():
                                  batch_rows=cfg.get("search_batch_rows", 250))
         eng.search.start_process()
     threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
+    threading.Thread(target=outbox_loop, args=(eng,), daemon=True).start()
     Handler.eng = eng
     srv = ThreadingHTTPServer((cfg["bind"], cfg["port"]), Handler)
     print(f"fleet-dash on http://{cfg['bind']}:{cfg['port']}", flush=True)

@@ -1692,6 +1692,7 @@ def _account_usage(limits, tokens, info=None):
     plan_type = current.get("planType") or plan_type
     summary = tokens.get("summary") or {}
     return {"provider": "codex", "plan_type": plan_type,
+            "account_id": current.get("id") or current.get("email") or "active",
             "email": current.get("email"),
             "buckets": buckets,
             "lifetime_tokens": summary.get("lifetimeTokens"),

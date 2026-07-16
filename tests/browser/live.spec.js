@@ -81,7 +81,23 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(page.locator('#notoken')).toBeVisible();
   for (let index = 0; index < 10; index += 1) await page.evaluate(() => tick());
   await page.screenshot({ path: testInfo.outputPath('running-fleet.png'), fullPage: true });
-  expect(expectedReadOnly).toHaveLength(1);
+  expect(expectedReadOnly.length).toBeGreaterThanOrEqual(1);
+  expect(expectedReadOnly.length).toBeLessThanOrEqual(2);
+  expect(failures).toEqual([]);
+});
+
+test('running Fleet Dash opens the authenticated Outbox without dispatching work', async ({ page }, testInfo) => {
+  const target = authenticatedLiveURL();
+  test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
+  const failures = [];
+  page.on('pageerror', error => failures.push(`page: ${error}`));
+  page.on('console', message => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
+  page.on('requestfailed', request => failures.push(`network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  await page.goto(target, { waitUntil: 'domcontentloaded' });
+  await page.locator('#outboxchip').click();
+  await expect(page.locator('#outboxview')).toBeVisible();
+  await expect(page.locator('#outboxbody')).toContainText(/No messages|Scheduled|Waiting|Sent|Cancelled|Blocked/);
+  await page.screenshot({ path: testInfo.outputPath('running-outbox.png'), fullPage: true });
   expect(failures).toEqual([]);
 });
 

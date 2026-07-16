@@ -380,6 +380,57 @@ class EngineProviderTest(unittest.TestCase):
             "cwd": cwd, "model": "gpt-5.4", "effort": "high",
             "mode": "plan", "initial_text": "hi"})
 
+    def test_codex_spawn_uses_explicit_initial_message_when_supplied(self):
+        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+            result = self.engine.spawn_codex_session({
+                "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
+                "effort": "high", "mode": "default", "initial_text": "Start exact work"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["initial_message"], "Start exact work")
+        self.assertEqual(self.codex.started_thread["initial_text"], "Start exact work")
+
+    def test_outbox_action_dispatches_to_exact_available_provider_session(self):
+        self.engine.scan()
+        created = self.engine.act({"type": "outbox_create", "kind": "when_available",
+            "message": "Queued exact work", "created_zone": "UTC",
+            "target_provider": "codex", "target_session_id": "codex:same"})
+        self.assertTrue(created["ok"])
+        self.engine.run_outbox()
+        row = self.engine.outbox.get(created["item"]["id"])
+        self.assertEqual(row["state"], "sent")
+        self.assertEqual(self.codex.actions[-1], {"type": "text",
+            "session_id": "codex:same", "text": "Queued exact work"})
+        self.assertNotIn("Queued exact work", json.dumps(row["provider_receipt"]))
+
+    def test_outbox_rejects_view_only_target_before_persisting(self):
+        self.engine.scan()
+        with self.engine.lock:
+            target = next(item for item in self.engine.snapshot_cache["sessions"]
+                          if item["session_id"] == "codex:same")
+            target.update(read_only=True, access="view_only",
+                          read_only_reason="another runtime owns it")
+        result = self.engine.act({"type": "outbox_create", "kind": "when_available",
+            "message": "Do not redirect", "created_zone": "UTC",
+            "target_provider": "codex", "target_session_id": "codex:same"})
+        self.assertFalse(result["ok"])
+        self.assertIn("another runtime", result["error"])
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
+
+    def test_scheduled_new_codex_session_sends_message_in_exact_first_turn(self):
+        self.engine.scan()
+        created = self.engine.act({"type": "outbox_create", "kind": "new_session",
+            "message": "Scheduled first turn", "created_zone": "UTC",
+            "trigger_at": time.time() - 1, "spawn_spec": {"provider": "codex",
+                "cwd": self.cwd, "model": "gpt-5.4", "effort": "high",
+                "mode": "plan", "worktree": False, "worktree_name": ""}})
+        self.assertTrue(created["ok"])
+        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+            self.engine.run_outbox()
+        row = self.engine.outbox.get(created["item"]["id"])
+        self.assertEqual(row["state"], "sent")
+        self.assertEqual(row["destination_session_id"], "codex:new-thread")
+        self.assertEqual(self.codex.started_thread["initial_text"], "Scheduled first turn")
+
     def test_arbitrary_claude_file_path_is_rejected(self):
         ctype, data, error = self.engine.file_content("same", self.transcript)
         self.assertIsNone(ctype)

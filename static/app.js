@@ -416,6 +416,179 @@ function md(src){
   return html;
 }
 
+// ---- durable message Outbox -----------------------------------------------
+let outboxData={ok:true,items:[],summary:{pending:0,attention:0},usage_options:[]};
+let outboxLoading=false,outboxLoadPromise=null,outboxLoadedAt=0,outboxAccess='unknown',outboxFilter='current',scheduleView=null;
+const outboxPending=new Set(['scheduled','waiting_availability','waiting_usage_reset','spawning','sending']);
+const outboxAttention=new Set(['blocked','failed','confirmation_unknown']);
+function outboxWhen(item){
+  const value=item.sent_at||item.trigger_at||item.created_at;if(!value)return'';
+  const date=new Date(value*1000);return date.toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+}
+function outboxTarget(item){
+  if(item.kind==='new_session')return`new ${item.target_provider||item.spawn_spec?.provider||''} session`;
+  const session=((last&&last.sessions)||[]).find(row=>row.session_id===(item.destination_session_id||item.target_session_id));
+  const base=session?.title||session?.project||item.destination_session_id||item.target_session_id||'missing target';
+  return item.target_agent_id?`${base} · ${item.target_agent_id}`:base;
+}
+async function loadOutbox(force=false){
+  if(outboxAccess==='denied'&&!force)return outboxData;
+  if(outboxLoading){await outboxLoadPromise;return force?loadOutbox(true):outboxData;}
+  if(!force&&Date.now()-outboxLoadedAt<1500)return outboxData;
+  outboxLoading=true;
+  outboxLoadPromise=(async()=>{try{
+      const r=await fetch('/api/outbox?limit=200',{cache:'no-store'}),data=await r.json();
+      if(!r.ok||!data.ok){if(r.status===403)outboxAccess='denied';throw new Error(r.status===403?'Outbox needs this device’s action token':(data.error||'Outbox unavailable'));}
+      outboxAccess='allowed';outboxData=data;outboxLoadedAt=Date.now();
+    }catch(error){outboxData={...outboxData,ok:false,error:String(error)};}
+    finally{outboxLoading=false;outboxLoadPromise=null;renderOutboxCompact();renderOutboxFull();}})();
+  await outboxLoadPromise;return outboxData;
+}
+function renderOutboxCompact(){
+  const el=$('#outboxsummary');if(!el)return;
+  const summary=outboxData.summary||last?.outbox_summary||{};
+  const current=(outboxData.items||[]).filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
+  if(!summary.pending&&!summary.attention&&!outboxData.error){el.innerHTML='';return;}
+  const rows=current.slice(0,3).map(item=>`<div class="outboxmini"><span class="oboxstate">${esc(item.state_label||item.state)}</span><span class="oboxmsg">${esc(item.message||'')}</span><small>${esc(outboxWhen(item))}</small></div>`).join('');
+  el.innerHTML=`<section class="outboxcompact${summary.attention?' attention':''}"><button class="outboxcompacthead" onclick="openOutbox()">
+    <span><b>Message Outbox</b><small>${summary.attention?`${summary.attention} need review · `:''}${summary.pending||0} waiting to send</small></span><b class="outboxcount">Open →</b></button>${rows}</section>`;
+}
+function openOutbox(){
+  $('#outboxview').style.display='flex';syncOverlayHistory();renderOutboxFull();loadOutbox(true);
+}
+function closeOutbox(){$('#outboxview').style.display='none';$('#outboxbody').innerHTML='';}
+function setOutboxFilter(value){outboxFilter=value;renderOutboxFull();}
+function visibleOutboxItems(){
+  const items=outboxData.items||[];
+  if(outboxFilter==='pending')return items.filter(item=>outboxPending.has(item.state));
+  if(outboxFilter==='attention')return items.filter(item=>outboxAttention.has(item.state));
+  if(outboxFilter==='sent')return items.filter(item=>item.state==='sent');
+  if(outboxFilter==='all')return items;
+  return items.filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
+}
+function outboxRow(item){
+  const error=item.error||item.blocked_reason;
+  const canEdit=item.editable,canRetry=item.retryable;
+  return`<article class="outboxrow ${esc(item.state)}"><div class="outboxtop"><span class="outboxstate">${esc(item.state_label||item.state)}</span>
+    <span class="outboxtime">${esc(outboxWhen(item))}</span></div><div class="outboxmessage">${esc(item.message||'')}</div>
+    <div class="outboxmeta">${esc(outboxTarget(item))} · ${esc(String(item.kind||'').replaceAll('_',' '))}${item.created_zone?` · ${esc(item.created_zone)}`:''}</div>
+    ${error?`<div class="outboxerror">${esc(error)}</div>`:''}<div class="outboxactions">
+      ${canEdit?`<button onclick="editOutbox('${item.id}')">Edit</button><button class="primary" onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
+      ${canRetry?`<button class="primary" onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
+    </div></article>`;
+}
+function renderOutboxFull(){
+  const el=$('#outboxbody');if(!el||$('#outboxview').style.display!=='flex')return;
+  if(outboxLoading&&!outboxData.items?.length){el.innerHTML='<div class="ctxload">Loading Outbox…</div>';return;}
+  if(!outboxData.ok){el.innerHTML=`<div class="outboxempty">${esc(outboxData.error||'Outbox unavailable')}</div>`;return;}
+  const items=visibleOutboxItems();
+  el.innerHTML=`<div class="outboxlayout"><div class="outboxtools">${[['current','Current'],['pending','Pending'],['attention','Needs review'],['sent','Sent'],['all','All']].map(([value,label])=>
+    `<button class="${outboxFilter===value?'on':''}" onclick="setOutboxFilter('${value}')">${label}</button>`).join('')}</div>
+    <div class="outboxlist">${items.length?items.map(outboxRow).join(''):'<div class="outboxempty">No messages in this view.</div>'}</div></div>`;
+}
+function mergeOutboxResult(result){
+  if(!result?.item)return;
+  const items=[...(outboxData.items||[])],index=items.findIndex(item=>item.id===result.item.id);
+  if(index>=0)items[index]=result.item;else items.unshift(result.item);
+  outboxData={...outboxData,ok:true,items,summary:result.summary||outboxData.summary};
+  renderOutboxCompact();renderOutboxFull();
+}
+async function outboxAction(id,type,payload={}){
+  const result=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type,outbox_id:id,...payload})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
+  if(!result.ok){alert(result.error||'Outbox action failed');return result;}
+  mergeOutboxResult(result);
+  await loadOutbox(true);return result;
+}
+function confirmCancelOutbox(id){askConfirm('Cancel this scheduled message?',
+  'It will remain in the Outbox audit trail and will never be sent.','cancel message',()=>outboxAction(id,'outbox_cancel'));}
+function localInputAt(epoch,zone){
+  if(!epoch)return'';try{
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone||undefined,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(epoch*1000));
+    const get=kind=>parts.find(part=>part.type===kind)?.value||'';
+    return`${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+  }catch(_){return new Date(epoch*1000).toISOString().slice(0,16);}
+}
+function defaultScheduleTime(){const date=new Date(Date.now()+3600000),pad=value=>String(value).padStart(2,'0');date.setSeconds(0,0);
+  return`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;}
+function scheduleButton(sid,inputId,agentId=''){
+  return`<button class="pbtn sendoption" title="schedule or wait to send" aria-label="delivery options" onclick="openSchedule('${sid}','${inputId}','${agentId}')">⌄</button>`;
+}
+async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,message=''){
+  await loadOutbox();
+  const input=inputId?document.getElementById(inputId):null;
+  const source=existing||{};
+  const zone=source.created_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
+  scheduleView={id:source.id||null,operation:null,sid:sid||source.target_session_id||'',
+    agentId:agentId||source.target_agent_id||'',inputId:inputId||null,
+    kind:source.kind||((spawnSpec||source.spawn_spec)?'new_session':'at_time'),
+    message:message||source.message||(input?.value||''),zone,
+    localTime:source.local_time||localInputAt(source.trigger_at,zone)||defaultScheduleTime(),
+    fold:source.trigger_fold,choices:null,usageKey:'',spawnSpec:spawnSpec||source.spawn_spec||null};
+  if(source.usage_account_id)scheduleView.usageKey=[source.target_provider,source.usage_account_id,source.usage_window_id].join('|');
+  const stacked=anyOverlay();
+  $('#scheduleview').style.display='flex';$('#scheduletitle').textContent=source.id?'Edit Outbox message':
+    scheduleView.kind==='new_session'?'Schedule new coding session':'Schedule message';
+  if(stacked){schedulePushed=true;history.pushState({fdSchedule:1},'');}else syncOverlayHistory();
+  renderSchedule();
+}
+function editOutbox(id,operation=null){
+  const item=(outboxData.items||[]).find(row=>row.id===id);if(!item)return;
+  closeOutbox();openSchedule(item.target_session_id,null,item.target_agent_id||'',item).then(()=>{scheduleView.operation=operation;renderSchedule();});
+}
+function closeSchedule(){$('#scheduleview').style.display='none';$('#schedulebody').innerHTML='';scheduleView=null;}
+function scheduleSet(key,value){if(!scheduleView)return;scheduleView[key]=value;if(key==='sid')scheduleView.agentId='';renderSchedule();}
+function scheduleUsageOptions(){return(outboxData.usage_options||[]).flatMap(account=>
+  (account.windows||[]).map(window=>({value:[account.provider,account.account_id,window.id].join('|'),
+    label:`${account.provider==='claude'?'Claude Code':'Codex CLI'} · ${account.label} · ${window.label} · ${usageReset(window.reset)}`})));
+}
+function renderSchedule(){
+  const el=$('#schedulebody');if(!el||!scheduleView)return;const v=scheduleView;
+  const sessions=((last&&last.sessions)||[]).filter(item=>item.access==='interactive'&&!item.read_only);
+  const target=sessions.find(item=>item.session_id===v.sid);const agents=(target?.agents||[]).filter(a=>!['done','ended'].includes(a.state));
+  const usage=scheduleUsageOptions();if(!v.usageKey&&usage.length)v.usageKey=usage[0].value;
+  const spawn=v.spawnSpec||{};const isNew=v.kind==='new_session';
+  el.innerHTML=`<div class="scheduleform">${!isNew?`<div class="schedulemode">
+      ${[['at_time','At a time'],['when_available','When available'],['usage_reset','When usage resets']].map(([value,label])=>`<button class="${v.kind===value?'on':''}" onclick="scheduleSet('kind','${value}')">${label}</button>`).join('')}</div>
+    <label class="nflab">exact session</label><select class="nfsel" onchange="scheduleSet('sid',this.value)">
+      ${sessions.map(item=>`<option value="${esc(item.session_id)}" ${item.session_id===v.sid?'selected':''}>${esc((item.provider==='codex'?'Codex · ':'Claude · ')+(item.title||item.project))}</option>`).join('')}</select>
+    ${agents.length?`<label class="nflab">target</label><select class="nfsel" onchange="scheduleSet('agentId',this.value)"><option value="">Session</option>${agents.map(agent=>`<option value="${esc(agent.agent_id)}" ${agent.agent_id===v.agentId?'selected':''}>Subagent · ${esc(agent.description||agent.agent_type||agent.agent_id)}</option>`).join('')}</select>`:''}`:
+    `<label class="nflab">provider</label><select class="nfsel" onchange="scheduleView.spawnSpec.provider=this.value;renderSchedule()"><option value="claude" ${spawn.provider==='claude'?'selected':''}>Claude Code</option><option value="codex" ${spawn.provider==='codex'?'selected':''}>Codex CLI</option></select>
+     <label class="nflab">directory</label><input class="nfin" value="${esc(spawn.cwd||'')}" oninput="scheduleView.spawnSpec.cwd=this.value">
+     <div class="nfrow"><div class="nfcol"><label class="nflab">model</label><input class="nfin" value="${esc(spawn.model||'')}" placeholder="default" oninput="scheduleView.spawnSpec.model=this.value"></div>
+     <div class="nfcol"><label class="nflab">effort</label><input class="nfin" value="${esc(spawn.effort||'')}" placeholder="default" oninput="scheduleView.spawnSpec.effort=this.value"></div></div>
+     ${spawn.provider==='codex'?`<label class="nflab">mode</label><select class="nfsel" onchange="scheduleView.spawnSpec.mode=this.value"><option value="plan" ${spawn.mode==='plan'?'selected':''}>Plan</option><option value="default" ${spawn.mode==='default'?'selected':''}>Default</option></select>`:
+       `<label class="nfcheck"><input type="checkbox" ${spawn.worktree?'checked':''} onchange="scheduleView.spawnSpec.worktree=this.checked;renderSchedule()"><span>new git worktree</span></label>${spawn.worktree?`<input class="nfin" value="${esc(spawn.worktree_name||'')}" placeholder="worktree name (optional)" oninput="scheduleView.spawnSpec.worktree_name=this.value">`:''}`}`}
+    <label class="nflab">message</label><textarea class="nfin" maxlength="2000" oninput="scheduleView.message=this.value">${esc(v.message)}</textarea>
+    ${v.kind==='at_time'||isNew?`<div class="scheduletime"><label><span class="nflab">local date and time</span><input class="nfin" type="datetime-local" value="${esc(v.localTime)}" onchange="scheduleView.localTime=this.value;scheduleView.choices=null"></label><span class="schedulezone">${esc(v.zone)}</span></div>`:''}
+    ${v.kind==='usage_reset'?`<label class="nflab">account and usage window</label><select class="nfsel" onchange="scheduleView.usageKey=this.value">${usage.map(item=>`<option value="${esc(item.value)}" ${item.value===v.usageKey?'selected':''}>${esc(item.label)}</option>`).join('')}</select>${usage.length?'':'<div class="schedulewarn">No fresh reset evidence is available.</div>'}`:''}
+    ${v.choices?`<div class="schedulewarn">That clock time occurs twice. Choose which occurrence:<select class="nfsel" onchange="scheduleView.fold=Number(this.value)">${v.choices.map((choice,index)=>`<option value="${choice.fold}">${index?'Second':'First'} occurrence · UTC offset ${esc(choice.offset)}</option>`).join('')}</select></div>`:''}
+    <div id="schedulemsg" class="actmsg"></div><div class="schedulesubmit"><button class="pbtn" onclick="dismissOverlay()">Cancel</button><button class="pbtn send" onclick="submitSchedule()">${v.id?(v.operation?'Create retry':'Save changes'):'Schedule'}</button></div></div>`;
+}
+async function submitSchedule(){
+  if(!scheduleView)return;const v=scheduleView;const msg=$('#schedulemsg');
+  if(!v.message.trim()){msg.textContent='✗ message is required';return;}
+  if(/^[\/$]/.test(v.message.trim())){msg.textContent='✗ scheduled sends support messages, not commands or skills';return;}
+  const target=((last&&last.sessions)||[]).find(item=>item.session_id===v.sid);
+  const payload={kind:v.kind,message:v.message,created_zone:v.zone,local_time:v.localTime,trigger_fold:v.fold,
+    target_provider:target?.provider,target_session_id:v.sid,target_agent_id:v.agentId||null};
+  if(v.kind==='new_session'){payload.spawn_spec=v.spawnSpec;payload.target_provider=v.spawnSpec?.provider;}
+  if(v.kind==='usage_reset'){
+    const [provider,account,window]=v.usageKey.split('|');payload.target_provider=provider;
+    payload.usage_account_id=account;payload.usage_window_id=window;delete payload.local_time;
+  }
+  if(v.kind==='when_available')delete payload.local_time;
+  msg.textContent='saving…';
+  let body;if(!v.id)body={type:'outbox_create',...payload};
+  else if(v.operation==='retry')body={type:'outbox_retry',outbox_id:v.id,patch:payload};
+  else body={type:'outbox_update',outbox_id:v.id,patch:payload};
+  const result=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
+  if(!result.ok){if(result.code==='ambiguous_time'){v.choices=result.choices;v.fold=result.choices?.[0]?.fold;renderSchedule();return;}msg.textContent='✗ '+(result.error||'failed');return;}
+  mergeOutboxResult(result);
+  const input=v.inputId&&document.getElementById(v.inputId);if(input)input.value='';
+  dismissOverlay();await loadOutbox(true);render(last,true);
+}
+
 // Compact Markdown for card peeks. Preserve headings/emphasis/lists while
 // collapsing document-scale code and tables into short, safe prose.
 function peekMd(src){
@@ -1030,7 +1203,7 @@ function renderViewerBar(force){
     ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
       onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
-      <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>`:''}
+      <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
   keepStripScroll(bar,()=>{bar.innerHTML=h;});
@@ -1073,12 +1246,13 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
-let histPushed=false;
-const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview'].some(id=>$(id).style.display==='flex');
+let histPushed=false,schedulePushed=false;
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  if(schedulePushed){schedulePushed=false;closeSchedule();return;}
   if(repoPushed){repoPushed=false;closeRepository();return;}
   if(handoffPushed){
     handoffPushed=false;
@@ -1089,7 +1263,7 @@ window.addEventListener('popstate',()=>{
   }
   if(histPushed){
     histPushed=false;
-    closeConfirm();closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();
+    closeConfirm();closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
     return;
   }
   navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
@@ -1099,8 +1273,9 @@ function dismissOverlay(){
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
   if(repoPushed)return history.back();
   if(handoffPushed)return history.back();
+  if(schedulePushed)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();}
+  else{closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
@@ -1339,7 +1514,7 @@ function renderSession(force){
     ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
       onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
-      <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>`:''}
+      <span class="sendpair"><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div>`:''}
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
     <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
@@ -1412,7 +1587,7 @@ function renderAgent(force){
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
       ${!done&&par?.capabilities?.relay_agent?`<div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
         onkeydown="if(event.key==='Enter')sendRelay()">
-        <button class="pbtn send" onclick="sendRelay()">relay</button></div>`:''}
+        <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
       <div class="actmsg" id="amsg"></div>
       <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
         <summary>agent info</summary>
@@ -2333,7 +2508,7 @@ function filterChips(kind,current,items){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',spawnWait=null,spawnMsg='';
+let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
@@ -2387,7 +2562,10 @@ function newSection(){
       onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
     ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
       oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
-    <button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
+    <label class="nflab">initial message <span style="text-transform:none;letter-spacing:0">(optional now, required to schedule)</span></label>
+    <textarea class="nfin nfmessage" maxlength="2000" placeholder="What should this session work on?" oninput="newMessage=this.value">${esc(newMessage)}</textarea>
+    <div class="nfactions"><button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
+      <button class="pbtn sendoption nfgo" onclick="doScheduleNew()">schedule session</button></div>
     ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
   </div>
   <div class="dsep"></div>`;
@@ -2398,7 +2576,7 @@ async function doSpawn(){
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({type:'spawn',provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
-                           worktree:newWt,worktree_name:newWtName})});
+                           worktree:newWt,worktree_name:newWtName,initial_text:newMessage||undefined})});
     const d=await r.json();
     if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}
     spawnMsg=d.trust_prompt
@@ -2406,16 +2584,29 @@ async function doSpawn(){
       : 'started ✓ — opening it here as soon as it appears…';
     // Both providers return the exact native session identity. Never guess by cwd:
     // a sibling session in the same repo must not be opened by mistake.
-    spawnWait={sessionId:d.session_id,until:Date.now()+120000};
+    spawnWait={sessionId:d.session_id,until:Date.now()+120000,provider:newProvider,initialMessage:newMessage};
+    newMessage='';
     newOpen=false;render(last,true);
   }catch(e){spawnMsg='✗ '+e;render(last,true);}
 }
+function doScheduleNew(){
+  if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
+  if(!newMessage.trim()){spawnMsg='✗ add the message this new session should receive';render(last,true);return;}
+  const spec={provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    worktree:newProvider==='claude'&&newWt,worktree_name:newProvider==='claude'?newWtName:''};
+  openSchedule('',null,'',null,spec,newMessage);
+}
 // a spawned session only enters the fleet once it writes a transcript
-function checkSpawn(f){
+async function checkSpawn(f){
   if(!spawnWait)return;
   if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
   const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
-  if(s){spawnWait=null;spawnMsg='';openSession(s.session_id);}
+  if(s){const waiting=spawnWait;spawnWait=null;spawnMsg='';
+    if(waiting.provider==='claude'&&waiting.initialMessage){
+      const delivered=await act(s.session_id,{type:'text',text:waiting.initialMessage},'spawnmsg');
+      if(!delivered.ok)spawnMsg='✗ session started, but the initial message failed: '+(delivered.error||'failed');
+    }
+    openSession(s.session_id);}
 }
 function historySection(f){
   const items=historyItems(f);
@@ -2564,7 +2755,11 @@ function render(f,force){
   applyReaderWidth();
   syncPinnedSessions(f);
   const t=f.totals;
-  $('#nav-now-count').textContent=t.needs_me||'';
+  const outSummary=f.outbox_summary||{};
+  const navCount=(t.needs_me||0)+(outSummary.pending||0)+(outSummary.attention||0);
+  $('#nav-now-count').textContent=navCount||'';
+  $('#nav-now-count').title=`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`;
+  const outChip=$('#outboxchip');if(outChip)outChip.textContent=`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`;
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
     const active=button.dataset.nowFilter===nowState;
     button.classList.toggle('active',active);
@@ -2580,13 +2775,14 @@ function render(f,force){
     `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
   const ae=document.activeElement;
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
-  const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
+  const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')&&$('#newsess').contains(ae);
   if(force||!touching()){
     const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
     const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
       .map(action=>action.session_id));
     renderPinned(f,matchesNow);
     renderActionInbox(f);
+    renderOutboxCompact();
     renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
       'Working','turns in progress','working');
     renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
@@ -2613,6 +2809,7 @@ async function tick(){
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
     $('#stale').style.display='none';
     render(last);
+    if(currentRoute==='now'||$('#outboxview').style.display==='flex')loadOutbox();
   }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
 }
 navigateTo(currentRoute,false);

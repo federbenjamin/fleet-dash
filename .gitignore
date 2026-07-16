@@ -1,4 +1,6 @@
 ledger.db
+ledger.db-shm
+ledger.db-wal
 search.db*
 fleet-dash.log
 pending/

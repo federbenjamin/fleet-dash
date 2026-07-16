@@ -15,6 +15,7 @@ from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
+from outbox import OutboxError, OutboxManager
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -895,6 +896,7 @@ class Engine:
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
+        self.outbox = OutboxManager(os.path.join(BASE, "ledger.db"))
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -1501,6 +1503,11 @@ class Engine:
                           "preview_agents", "preview_agent_lines", "reader_width",
                           "pinned_sessions", "dismissed_actions")},
         }
+        try:
+            fleet["outbox_summary"] = self.outbox.counts()
+        except Exception as exc:
+            fleet["outbox_summary"] = {"pending": 0, "attention": 0,
+                                        "stale": True, "error": str(exc)}
         return fleet
 
     def workstreams_snapshot(self):
@@ -3202,6 +3209,178 @@ Treat this as an independent session. Verify the repository state before changin
             result.update(reopened=True, session_id=sid, cwd=cwd, command=command)
         return result
 
+    def outbox_usage_options(self):
+        """Return stable, display-safe account/window choices for reset triggers."""
+        with self.lock:
+            providers = copy.deepcopy(self.snapshot_cache.get("provider_usage") or {})
+        options = []
+        claude = providers.get("claude") or {}
+        for profile in claude.get("profiles") or ([claude] if claude else []):
+            account_id = str(profile.get("id") or profile.get("email") or "active")
+            label = profile.get("email") or profile.get("name") or "Active Claude account"
+            windows = []
+            for window_id, name, field in (
+                    ("five_hour", "5-hour", "five_hour_reset"),
+                    ("weekly", "Weekly", "weekly_reset")):
+                if profile.get(field):
+                    windows.append({"id": window_id, "label": name,
+                                    "reset": profile.get(field)})
+            if windows:
+                options.append({"provider": "claude", "account_id": account_id,
+                                "label": label, "windows": windows})
+        codex = providers.get("codex") or {}
+        buckets = [{"id": str(item.get("id")), "label": item.get("label") or item.get("id"),
+                    "reset": item.get("reset")} for item in codex.get("buckets") or []
+                   if item.get("id") and item.get("reset")]
+        if buckets:
+            options.append({"provider": "codex",
+                "account_id": str(codex.get("account_id") or codex.get("email") or "active"),
+                "label": codex.get("email") or "Active Codex account", "windows": buckets})
+        return options
+
+    def outbox_snapshot(self, state=None, cursor=0, limit=100):
+        try:
+            result = self.outbox.list(state=state, cursor=cursor, limit=limit)
+            result["summary"] = self.outbox.counts()
+            result["usage_options"] = self.outbox_usage_options()
+            return result
+        except OutboxError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code}
+        except Exception as exc:
+            return {"ok": False, "error": f"outbox is temporarily unavailable: {exc}"}
+
+    def _outbox_current_target(self, payload):
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        record = {
+            "target_provider": payload.get("target_provider"),
+            "target_session_id": payload.get("target_session_id"),
+            "target_agent_id": payload.get("target_agent_id"),
+            "destination_session_id": payload.get("destination_session_id"),
+            "updated_at": time.time() - 300,
+        }
+        return self.outbox._target_status(record, snapshot)
+
+    def _validate_outbox_spawn(self, spec):
+        if not isinstance(spec, dict):
+            raise OutboxError("new-session settings are required")
+        provider = str(spec.get("provider") or "")
+        if provider not in ("claude", "codex"):
+            raise OutboxError("unknown provider")
+        cwd = os.path.realpath(os.path.expanduser(str(spec.get("cwd") or "").strip()))
+        home = os.path.realpath(HOME)
+        if not cwd or not os.path.isdir(cwd):
+            raise OutboxError("no such directory")
+        if cwd != home and not cwd.startswith(home + os.sep):
+            raise OutboxError("directory must be under your home folder")
+        model = str(spec.get("model") or "").strip()
+        effort = str(spec.get("effort") or "").strip()
+        if provider == "claude":
+            if model and model not in self.MODELS:
+                raise OutboxError("unknown Claude model")
+            if effort and effort not in self.EFFORTS:
+                raise OutboxError("unknown effort level")
+        else:
+            catalog = {item.get("id"): item for item in self.codex.models}
+            if model and model not in catalog:
+                raise OutboxError("unknown Codex model")
+            allowed = (catalog.get(model) or {}).get("efforts") or []
+            if effort and allowed and effort not in allowed:
+                raise OutboxError("unsupported Codex effort level")
+            if str(spec.get("mode") or "plan") not in ("plan", "default"):
+                raise OutboxError("Codex mode must be plan or default")
+        name = str(spec.get("worktree_name") or "").strip()
+        if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+            raise OutboxError("worktree name: letters, digits, . _ - only")
+        if spec.get("worktree") and not os.path.exists(os.path.join(cwd, ".git")):
+            raise OutboxError("new worktree requires a Git repository")
+        return {"provider": provider, "cwd": cwd, "model": model, "effort": effort,
+                "mode": str(spec.get("mode") or "plan"),
+                "worktree": bool(spec.get("worktree")), "worktree_name": name}
+
+    def _prepare_outbox_payload(self, payload):
+        prepared = dict(payload or {})
+        if prepared.get("kind") == "new_session" or prepared.get("spawn_spec"):
+            prepared["spawn_spec"] = self._validate_outbox_spawn(prepared.get("spawn_spec"))
+        elif prepared.get("target_session_id"):
+            status, reason, _ = self._outbox_current_target(prepared)
+            if status == "block":
+                raise OutboxError(reason or "target is unavailable")
+        if prepared.get("kind") == "usage_reset":
+            options = self.outbox_usage_options()
+            account = next((item for item in options
+                if item["provider"] == prepared.get("target_provider") and
+                   item["account_id"] == str(prepared.get("usage_account_id") or "")), None)
+            window = next((item for item in (account or {}).get("windows", [])
+                if item["id"] == str(prepared.get("usage_window_id") or "")), None)
+            if not window:
+                raise OutboxError("fresh evidence for that usage reset is unavailable")
+            prepared["observed_reset_at"] = window["reset"]
+        return prepared
+
+    def outbox_action(self, action):
+        typ = str(action.get("type") or "")
+        outbox_id = str(action.get("outbox_id") or "")
+        try:
+            if typ == "outbox_create":
+                item = self.outbox.create(self._prepare_outbox_payload(action))
+            elif typ == "outbox_update":
+                item = self.outbox.update(outbox_id,
+                    self._prepare_outbox_payload(action.get("patch") or {}))
+            elif typ == "outbox_cancel":
+                item = self.outbox.cancel(outbox_id)
+            elif typ == "outbox_send_now":
+                item = self.outbox.send_now(outbox_id)
+            elif typ == "outbox_retry":
+                patch = action.get("patch") or {}
+                item = self.outbox.retry(outbox_id,
+                    self._prepare_outbox_payload(patch) if patch else None)
+            elif typ == "outbox_retarget":
+                item = self.outbox.retarget(outbox_id,
+                    self._prepare_outbox_payload(action.get("patch") or {}))
+            else:
+                return {"ok": False, "error": "unknown outbox action"}
+            return {"ok": True, "item": item, "summary": self.outbox.counts()}
+        except OutboxError as exc:
+            result = {"ok": False, "error": str(exc), "code": exc.code}
+            if hasattr(exc, "choices"):
+                result["choices"] = exc.choices
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": f"outbox action failed: {exc}"}
+
+    def _outbox_dispatch(self, record):
+        sid = record.get("destination_session_id") or record.get("target_session_id")
+        action = {"type": "relay", "session_id": sid,
+                  "agent_id": record.get("target_agent_id"),
+                  "text": record.get("message")} if record.get("target_agent_id") else {
+                  "type": "text", "session_id": sid, "text": record.get("message")}
+        result = self.act(action)
+        return {"ok": bool(result.get("ok")), "provider": record.get("target_provider"),
+                "session_id": sid, "accepted": bool(result.get("ok")),
+                "error": result.get("error")}
+
+    def _outbox_spawn(self, record):
+        spec = dict(record.get("spawn_spec") or {})
+        provider = spec.get("provider")
+        if provider == "codex":
+            result = self.spawn_codex_session({**spec, "initial_text": record.get("message")})
+            return {"ok": bool(result.get("ok")), "provider": "codex",
+                    "session_id": result.get("session_id"),
+                    "message_delivered": bool(result.get("ok")),
+                    "accepted": bool(result.get("ok")), "error": result.get("error")}
+        result = self.spawn_session(spec, reserved_sid=record.get("destination_session_id"))
+        return {"ok": bool(result.get("ok")), "provider": "claude",
+                "session_id": result.get("session_id"), "message_delivered": False,
+                "accepted": bool(result.get("ok")), "error": result.get("error"),
+                "trust_prompt": bool(result.get("trust_prompt"))}
+
+    def run_outbox(self):
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        usage = copy.deepcopy(snapshot.get("provider_usage") or {})
+        self.outbox.tick(snapshot, usage, self._outbox_dispatch, self._outbox_spawn)
+
     def act(self, action):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
@@ -3218,6 +3397,8 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if str(action.get("type") or "").startswith("outbox_"):
+            return self.outbox_action(action)
         if action.get("type") == "handoff":
             return self.execute_handoff(action)
         if action.get("type") in ("git_commit", "git_push", "pr_create_draft",
@@ -3609,17 +3790,20 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
             return {"ok": False, "error": "directory must be under your home folder"}
+        initial_text = str(action.get("initial_text") or "hi").strip()
+        if not initial_text or len(initial_text) > 2000:
+            return {"ok": False, "error": "initial message must be 1–2,000 characters"}
         try:
             thread = self.codex.start_thread(
                 cwd, str(action.get("model") or "").strip() or None,
                 str(action.get("effort") or "").strip() or None,
-                str(action.get("mode") or "plan").strip(), initial_text="hi")
+                str(action.get("mode") or "plan").strip(), initial_text=initial_text)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         tid = thread.get("id")
         return {"ok": bool(tid), "session_id": self.codex.key(tid) if tid else None,
                 "provider": "codex", "cwd": cwd,
-                "initial_message": "hi" if tid else None}
+                "initial_message": initial_text if tid else None}
 
     def spawn_session(self, action, reserved_sid=None):
         """Start a NEW Claude Code session in a fresh iTerm tab.
