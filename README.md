@@ -9,8 +9,13 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **One card per live session**, sorted needs-you-first, headed by the session's AI tab title
-  (same string as your iTerm tab), with project · branch beneath. On an open card the header
+- **One card per session**, organized as an action queue: **Pinned**, **Needs you**, **Working**,
+  **Available**, then one collapsed **Session history**. Pinned/Needs you/Working disappear when
+  empty; Available remains visible. Cards use reasons such as **Reply requested**, **Command
+  approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
+  The complete classification and action contract is in
+  [`docs/session-organization.md`](docs/session-organization.md). Each card is headed by the
+  session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
 - **⚙ settings** (top right): per-category toggles for the ntfy pushes (waiting-on-you,
@@ -49,13 +54,15 @@ npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
   Fleet Codex session immediately sends a visible, normal `hi` turn. That creates the rollout the
   TUI needs instead of leaving an empty, unresumable thread shell. **Attach** stays disabled as
   **turn active** until that bootstrap turn finishes because resuming an active thread aborts its turn.
+  A pre-bootstrap shell is retained only while Fleet's App Server still reports it loaded; if both
+  that runtime state and the rollout are absent, Fleet removes the unusable ghost card.
 - A terminal started with
   `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
   is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
   active turn without resuming a second agent. The card's **attach** button opens this TUI form.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
-  transcripts through paginated `thread/list`, keeps them in the collapsed **headless sessions**
-  fold, and exposes them as view-only. There is deliberately no **take over** action: `thread/resume`
+  transcripts through paginated `thread/list`, puts active work under **Working** and inactive work
+  in **Session history**, and exposes them as view-only. There is deliberately no **take over** action: `thread/resume`
   on Fleet's server would create a second runtime copy, not attach to Desktop's active agent.
   Independently launched CLI threads that are not connected to Fleet's socket are likewise view-only.
   Child subagent threads never become duplicate top-level cards.
@@ -89,17 +96,15 @@ npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
 
 Requires a `codex` executable with App Server support. Set `codex_enabled` to `false` to disable
 the provider without affecting Claude sessions.
-- **Headless sessions** are external Codex transcripts that Fleet Dash can see but whose App Server it
-  does not own. Their fold stays collapsed by default and every action remains in the owning client.
-- **Dormant sessions** get their own fold above session history. For Claude, dormant means the
-  transcript hasn't moved in over 2h (`dormant_seconds`) and no agents are running. For Codex, it
-  means App Server reports the managed thread as `notLoaded` after more than 24h of inactivity.
-  They're kept out of the live list and can never "need you".
-- **Idle sessions** remain in the always-visible list because they are managed and can accept a turn
-  immediately.
-- **State chip:** `needs you` (blocked on a question/permission — amber), `done ✓` (work turn
-  finished <15 min ago, unharvested), `running`, `stalled` (transcript frozen >4 min mid-turn),
-  `idle` (at prompt, nothing pending), `dormant` (quiet >2h — VS Code backends, forgotten panes).
+- **Needs you** includes native questions/approvals and ordinary assistant prose that directly asks
+  for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
+  Completed non-question turns remain **Available** and show **new** until opened.
+- **Session history** is one flat chronological list for dormant, inactive external, reopenable, and
+  closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
+  View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no
+  recent activity; it is a diagnostic raw state, not a separate page section.
+- Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
+  of turning every session into a duplicate error card.
 - **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
   use middle-dot separators. Claude shows the logged-in account email and a local lifetime-token
   total from `~/.claude/stats-cache.json`; that total sums uncached input, cache writes, cache reads,
@@ -136,11 +141,11 @@ the provider without affecting Claude sessions.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below the usage header. The order is **stable** — the
-  order you pinned them — and never reshuffles as session states change. On **desktop**, use the
+  **📌 pinned sessions** block directly below the usage header. Pinned cards sort by action urgency,
+  then newest activity, and are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
   **mobile**, **long-press** the header (a short tap still opens
-  its chat). Pins are in-memory and clear on reload.
+  its chat). Pins persist in server settings across reloads, daemon restarts, and devices.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
   dropdown (id, type, description, model, state, started/last activity, token split, $), and a
@@ -317,6 +322,9 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
+| `pinned_sessions` | [] | persisted session ids relocated into the Pinned section |
+| `reply_available` | {} | session id → conversation revision explicitly marked available |
+| `read_sessions` | {} | session id → opened conversation revision for the New response badge |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
 | `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |

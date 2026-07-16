@@ -48,6 +48,12 @@ def base_session(provider, sid, title):
             "agents": [], "agents_running": 0, "agents_total": 0,
             "headless": False, "read_only": False, "read_only_reason": None,
             "codex_source": "appServer" if codex else None,
+            "ui_group": "available", "reason_label": "Available",
+            "primary_action": "continue", "primary_action_label": "Continue",
+            "access": "interactive", "access_label": "Interactive",
+            "external": False, "provider_stale": False,
+            "reply_requested": False, "new_response": False,
+            "activity_at": time.time() - 3, "pinned": False,
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
                 measured_throughput=not codex)}
@@ -69,20 +75,89 @@ def fresh_state():
                 "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
-                "reader_width": "fit"}}
+                "reader_width": "fit", "pinned_sessions": []},
+            "reply_available": {}, "read_sessions": {}}
 
 
 STATE = fresh_state()
 
 
+def organize_session(session):
+    state = session.get("state") or "idle"
+    pending = session.get("pending") or {}
+    external = bool(session.get("headless") or session.get("read_only"))
+    kind = pending.get("kind")
+    if kind == "question":
+        group, reason, action = "needs_you", "Question waiting", "respond"
+    elif kind == "elicitation":
+        group, reason, action = "needs_you", "Form waiting", "respond"
+    elif kind == "permission":
+        label = {"command": "Command approval", "file_change": "File approval",
+                 "permissions": "Permission needed"}.get(
+                     pending.get("approval_kind") or pending.get("tool"), "Permission needed")
+        group, reason, action = "needs_you", label, "review"
+    elif state == "error":
+        group, reason, action = "needs_you", "Fix needed", "open"
+    elif state == "stale":
+        group, reason, action = "available", "Available", "view"
+    elif state == "stalled_or_prompt":
+        group, reason, action = "needs_you", "Check session", "open"
+    elif state == "needs_you":
+        group, reason, action = "needs_you", "Response needed", "respond"
+    elif session.get("compacting") is not None:
+        group, reason, action = "working", "Compacting", "open"
+    elif state == "stalled":
+        group, reason, action = "working", "Slow", "open"
+    elif state == "running":
+        group, reason, action = ("working", "Working elsewhere", "view") if external \
+            else ("working", "Working", "open")
+    elif session.get("reply_requested"):
+        group, reason, action = "needs_you", "Reply requested", "respond"
+    elif external:
+        group, reason, action = "history", "External", "view"
+    elif state == "dormant":
+        group, reason, action = "history", "Inactive", "continue"
+    else:
+        group, reason, action = "available", "Available", "continue"
+    if external or state == "stale":
+        access = "view_only"
+        if action != "view":
+            action = "view"
+    else:
+        access = "interactive"
+    session.update(ui_group=group, reason_label=reason, primary_action=action,
+                   primary_action_label={"respond": "Respond", "review": "Review",
+                       "open": "Open", "continue": "Continue", "view": "View"}[action],
+                   access=access, access_label="View only" if access == "view_only" else "Interactive",
+                   external=external, provider_stale=state == "stale",
+                   activity_at=time.time() - float(session.get("quiet_s") or 0),
+                   pinned=session["session_id"] in STATE["settings"]["pinned_sessions"])
+    return session
+
+
 def fleet():
-    sessions = copy.deepcopy(STATE["sessions"])
+    sessions = [organize_session(item) for item in copy.deepcopy(STATE["sessions"])]
+    closed = [{**item, "ui_group": "history", "reason_label": "Closed",
+        "primary_action": "view", "primary_action_label": "View", "access": "view_only",
+        "access_label": "View only", "external": False, "provider_stale": False,
+        "reply_requested": False, "new_response": False,
+        "activity_at": item.get("last_seen") or item.get("closed_at") or time.time(),
+        "pinned": item["session_id"] in STATE["settings"]["pinned_sessions"]}
+        for item in [{"session_id": "codex:closed", "provider": "codex",
+                "title": "Closed Codex", "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
+                "branch": "old", "model": "gpt-5.4", "cost": None, "agent_cost": None,
+                "agents_total": 0, "closed_at": int(time.time()) - 60,
+                "first_seen": int(time.time()) - 3600, "bridge_url": None},
+                *copy.deepcopy(STATE["closed"])]]
     return {"t": time.time(), "sessions": sessions,
             "totals": {"sessions": len(sessions),
-                "busy": sum(item["state"] == "running" for item in sessions),
-                "needs_me": sum(item["state"] in ("needs_you", "stalled") for item in sessions),
+                "busy": sum(item["ui_group"] == "working" for item in sessions),
+                "needs_me": sum(item["ui_group"] == "needs_you" for item in sessions),
+                "available": sum(item["ui_group"] == "available" for item in sessions),
+                "history": sum(item["ui_group"] == "history" for item in sessions) + len(closed),
+                "pinned": sum(item.get("pinned") for item in sessions + closed),
                 "dormant": sum(item["state"] == "dormant" for item in sessions),
-                "done": sum(item["state"] == "turn_done" for item in sessions),
+                "done": sum(item.get("new_response") for item in sessions),
                 "agents_running": sum(item["agents_running"] for item in sessions),
                 "session_cost": .12, "agent_cost": .03, "cost_partial": True},
             "usage": {"five_hour_pct": 20, "weekly_pct": 30,
@@ -99,12 +174,7 @@ def fleet():
                      "reset": "2099-01-07T00:00:00Z"},
                     {"id": "spark:secondary", "label": "GPT-5.3-Codex-Spark weekly",
                      "used_pct": 0, "reset": "2099-01-07T00:00:00Z"}]}},
-            "closed": [{"session_id": "codex:closed", "provider": "codex",
-                "title": "Closed Codex", "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
-                "branch": "old", "model": "gpt-5.4", "cost": None, "agent_cost": None,
-                "agents_total": 0, "closed_at": int(time.time()) - 60,
-                "first_seen": int(time.time()) - 3600, "bridge_url": None},
-                *copy.deepcopy(STATE["closed"])],
+            "closed": closed,
             "recent_dirs": [{"path": "/Users/test/fleet-dash", "trusted": True}],
             "models": ["sonnet", "opus"], "efforts": ["low", "medium", "high"],
             "models_by_provider": {"claude": [{"id": "sonnet", "name": "sonnet",
@@ -176,6 +246,7 @@ def set_scenario(name):
     elif name == "stale":
         session.update(state="stale", error="app-server exited", stale=True,
                        stale_reason="app-server exited")
+        STATE["codex_error"] = "app-server exited"
         session["capabilities"] = capabilities(submit=False, interrupt=False, close=False)
     elif name == "cross-client-active":
         session.update(state="running", reg_status="running", quiet_s=1,
@@ -189,6 +260,15 @@ def set_scenario(name):
     elif name == "markdown-peek":
         session["last_msg"] = {"role": "assistant", "text":
             "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear"}
+    elif name == "reply-requested":
+        session.update(state="turn_done", reg_status="idle", reply_requested=True,
+                       convo_v="reply:1", quiet_s=12,
+                       last_msg={"role": "assistant", "text":
+                           "Which organization should we use?\n\nAnswer both before I continue."})
+    elif name == "new-response":
+        session.update(state="turn_done", reg_status="idle", new_response=True,
+                       convo_v="response:1", quiet_s=12,
+                       last_msg={"role": "assistant", "text": "The implementation is complete."})
     elif name == "subagent":
         session.update(state="running", reg_status="running", agents_running=1)
         session["agents"][0]["state"] = "running"
@@ -291,6 +371,25 @@ class Handler(BaseHTTPRequestHandler):
                             "preview_agents", "preview_agent_lines"):
                     if key in payload:
                         STATE["settings"][key] = payload[key]
+                if payload.get("pin_session"):
+                    sid=payload["pin_session"]
+                    pins=[item for item in STATE["settings"]["pinned_sessions"] if item != sid]
+                    if payload.get("pinned"):
+                        pins.append(sid)
+                    STATE["settings"]["pinned_sessions"] = pins
+                    payload["pinned_sessions"] = pins
+                if payload.get("mark_available_session"):
+                    sid=payload["mark_available_session"]
+                    target=next((item for item in STATE["sessions"] if item["session_id"] == sid),None)
+                    if target:
+                        target["reply_requested"] = False
+                    STATE["reply_available"][sid] = payload.get("revision")
+                if payload.get("mark_read_session"):
+                    sid=payload["mark_read_session"]
+                    target=next((item for item in STATE["sessions"] if item["session_id"] == sid),None)
+                    if target:
+                        target["new_response"] = False
+                    STATE["read_sessions"][sid] = payload.get("revision")
                 STATE["actions"].append(payload)
                 return self.json_reply({"ok": True, **payload})
             if route == "/api/act":

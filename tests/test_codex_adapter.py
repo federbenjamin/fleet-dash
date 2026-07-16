@@ -83,6 +83,21 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual(session["provider"], "codex")
         self.assertEqual(session["branch"], "feature")
         self.assertEqual(session["cost_source"], "unavailable")
+        self.assertEqual(session["_latest_prose"],
+                         {"role": "assistant", "text": "hi"})
+
+    def test_refresh_failure_preserves_the_last_state_for_page_placement(self):
+        self.adapter._refresh()
+
+        def fail():
+            raise RuntimeError("app server disconnected")
+
+        self.client.list_threads = fail
+        self.adapter._refresh()
+        session = self.adapter.sessions()[0]
+        self.assertEqual(session["state"], "stale")
+        self.assertEqual(session["stale_previous_state"], "dormant")
+        self.assertIn("disconnected", session["stale_reason"])
 
     def test_context_normalizes_messages_and_tools(self):
         out = self.adapter.context("codex:thr-1")

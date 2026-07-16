@@ -35,6 +35,9 @@ DEFAULT_CONFIG = {
     "notify": {"needs_you": True, "stall": True, "spend": True, "fleet_quiet": True},
     "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
     "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
+    "pinned_sessions": [],               # shared watchlist, ordered by UI urgency
+    "reply_available": {},               # session_id -> dismissed conversation revision
+    "read_sessions": {},                 # session_id -> opened conversation revision
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -108,6 +111,29 @@ IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
 # slash commands that destroy conversation state — the page confirms before sending
 DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
+
+
+def requests_reply(text):
+    """Conservative plain-prose signal that an assistant explicitly wants input.
+
+    Provider-native questions remain authoritative. This covers ordinary completed
+    assistant messages, whose protocols do not carry a requires-reply field.
+    Code, Markdown quotations, and quoted strings are removed before detection so
+    examples such as `value?` do not manufacture attention work.
+    """
+    prose = str(text or "")
+    if not prose.strip():
+        return False
+    prose = re.sub(r"```[\s\S]*?```", " ", prose)
+    prose = re.sub(r"`[^`\n]*`", " ", prose)
+    prose = re.sub(r"(?m)^\s*>.*$", " ", prose)
+    prose = re.sub(r'"[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'|‘[^’\n]*’', " ", prose)
+    if "?" in prose:
+        return True
+    return bool(re.search(
+        r"(?i)\b(answer|choose|confirm|pick|reply|respond|select|tell me|let me know)\b"
+        r"[^.!?\n]{0,100}(?:before (?:i|we) continue|which|whether|one|option|both|these)",
+        prose))
 
 # built-in commands the TUI offers (name, description). Skills + custom commands
 # are enumerated off disk per session; these have no file to read.
@@ -576,6 +602,13 @@ class Tail:
                         "text": txt[:limit] + ("…" if len(txt) > limit else "")}
         return None
 
+    def latest_prose(self):
+        """Newest complete user/assistant prose for server-side classification."""
+        for e in reversed(self.convo):
+            if e.get("role") in ("user", "assistant") and e.get("text"):
+                return {"role": e["role"], "text": str(e["text"]).strip()}
+        return None
+
     @property
     def total_tokens(self):
         return self.ti + self.tw + self.tr + self.to
@@ -656,6 +689,113 @@ class Engine:
         if t is None:
             t = self.tails[path] = Tail(path)
         return t
+
+    @staticmethod
+    def _pending_reason(pending):
+        kind = (pending or {}).get("kind")
+        if kind == "question":
+            return "Question waiting", "respond"
+        if kind == "elicitation":
+            return "Form waiting", "respond"
+        if kind == "permission":
+            approval = (pending or {}).get("approval_kind") or (pending or {}).get("tool")
+            if approval == "command":
+                return "Command approval", "review"
+            if approval == "file_change":
+                return "File approval", "review"
+            return "Permission needed", "review"
+        return None, None
+
+    def organize_session(self, session, now):
+        """Add provider-neutral placement, reason, access, and action fields."""
+        sid = str(session.get("session_id") or "")
+        revision = str(session.get("convo_v") or "")
+        latest = session.pop("_latest_prose", None) or {}
+        latest_assistant = latest if latest.get("role") == "assistant" else None
+        raw_state = session.get("state") or "idle"
+        state = (session.get("stale_previous_state") or "idle"
+                 if raw_state == "stale" else raw_state)
+        pending = session.get("pending") or {}
+        capabilities = session.get("capabilities") or {}
+        external = bool(session.get("headless") or session.get("read_only"))
+        provider_stale = raw_state == "stale"
+        dismissed = str((self.cfg.get("reply_available") or {}).get(sid, ""))
+        read_revision = str((self.cfg.get("read_sessions") or {}).get(sid, ""))
+        reply_requested = bool(
+            latest_assistant and requests_reply(latest_assistant.get("text"))
+            and dismissed != revision)
+
+        reason, primary = self._pending_reason(pending)
+        if reason:
+            group = "needs_you"
+        elif raw_state == "error":
+            group, reason, primary = "needs_you", "Fix needed", "open"
+        elif state == "stalled_or_prompt":
+            group, reason, primary = "needs_you", "Check session", "open"
+        elif state == "needs_you":
+            group, reason, primary = "needs_you", "Response needed", "respond"
+        elif session.get("compacting") is not None:
+            group, reason, primary = "working", "Compacting", "open"
+        elif state == "stalled":
+            group, reason, primary = "working", "Slow", "open"
+        elif state == "running":
+            group = "working"
+            reason = "Working elsewhere" if external else "Working"
+            primary = "view" if external else "open"
+        elif reply_requested:
+            group, reason, primary = "needs_you", "Reply requested", "respond"
+        elif external:
+            group, reason, primary = "history", "External", "view"
+        elif state == "reopenable":
+            group, reason = "history", "Reopenable"
+            primary = "reopen" if capabilities.get("reopen") else "view"
+        elif state == "dormant":
+            group, reason, primary = "history", "Inactive", "continue"
+        else:
+            group, reason, primary = "available", "Available", "continue"
+
+        if external or provider_stale:
+            access = "view_only"
+            if primary in ("respond", "review", "open", "continue"):
+                primary = "view"
+        elif primary == "reopen":
+            access = "reopen"
+        else:
+            access = "interactive"
+
+        new_response = bool(
+            group == "available" and state == "turn_done" and latest_assistant
+            and read_revision != revision)
+        activity_at = max(0, now - float(session.get("quiet_s") or 0))
+        session.update(
+            ui_group=group,
+            reason_label=reason,
+            primary_action=primary,
+            primary_action_label={"respond": "Respond", "review": "Review",
+                                  "open": "Open", "continue": "Continue",
+                                  "view": "View", "reopen": "Reopen"}[primary],
+            access=access,
+            access_label={"interactive": "Interactive", "view_only": "View only",
+                          "reopen": "Reopen"}[access],
+            external=external,
+            provider_stale=provider_stale,
+            reply_requested=reason == "Reply requested",
+            new_response=new_response,
+            activity_at=activity_at,
+            pinned=sid in set(self.cfg.get("pinned_sessions") or []),
+        )
+        return session
+
+    def organize_closed(self, session):
+        sid = str(session.get("session_id") or "")
+        session.update(ui_group="history", reason_label="Closed",
+                       primary_action="view", primary_action_label="View",
+                       access="view_only", access_label="View only",
+                       external=False, provider_stale=False,
+                       reply_requested=False, new_response=False,
+                       activity_at=session.get("last_seen") or session.get("closed_at") or 0,
+                       pinned=sid in set(self.cfg.get("pinned_sessions") or []))
+        return session
 
     def scan(self):
         with self.scan_lock:
@@ -762,6 +902,7 @@ class Engine:
                 # for the configured clamp and no more (this rides every 2s poll)
                 "last_msg": (mt.last_message(140 * int(cfg.get("preview_session_lines", 2)))
                              if cfg.get("preview_sessions", True) else None),
+                "_latest_prose": mt.latest_prose(),
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
@@ -799,12 +940,20 @@ class Engine:
         muted = self.cfg.get("muted_sessions") or {}
         for session in sessions:
             session["muted"] = session["session_id"] in muted
-        order = {"needs_you": 0, "stalled": 0, "stalled_or_prompt": 0, "turn_done": 1,
-                 "running": 2, "error": 2, "stale": 2, "idle": 3,
-                 "reopenable": 4, "dormant": 5}
-        sessions.sort(key=lambda s: (order.get(s["state"], 2),
-                                     -(s.get("cost") or 0)))
+            self.organize_session(session, now)
+        group_order = {"needs_you": 0, "working": 1, "available": 2, "history": 3}
+
+        def session_order(session):
+            group = session.get("ui_group") or "working"
+            within = (-float(session.get("quiet_s") or 0) if group == "needs_you"
+                      else -float(session.get("activity_at") or 0))
+            return (0 if session.get("pinned") else 1,
+                    group_order.get(group, 1), within)
+
+        sessions.sort(key=session_order)
         self.record_sessions(sessions, now)
+        closed = [self.organize_closed(item) for item in self.closed_sessions()]
+        closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
         claude_usage = self.read_usage()
         try:
             codex_usage = self.codex.account_usage()
@@ -815,10 +964,15 @@ class Engine:
             "sessions": sessions,
             "totals": {
                 "sessions": len(sessions),
-                "busy": sum(1 for s in sessions if s["state"] == "running"),
-                "needs_me": sum(1 for s in sessions if s["state"] in ("needs_you", "stalled", "stalled_or_prompt")),
+                "busy": sum(1 for s in sessions if s["ui_group"] == "working"),
+                "needs_me": sum(1 for s in sessions if s["ui_group"] == "needs_you"),
+                "available": sum(1 for s in sessions if s["ui_group"] == "available"),
+                "history": (sum(1 for s in sessions if s["ui_group"] == "history")
+                            + len(closed)),
+                "pinned": sum(1 for s in sessions if s.get("pinned"))
+                          + sum(1 for s in closed if s.get("pinned")),
                 "dormant": sum(1 for s in sessions if s["state"] == "dormant"),
-                "done": sum(1 for s in sessions if s["state"] == "turn_done"),
+                "done": sum(1 for s in sessions if s.get("new_response")),
                 "agents_running": sum(s["agents_running"] for s in sessions),
                 "session_cost": round(sum(s.get("cost") or 0 for s in sessions), 2),
                 "agent_cost": round(sum(s.get("agent_cost") or 0 for s in sessions), 2),
@@ -827,7 +981,7 @@ class Engine:
             },
             "usage": claude_usage,
             "provider_usage": {"claude": claude_usage, "codex": codex_usage},
-            "closed": self.closed_sessions(),
+            "closed": closed,
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
             "models_by_provider": {"claude": [{"id": m, "name": m,
@@ -842,7 +996,8 @@ class Engine:
                          ("awaiting_input_notify_seconds", "stall_seconds",
                           "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
                           "preview_sessions", "preview_session_lines",
-                          "preview_agents", "preview_agent_lines", "reader_width")},
+                          "preview_agents", "preview_agent_lines", "reader_width",
+                          "pinned_sessions")},
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -2026,17 +2181,17 @@ class Engine:
             if on.get("stall", True) and s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
                 self.once(f"stall:{key_base}:{s['quiet_s'] // 300}", "Session stalled",
                           f"{s['name']}: frozen {s['quiet_s']}s mid-turn", "warning", "high")
-            if on.get("needs_you", True) and s["state"] == "needs_you" \
+            if on.get("needs_you", True) and s.get("ui_group") == "needs_you" \
                and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
                 p = s.get("pending") or {}
-                what = ""
+                what = f" — {s.get('reason_label') or 'response needed'}"
                 if p.get("kind") == "question" and p.get("questions"):
                     q0 = p["questions"][0]
-                    what = f" — {q0.get('header') or 'question'}: {q0.get('question', '')}"
+                    what += f": {q0.get('header') or 'question'} — {q0.get('question', '')}"
                 elif p.get("kind") == "permission":
-                    what = f" — permission: {p.get('tool', '')}"
+                    what += f": {p.get('tool', '')}"
                 self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
-                          f"{s['name']}: blocked {s['quiet_s'] // 60}m{what}"[:400],
+                          f"{s['name']}: waiting {s['quiet_s'] // 60}m{what}"[:400],
                           "hourglass_flowing_sand")
             measured_cost = ((s.get("cost") or 0) + (s.get("agent_cost") or 0)
                              if s.get("capabilities", {}).get("exact_cost") else None)
@@ -2071,7 +2226,7 @@ class Engine:
 
     def update_settings(self, patch):
         """Persist dashboard-editable settings: notify toggles, notification
-        thresholds, per-session mutes."""
+        thresholds, session pins, read state, and per-session mutes."""
         changed = {}
         nt = patch.get("notify")
         if isinstance(nt, dict):
@@ -2111,11 +2266,35 @@ class Engine:
                 mu.pop(str(ms), None)
             mu = {k: v for k, v in mu.items() if time.time() - v < 30 * 86400}
             self.cfg["muted_sessions"] = changed["muted_sessions"] = mu
+        if "pin_session" in patch:
+            sid = str(patch.get("pin_session") or "").strip()[:300]
+            if not sid:
+                return {"ok": False, "error": "pin_session is required"}
+            pins = [str(item) for item in (self.cfg.get("pinned_sessions") or [])
+                    if str(item) != sid]
+            if patch.get("pinned"):
+                pins.append(sid)
+            pins = pins[-500:]
+            self.cfg["pinned_sessions"] = changed["pinned_sessions"] = pins
+        for patch_key, config_key in (("mark_available_session", "reply_available"),
+                                      ("mark_read_session", "read_sessions")):
+            if patch_key not in patch:
+                continue
+            sid = str(patch.get(patch_key) or "").strip()[:300]
+            revision = str(patch.get("revision") or "").strip()[:300]
+            if not sid or not revision:
+                return {"ok": False, "error": f"{patch_key} and revision are required"}
+            values = dict(self.cfg.get(config_key) or {})
+            values.pop(sid, None)
+            values[sid] = revision
+            values = dict(list(values.items())[-1000:])
+            self.cfg[config_key] = changed[config_key] = values
         if not changed:
             return {"ok": False, "error": "nothing to update"}
         path = os.path.join(BASE, "config.json")
         try:
-            raw = json.load(open(path))
+            with open(path) as handle:
+                raw = json.load(handle)
         except Exception:
             raw = {}
         raw.update(changed)

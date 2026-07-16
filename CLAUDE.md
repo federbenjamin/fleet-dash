@@ -233,9 +233,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
     so it applies in either container. `#stheme` is fixed 40×32 so the glyph swap can't resize the
     chat header (`#vtheme` stays the big 28px viewer button).
-28. **Pinned sessions (`pinnedSessions` Set, by session_id, in-memory) live in a GLOBAL block.**
-    `renderPinned` fills `#pinned` (directly below `#usage`) in Set insertion order, deliberately
-    not re-sorted by session state. Pinned cards are excluded from the regular live/dormant lists.
+28. **Pinned sessions are server-persisted and live in a GLOBAL block.**
+    `pinnedSessions` mirrors `/api/fleet.settings.pinned_sessions`; `toggleSessionPin` writes
+    `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
+    `#usage`) in urgency order, then newest activity. Pinned cards are relocated, never duplicated.
     Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
     `sessionTap` swallows the following click so pinning does not also open the chat.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
@@ -254,12 +255,23 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     may be steered by Fleet or an attached `codex resume --remote unix://...` TUI. A newly created
     Fleet thread immediately starts a visible normal `hi` turn; `thread/start` alone has no rollout
     and cannot be resumed by the TUI. `thread/resume` aborts an active turn, so expose disabled
-    **turn active** instead of attach until the turn finishes. Keep the full-chat
+    **turn active** instead of attach until the turn finishes. Before materialization, expose disabled
+    **starting**, never **attach**. Preserve that empty shell only while `thread/loaded/list` still
+    contains it; otherwise it has no runtime or rollout and must be discarded as a ghost. Keep the full-chat
     open/attach/view-only button directly left of its overflow menu. `source=vscode` is not ownership
     evidence: App Server uses it for Fleet's rich-client threads too. Only a thread persisted with
     `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
     headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
     server creates a second runtime agent.
+31. **Main-page placement is an action queue, not a provider-state dump.** `Engine.organize_session`
+    is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
+    `reply_requested`, and `new_response`. Page order is Pinned → Needs you → Working → Available →
+    Session history. Pinned/Needs/Working hide when empty; Available stays visible; History is one
+    collapsed chronological list with access/provider filters. `requests_reply` examines the newest
+    complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
+    or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
+    response badge. Provider-wide stale state preserves the last placement and renders one banner.
+    Keep [`docs/session-organization.md`](docs/session-organization.md) synchronized with any mapping.
 
 ## Dev workflow
 
@@ -303,15 +315,16 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   POST `/api/act` + `/api/settings` (both token-gated; settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
-  the stalled STATE, not just the push), and `muted_sessions` (sid → ts, pruned at 30d;
-  muted sessions skip all per-session pushes) into config.json via `Engine.update_settings`.
+  the stalled STATE, not just the push), `muted_sessions` (sid → ts, pruned at 30d),
+  `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
+  `Engine.update_settings`. Muted sessions skip all per-session pushes.
   Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
   transition (`Engine.quiet_since`), not on a time-bucket dedupe).
 - `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
-  closedSection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
+  renderQueue/historySection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
-  (`open`/`infoOpen`/`doneOpen`/`filesOpen`/`closedOpen`/`rollupOpen`) re-applied at render —
+  (`open`/`infoOpen`/`doneOpen`/`filesOpen`/`historyOpen`/`rollupOpen`) re-applied at render —
   a full innerHTML re-render destroys native `<details>` state otherwise.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
   `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
@@ -321,8 +334,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   a signature that EXCLUDES per-second time fields (started/delivered ages) so a ticking clock
   never remounts it. That is what stops an expanded card's open dropdown from blinking every
   2s. Trade-off: completed-agent/spend text in an open panel can be up to a few seconds stale
-  until a material field changes. `sessionCard(s)` (= `.ctop`+detail wholesale) survives only
-  for the dormant fold, which is still innerHTML-rendered. The viewer's docked
+  until a material field changes. The viewer's docked
   action bar (`renderViewerBar`, rebuilt each render tick for `viewerSid`) duplicates the card's
   act controls — its element ids are `vft-`/`vmsg-` (never `ft-`/`msg-`: the card's ids coexist
   in the DOM and getElementById would hit the wrong one). The bar owns its expandable `.vconvo`

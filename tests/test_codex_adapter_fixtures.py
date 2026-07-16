@@ -372,20 +372,35 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         meta = {"cwd": "/work/project", "model": "gpt-5.4", "effort": "high",
                 "name": "empty", "created_at": 900, "unmaterialized": True}
         adapter._remember("empty", "plan", meta)
+        client.loaded = ["empty"]
         adapter._refresh()
         first = adapter.sessions()
         self.assertEqual(len(first), 1)
         self.assertEqual(first[0]["collaboration_mode"], "plan")
+        self.assertFalse(first[0]["capabilities"]["focus_terminal"])
+        self.assertEqual(first[0]["capabilities"]["focus_terminal_label"], "starting")
         restarted = CodexAdapter(client=client, state_path=self.state_path,
                                  clock=lambda: 1000, stall_seconds=30)
         restarted._refresh()
         self.assertEqual(restarted.sessions()[0]["native_session_id"], "empty")
+
+    def test_unmaterialized_thread_missing_from_runtime_is_discarded(self):
+        adapter, _ = self.adapter([])
+        adapter._remember("ghost", "plan", {
+            "cwd": "/work/project", "model": "gpt-5.4", "effort": "high",
+            "created_at": 900, "unmaterialized": True})
+
+        adapter._refresh()
+
+        self.assertEqual(adapter.sessions(), [])
+        self.assertNotIn("ghost", adapter._managed())
 
     def test_failed_detail_read_does_not_materialize_transient_list_row(self):
         adapter, client = self.adapter([self.thread("empty")])
         meta = {"cwd": "/work/project", "model": "gpt-5.4", "effort": "high",
                 "name": "empty", "created_at": 900, "unmaterialized": True}
         adapter._remember("empty", "plan", meta)
+        client.loaded = ["empty"]
         client.fail_read = True
         adapter._refresh()
         client.threads = []

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import DEFAULT_CONFIG, Engine, Tail
+from engine import DEFAULT_CONFIG, Engine, Tail, requests_reply
 from server import Handler
 
 
@@ -352,6 +352,89 @@ class EngineProviderTest(unittest.TestCase):
         invalid = self.engine.update_settings({"reader_width": "left"})
         self.assertFalse(invalid["ok"])
         self.assertEqual(self.engine.cfg["reader_width"], "centered")
+
+    def test_plain_prose_reply_detection_ignores_examples_and_finds_requests(self):
+        self.assertTrue(requests_reply("Which option should I implement?"))
+        self.assertTrue(requests_reply(
+            "### Scope\n\nAnswer both before I continue.\n\nSome background follows."))
+        self.assertFalse(requests_reply(
+            "The parser handles `value?` and this quoted example: \"Continue?\""))
+        self.assertFalse(requests_reply(
+            "> Should this quoted requirement count?\n\nImplementation is complete."))
+
+    def test_session_organization_maps_every_user_facing_group(self):
+        now = 10_000
+
+        def organized(**updates):
+            session = codex_session()
+            session.update(convo_v="revision:1", quiet_s=20,
+                           _latest_prose={"role": "assistant", "text": "Finished."})
+            session.update(updates)
+            return self.engine.organize_session(session, now)
+
+        question = organized(state="needs_you", pending={"kind": "question"})
+        self.assertEqual((question["ui_group"], question["reason_label"],
+                          question["primary_action"]),
+                         ("needs_you", "Question waiting", "respond"))
+        command = organized(state="needs_you", pending={"kind": "permission",
+                            "approval_kind": "command"})
+        self.assertEqual((command["reason_label"], command["primary_action"]),
+                         ("Command approval", "review"))
+        file_change = organized(state="needs_you", pending={"kind": "permission",
+                                "approval_kind": "file_change"})
+        self.assertEqual(file_change["reason_label"], "File approval")
+        form = organized(state="needs_you", pending={"kind": "elicitation"})
+        self.assertEqual(form["reason_label"], "Form waiting")
+
+        reply = organized(state="turn_done", _latest_prose={"role": "assistant",
+                           "text": "Which layout should I use?"})
+        self.assertEqual((reply["ui_group"], reply["reason_label"]),
+                         ("needs_you", "Reply requested"))
+        running = organized(state="running")
+        self.assertEqual((running["ui_group"], running["reason_label"]),
+                         ("working", "Working"))
+        external = organized(state="running", headless=True, read_only=True)
+        self.assertEqual((external["ui_group"], external["reason_label"],
+                          external["primary_action"], external["access"]),
+                         ("working", "Working elsewhere", "view", "view_only"))
+        slow = organized(state="stalled")
+        self.assertEqual((slow["ui_group"], slow["reason_label"]),
+                         ("working", "Slow"))
+        available = organized(state="idle")
+        self.assertEqual((available["ui_group"], available["reason_label"]),
+                         ("available", "Available"))
+        inactive = organized(state="dormant")
+        self.assertEqual((inactive["ui_group"], inactive["reason_label"],
+                          inactive["primary_action"]),
+                         ("history", "Inactive", "continue"))
+        historical = organized(state="idle", headless=True, read_only=True)
+        self.assertEqual((historical["ui_group"], historical["reason_label"]),
+                         ("history", "External"))
+
+    def test_pin_reply_dismissal_and_read_markers_persist(self):
+        pinned = self.engine.update_settings({"pin_session": "codex:same",
+                                              "pinned": True})
+        self.assertEqual(pinned["pinned_sessions"], ["codex:same"])
+        dismissed = self.engine.update_settings({
+            "mark_available_session": "codex:same", "revision": "reply:2"})
+        self.assertEqual(dismissed["reply_available"]["codex:same"], "reply:2")
+        read = self.engine.update_settings({
+            "mark_read_session": "codex:same", "revision": "response:3"})
+        self.assertEqual(read["read_sessions"]["codex:same"], "response:3")
+
+        with open(os.path.join(self.base, "config.json")) as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["pinned_sessions"], ["codex:same"])
+        self.assertEqual(saved["reply_available"]["codex:same"], "reply:2")
+        self.assertEqual(saved["read_sessions"]["codex:same"], "response:3")
+
+        session = codex_session()
+        session.update(state="turn_done", convo_v="reply:2",
+                       _latest_prose={"role": "assistant",
+                                      "text": "Should I continue?"})
+        organized = self.engine.organize_session(session, time.time())
+        self.assertEqual(organized["ui_group"], "available")
+        self.assertTrue(organized["pinned"])
 
     def test_claude_peek_preserves_markdown_blocks(self):
         tail = Tail(self.transcript)

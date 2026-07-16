@@ -32,10 +32,17 @@ test('running Fleet Dash renders both providers without console or network failu
   await page.evaluate(() => history.back());
   await expect(page.locator('#settingsview')).toBeHidden();
   const codex = page.locator('[data-sid^="codex:"]').first();
-  if (!(await codex.isVisible())) await page.locator('#headless summary').click();
-  await expect(codex).toBeVisible();
-  await expect(codex.locator('select.modesel')).toHaveCount(0);
-  await codex.locator('.shead').click();
+  if (await codex.isVisible()) {
+    await expect(codex.locator('select.modesel')).toHaveCount(0);
+    await codex.locator('.shead').click();
+  } else {
+    const history = page.locator('#history details');
+    await history.locator('summary').click();
+    const codexHistory = page.locator('[data-history-sid^="codex:"]').first();
+    await expect(codexHistory).toBeVisible();
+    await codexHistory.locator('.historyaction').click();
+  }
+  await expect(page.locator('#sview')).toBeVisible();
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Appearance.*light \/ dark/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeVisible();

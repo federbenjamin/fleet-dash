@@ -3,7 +3,7 @@ const { test, expect } = require('@playwright/test');
 async function reset(page, scenario = 'base') {
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
-  await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+  await expect(page.locator('#totals')).toBeVisible();
 }
 
 async function refresh(page) {
@@ -29,6 +29,13 @@ test.afterEach(async ({ page }) => {
 
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
+  await expect(page.locator('#totals > span')).toHaveText([
+    '0 need you', '0 working', '2 available · 0 subagents']);
+  await expect(page.locator('#totals .sep')).toHaveCount(1);
+  await expect(page.locator('#totals > span').first().locator('b')).not.toHaveAttribute('style');
+  await expect(page.locator('#totals')).not.toContainText('history');
+  await expect(page.locator('#totals')).not.toContainText('new');
+  await expect(page.locator('#totals')).not.toContainText('running');
   await expect(page.locator('[data-sid="claude-one"]')).toContainText('Claude parser fix');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(codex).toContainText('Codex parity work');
@@ -213,15 +220,12 @@ test('session card surfaces distinguish active, available, and expanded informat
 
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
-  surfaces = await themeSurfaces();
-  const headless = page.locator('#headless details');
-  const dormant = page.locator('#dormant details');
-  await headless.locator('summary').click();
-  await dormant.locator('summary').click();
-  expect((await cardStyle(headless.locator('[data-sid="codex:thread-one"]'))).background)
-    .toBe(surfaces.card);
-  expect((await cardStyle(dormant.locator('[data-sid="claude-dormant"]'))).background)
-    .toBe(surfaces.card);
+  const history = page.locator('#history details');
+  await history.locator('summary').click();
+  await expect(history.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
+  await expect(history.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
+  await expect(page.locator('#headless')).toHaveCount(0);
+  await expect(page.locator('#dormant')).toHaveCount(0);
 });
 
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
@@ -250,7 +254,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
-  await expect(card.locator('.chip')).toContainText('done');
+  await expect(card.locator('.chip')).toContainText('Available');
   await expect(page.locator('#sctrl > .termbtn')).toHaveText('attach');
   await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
 });
@@ -258,10 +262,10 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
   await page.request.post('/test/reset', { data: { scenario: 'cross-client-active' } });
   await page.goto('/?token=abcdef123456');
-  await page.locator('#headless summary').click();
   const card = page.locator('[data-sid="codex:thread-one"]');
 
-  await expect(card.locator('.chip')).toContainText('running');
+  await expect(page.locator('#working')).toContainText('Working · 1');
+  await expect(card.locator('.chip')).toContainText('Working elsewhere');
   await expect(card).toContainText('Working in ChatGPT desktop.');
   if ((await page.viewportSize()).width > 700)
     await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
@@ -345,9 +349,9 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await page.locator('#confirm').getByRole('button', { name: 'stop and close' }).click();
   await expect(page.locator('#sview')).toBeHidden();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toHaveCount(0);
-  await expect(page.locator('#closed')).toContainText('session history (2)');
-  await page.locator('#closed summary').click();
-  await expect(page.locator('#closed')).toContainText('Codex parity work');
+  await expect(page.locator('#history')).toContainText('Session history (2)');
+  await page.locator('#history summary').click();
+  await expect(page.locator('#history')).toContainText('Codex parity work');
 });
 
 test('single, multi, free-text, dismiss, invalid, and stale questions', async ({ page }) => {
@@ -438,24 +442,21 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
 
 test('closed, external view-only, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
   await reset(page);
-  await page.getByText(/session history/).click();
-  await page.locator('#closedrows .expandbtn').click();
+  await page.getByText(/Session history/).click();
+  await page.locator('[data-history-sid="codex:closed"]').getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Durable closed conversation');
   await page.locator('#sclose').click();
 
   await page.request.post('/test/reset', { data: { scenario: 'reopenable' } });
   await page.reload();
-  const card = page.locator('[data-sid="codex:thread-one"]');
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
-  const headless = page.locator('#headless details');
-  await expect(headless).not.toHaveAttribute('open', '');
-  await expect(headless.getByText(/external Codex transcripts, view only/)).toBeVisible();
-  await headless.locator('summary').click();
-  await expect(card).toBeVisible();
-  await expect(card).toContainText('idle');
-  if (testInfo.project.name === 'desktop')
-    await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
-  await card.locator('.shead').click();
+  const history = page.locator('#history details');
+  await expect(history).not.toHaveAttribute('open', '');
+  await history.locator('summary').click();
+  const external = page.locator('[data-history-sid="codex:thread-one"]');
+  await expect(external).toContainText('External');
+  await expect(external).toContainText('View');
+  await external.getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sact')).toContainText('view only');
   await expect(page.locator('#sact input')).toHaveCount(0);
   await expect(page.locator('#sact')).not.toContainText('take over');
@@ -470,6 +471,7 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   await page.reload();
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toHaveCount(0);
+  await expect(page.locator('#providerstate')).toContainText('codex unavailable');
 
   await page.context().clearCookies();
   await page.goto('/');
@@ -479,32 +481,103 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   page.__failures = [];
 });
 
-test('idle stays visible while headless, dormant, and history remain collapsed', async ({ page }, testInfo) => {
+test('available stays visible while every inactive lifecycle shares one collapsed history', async ({ page }, testInfo) => {
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
-  await expect(page.locator('#sessions [data-sid="claude-one"]')).toContainText('idle');
+  await expect(page.locator('#sessions [data-sid="claude-one"]')).toContainText('Available');
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
-  const headless = page.locator('#headless details');
-  const dormant = page.locator('#dormant details');
-  const history = page.locator('#closed details');
-  await expect(headless).not.toHaveAttribute('open', '');
-  await expect(dormant).not.toHaveAttribute('open', '');
+  const history = page.locator('#history details');
   await expect(history).not.toHaveAttribute('open', '');
-  await expect(headless.locator('[data-sid="codex:thread-one"]')).toBeHidden();
-  await expect(dormant.locator('[data-sid="claude-dormant"]')).toBeHidden();
-  await expect(history).toContainText('session history (1)');
-
-  const ordered = await page.evaluate(() => {
-    const headless = document.querySelector('#headless');
-    const dormant = document.querySelector('#dormant');
-    return Boolean(headless.compareDocumentPosition(dormant) & Node.DOCUMENT_POSITION_FOLLOWING);
-  });
-  expect(ordered).toBe(true);
-
-  await headless.locator('summary').click();
-  await expect(headless.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+  await expect(history).toContainText('Session history (3)');
+  await expect(page.locator('[data-history-sid="codex:thread-one"]')).toBeHidden();
+  await history.locator('summary').click();
+  await expect(page.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
+  await expect(page.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
+  await expect(page.locator('[data-history-sid="codex:closed"]')).toContainText('Closed');
   await page.screenshot({ path: testInfo.outputPath('organized-session-inventory.png'), fullPage: true });
+});
+
+test('action queue separates requests, work, availability, and unread responses', async ({ page }, testInfo) => {
+  await reset(page, 'single-question');
+  const question = page.locator('[data-sid="codex:thread-one"]');
+  await expect(page.locator('#needs')).toContainText('Needs you · 1');
+  await expect(question.locator('.chip')).toHaveText('Question waiting');
+  await expect(question.getByRole('button', { name: 'Respond' })).toBeVisible();
+  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await page.screenshot({ path: testInfo.outputPath('needs-you-queue.png'), fullPage: true });
+
+  await reset(page, 'subagent');
+  const working = page.locator('[data-sid="codex:thread-one"]');
+  await expect(page.locator('#working')).toContainText('Working · 1');
+  await expect(working.locator('.chip')).toHaveText('Working');
+  await expect(working.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
+  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await page.screenshot({ path: testInfo.outputPath('working-queue.png'), fullPage: true });
+
+  await reset(page, 'reply-requested');
+  const reply = page.locator('[data-sid="codex:thread-one"]');
+  await expect(page.locator('#needs')).toContainText('Needs you · 1');
+  await expect(reply.locator('.chip')).toHaveText('Reply requested');
+  await expect(reply).toContainText('Which organization should we use?');
+  await reply.getByRole('button', { name: 'mark available' }).click();
+  await expect.poll(async () => (await fixtureState(page)).reply_available['codex:thread-one'])
+    .toBe('reply:1');
+  await refresh(page);
+  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .chip')).toHaveText('Available');
+
+  await reset(page, 'new-response');
+  const fresh = page.locator('[data-sid="codex:thread-one"]');
+  await expect(fresh.locator('.newbadge')).toHaveText('new');
+  await fresh.getByRole('button', { name: 'Continue' }).click();
+  await expect.poll(async () => (await fixtureState(page)).read_sessions['codex:thread-one'])
+    .toBe('response:1');
+  await page.locator('#sclose').click();
+  await page.reload();
+  await expect(page.locator('[data-sid="codex:thread-one"] .newbadge')).toHaveCount(0);
+});
+
+test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
+  await reset(page, 'single-question');
+  await page.evaluate(() => toggleSessionPin('codex:thread-one'));
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toContain('codex:thread-one');
+  await expect(page.locator('#pinned [data-sid="codex:thread-one"]')).toBeVisible();
+  await expect(page.locator('#needs [data-sid="codex:thread-one"]')).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean(document.querySelector('#pinned')
+    .compareDocumentPosition(document.querySelector('#needs')) & Node.DOCUMENT_POSITION_FOLLOWING)))
+    .toBe(true);
+
+  await page.reload();
+  await expect(page.locator('#pinned [data-sid="codex:thread-one"]')).toBeVisible();
+  await page.evaluate(() => toggleSessionPin('codex:thread-one'));
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .not.toContain('codex:thread-one');
+});
+
+test('session history text and access/provider chips filter one flat list', async ({ page }) => {
+  await reset(page, 'organization');
+  const history = page.locator('#history details');
+  await history.locator('summary').click();
+  await expect(page.locator('#historyrows .historyrow')).toHaveCount(3);
+
+  const input = history.getByPlaceholder(/Filter by title/);
+  await input.fill('migration');
+  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
+  await expect(page.locator('#historyrows')).toContainText('Dormant migration');
+  await input.fill('');
+
+  const access = history.locator('.filterline').nth(0);
+  await access.getByRole('button', { name: 'Continue' }).click();
+  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
+  await expect(page.locator('#historyrows')).toContainText('Inactive');
+  await access.getByRole('button', { name: 'All' }).click();
+
+  const provider = history.locator('.filterline').nth(1);
+  await provider.getByRole('button', { name: 'Codex' }).click();
+  await expect(page.locator('#historyrows .historyrow')).toHaveCount(2);
+  await expect(page.locator('#historyrows')).toContainText('External');
+  await expect(page.locator('#historyrows')).toContainText('Closed');
 });

@@ -828,6 +828,8 @@ class CodexAdapter:
                 self.error = str(exc)
                 self.error_at = now
                 for session in self._sessions:
+                    if session.get("state") != "stale":
+                        session["stale_previous_state"] = session.get("state")
                     session["stale"] = True
                     session["stale_reason"] = self.error
                     session["state"] = "stale"
@@ -968,7 +970,9 @@ class CodexAdapter:
                              state in ("running", "stalled", "needs_you"))
             uncontrolled_active = (state in ("running", "stalled", "needs_you") and
                                    not can_interrupt)
-            can_attach = is_managed and state not in ("running", "stalled", "needs_you")
+            materialized = not bool((thread_meta.get(tid) or {}).get("unmaterialized"))
+            can_attach = (is_managed and materialized and
+                          state not in ("running", "stalled", "needs_you"))
             reg_status = ("running" if state in ("running", "stalled") else
                           "turn_done" if state == "turn_done" else
                           live.get("status") or recorded_type)
@@ -981,6 +985,7 @@ class CodexAdapter:
                 "model": model, "family": "codex", "effort": effort,
                 "collaboration_mode": mode, "running": None,
                 "last_msg": _last_message(messages, thread.get("preview")),
+                "_latest_prose": _latest_prose(messages),
                 "state": state, "reg_status": reg_status,
                 "headless": not is_managed, "read_only": not is_managed,
                 "read_only_reason": ("ChatGPT Desktop and VS Code use a different App Server; "
@@ -1010,10 +1015,13 @@ class CodexAdapter:
                     "files": bool(files), "focus_terminal": can_attach,
                     "focus_terminal_mode": "attach" if can_attach else None,
                     "focus_terminal_label": ("attach" if can_attach else
+                                             "starting" if is_managed and not materialized else
                                              "view only" if not is_managed else
                                              "turn active"),
                     "focus_terminal_reason": ("Open a Codex TUI attached to Fleet's shared "
                                               "App Server" if can_attach else
+                                              "Fleet is creating the saved Codex session needed "
+                                              "by the terminal" if is_managed and not materialized else
                                               "Wait for the current Codex turn to finish before "
                                               "attaching" if is_managed else
                                               "External Codex runtime is view only"),
@@ -1026,11 +1034,17 @@ class CodexAdapter:
                     "measured_throughput": False},
             })
         # App Server assigns a thread ID before the first turn materializes a
-        # rollout. Such a thread is intentionally absent from thread/list.
+        # rollout. Keep that short-lived shell only while the canonical runtime
+        # still reports it loaded. Without either runtime state or a rollout, the
+        # ID can never be resumed or used and must not become an Available ghost.
         for tid in managed - listed:
             meta = thread_meta.get(tid) or {}
             if meta.get("unmaterialized"):
-                out.append(self._stub_session(tid, meta, modes.get(tid) or "default"))
+                if tid in loaded:
+                    out.append(self._stub_session(tid, meta,
+                                                  modes.get(tid) or "default"))
+                else:
+                    self._forget(tid)
         with self._lock:
             self._sessions = out
             self.models = [{"id": m.get("model") or m.get("id"),
@@ -1256,9 +1270,10 @@ class CodexAdapter:
                     "read_only_reason": None, "codex_source": "appServer",
                     "agents": [], "agents_running": 0, "agents_total": 0,
                     "agent_cost": None, "capabilities": {"submit": True,
-                    "interrupt": False, "close": True, "focus_terminal": True,
-                    "focus_terminal_mode": "attach",
-                    "focus_terminal_reason": "Open a Codex TUI attached to Fleet's shared App Server",
+                    "interrupt": False, "close": True, "focus_terminal": False,
+                    "focus_terminal_mode": None, "focus_terminal_label": "starting",
+                    "focus_terminal_reason": ("Fleet is creating the saved Codex session needed "
+                                              "by the terminal"),
                     "answer_structured": False, "takeover": False,
                     "archive": True, "compact": True, "review": True, "files": False,
                     "decide_approval": False, "spawn_agent": True, "relay_agent": False,
@@ -1755,6 +1770,13 @@ def _last_message(messages, fallback=None):
             return {"role": message["role"], "text": text[:280]}
     if fallback:
         return {"role": "user", "text": str(fallback).strip()[:280]}
+    return None
+
+
+def _latest_prose(messages):
+    for message in reversed(messages):
+        if message.get("role") in ("user", "assistant") and message.get("text"):
+            return {"role": message["role"], "text": str(message["text"]).strip()}
     return None
 
 
