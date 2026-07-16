@@ -9,7 +9,7 @@ from unittest import mock
 
 import engine as engine_module
 from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail,
-                    requests_reply)
+                    classify_placement, requests_reply)
 from server import Handler
 
 
@@ -252,12 +252,27 @@ class EngineProviderTest(unittest.TestCase):
             if restarted.db:
                 restarted.db.close()
 
-    def test_codex_failure_does_not_remove_claude(self):
+    def test_codex_failure_keeps_last_good_codex_snapshot_stale_without_removing_claude(self):
+        healthy = self.engine.scan()
+        self.assertEqual({item["provider"] for item in healthy["sessions"]},
+                         {"claude", "codex"})
         self.codex.fail_sessions = True
         fleet = self.engine.scan()
-        self.assertEqual([item["provider"] for item in fleet["sessions"]], ["claude"])
+        self.assertEqual({item["provider"] for item in fleet["sessions"]},
+                         {"claude", "codex"})
+        codex = next(item for item in fleet["sessions"] if item["provider"] == "codex")
+        self.assertEqual((codex["state"], codex["provider_stale"],
+                          codex["state_confidence"], codex["access"]),
+                         ("stale", True, "stale", "view_only"))
         self.assertFalse(fleet["providers"]["codex"]["ok"])
         self.assertIn("Codex crashed", fleet["providers"]["codex"]["error"])
+
+        self.codex.fail_sessions = False
+        recovered = self.engine.scan()
+        codex = next(item for item in recovered["sessions"] if item["provider"] == "codex")
+        self.assertEqual((codex["state"], codex["provider_stale"],
+                          recovered["providers"]["codex"]["ok"]),
+                         ("idle", False, True))
 
     def test_claude_history_backfill_is_viewable_reopenable_and_idempotent(self):
         sid = "11111111-2222-3333-4444-555555555555"
@@ -508,6 +523,91 @@ class EngineProviderTest(unittest.TestCase):
             "The parser handles `value?` and this quoted example: \"Continue?\""))
         self.assertFalse(requests_reply(
             "> Should this quoted requirement count?\n\nImplementation is complete."))
+        self.assertFalse(requests_reply(
+            "Why did the cache miss? The path changed, so I rebuilt the index."))
+        self.assertFalse(requests_reply(
+            "I will check whether the provider recovered, then rerun the test."))
+
+    def test_pure_classifier_explains_priority_without_mutating_input(self):
+        session = codex_session()
+        session.update(state="running", quiet_s=12, agents_running=1,
+                       pending={"kind": "question", "nonce": "q-1"},
+                       _latest_prose={"role": "assistant", "text": "Which path?"})
+        before = json.dumps(session, sort_keys=True)
+        result = classify_placement(session, 100)
+        self.assertEqual(json.dumps(session, sort_keys=True), before)
+        self.assertEqual((result["ui_group"], result["winning_rule"],
+                          result["state_confidence"]),
+                         ("needs_you", "placement.pending.question", "confirmed"))
+        self.assertIn("placement.state.running", result["suppressed_rules"])
+        self.assertEqual([fact["kind"] for fact in result["state_evidence"]][:3],
+                         ["provider_signal", "pending_request", "transcript_event"])
+
+    def test_external_completion_is_available_before_it_ages_into_history(self):
+        session = codex_session()
+        session.update(state="turn_done", headless=True, read_only=True,
+                       read_only_reason="Desktop-owned thread", quiet_s=15,
+                       _latest_prose={"role": "assistant", "text": "Finished."})
+        current = self.engine.organize_session(session, 100)
+        self.assertEqual((current["ui_group"], current["reason_label"],
+                          current["access"], current["primary_action"]),
+                         ("available", "Completed elsewhere", "view_only", "view"))
+        self.assertTrue(current["new_response"])
+
+        older = codex_session()
+        older.update(state="idle", headless=True, read_only=True, quiet_s=120,
+                     _latest_prose={"role": "assistant", "text": "Finished."})
+        historical = self.engine.organize_session(older, 200)
+        self.assertEqual((historical["ui_group"], historical["reason_label"]),
+                         ("history", "External"))
+
+    def test_stale_snapshot_keeps_last_placement_with_explicit_stale_evidence(self):
+        session = codex_session()
+        session.update(state="stale", stale=True, stale_previous_state="running",
+                       stale_reason="App Server stopped", quiet_s=8)
+        organized = self.engine.organize_session(session, 100)
+        self.assertEqual((organized["state"], organized["normalized_state"],
+                          organized["ui_group"], organized["state_confidence"],
+                          organized["access"]),
+                         ("stale", "running", "working", "stale", "view_only"))
+        self.assertIn("stale", [fact["kind"] for fact in organized["state_evidence"]])
+
+    def test_state_journal_deduplicates_recovers_and_pages(self):
+        session = codex_session()
+        session.update(_latest_prose={"role": "assistant", "text": "Done."})
+        available = self.engine.organize_session(session, 100)
+        self.engine.record_state_events([available], 100)
+        self.engine.record_state_events([available], 102)
+        session = codex_session()
+        session.update(state="running", reg_status="running", quiet_s=1,
+                       _latest_prose={"role": "user", "text": "Continue"})
+        running = self.engine.organize_session(session, 110)
+        self.engine.record_state_events([running], 110)
+        session = codex_session()
+        session.update(state="stale", stale=True, stale_previous_state="running",
+                       stale_reason="App Server stopped", quiet_s=3)
+        stale = self.engine.organize_session(session, 115)
+        self.engine.record_state_events([stale], 115)
+        session = codex_session()
+        session.update(state="running", reg_status="running", quiet_s=1)
+        recovered = self.engine.organize_session(session, 120)
+        self.engine.record_state_events([recovered], 120)
+
+        count = self.engine.ensure_db().execute(
+            "SELECT count(*) FROM state_events WHERE session_id='codex:same'").fetchone()[0]
+        self.assertEqual(count, 4)
+        first = self.engine.state_history("codex:same", limit=2)
+        self.assertTrue(first["ok"])
+        self.assertEqual(len(first["events"]), 2)
+        self.assertIsNotNone(first["next_cursor"])
+        self.assertEqual(first["events"][0]["winning_rule"], "placement.state.running")
+        self.assertEqual(first["events"][1]["confidence"], "stale")
+        second = self.engine.state_history(
+            "codex:same", cursor=first["next_cursor"], limit=2)
+        self.assertEqual(len(second["events"]), 2)
+        self.assertIsNone(second["next_cursor"])
+        self.assertFalse(self.engine.state_history("bad\nvalue")["ok"])
+        self.assertFalse(self.engine.state_history("codex:same", limit=101)["ok"])
 
     def test_transient_claude_waiting_between_tools_remains_working(self):
         """A progress note followed by another tool is not a request for input."""
@@ -572,6 +672,10 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(file_change["reason_label"], "File approval")
         form = organized(state="needs_you", pending={"kind": "elicitation"})
         self.assertEqual(form["reason_label"], "Form waiting")
+        provider_error = organized(state="error", error="protocol failed")
+        self.assertEqual((provider_error["ui_group"], provider_error["reason_label"],
+                          provider_error["winning_rule"]),
+                         ("needs_you", "Fix needed", "placement.provider.error"))
 
         reply = organized(state="turn_done", _latest_prose={"role": "assistant",
                            "text": "Which layout should I use?"})
@@ -587,6 +691,9 @@ class EngineProviderTest(unittest.TestCase):
         slow = organized(state="stalled")
         self.assertEqual((slow["ui_group"], slow["reason_label"]),
                          ("working", "Slow"))
+        compacting = organized(state="running", compacting=4)
+        self.assertEqual((compacting["ui_group"], compacting["reason_label"]),
+                         ("working", "Compacting"))
         available = organized(state="idle")
         self.assertEqual((available["ui_group"], available["reason_label"]),
                          ("available", "Available"))
@@ -597,6 +704,20 @@ class EngineProviderTest(unittest.TestCase):
         historical = organized(state="idle", headless=True, read_only=True)
         self.assertEqual((historical["ui_group"], historical["reason_label"]),
                          ("history", "External"))
+        reopenable = organized(state="reopenable", capabilities={"reopen": True})
+        self.assertEqual((reopenable["ui_group"], reopenable["primary_action"],
+                          reopenable["access"]),
+                         ("history", "reopen", "reopen"))
+        unknown = organized(state="future_protocol_state")
+        self.assertEqual((unknown["ui_group"], unknown["state_confidence"]),
+                         ("available", "unknown"))
+
+        closed = self.engine.organize_closed({
+            "session_id": "codex:closed", "provider": "codex", "closed_at": 9,
+            "last_seen": 8, "can_reopen": False})
+        self.assertEqual((closed["state"], closed["ui_group"], closed["winning_rule"],
+                          closed["state_confidence"]),
+                         ("closed", "history", "placement.ledger.closed", "confirmed"))
 
     def test_pin_reply_dismissal_and_read_markers_persist(self):
         pinned = self.engine.update_settings({"pin_session": "codex:same",

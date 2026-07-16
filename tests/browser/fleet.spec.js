@@ -210,6 +210,32 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await page.screenshot({ path: testInfo.outputPath('artifact-preview.png'), fullPage: true });
 });
 
+test('session placement evidence is visible on cards and in a paged desktop/mobile rail', async ({ page }, testInfo) => {
+  await reset(page);
+  const card = page.locator('[data-sid="claude-one"]');
+  await card.getByRole('button', { name: /more/ }).click();
+  await card.locator('details.statewhy > summary').click();
+  await expect(card.locator('.statewhybody')).toContainText('placement.default.available');
+  await expect(card.locator('.statewhybody')).toContainText('Provider signal');
+
+  await card.locator('.shead').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.getByRole('button', { name: /Why here/ }).click();
+  const rail = page.locator('#sevidence');
+  await expect(rail).toBeVisible();
+  await expect(rail).toContainText('Why Fleet put this here');
+  await expect(rail).toContainText('Available');
+  await expect(rail).toContainText('placement.default.available');
+  await expect(rail.locator('.evidenceevent')).toHaveCount(2);
+  await expect(rail).toContainText('Working');
+  if (testInfo.project.name.startsWith('mobile')) {
+    expect(await rail.evaluate(element => element.getBoundingClientRect().width <= window.innerWidth)).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
+  await rail.getByRole('button', { name: 'close state evidence' }).click();
+  await expect(rail).toBeHidden();
+});
+
 test('context gauge, Markdown peek, and shared reading width stay legible', async ({ page }, testInfo) => {
   await reset(page, 'markdown-peek');
   let card = page.locator('[data-sid="codex:thread-one"]');

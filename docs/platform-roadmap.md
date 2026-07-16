@@ -10,7 +10,8 @@ Status: approved for sequential implementation on `codex-integration`.
 | M1 — App shell and shared components | Complete · 2026-07-16 | Semantic zero-build shell in `dashboard.html`, responsive/navigation/component rules in `static/fleet.css`, route/back/filter behavior in `static/app.js`, 82 Python tests, 40 deterministic Playwright desktop/mobile tests, and 2 running-daemon Playwright checks. |
 | M2 — Incremental global search | Complete · 2026-07-16 | Isolated low-priority index process, per-source WAL/FTS5 state, authenticated search/status/context/rebuild APIs, desktop/mobile Search UI, exact session/subagent/artifact context, 88 Python tests, 44 deterministic browser tests, and the 100k-message/2k-source benchmark. Live while indexing 2.7 GB: `/api/fleet` p95 12.653 ms, search p95 26.619 ms, server search p95 24.515 ms. |
 | M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
-| M4 — State evidence | Next | Extract the placement classifier and persist the exact evidence behind every user-facing state. |
+| M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
+| M5 — Provider handoff | Next | Synthesize an editable continuation preview and deliver it only to a newly identified provider-native session. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -694,6 +695,30 @@ Commit: `Explain session state with durable evidence`.
 
 Exit: every provider/raw state, transition, ambiguity, stale recovery, and classifier regression has
 deterministic coverage.
+
+Completed 2026-07-16. `EVID-001`–`EVID-005` and the M4 portion of `EVID-006` are implemented by a
+pure provider-neutral classifier that returns the normalized state, placement, reason, access,
+primary action, ordered bounded evidence, winning rule, suppressed rules, and confidence without
+mutating its input. The SQLite transition journal records only meaningful consecutive changes,
+survives restart, pages through `GET /api/evidence`, and skips already-journaled immutable closed
+rows before rebuilding evidence. The card detail explains current placement; full chat exposes a
+responsive “Why here?” rail with current facts and historical transitions. Recent view-only Codex
+completions now remain Available for review before aging into History. Engine-level Codex failures
+retain the last good session snapshot as stale/view-only and recover without removing Claude.
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 100 passed, including every placement
+  branch, false prose-question cases, same-session journal dedupe/pagination, stale/recovery, and
+  provider isolation.
+- `npx playwright test tests/browser/fleet.spec.js` — 50 passed at desktop 1440×1000 and mobile
+  390×844, including card evidence, full-chat rail/history, responsive overlay behavior, stale and
+  external states, and all prior fleet regressions.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377 FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 4 passed across both viewports with live evidence history and no
+  console/network failures.
+- On the live archive with 26 current and 734 closed sessions, the steady evidence-journal slice was
+  2.615 ms. An initial per-session SQLite lookup design was rejected after it pushed scans to about
+  250 ms; the final cache performs one startup signature load and no per-closed-row hot-path query.
 
 ### M5 — Provider handoff
 

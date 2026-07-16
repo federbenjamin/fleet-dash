@@ -4,6 +4,7 @@
 GET /            dashboard.html (re-read per request, edit without restart)
 GET /api/fleet   latest fleet snapshot JSON
 GET /api/workstreams lazy repository/project rollup
+GET /api/evidence durable session placement history
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -152,6 +153,10 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/workstreams":
             self.reply(200, "application/json",
                        json.dumps(self.eng.workstreams_snapshot()).encode())
+        elif route == "/api/evidence":
+            out = self.eng.state_history(self.query("sid"), self.query("cursor") or 0,
+                                         self.query("limit") or 40)
+            self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/fleet":
             with self.eng.lock:
                 snap = dict(self.eng.snapshot_cache)

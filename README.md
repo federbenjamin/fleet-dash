@@ -236,6 +236,11 @@ the provider without affecting Claude sessions.
   exact model, started-ago, CLI status, tokens in context, spend split), "delivered files"
   (caption + age) and "completed agents" dropdowns (the latter two scroll internally past
   ~220px), and the open-in-claude.ai link.
+- **Why this is here** appears in every expanded card and as a **Why here?** control in full chat.
+  It shows the exact classifier rule, provider/CLI signal, pending work, latest transcript event,
+  activity age, ownership, stale status, confidence, and any lower-priority rules that were
+  suppressed. Full chat opens a desktop side rail or mobile in-place sheet and pages durable
+  placement transitions from `GET /api/evidence`; repeated polls do not create duplicate history.
 - **Amber interaction box** when a session is waiting on you. On the CARD a question is only a
   **signal** — "multi-part question (3) — waiting on you", any read-first chip, and an
   **answer ⤢** button that opens the full view with the question expanded; the controls

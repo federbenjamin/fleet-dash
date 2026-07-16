@@ -55,6 +55,16 @@ def base_session(provider, sid, title):
             "external": False, "provider_stale": False,
             "reply_requested": False, "new_response": False,
             "activity_at": time.time() - 3, "pinned": False,
+            "normalized_state": "idle", "winning_rule": "placement.default.available",
+            "suppressed_rules": [], "state_confidence": "confirmed",
+            "state_evidence": [
+                {"kind": "provider_signal", "label": "Provider signal",
+                 "value": f"{provider} state idle; CLI status idle",
+                 "confidence": "confirmed"},
+                {"kind": "transcript_event", "label": "Latest transcript event",
+                 "value": "assistant message at revision 1", "confidence": "confirmed"},
+                {"kind": "age", "label": "Last activity", "value": "3s quiet",
+                 "confidence": "confirmed"}],
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
                 measured_throughput=not codex)}
@@ -78,6 +88,34 @@ def fresh_state():
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
             "scenario": "base", "codex_error": None,
+            "evidence": {
+                "claude-one": [
+                    {"id": 12, "session_id": "claude-one", "provider": "claude",
+                     "at": time.time() - 3, "raw_state": "idle", "reg_status": "idle",
+                     "normalized_state": "idle", "ui_group": "available",
+                     "reason": "Available", "access": "interactive",
+                     "primary_action": "continue", "evidence_kind": "provider_signal",
+                     "evidence_summary": "Provider signal: claude state idle; Last activity: 3s quiet",
+                     "revision": "1", "winning_rule": "placement.default.available",
+                     "suppressed_rules": [], "confidence": "confirmed", "evidence": []},
+                    {"id": 8, "session_id": "claude-one", "provider": "claude",
+                     "at": time.time() - 60, "raw_state": "running", "reg_status": "busy",
+                     "normalized_state": "running", "ui_group": "working",
+                     "reason": "Working", "access": "interactive",
+                     "primary_action": "open", "evidence_kind": "provider_signal",
+                     "evidence_summary": "Provider signal: claude state running",
+                     "revision": "0", "winning_rule": "placement.state.running",
+                     "suppressed_rules": ["placement.default.available"],
+                     "confidence": "confirmed", "evidence": []}],
+                "codex:thread-one": [
+                    {"id": 13, "session_id": "codex:thread-one", "provider": "codex",
+                     "at": time.time() - 3, "raw_state": "idle", "reg_status": "idle",
+                     "normalized_state": "idle", "ui_group": "available",
+                     "reason": "Available", "access": "interactive",
+                     "primary_action": "continue", "evidence_kind": "provider_signal",
+                     "evidence_summary": "Provider signal: codex state idle; Last activity: 3s quiet",
+                     "revision": "1:1", "winning_rule": "placement.default.available",
+                     "suppressed_rules": [], "confidence": "confirmed", "evidence": []}]},
             "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
                 "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
                 "preview_sessions": True, "preview_session_lines": 2,
@@ -519,6 +557,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply(fleet())
             if route == "/api/workstreams":
                 return self.json_reply(fixture_workstreams())
+            if route == "/api/evidence":
+                sid = (query.get("sid") or [""])[0]
+                try:
+                    cursor = int((query.get("cursor") or ["0"])[0] or 0)
+                    limit = int((query.get("limit") or ["40"])[0] or 40)
+                except ValueError:
+                    return self.json_reply({"ok": False, "error": "invalid evidence cursor or limit"})
+                rows = copy.deepcopy(STATE.get("evidence", {}).get(sid, []))
+                if cursor:
+                    rows = [row for row in rows if row["id"] < cursor]
+                more = len(rows) > limit
+                rows = rows[:limit]
+                current = next((item for item in STATE["sessions"] + STATE["closed"]
+                                if item.get("session_id") == sid), None)
+                return self.json_reply({"ok": True, "session_id": sid,
+                    "current": current, "events": rows,
+                    "next_cursor": rows[-1]["id"] if more and rows else None})
             if route == "/api/context":
                 sid = (query.get("sid") or [""])[0]
                 return self.json_reply({"ok": True,

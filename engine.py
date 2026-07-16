@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
@@ -138,12 +138,211 @@ def requests_reply(text):
     prose = re.sub(r"`[^`\n]*`", " ", prose)
     prose = re.sub(r"(?m)^\s*>.*$", " ", prose)
     prose = re.sub(r'"[^"\n]*"|“[^”\n]*”|\'[^\'\n]*\'|‘[^’\n]*’', " ", prose)
-    if "?" in prose:
-        return True
-    return bool(re.search(
+    explicit = bool(re.search(
         r"(?i)\b(answer|choose|confirm|pick|reply|respond|select|tell me|let me know)\b"
         r"[^.!?\n]{0,100}(?:before (?:i|we) continue|which|whether|one|option|both|these)",
         prose))
+    if explicit:
+        return True
+    # A question is actionable only when it is the final prose request. This
+    # excludes rhetorical/status questions that the assistant immediately
+    # answers itself, while retaining ordinary "Should I continue?" endings.
+    stripped = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", prose).strip()
+    match = re.search(r"([^.!?\n]*(?:\n[^.!?\n]*)*)\?\s*$", stripped)
+    if not match:
+        return False
+    question = re.sub(r"\s+", " ", match.group(1)).strip(" -*0123456789.)\t")
+    return bool(re.match(
+        r"(?i)^(?:what|which|who|when|where|why|how|do|does|did|is|are|was|were|"
+        r"can|could|would|will|should|may|must|have|has|had)\b", question))
+
+
+PRIMARY_ACTION_LABELS = {"respond": "Respond", "review": "Review", "open": "Open",
+                         "continue": "Continue", "view": "View", "reopen": "Reopen"}
+ACCESS_LABELS = {"interactive": "Interactive", "view_only": "View only",
+                 "reopen": "Reopen"}
+
+
+def _fact_text(value, limit=220):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
+
+
+def _pending_placement(pending):
+    kind = (pending or {}).get("kind")
+    if kind == "question":
+        return "Question waiting", "respond", "placement.pending.question"
+    if kind == "elicitation":
+        return "Form waiting", "respond", "placement.pending.form"
+    if kind == "permission":
+        approval = (pending or {}).get("approval_kind") or (pending or {}).get("tool")
+        if approval == "command":
+            return "Command approval", "review", "placement.pending.command_approval"
+        if approval == "file_change":
+            return "File approval", "review", "placement.pending.file_approval"
+        return "Permission needed", "review", "placement.pending.permission"
+    return None
+
+
+def classify_placement(session, now, reply_available=None, read_sessions=None):
+    """Pure provider-neutral session placement with diagnostic evidence."""
+    reply_available = reply_available or {}
+    read_sessions = read_sessions or {}
+    sid = str(session.get("session_id") or "")
+    revision = str(session.get("convo_v") or "")
+    latest = session.get("_latest_prose") or {}
+    latest_assistant = latest if latest.get("role") == "assistant" else None
+    raw_state = str(session.get("state") or "idle")
+    state = str(session.get("stale_previous_state") or "idle") \
+        if raw_state == "stale" else raw_state
+    pending = session.get("pending") or {}
+    capabilities = session.get("capabilities") or {}
+    external = bool(session.get("headless") or session.get("read_only"))
+    provider_stale = raw_state == "stale" or bool(session.get("stale"))
+    dismissed = str(reply_available.get(sid, ""))
+    read_revision = str(read_sessions.get(sid, ""))
+    reply_requested = bool(
+        latest_assistant and requests_reply(latest_assistant.get("text"))
+        and dismissed != revision)
+
+    candidates = []
+    pending_rule = _pending_placement(pending)
+    if pending_rule:
+        reason, primary, rule = pending_rule
+        candidates.append((rule, "needs_you", reason, primary, "confirmed"))
+    if raw_state == "error":
+        candidates.append(("placement.provider.error", "needs_you", "Fix needed",
+                           "open", "confirmed"))
+    if state == "stalled_or_prompt":
+        candidates.append(("placement.state.stalled_or_prompt", "needs_you",
+                           "Check session", "open", "inferred"))
+    if state == "needs_you":
+        candidates.append(("placement.state.needs_you", "needs_you",
+                           "Response needed", "respond", "confirmed"))
+    if session.get("compacting") is not None:
+        candidates.append(("placement.runtime.compacting", "working", "Compacting",
+                           "open", "confirmed"))
+    if state == "stalled":
+        candidates.append(("placement.state.stalled", "working", "Slow",
+                           "open", "inferred"))
+    if state == "running":
+        candidates.append(("placement.state.running", "working",
+                           "Working elsewhere" if external else "Working",
+                           "view" if external else "open", "confirmed"))
+    if reply_requested:
+        candidates.append(("placement.prose.reply_requested", "needs_you",
+                           "Reply requested", "respond", "inferred"))
+    if state == "turn_done":
+        candidates.append(("placement.state.turn_done", "available",
+                           "Completed elsewhere" if external else "Available",
+                           "view" if external else "continue", "confirmed"))
+    if external:
+        candidates.append(("placement.access.external", "history", "External",
+                           "view", "confirmed"))
+    if state == "reopenable":
+        candidates.append(("placement.state.reopenable", "history", "Reopenable",
+                           "reopen" if capabilities.get("reopen") else "view", "confirmed"))
+    if state == "dormant":
+        candidates.append(("placement.state.dormant", "history", "Inactive",
+                           "continue", "inferred"))
+    default_confidence = ("unknown" if state not in
+                          {"idle", "turn_done", "running", "stalled", "needs_you",
+                           "stalled_or_prompt", "dormant", "reopenable"} else "confirmed")
+    candidates.append(("placement.default.available", "available", "Available",
+                       "continue", default_confidence))
+
+    winning_rule, group, reason, primary, confidence = candidates[0]
+    if external or provider_stale:
+        access = "view_only"
+        if primary in ("respond", "review", "open", "continue"):
+            primary = "view"
+    elif primary == "reopen":
+        access = "reopen"
+    else:
+        access = "interactive"
+    if provider_stale:
+        confidence = "stale"
+
+    evidence = [{"kind": "provider_signal", "label": "Provider signal",
+                 "value": _fact_text(
+                     f"{session.get('provider') or 'claude'} state {raw_state}"
+                     + (f"; CLI status {session.get('reg_status')}"
+                        if session.get("reg_status") is not None else "")),
+                 "confidence": "stale" if provider_stale else "confirmed"}]
+    if pending:
+        evidence.append({"kind": "pending_request", "label": "Pending work",
+                         "value": _fact_text(
+                             f"{pending.get('kind') or 'request'}"
+                             + (f" · {pending.get('approval_kind') or pending.get('tool')}"
+                                if pending.get("approval_kind") or pending.get("tool") else "")),
+                         "confidence": "confirmed"})
+    if latest:
+        evidence.append({"kind": "transcript_event", "label": "Latest transcript event",
+                         "value": _fact_text(
+                             f"{latest.get('role') or 'unknown'} message at revision {revision or 'unknown'}"
+                             + ("; direct reply requested" if reply_requested else "")),
+                         "confidence": "inferred" if reply_requested else "confirmed"})
+    if session.get("agents_running"):
+        evidence.append({"kind": "active_work", "label": "Active work",
+                         "value": f"{int(session.get('agents_running') or 0)} subagent(s) running",
+                         "confidence": "confirmed"})
+    if session.get("compacting") is not None:
+        evidence.append({"kind": "active_work", "label": "Active work",
+                         "value": f"Compaction active for {round(float(session.get('compacting') or 0))}s",
+                         "confidence": "confirmed"})
+    quiet = max(0, round(float(session.get("quiet_s") or 0)))
+    evidence.append({"kind": "age", "label": "Last activity",
+                     "value": f"{quiet}s quiet", "confidence": "confirmed"})
+    if external:
+        evidence.append({"kind": "access", "label": "Control",
+                         "value": _fact_text(session.get("read_only_reason") or
+                                             "Owned by another runtime; Fleet can only view it"),
+                         "confidence": "confirmed"})
+    if provider_stale:
+        evidence.append({"kind": "stale", "label": "Freshness",
+                         "value": _fact_text(session.get("stale_reason") or session.get("error") or
+                                             "Showing the last good provider snapshot"),
+                         "confidence": "stale"})
+
+    new_response = bool(
+        group == "available" and state == "turn_done" and latest_assistant
+        and read_revision != revision)
+    return {
+        "state": state, "ui_group": group, "reason_label": reason,
+        "primary_action": primary, "primary_action_label": PRIMARY_ACTION_LABELS[primary],
+        "access": access, "access_label": ACCESS_LABELS[access],
+        "external": external, "provider_stale": provider_stale,
+        "reply_requested": reply_requested, "new_response": new_response,
+        "activity_at": max(0, float(now) - float(session.get("quiet_s") or 0)),
+        "winning_rule": winning_rule,
+        "suppressed_rules": [candidate[0] for candidate in candidates[1:]],
+        "state_confidence": confidence, "state_evidence": evidence,
+    }
+
+
+def classify_closed_placement(session):
+    """Pure placement for a ledger session whose provider process is gone."""
+    can_reopen = bool(session.get("can_reopen"))
+    primary = "reopen" if can_reopen else "view"
+    access = "reopen" if can_reopen else "view_only"
+    closed_at = float(session.get("closed_at") or 0)
+    return {
+        "state": "closed", "ui_group": "history", "reason_label": "Closed",
+        "primary_action": primary, "primary_action_label": PRIMARY_ACTION_LABELS[primary],
+        "access": access, "access_label": ACCESS_LABELS[access],
+        "external": False, "provider_stale": False, "reply_requested": False,
+        "new_response": False,
+        "activity_at": session.get("last_seen") or closed_at,
+        "winning_rule": "placement.ledger.closed", "suppressed_rules": [],
+        "state_confidence": "confirmed",
+        "state_evidence": [
+            {"kind": "ledger", "label": "Provider process",
+             "value": "No live provider process is registered", "confidence": "confirmed"},
+            {"kind": "access", "label": "Conversation access",
+             "value": ("Transcript can reopen in a new Claude terminal" if can_reopen else
+                       "Conversation is retained for viewing only"), "confidence": "confirmed"},
+        ],
+    }
 
 # built-in commands the TUI offers (name, description). Skills + custom commands
 # are enumerated off disk per session; these have no file to read.
@@ -665,9 +864,13 @@ class Engine:
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
         self.scan_timings_ms = deque(maxlen=240)
+        self.last_state_journal_ms = 0.0
         self.history_backfilled = False
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
+        self._provider_session_cache = {"codex": []}
+        self.codex_scan_error = None
+        self._state_event_signatures = None
         # Claude's registry can flash `waiting` between assistant text and the
         # next tool call. Keep the transition time so an uncorroborated flash
         # remains Working instead of manufacturing a "Response needed" card.
@@ -731,112 +934,28 @@ class Engine:
 
     @staticmethod
     def _pending_reason(pending):
-        kind = (pending or {}).get("kind")
-        if kind == "question":
-            return "Question waiting", "respond"
-        if kind == "elicitation":
-            return "Form waiting", "respond"
-        if kind == "permission":
-            approval = (pending or {}).get("approval_kind") or (pending or {}).get("tool")
-            if approval == "command":
-                return "Command approval", "review"
-            if approval == "file_change":
-                return "File approval", "review"
-            return "Permission needed", "review"
-        return None, None
+        placement = _pending_placement(pending)
+        return placement[0:2] if placement else (None, None)
 
     def organize_session(self, session, now):
         """Add provider-neutral placement, reason, access, and action fields."""
-        sid = str(session.get("session_id") or "")
-        revision = str(session.get("convo_v") or "")
-        latest = session.pop("_latest_prose", None) or {}
-        latest_assistant = latest if latest.get("role") == "assistant" else None
-        raw_state = session.get("state") or "idle"
-        state = (session.get("stale_previous_state") or "idle"
-                 if raw_state == "stale" else raw_state)
-        pending = session.get("pending") or {}
-        capabilities = session.get("capabilities") or {}
-        external = bool(session.get("headless") or session.get("read_only"))
-        provider_stale = raw_state == "stale"
-        dismissed = str((self.cfg.get("reply_available") or {}).get(sid, ""))
-        read_revision = str((self.cfg.get("read_sessions") or {}).get(sid, ""))
-        reply_requested = bool(
-            latest_assistant and requests_reply(latest_assistant.get("text"))
-            and dismissed != revision)
-
-        reason, primary = self._pending_reason(pending)
-        if reason:
-            group = "needs_you"
-        elif raw_state == "error":
-            group, reason, primary = "needs_you", "Fix needed", "open"
-        elif state == "stalled_or_prompt":
-            group, reason, primary = "needs_you", "Check session", "open"
-        elif state == "needs_you":
-            group, reason, primary = "needs_you", "Response needed", "respond"
-        elif session.get("compacting") is not None:
-            group, reason, primary = "working", "Compacting", "open"
-        elif state == "stalled":
-            group, reason, primary = "working", "Slow", "open"
-        elif state == "running":
-            group = "working"
-            reason = "Working elsewhere" if external else "Working"
-            primary = "view" if external else "open"
-        elif reply_requested:
-            group, reason, primary = "needs_you", "Reply requested", "respond"
-        elif external:
-            group, reason, primary = "history", "External", "view"
-        elif state == "reopenable":
-            group, reason = "history", "Reopenable"
-            primary = "reopen" if capabilities.get("reopen") else "view"
-        elif state == "dormant":
-            group, reason, primary = "history", "Inactive", "continue"
-        else:
-            group, reason, primary = "available", "Available", "continue"
-
-        if external or provider_stale:
-            access = "view_only"
-            if primary in ("respond", "review", "open", "continue"):
-                primary = "view"
-        elif primary == "reopen":
-            access = "reopen"
-        else:
-            access = "interactive"
-
-        new_response = bool(
-            group == "available" and state == "turn_done" and latest_assistant
-            and read_revision != revision)
-        activity_at = max(0, now - float(session.get("quiet_s") or 0))
-        session.update(
-            ui_group=group,
-            reason_label=reason,
-            primary_action=primary,
-            primary_action_label={"respond": "Respond", "review": "Review",
-                                  "open": "Open", "continue": "Continue",
-                                  "view": "View", "reopen": "Reopen"}[primary],
-            access=access,
-            access_label={"interactive": "Interactive", "view_only": "View only",
-                          "reopen": "Reopen"}[access],
-            external=external,
-            provider_stale=provider_stale,
-            reply_requested=reason == "Reply requested",
-            new_response=new_response,
-            activity_at=activity_at,
-            pinned=sid in set(self.cfg.get("pinned_sessions") or []),
-        )
+        placement = classify_placement(
+            session, now, self.cfg.get("reply_available"), self.cfg.get("read_sessions"))
+        session.pop("_latest_prose", None)
+        normalized_state = placement.pop("state")
+        session.update(placement)
+        session["normalized_state"] = normalized_state
+        session["pinned"] = str(session.get("session_id") or "") in set(
+            self.cfg.get("pinned_sessions") or [])
         return session
 
     def organize_closed(self, session):
         sid = str(session.get("session_id") or "")
-        can_reopen = bool(session.get("can_reopen"))
-        session.update(ui_group="history", reason_label="Closed",
-                       primary_action="reopen" if can_reopen else "view",
-                       primary_action_label="Reopen" if can_reopen else "View",
-                       access="reopen" if can_reopen else "view_only",
-                       access_label="Reopen" if can_reopen else "View only",
-                       external=False, provider_stale=False,
-                       reply_requested=False, new_response=False,
-                       activity_at=session.get("last_seen") or session.get("closed_at") or 0,
-                       pinned=sid in set(self.cfg.get("pinned_sessions") or []))
+        placement = classify_closed_placement(session)
+        normalized_state = placement.pop("state")
+        session.update(placement)
+        session["state"] = session["normalized_state"] = normalized_state
+        session["pinned"] = sid in set(self.cfg.get("pinned_sessions") or [])
         return session
 
     @staticmethod
@@ -1092,6 +1211,7 @@ class Engine:
             "scan_p50_ms": round(percentile(.50), 3),
             "scan_p95_ms": round(percentile(.95), 3),
             "scan_samples": len(ordered),
+            "state_journal_ms": round(self.last_state_journal_ms, 3),
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -1241,10 +1361,20 @@ class Engine:
         try:
             if hasattr(self.codex, "track_external"):
                 self.codex.track_external(self.cfg.get("pinned_sessions") or [])
-            codex_sessions = self.codex.sessions()
+            codex_sessions = [copy.deepcopy(item) for item in self.codex.sessions()]
+            self._provider_session_cache["codex"] = copy.deepcopy(codex_sessions)
+            self.codex_scan_error = None
         except Exception as exc:
-            self.codex.error = str(exc)
-            codex_sessions = []
+            self.codex_scan_error = str(exc)
+            codex_sessions = copy.deepcopy(self._provider_session_cache.get("codex") or [])
+            for session in codex_sessions:
+                if session.get("state") != "stale":
+                    session["stale_previous_state"] = session.get("state") or "idle"
+                session.update(state="stale", stale=True, stale_reason=self.codex_scan_error,
+                               error=self.codex_scan_error)
+                session["capabilities"] = {
+                    **(session.get("capabilities") or {}), "submit": False,
+                    "interrupt": False, "takeover": False, "close": False}
         sessions.extend(codex_sessions)
         muted = self.cfg.get("muted_sessions") or {}
         for session in sessions:
@@ -1278,6 +1408,9 @@ class Engine:
                       flush=True)
         closed = [self.organize_closed(item) for item in self.closed_sessions()]
         closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
+        journal_started = time.perf_counter()
+        self.record_state_events([*sessions, *closed], now)
+        self.last_state_journal_ms = (time.perf_counter() - journal_started) * 1000
         actions = self.action_records(sessions)
         claude_usage = self.read_usage()
         try:
@@ -1315,8 +1448,8 @@ class Engine:
                                                for m in self.MODELS],
                                    "codex": list(self.codex.models)},
             "providers": {"claude": {"ok": True},
-                          "codex": {"ok": not bool(self.codex.error),
-                                    "error": self.codex.error}},
+                          "codex": {"ok": not bool(self.codex_scan_error or self.codex.error),
+                                    "error": self.codex_scan_error or self.codex.error}},
             "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
@@ -1694,6 +1827,17 @@ class Engine:
                 path TEXT, day TEXT, kind TEXT, name TEXT,
                 uses INT, chars INT, t_in INT, t_cw INT, t_cr INT, t_out INT, fam TEXT,
                 PRIMARY KEY(path, day, kind, name))""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS state_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL, provider TEXT NOT NULL, at REAL NOT NULL,
+                raw_state TEXT, reg_status TEXT, normalized_state TEXT, ui_group TEXT,
+                reason TEXT, access TEXT, primary_action TEXT,
+                evidence_kind TEXT, evidence_summary TEXT, revision TEXT,
+                winning_rule TEXT, suppressed_rules TEXT, confidence TEXT,
+                evidence_json TEXT, signature TEXT NOT NULL)""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS state_events_session_id
+                ON state_events(session_id, id DESC)""")
+            self.db.commit()
         return self.db
 
     @staticmethod
@@ -1933,6 +2077,152 @@ class Engine:
             db.commit()
         except Exception as e:
             print(f"session ledger error: {e}", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def _state_event_record(session, now):
+        evidence = []
+        for fact in (session.get("state_evidence") or [])[:12]:
+            if not isinstance(fact, dict):
+                continue
+            evidence.append({
+                "kind": _fact_text(fact.get("kind"), 40),
+                "label": _fact_text(fact.get("label"), 80),
+                "value": _fact_text(fact.get("value"), 220),
+                "confidence": (_fact_text(fact.get("confidence"), 20) or "unknown"),
+            })
+        summary = "; ".join(
+            f"{fact['label']}: {fact['value']}" for fact in evidence)[:1200]
+        pending = session.get("pending") or {}
+        stable = {
+            "raw_state": str(session.get("state") or "unknown"),
+            "reg_status": str(session.get("reg_status") or ""),
+            "normalized_state": str(session.get("normalized_state") or
+                                    session.get("state") or "unknown"),
+            "ui_group": str(session.get("ui_group") or "history"),
+            "reason": str(session.get("reason_label") or ""),
+            "access": str(session.get("access") or "view_only"),
+            "primary_action": str(session.get("primary_action") or "view"),
+            "winning_rule": str(session.get("winning_rule") or "placement.unknown"),
+            "suppressed_rules": list(session.get("suppressed_rules") or [])[:20],
+            "confidence": str(session.get("state_confidence") or "unknown"),
+            "pending_nonce": str(pending.get("nonce") or ""),
+            "reply_requested": bool(session.get("reply_requested")),
+            "new_response": bool(session.get("new_response")),
+            "provider_stale": bool(session.get("provider_stale")),
+        }
+        signature = hashlib.sha256(json.dumps(
+            stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return {
+            **stable, "session_id": str(session.get("session_id") or ""),
+            "provider": str(session.get("provider") or "claude"), "at": float(now),
+            "evidence_kind": evidence[0]["kind"] if evidence else "unknown",
+            "evidence_summary": summary, "evidence": evidence,
+            "revision": str(session.get("convo_v") or session.get("closed_at") or ""),
+            "signature": signature,
+        }
+
+    def record_state_events(self, sessions, now):
+        """Persist only meaningful consecutive placement changes."""
+        try:
+            db = self.ensure_db()
+            if self._state_event_signatures is None:
+                rows = db.execute("""SELECT event.session_id,event.signature,
+                                             event.normalized_state
+                    FROM state_events event JOIN (
+                        SELECT session_id,MAX(id) AS latest_id FROM state_events
+                        GROUP BY session_id
+                    ) latest ON latest.latest_id=event.id""").fetchall()
+                self._state_event_signatures = {
+                    sid: (signature, normalized_state)
+                    for sid, signature, normalized_state in rows}
+            for session in sessions:
+                sid = str(session.get("session_id") or "")
+                previous = self._state_event_signatures.get(sid)
+                # Closed ledger rows are immutable. Once their close transition
+                # is journaled, skip them before rebuilding evidence/hashes on
+                # every two-second live poll.
+                if (session.get("normalized_state") == "closed" and previous
+                        and previous[1] == "closed"):
+                    continue
+                record = self._state_event_record(session, now)
+                if not record["session_id"]:
+                    continue
+                previous = self._state_event_signatures.get(record["session_id"])
+                if previous and previous[0] == record["signature"]:
+                    continue
+                db.execute("""INSERT INTO state_events(
+                    session_id,provider,at,raw_state,reg_status,normalized_state,ui_group,
+                    reason,access,primary_action,evidence_kind,evidence_summary,revision,
+                    winning_rule,suppressed_rules,confidence,evidence_json,signature)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    record["session_id"], record["provider"], record["at"],
+                    record["raw_state"], record["reg_status"], record["normalized_state"],
+                    record["ui_group"], record["reason"], record["access"],
+                    record["primary_action"], record["evidence_kind"],
+                    record["evidence_summary"], record["revision"],
+                    record["winning_rule"], json.dumps(record["suppressed_rules"]),
+                    record["confidence"], json.dumps(record["evidence"], separators=(",", ":")),
+                    record["signature"]))
+                self._state_event_signatures[record["session_id"]] = (
+                    record["signature"], record["normalized_state"])
+            db.commit()
+        except Exception as exc:
+            print(f"state journal error: {exc}", file=sys.stderr, flush=True)
+
+    def state_history(self, sid, cursor=0, limit=40):
+        sid = str(sid or "")
+        if not sid or len(sid) > 300 or any(ord(char) < 32 for char in sid):
+            return {"ok": False, "error": "invalid session id"}
+        try:
+            cursor = int(cursor or 0)
+            limit = int(limit or 40)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid evidence cursor or limit"}
+        if cursor < 0 or not 1 <= limit <= 100:
+            return {"ok": False, "error": "evidence limit must be 1–100"}
+        cols = ("id", "session_id", "provider", "at", "raw_state", "reg_status",
+                "normalized_state", "ui_group", "reason", "access", "primary_action",
+                "evidence_kind", "evidence_summary", "revision", "winning_rule",
+                "suppressed_rules", "confidence", "evidence_json")
+        where = "session_id=?" + (" AND id<?" if cursor else "")
+        params = [sid] + ([cursor] if cursor else []) + [limit + 1]
+        try:
+            db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+            rows = db.execute(
+                f"SELECT {','.join(cols)} FROM state_events WHERE {where} "
+                "ORDER BY id DESC LIMIT ?", params).fetchall()
+            db.close()
+        except Exception as exc:
+            return {"ok": False, "error": f"state history unavailable: {exc}"}
+        more = len(rows) > limit
+        rows = rows[:limit]
+        events = []
+        for row in rows:
+            event = dict(zip(cols, row))
+            try:
+                event["suppressed_rules"] = json.loads(event["suppressed_rules"] or "[]")
+            except ValueError:
+                event["suppressed_rules"] = []
+            try:
+                event["evidence"] = json.loads(event.pop("evidence_json") or "[]")
+            except ValueError:
+                event["evidence"] = []
+            events.append(event)
+        with self.lock:
+            current = next((item for item in
+                            list(self.snapshot_cache.get("sessions") or []) +
+                            list(self.snapshot_cache.get("closed") or [])
+                            if item.get("session_id") == sid), None)
+            if current:
+                current = {key: current.get(key) for key in (
+                    "session_id", "provider", "state", "normalized_state", "reg_status",
+                    "ui_group", "reason_label", "access", "access_label",
+                    "primary_action", "primary_action_label", "winning_rule",
+                    "suppressed_rules", "state_confidence", "state_evidence",
+                    "provider_stale", "activity_at", "convo_v")}
+        return {"ok": True, "session_id": sid, "current": current,
+                "events": events,
+                "next_cursor": events[-1]["id"] if more and events else None}
 
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",

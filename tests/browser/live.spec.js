@@ -69,6 +69,11 @@ test('running Fleet Dash renders both providers without console or network failu
     await codexHistory.locator('.historyaction').click();
   }
   await expect(page.locator('#sview')).toBeVisible();
+  await page.getByRole('button', { name: 'Why here?' }).click();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  await expect(page.locator('#sevidence')).toContainText('Winning rule');
+  await expect(page.locator('#sevidence .evidenceevent').first()).toBeVisible();
+  await page.getByRole('button', { name: 'close state evidence' }).click();
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Appearance.*light \/ dark/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeVisible();

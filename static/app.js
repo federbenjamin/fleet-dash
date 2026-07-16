@@ -4,7 +4,7 @@ const $=q=>document.querySelector(q);
         history.replaceState(null,'',location.pathname+location.hash);}})();
 const open=new Set();
 const expandedPeeks=new Set();
-const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
+const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
 const routeNames={now:'Now',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights'};
 const validRoutes=new Set(Object.keys(routeNames));
 let currentRoute=validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now';
@@ -610,6 +610,7 @@ let viewerSid=null;
 function setTheme(light){
   $('#vbody').classList.toggle('light',light);
   $('#sbody').classList.toggle('light',light);
+  $('#sevidence').classList.toggle('light',light);
   $('#abody').classList.toggle('light',light);
   $('#searchviewbody').classList.toggle('light',light);
   try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
@@ -831,6 +832,87 @@ let sessionView=null;            // {sid, closed} of the open overlay
 let sessQOpen=true;              // the question block inside the chat view
 let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
 const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
+let sessionEvidenceOpen=false;
+const evidenceCache={};          // sid -> {events,next_cursor,loaded,loading,error}
+function confidenceText(value){return({confirmed:'confirmed',inferred:'inferred',stale:'stale',unknown:'unknown'})[value]||'unknown';}
+function evidenceButton(s){
+  if(!s||!s.session_id)return'';
+  return`<button class="evidencebtn${sessionEvidenceOpen?' on':''}" aria-label="Why here?" aria-pressed="${sessionEvidenceOpen}"
+    title="Explain why this session is ${esc(s.reason_label||s.ui_group||'here')}"
+    onclick="toggleSessionEvidence('${enc(s.session_id)}')">◎ <span>Why here?</span></button>`;
+}
+function evidenceFactsHtml(s){
+  const facts=(s&&s.state_evidence)||[];
+  if(!facts.length)return'<div class="evidenceempty">No state evidence recorded yet.</div>';
+  return`<div class="evidencefacts">${facts.map(fact=>`<div class="evidencefact">
+    <span class="evidencekind">${esc(fact.label||fact.kind||'Evidence')}</span>
+    <b>${esc(fact.value||'Unavailable')}</b><small class="confidence ${esc(fact.confidence||'unknown')}">${esc(confidenceText(fact.confidence))}</small>
+  </div>`).join('')}</div>`;
+}
+function evidenceEventHtml(event){
+  const when=event.at?new Date(event.at*1000).toLocaleString():'time unavailable';
+  return`<article class="evidenceevent">
+    <div><b>${esc(event.reason||event.ui_group||event.normalized_state||'State changed')}</b>
+      <span class="confidence ${esc(event.confidence||'unknown')}">${esc(confidenceText(event.confidence))}</span></div>
+    <small>${esc(when)} · ${esc(event.ui_group||'history')} · ${esc(event.access||'view_only')}</small>
+    <p>${esc(event.evidence_summary||'No evidence summary recorded.')}</p>
+    <code>${esc(event.winning_rule||'placement.unknown')}</code>
+  </article>`;
+}
+function renderEvidenceRail(s){
+  const rail=$('#sevidence');if(!rail)return;
+  rail.classList.toggle('open',sessionEvidenceOpen);
+  if(!sessionEvidenceOpen){rail.innerHTML='';return;}
+  const cache=evidenceCache[s.session_id]||{};
+  const suppressed=(s.suppressed_rules||[]);
+  rail.innerHTML=`<div class="evidencehead"><div><small>Why Fleet put this here</small>
+      <b>${esc(s.reason_label||s.ui_group||'Unknown')}</b></div>
+      <button onclick="toggleSessionEvidence('${enc(s.session_id)}')" aria-label="close state evidence">✕</button></div>
+    <div class="evidencecurrent"><div class="evidencestate"><span class="chip ${esc(s.ui_group||'history')}">${esc(s.ui_group||'history')}</span>
+      <span class="confidence ${esc(s.state_confidence||'unknown')}">${esc(confidenceText(s.state_confidence))}</span></div>
+      <div class="evidencerule"><span>Winning rule</span><code>${esc(s.winning_rule||'placement.unknown')}</code></div>
+      ${evidenceFactsHtml(s)}
+      ${suppressed.length?`<details><summary>${suppressed.length} lower-priority rule${suppressed.length===1?'':'s'} suppressed</summary>
+        <div class="suppressedrules">${suppressed.map(rule=>`<code>${esc(rule)}</code>`).join('')}</div></details>`:''}</div>
+    <div class="evidencehistory"><h3>Placement history</h3>
+      ${cache.error?`<div class="evidenceerror">${esc(cache.error)}</div>`:''}
+      ${(cache.events||[]).map(evidenceEventHtml).join('')}
+      ${cache.loading?'<div class="ctxload">loading evidence…</div>':''}
+      ${cache.loaded&&!(cache.events||[]).length?'<div class="evidenceempty">No earlier transitions recorded.</div>':''}
+      ${cache.next_cursor&&!cache.loading?`<button class="historyaction evidenceolder" onclick="loadSessionEvidence('${enc(s.session_id)}',true)">Load older</button>`:''}
+    </div>`;
+}
+async function loadSessionEvidence(encodedSid,more=false){
+  const sid=decodeURIComponent(encodedSid),cache=evidenceCache[sid]||(evidenceCache[sid]={events:[]});
+  if(cache.loading||(!more&&cache.loaded))return;
+  cache.loading=true;cache.error=null;
+  const current=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
+    ((last&&last.closed)||[]).find(item=>item.session_id===sid)||{};
+  renderEvidenceRail(current);
+  try{
+    const cursor=more&&cache.next_cursor?'&cursor='+encodeURIComponent(cache.next_cursor):'';
+    const response=await fetch('/api/evidence?sid='+encodeURIComponent(sid)+'&limit=30'+cursor,{cache:'no-store'});
+    const data=await response.json();
+    if(!data.ok)throw new Error(data.error||'state evidence unavailable');
+    cache.events=more?[...(cache.events||[]),...(data.events||[])]:data.events||[];
+    cache.next_cursor=data.next_cursor||null;cache.loaded=true;
+  }catch(error){cache.error=String(error.message||error);}
+  finally{cache.loading=false;}
+  if(sessionView&&sessionView.sid===sid&&sessionEvidenceOpen){
+    const fresh=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
+      ((last&&last.closed)||[]).find(item=>item.session_id===sid)||current;
+    renderEvidenceRail(fresh);
+  }
+}
+function toggleSessionEvidence(encodedSid){
+  const sid=decodeURIComponent(encodedSid);
+  sessionEvidenceOpen=!sessionEvidenceOpen;
+  const s=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
+    ((last&&last.closed)||[]).find(item=>item.session_id===sid)||{};
+  renderEvidenceRail(s);
+  if(sessionEvidenceOpen)loadSessionEvidence(encodedSid);
+  if(sessionView&&!sessionView.closed)renderSession(true);else if(sessionView)renderClosed(true);
+}
 function primarySessionAction(sid){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(s){openSession(sid);return;}
@@ -869,7 +951,7 @@ function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
   const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(session?.new_response)markRead(session);
-  sessionView={sid,closed:false};sessionOpened=true;
+  sessionView={sid,closed:false};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
   syncOverlayHistory();
   renderSession(true);
@@ -877,21 +959,22 @@ function openSession(sid){
 // a closed session has no process: read its transcript, offer no controls
 function openClosed(sid){
   closeViewer();
-  sessionView={sid,closed:true};sessionOpened=true;
+  sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
   syncOverlayHistory();
   renderClosed(true);
 }
 function closeSession(){
-  closeOverflow();sessionView=null;slashClose();
-  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';$('#sctrl').innerHTML='';
+  closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
+  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
 }
 async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
   const sid=sessionView.sid;
   const body=$('#sbody');
   const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
-  $('#sctrl').innerHTML=overflowMenu('session',null,'closed');
+  $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',null,'closed');
+  renderEvidenceRail(meta);
   $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
     so there is nothing to send to. The conversation is read-only.</div>
     ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
@@ -939,7 +1022,8 @@ function renderSession(force){
   const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
   const done=['done','ended'];
   $('#stitle2').innerHTML=sessTitleBlock(s);
-  $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,'session');
+  $('#sctrl').innerHTML=evidenceButton(s)+terminalButton(s)+overflowMenu('session',s,'session');
+  renderEvidenceRail(s);
   // A focused composer must not freeze transcript confirmation. The composer
   // itself is preserved below; only defer the body repaint during an active
   // touch gesture so mobile scrolling is not interrupted.
@@ -1217,6 +1301,12 @@ function cardDetail(s){
         <span>${s.muted?'push notifications muted for this session':'notify me about this session'}</span>
       </div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
+      <details class="dfold statewhy" ${stateInfoOpen.has(s.session_id)?'open':''}
+        ontoggle="stateInfoOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>why this is ${esc((s.reason_label||s.ui_group||'here').toLowerCase())}</summary>
+        <div class="statewhybody"><div class="evidencerule"><span>Winning rule</span><code>${esc(s.winning_rule||'placement.unknown')}</code></div>
+          ${evidenceFactsHtml(s)}</div>
+      </details>
       <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
         ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>session info</summary>
@@ -1257,7 +1347,8 @@ function detailSig(s){
   const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
   return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.reg_status,s.ctx_tokens,
-    s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files].join('|');
+    s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files,
+    s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh'].join('|');
 }
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
@@ -2086,12 +2177,14 @@ function historyRow(item,pinnedView=false){
       <span>provider</span><b>${esc(provider)}</b>
       <span>access</span><b>${esc(item.access_label||'View only')}</b>
       <span>provider state</span><b>${esc(raw)}</b>
+      <span>placement rule</span><b><code>${esc(item.winning_rule||'placement.unknown')}</code></b>
+      <span>confidence</span><b>${esc(confidenceText(item.state_confidence))}</b>
       <span>cwd</span>${cpb(item.cwd||'?')}
       <span>branch</span><b>${esc(item.branch||'—')}</b>
       <span>model</span><b>${esc(item.model||'?')}</b>
       ${item.error?`<span>error</span><b>${esc(item.error)}</b>`:''}
       ${item.bridge_url?`<span>link</span><b><a class="jump" href="${esc(item.bridge_url)}" target="_blank">open in claude.ai ↗</a></b>`:''}
-    </div></div>`:''}
+    </div>${evidenceFactsHtml(item)}</div>`:''}
   </div>`;
 }
 

@@ -621,7 +621,55 @@ td.r,th.r{text-align:right}
 #sctrl{display:flex;align-items:center;gap:6px}
 #sclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
-#sbody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
+#sworkspace{position:relative;display:flex;flex:1;min-height:0}
+#sbody{flex:1;min-width:0;overflow:auto;padding:14px;overscroll-behavior:contain}
+#sevidence{display:none;flex:0 0 370px;max-width:42vw;overflow:auto;background:#0f141b;
+  border-left:1px solid var(--line);padding:0 13px 18px;overscroll-behavior:contain}
+#sevidence.open{display:block}
+.evidencebtn{height:36px;display:inline-flex;align-items:center;gap:6px;background:var(--card);
+  border:1px solid var(--line);border-radius:8px;color:var(--dim);font:inherit;font-size:11px;
+  padding:0 10px;cursor:pointer;white-space:nowrap}
+.evidencebtn:hover,.evidencebtn.on{color:var(--blue);border-color:var(--blue)}
+.evidencehead{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;
+  gap:10px;margin:0 -13px 12px;padding:12px 13px 10px;background:rgba(15,20,27,.96);
+  border-bottom:1px solid var(--line);backdrop-filter:blur(12px)}
+.evidencehead>div{display:flex;min-width:0;flex-direction:column;gap:2px}
+.evidencehead small{color:var(--faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.45px}
+.evidencehead b{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.evidencehead button{width:34px;height:32px;background:var(--card);border:1px solid var(--line);
+  border-radius:8px;color:var(--fg);font:inherit;cursor:pointer}
+.evidencecurrent{padding-bottom:14px;border-bottom:1px solid var(--line)}
+.evidencestate{display:flex;align-items:center;gap:7px;margin-bottom:10px}
+.confidence{display:inline-flex;align-items:center;width:max-content;border:1px solid var(--line);
+  border-radius:999px;padding:2px 6px;color:var(--dim);font:9px/1.2 "SF Mono",Menlo,monospace;
+  text-transform:uppercase;letter-spacing:.25px}
+.confidence.confirmed{border-color:rgba(63,185,80,.38);color:var(--green)}
+.confidence.inferred{border-color:rgba(210,153,34,.38);color:var(--amber)}
+.confidence.stale{border-color:rgba(248,81,73,.42);color:var(--red)}
+.evidencerule{display:grid;grid-template-columns:88px minmax(0,1fr);align-items:start;gap:8px;
+  color:var(--faint);font-size:10px;margin:8px 0}
+.evidencerule code,.suppressedrules code,.evidenceevent code{color:var(--blue);font:10px/1.4 "SF Mono",Menlo,monospace;
+  overflow-wrap:anywhere}
+.evidencefacts{display:flex;flex-direction:column;gap:7px;margin-top:10px}
+.evidencefact{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;padding:8px 9px;
+  background:var(--card);border:1px solid var(--line);border-radius:8px}
+.evidencefact .evidencekind{grid-column:1/-1;color:var(--faint);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.35px}.evidencefact b{color:var(--dim);font-size:11px;line-height:1.45;font-weight:500}
+.evidencefact .confidence{align-self:start}.evidencecurrent details{margin-top:10px;color:var(--dim);font-size:10.5px}
+.evidencecurrent summary{cursor:pointer}.suppressedrules{display:flex;flex-direction:column;gap:4px;padding:7px 0 0 12px}
+.evidencehistory h3{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--faint);margin:14px 0 8px}
+.evidenceevent{border-left:2px solid var(--line);padding:2px 0 12px 10px;margin-left:3px}
+.evidenceevent>div{display:flex;align-items:center;gap:7px}.evidenceevent b{font-size:11.5px}
+.evidenceevent>small{display:block;color:var(--faint);font-size:9.5px;margin:3px 0}
+.evidenceevent p{color:var(--dim);font-size:10.5px;line-height:1.45;margin:5px 0}
+.evidenceempty,.evidenceerror{color:var(--faint);font-size:11px;line-height:1.5;padding:9px}
+.evidenceerror{color:var(--red);border:1px solid rgba(248,81,73,.35);border-radius:8px}
+.evidenceolder{width:100%;margin-top:4px}.statewhybody{padding:0 10px 10px}
+#sevidence.light{background:#f7f8fa;color:#1c2128}
+#sevidence.light .evidencehead{background:rgba(247,248,250,.96)}
+#sevidence.light .evidencefact{background:#fff;border-color:#d0d7de}
+#sevidence.light .evidencefact b,#sevidence.light .evidenceevent p{color:#57606a}
+#sevidence.light .evidenceevent{border-color:#d0d7de}
 #sact{border-top:1px solid var(--line);background:var(--card);
       padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
 #sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
@@ -854,6 +902,8 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .workhead{grid-template-columns:32px minmax(0,1fr) 18px}.workcounts{grid-column:2;justify-content:flex-start;margin-top:4px}
   .workhead .chev{grid-column:3;grid-row:1/3}.worksummary{padding-left:12px;gap:7px}
   .workoutcome{grid-template-columns:44px}.worksignals{gap:8px}.worksignals span{flex:1 1 42%}
+  #sevidence{position:absolute;inset:0;z-index:24;width:100%;max-width:none;border-left:0;padding-bottom:24px}
+  .evidencebtn span{display:none}.evidencebtn{width:38px;justify-content:center;padding:0;font-size:15px}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}

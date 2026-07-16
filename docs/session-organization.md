@@ -11,6 +11,10 @@ Every session has three independent user-facing dimensions:
 2. **Reason** answers: why is it there?
 3. **Access and primary action** answer: what can Fleet do with it?
 
+Every classification also exposes its winning rule, suppressed lower-priority rules, confidence
+(`confirmed`, `inferred`, `stale`, or `unknown`), and ordered safe evidence facts. Expanded cards show
+the current explanation. Full chat's **Why here?** rail adds the durable transition history.
+
 The Now destination order is:
 
 1. **Pinned**
@@ -51,9 +55,10 @@ and command/file approvals are never bulk actions.
 | Available | No turn is active, Fleet can submit another message, and nothing requires a response. This includes provider `idle` and completed non-question turns. |
 | Session history | No turn is active and the session is dormant, external/view-only, reopenable, explicitly closed, or otherwise no longer part of the immediate interactive inventory. |
 
-An inactive external session moves to Session history immediately. If it starts a
-turn again, it returns to Working. If its final assistant prose asks a direct
-question, it moves to Needs you with View-only access instead.
+An inactive external session moves to Session history. If it starts a turn again, it returns to
+Working. A newly completed external turn remains Available long enough to review its outcome, with
+View-only access, before provider inactivity moves it to History. If its final assistant prose asks
+a direct question, it moves to Needs you with View-only access instead.
 
 ## Reason labels and actions
 
@@ -73,6 +78,7 @@ question, it moves to Needs you with View-only access instead.
 | Working | Working elsewhere | An external provider runtime owns an active turn. | View |
 | Working | Slow | The turn is still active but activity has exceeded the stall threshold. | Open, or View when external |
 | Available | Available | The session is interactive, has no active turn, and has no reply request. | Continue |
+| Available | Completed elsewhere | A view-only external turn completed recently and its outcome is still current. | View |
 | Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. Its placement remains Available, but the unreviewed outcome is presented in the Action inbox until reviewed. | Continue |
 | Session history | Inactive | A managed, interactive session is dormant. | Continue |
 | Session history | External | The external/view-only session has no active turn. | View |
@@ -102,6 +108,7 @@ when the user sends a response or explicitly chooses **Mark available**.
 | `stalled` | Working / Slow |
 | `idle` | Available / Available |
 | Non-question `turn_done` | Available / Available, optionally New response |
+| External/view-only non-question `turn_done` | Available / Completed elsewhere / View, optionally New response |
 | Managed `dormant` | Session history / Inactive / Continue |
 | Inactive `headless` or other read-only external thread | Session history / External / View |
 | `reopenable` | Session history / Reopenable / Reopen |
@@ -117,9 +124,10 @@ still Needs you / Fix needed.
 
 Reply detection examines the complete newest assistant prose, not the truncated card
 peek. It ignores fenced code, inline code, Markdown quotations, and quoted strings.
-Questions anywhere in the remaining prose count, including multi-part interview
-questions followed by later explanatory text. Explicit instructions such as “answer
-both,” “choose one,” or “tell me which” also count.
+A direct question counts when it is the final prose request. This prevents rhetorical or status
+questions that the assistant immediately answers from creating false attention. Explicit response
+instructions such as “answer both,” “choose one,” or “tell me which” also count even when later
+background prose follows.
 
 The dismissal record is keyed by session id and conversation revision. A later
 assistant message therefore creates a new decision instead of inheriting an old
