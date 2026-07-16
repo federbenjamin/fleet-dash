@@ -10,8 +10,60 @@
    ::-webkit-scrollbar styling, so never mix the two. */
 *{scrollbar-width:thin;scrollbar-color:transparent transparent}
 .scrolling{scrollbar-color:#4a545f transparent}
-body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,sans-serif;
-     padding:12px 12px calc(24px + env(safe-area-inset-bottom));max-width:760px;margin:0 auto}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  min-height:100vh}
+#appshell{min-height:100vh;display:grid;grid-template-columns:218px minmax(0,1fr)}
+#sidenav{height:100vh;position:sticky;top:0;border-right:1px solid var(--line);background:#0a0e14;
+  padding:18px 12px 14px;display:flex;flex-direction:column;z-index:20}
+.brand{display:flex;align-items:center;gap:10px;padding:2px 8px 22px;color:var(--fg)}
+.brandmark{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid #365d87;border-radius:7px;background:#101c2c;color:var(--blue);font-weight:800;
+  font-size:13px;box-shadow:inset 0 0 0 1px rgba(88,166,255,.08)}
+.brand>span:last-child{display:flex;flex-direction:column;line-height:1.25}
+.brand b{font-size:14px}.brand small{font-size:9.5px;color:var(--faint);letter-spacing:.35px;text-transform:uppercase}
+.navlist{display:flex;flex-direction:column;gap:3px}
+.navlist button{width:100%;min-height:42px;display:grid;grid-template-columns:24px 1fr auto;align-items:center;
+  gap:8px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--dim);
+  font:inherit;font-size:12.5px;text-align:left;padding:0 10px;cursor:pointer}
+.navlist button:hover{background:var(--card);color:var(--fg)}
+.navlist button.active{background:var(--card2);border-color:var(--line);color:var(--fg);font-weight:650}
+.navlist button.active .navicon{color:var(--blue)}
+.navlist button b{color:var(--amber);font-size:10px;font-variant-numeric:tabular-nums}
+.navicon{color:var(--faint);font:15px/1 "SF Mono",Menlo,monospace;text-align:center}
+.railstatus{margin-top:auto;display:flex;align-items:center;gap:7px;color:var(--faint);font-size:10.5px;
+  padding:10px 12px;border-top:1px solid var(--line)}
+.statuslamp{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(63,185,80,.09)}
+#appmain{min-width:0;padding:22px 28px 48px}
+.destination{width:min(100%,960px);margin-inline:auto}
+.destination[hidden]{display:none!important}
+.desthead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:0 0 16px;padding:0 2px}
+.desthead h1{font-size:22px;line-height:1.2;letter-spacing:-.25px}.desthead p{font-size:11.5px;color:var(--faint);margin-top:3px}
+.headprimary{border:1px solid var(--blue);border-radius:8px;background:#101c2c;color:var(--blue);
+  font:inherit;font-size:11.5px;font-weight:700;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.headprimary:hover{background:var(--blue);color:#07111d}
+.commandbar{position:sticky;top:0;z-index:12;background:rgba(13,17,23,.96);backdrop-filter:blur(12px);
+  border:1px solid var(--line);border-radius:10px;padding:7px;margin:0 0 12px;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.commandinput{display:flex;align-items:center;gap:8px;color:var(--faint);padding:0 4px}
+.commandinput input{width:100%;border:0;outline:0;background:transparent;color:var(--fg);font:inherit;
+  font-size:13px;padding:6px 2px}.commandinput input::placeholder{color:var(--faint)}
+.commandchips{display:flex;gap:5px;overflow-x:auto;padding-top:6px;border-top:1px solid #20262e}
+.commandchips button{flex:0 0 auto;border:1px solid transparent;border-radius:14px;background:transparent;
+  color:var(--faint);font:inherit;font-size:10.5px;padding:4px 9px;cursor:pointer}
+.commandchips button:hover{color:var(--fg);background:var(--card)}
+.commandchips button.active{border-color:#365d87;background:#101c2c;color:var(--blue)}
+.destinationempty{min-height:280px;border:1px dashed var(--line);border-radius:12px;background:var(--card);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--faint);padding:30px}
+.destinationempty>span{font:28px/1 "SF Mono",Menlo,monospace;color:var(--blue);margin-bottom:12px}
+.destinationempty b{color:var(--fg);font-size:13px}.destinationempty p{font-size:11.5px;margin-top:4px}
+.mobilehead,#bottomnav,#mobilemore{display:none}
+.historybox,.insightspanel{background:var(--card);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.historycount{padding:9px 12px;border-bottom:1px solid var(--line);color:var(--faint);font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.5px}
+.insightspanel{padding:8px 12px 12px}
+#route-insights #rollup{margin-top:0}
+#notoken{display:none;background:#2b2111;color:var(--amber);border-radius:7px;padding:7px 10px;
+  font-size:11.5px;margin-bottom:10px}
+.mono,.scost,.anum,.acost,.historyage,.umeta,.ureset{font-family:"SF Mono",Menlo,monospace}
 .pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
 .pagetitle span{flex:1}
 #gear{background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:2px 6px}
@@ -634,6 +686,43 @@ html[data-reader-width="centered"] #abody>.aconvo,
 html[data-reader-width="centered"] #vbody>.mdoc,
 html[data-reader-width="centered"] #vbody>pre.raw{max-width:760px;margin-inline:auto}
 html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,760px);margin-inline:auto}
+@media (max-width:820px){
+  #appshell{display:block;min-height:100dvh}
+  #sidenav{display:none}
+  #appmain{padding:0 12px calc(82px + env(safe-area-inset-bottom))}
+  .destination{width:100%}
+  .mobilehead{height:52px;display:flex;position:sticky;top:0;z-index:14;align-items:center;gap:9px;
+    margin:0 -12px 12px;padding:0 12px;background:rgba(10,14,20,.97);backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line)}
+  .mobilehead .brandmark{width:25px;height:25px;font-size:11px}
+  #mobiletitle{flex:1;font-size:14px}
+  .desthead{align-items:center;margin-bottom:12px;padding:0 2px}
+  .desthead h1{display:none}
+  .desthead p{font-size:11px;margin:0}
+  .headprimary{padding:7px 10px}
+  .commandbar{top:52px;margin-left:-1px;margin-right:-1px}
+  #bottomnav{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;
+    z-index:40;padding:5px 6px calc(5px + env(safe-area-inset-bottom));background:rgba(10,14,20,.98);
+    backdrop-filter:blur(16px);border-top:1px solid var(--line)}
+  #bottomnav button{min-width:0;height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:2px;border:0;border-radius:8px;background:transparent;color:var(--faint);font:inherit;cursor:pointer}
+  #bottomnav button>span{font:16px/1 "SF Mono",Menlo,monospace}
+  #bottomnav button>small{font-size:9.5px}
+  #bottomnav button.active{background:var(--card2);color:var(--blue)}
+  #mobilemore{position:fixed;right:10px;bottom:calc(66px + env(safe-area-inset-bottom));z-index:45;
+    width:210px;flex-direction:column;padding:6px;background:#11161d;border:1px solid var(--line);
+    border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.62)}
+  #mobilemore.open{display:flex}
+  #mobilemore button{display:grid;grid-template-columns:24px 1fr;align-items:center;min-height:44px;
+    border:0;border-radius:7px;background:transparent;color:var(--fg);font:inherit;text-align:left;padding:0 10px;cursor:pointer}
+  #mobilemore button:hover{background:var(--card2)}
+  .destinationempty{min-height:220px}
+  .historymain{padding-left:8px;padding-right:8px}
+  .historyage{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}
+}
 /* iOS Safari auto-zooms any focused input with font-size < 16px — must be the
    LAST rule (ties on specificity with .freetext/.setnum input sizes; later wins) */
 @media (pointer:coarse){input{font-size:16px!important}}

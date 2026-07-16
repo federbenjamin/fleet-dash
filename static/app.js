@@ -1,10 +1,67 @@
 const $=q=>document.querySelector(q);
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
-        history.replaceState(null,'',location.pathname);}})();
+        history.replaceState(null,'',location.pathname+location.hash);}})();
 const open=new Set();
 const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
+const routeNames={now:'Now',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights'};
+const validRoutes=new Set(Object.keys(routeNames));
+let currentRoute=validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now';
+let nowFilter='',nowState='all';
+function closeMobileMore(){
+  const menu=$('#mobilemore'),button=$('#bottomnav [data-route="more"]');
+  if(menu)menu.classList.remove('open');
+  if(button){button.classList.remove('active');button.setAttribute('aria-expanded','false');}
+}
+function toggleMobileMore(){
+  const menu=$('#mobilemore'),button=$('#bottomnav [data-route="more"]');
+  const opening=!menu.classList.contains('open');
+  menu.classList.toggle('open',opening);
+  button.classList.toggle('active',opening);
+  button.setAttribute('aria-expanded',String(opening));
+}
+function applyRouteNav(route){
+  document.querySelectorAll('[data-route]').forEach(button=>{
+    const active=button.dataset.route===route||
+      (button.dataset.route==='more'&&(route==='insights'||route==='settings'));
+    button.classList.toggle('active',active);
+    if(button.dataset.route!=='more'){
+      if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
+    }
+  });
+  const title=$('#mobiletitle');if(title)title.textContent=route==='settings'?'Settings':(routeNames[route]||'Now');
+}
+function navigateTo(route,push=true){
+  closeMobileMore();
+  if(route==='settings'){
+    applyRouteNav('settings');
+    openSettings();
+    return;
+  }
+  if(!validRoutes.has(route))route='now';
+  currentRoute=route;
+  document.querySelectorAll('[data-destination]').forEach(section=>{section.hidden=section.dataset.destination!==route;});
+  applyRouteNav(route);
+  if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
+  if(route==='insights')loadInsights();
+  window.scrollTo({top:0,behavior:'auto'});
+}
+function setNowFilter(value){nowFilter=value;render(last,true);}
+function setNowState(value){
+  nowState=['all','needs_you','working','available'].includes(value)?value:'all';
+  render(last,true);
+}
+function matchesNow(session){
+  if(!session)return false;
+  const group=session.ui_group||(session.closed_at!=null?'history':'');
+  if(nowState!=='all'&&group!==nowState)return false;
+  const query=nowFilter.trim().toLowerCase();
+  if(!query)return true;
+  return [session.title,session.name,session.project,session.branch,session.provider,
+    session.reason_label,session.access_label,session.model,session.cwd]
+    .filter(Boolean).join(' ').toLowerCase().includes(query);
+}
 // input guard, two windows: a scroll gesture (touchmove OR desktop wheel/trackpad)
 // holds POLL re-renders 1500ms so the scrollbox isn't replaced mid-gesture (a
 // replaced node kills wheel momentum: "scroll stops after a second"); a tap
@@ -537,9 +594,12 @@ function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
-  if(!histPushed)return;                 // an entry we didn't push — leave it
-  histPushed=false;
-  closeConfirm();closeViewer();closeAgent();closeSession();closeSettings();
+  if(histPushed){
+    histPushed=false;
+    closeConfirm();closeViewer();closeAgent();closeSession();closeSettings();
+    return;
+  }
+  navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
 });
 function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
@@ -548,7 +608,10 @@ function dismissOverlay(){
   else{closeViewer();closeAgent();closeSession();closeSettings();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
-document.addEventListener('click',e=>{if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();});
+document.addEventListener('click',e=>{
+  if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();
+  if($('#mobilemore').classList.contains('open')&&!e.target.closest('#mobilemore')&&!e.target.closest('[data-route="more"]'))closeMobileMore();
+});
 
 // ---- full-screen session view ----------------------------------------------
 // Same overlay shape as the subagent view, but this one is a real terminal
@@ -862,11 +925,11 @@ function agentTap(e,sid,aid){
   e.stopPropagation();
   openAgent(sid,aid);
 }
-function renderPinned(f){
+function renderPinned(f,predicate=()=>true){
   const el=$('#pinned');
   const sessions=(f&&f.sessions)||[],closed=(f&&f.closed)||[];
-  const items=sessions.filter(s=>pinnedSessions.has(s.session_id));
-  const archived=closed.filter(s=>pinnedSessions.has(s.session_id));
+  const items=sessions.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
+  const archived=closed.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
   if(!items.length&&!archived.length){el.className='empty';el.innerHTML='';return;}
   el.className='';
   if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div><div class="pinarchived"></div>';
@@ -1046,6 +1109,7 @@ function closeSettings(){
   settingsOpen=false;
   $('#settingsview').style.display='none';
   $('#settings').innerHTML='';
+  applyRouteNav(currentRoute);
 }
 function renderSettings(){
   const el=$('#settings');
@@ -1489,7 +1553,7 @@ function slashPick(sid,pre,name){
   slashClose();
   inp.focus();
 }
-let historyOpen=false,historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
+let historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
 const historyInfoOpen=new Set();
 function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
   if(!list.length&&!keepEmpty){el.innerHTML='';el.className='';return;}
@@ -1626,10 +1690,9 @@ function checkSpawn(f){
 }
 function historySection(f){
   const items=historyItems(f);
-  if(!items.length)return'';
-  return`<details class="foldbox historybox" ${historyOpen?'open':''}
-      ontoggle="historyOpen=this.open">
-    <summary>Session history (${items.length}) <small>— inactive, external, reopenable, and closed</small></summary>
+  if(!items.length)return'<div class="destinationempty"><span>↺</span><b>No session history</b><p>Inactive and closed sessions will appear here.</p></div>';
+  return`<div class="historybox">
+    <div class="historycount">${items.length} session${items.length===1?'':'s'}</div>
     <div class="historytools">
       <div class="freetext"><input placeholder="Filter by title, project, branch, provider, or state"
         value="${esc(historyFilter)}" oninput="historyFilter=this.value;historyVisible=100;updateHistoryRows()"></div>
@@ -1637,7 +1700,7 @@ function historySection(f){
       ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
     </div>
     <div id="historyrows">${historyRows(filteredHistory(f))}</div>
-  </details>`;
+  </div>`;
 }
 function historyRows(items){
   if(!items.length)return'<div class="empty">no matches</div>';
@@ -1703,7 +1766,7 @@ function schedulePeekOverflow(){
 }
 window.addEventListener('resize',schedulePeekOverflow);
 
-let insightsOpen=false,insightsDays=7;
+let insightsDays=7;
 const insightsCache={};   // days -> {t, data, fetching}
 function loadInsights(force){
   const c=insightsCache[insightsDays];
@@ -1760,12 +1823,7 @@ function insightsSection(){
         insTable([['session'],['project'],['$',1]],
           d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
   }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
-  // leading separator: closes off the session/closed lists. Its margin-bottom (8)
-  // collapses with the foldbox margin-top (14) → a 14px gap to cost insights,
-  // matching the dormant-to-its-separator gap above.
-  return`<div class="dsep"></div>
-    <details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
-    <summary>cost insights</summary>${body}</details>`;
+  return`<div class="insightspanel">${body}</div>`;
 }
 
 let last=null;
@@ -1775,6 +1833,12 @@ function render(f,force){
   applyReaderWidth();
   syncPinnedSessions(f);
   const t=f.totals;
+  $('#nav-now-count').textContent=t.needs_me||'';
+  document.querySelectorAll('[data-now-filter]').forEach(button=>{
+    const active=button.dataset.nowFilter===nowState;
+    button.classList.toggle('active',active);
+    button.setAttribute('aria-pressed',String(active));
+  });
   $('#totals').innerHTML=`<span><b${t.needs_me?' style="color:var(--amber)"':''}>${t.needs_me}</b> need you</span>
     <span><b>${t.busy}</b> working</span>
     <span><b>${t.available||0}</b> available <i class="sep">·</i>
@@ -1787,8 +1851,8 @@ function render(f,force){
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
   if(force||!touching()){
-    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id));
-    renderPinned(f);
+    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
+    renderPinned(f,matchesNow);
     renderQueue($('#needs'),unpinned.filter(s=>s.ui_group==='needs_you'),
       'Needs you','waiting for a response or intervention','needs');
     renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
@@ -1804,6 +1868,7 @@ function render(f,force){
   renderAgent();
   renderSession();
   schedulePeekOverflow();
+  applyRouteNav(settingsOpen?'settings':currentRoute);
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
 }
 
@@ -1816,6 +1881,7 @@ async function tick(){
     render(last);
   }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
 }
+navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);
 fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
   .then(r=>{$('#notoken').style.display=r.status===403?'block':'none';}).catch(()=>{});

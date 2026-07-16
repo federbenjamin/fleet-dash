@@ -9,16 +9,21 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **One card per session**, organized as an action queue: **Pinned**, **Needs you**, **Working**,
-  **Available**, then one collapsed **Session history**. Pinned/Needs you/Working disappear when
-  empty; Available remains visible. Cards use reasons such as **Reply requested**, **Command
+- **One card per session** on **Now**, organized as an action queue: **Pinned**, **Needs you**,
+  **Working**, then **Available**. Pinned/Needs you/Working disappear when empty; Available remains
+  visible. The separate **History** destination owns dormant, external, reopenable, and closed
+  sessions. Cards use reasons such as **Reply requested**, **Command
   approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
-- **⚙ settings** (top right): per-category toggles for the ntfy pushes (waiting-on-you,
+- **Responsive application navigation:** desktop uses a persistent left rail for Now, Search,
+  Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
+  fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
+  across refresh and browser/native back gestures. Now has a sticky text filter plus state chips.
+- **⚙ settings** (desktop rail or mobile More): per-category toggles for the ntfy pushes (waiting-on-you,
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
@@ -105,7 +110,7 @@ the provider without affecting Claude sessions.
 - **Needs you** includes native questions/approvals and ordinary assistant prose that directly asks
   for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
   Completed non-question turns remain **Available** and show **new** until opened.
-- **Session history** is one flat chronological list for dormant, inactive external, reopenable, and
+- **History** is one flat chronological destination for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
   View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no
   recent activity; it is a diagnostic raw state, not a separate page section. Fleet indexes every
@@ -195,8 +200,8 @@ the provider without affecting Claude sessions.
   Its top-right **⋮ menu** contains Codex Plan/Default (when applicable), light/dark mode, Stop turn,
   and Close session. Stop and close both confirm first. Closing an active session stops its current
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
-  Claude's iTerm tab remains open. The conversation moves to **Session history**. The card keeps its
-  inline conversation for scanning; this is for actually reading and working a session.
+  Claude's iTerm tab remains open. The conversation moves to **History**. The card's bounded Markdown
+  peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
   button (right of "show conversation") takes you straight back. The two are built to resemble
@@ -256,13 +261,13 @@ the provider without affecting Claude sessions.
   ✕ dismiss), and the always-visible free-text send box.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
-- **Session history** dropdown: inactive sessions plus every surviving top-level Claude transcript
+- **History destination:** inactive sessions plus every surviving top-level Claude transcript
   (title, provider, project, state, and age), loaded 100 rows at a time. Search and combine Access
   and Provider filters. A closed row always has **View**. It also has **Reopen** when its exact
   transcript and original working directory still exist; Reopen starts `claude --resume <id>` in a
   new iTerm tab. Tap the row itself for its info block. Session ids, cwds and agent ids in any info
   block are **tap-to-copy**.
-- **cost insights** dropdown (7/30/90-day window; each subsection its own dropdown): where
+- **Insights destination** (7/30/90-day window; each subsection its own dropdown): where
   the tokens and money actually go —
   - **cache invalidations**: every API call whose cache_read fell short of the previous
     call's read+write, counting only tokens actually re-paid (as cache-write/uncached),
@@ -356,7 +361,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `act_token` | generated | device token for the act endpoint |
 
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
-(dashboard.html changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.
+(dashboard/static asset changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.
 
 ## Tests
 

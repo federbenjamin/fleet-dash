@@ -11,13 +11,15 @@ Every session has three independent user-facing dimensions:
 2. **Reason** answers: why is it there?
 3. **Access and primary action** answer: what can Fleet do with it?
 
-The main page order is:
+The Now destination order is:
 
 1. **Pinned**
 2. **Needs you**
 3. **Working**
 4. **Available**
-5. **Session history**
+
+The separate **History** destination follows those four live-inventory groups and owns inactive
+inventory.
 
 Pinned sessions are relocated, not duplicated. They retain their reason, access,
 and primary action. Pinned cards sort by the same urgency order as the main page,
@@ -25,8 +27,8 @@ then by newest activity. Pins persist in Fleet's server settings across browser
 reloads, daemon restarts, and devices.
 
 Empty Pinned, Needs you, and Working sections are hidden. Available remains visible
-with an empty-state message. Session history is hidden only when empty and is
-collapsed by default.
+with an empty-state message. History shows one flat list or an explicit empty state; it is not a
+disclosure nested under Now.
 
 ## Placement and classification
 

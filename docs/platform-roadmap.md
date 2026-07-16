@@ -2,6 +2,17 @@
 
 Status: approved for sequential implementation on `codex-integration`.
 
+## Implementation progress
+
+| Milestone | Status | Current evidence |
+| --- | --- | --- |
+| M0 — Baseline and roadmap | Complete · 2026-07-16 | Roadmap catalogue, persistent external-thread observation, quick-response delivery, repeatable Python/browser baselines, and pushed commits through `b9bf0e0`. |
+| M1 — App shell and shared components | Complete · 2026-07-16 | Semantic zero-build shell in `dashboard.html`, responsive/navigation/component rules in `static/fleet.css`, route/back/filter behavior in `static/app.js`, 82 Python tests, 40 deterministic Playwright desktop/mobile tests, and 2 running-daemon Playwright checks. |
+| M2 — Incremental global search | Next | Search destination is present but intentionally states that indexing arrives in M2. |
+
+Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
+verifies the current implementation and tests against the full catalogue.
+
 This roadmap turns Fleet Dash from a session list into a local operations desk for supervising
 Claude Code and Codex work. It preserves one shared application, provider-independent sessions,
 every existing control, and the current safe-action boundaries.

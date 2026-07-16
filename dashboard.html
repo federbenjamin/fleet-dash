@@ -7,24 +7,77 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Fleet View</title>
 <link rel="stylesheet" href="/static/fleet.css">
-
 </head>
 <body>
-<h1 class="pagetitle"><span>Fleet View</span><button id="gear" title="settings"
-  onclick="openSettings()">⚙</button></h1>
-<header><div id="totals"></div></header>
-<div id="usage"></div>
-<div id="pinned"></div>
-<div id="stale">server unreachable — showing last snapshot</div>
-<div id="providerstate"></div>
-<div id="notoken" style="display:none;background:#2b2111;color:#d29922;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:10px">
-read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
-<div id="needs"></div>
-<div id="working"></div>
-<div id="sessions"></div>
-<div id="newsess"></div>
-<div id="history"></div>
-<div id="rollup"></div>
+<div id="appshell">
+  <aside id="sidenav" aria-label="Fleet navigation">
+    <div class="brand"><span class="brandmark">F</span><span><b>Fleet Dash</b><small>local operations</small></span></div>
+    <nav class="navlist">
+      <button data-route="now" onclick="navigateTo('now')"><span class="navicon">⌂</span><span>Now</span><b id="nav-now-count"></b></button>
+      <button data-route="search" onclick="navigateTo('search')"><span class="navicon">⌕</span><span>Search</span></button>
+      <button data-route="workstreams" onclick="navigateTo('workstreams')"><span class="navicon">⌘</span><span>Workstreams</span></button>
+      <button data-route="history" onclick="navigateTo('history')"><span class="navicon">↺</span><span>History</span></button>
+      <button data-route="insights" onclick="navigateTo('insights')"><span class="navicon">⌁</span><span>Insights</span></button>
+      <button data-route="settings" onclick="navigateTo('settings')"><span class="navicon">⚙</span><span>Settings</span></button>
+    </nav>
+    <div class="railstatus"><span class="statuslamp"></span><span>local daemon</span></div>
+  </aside>
+  <main id="appmain">
+    <div class="mobilehead"><span class="brandmark">F</span><b id="mobiletitle">Now</b>
+      <button id="gear" title="settings" aria-label="settings" onclick="navigateTo('settings')">⚙</button></div>
+    <section class="destination" id="route-now" data-destination="now">
+      <div class="desthead"><div><h1>Now</h1><p>What needs attention and what is moving.</p></div>
+        <button class="headprimary" onclick="newOpen=true;render(last,true);document.getElementById('newsess').scrollIntoView({behavior:'smooth'})">+ New session</button></div>
+      <div class="commandbar" role="search">
+        <label class="commandinput"><span>⌕</span><input id="nowfilter" placeholder="Filter sessions" autocomplete="off"
+          oninput="setNowFilter(this.value)"></label>
+        <div class="commandchips" aria-label="Session state filter">
+          <button data-now-filter="all" onclick="setNowState('all')">All</button>
+          <button data-now-filter="needs_you" onclick="setNowState('needs_you')">Needs you</button>
+          <button data-now-filter="working" onclick="setNowState('working')">Working</button>
+          <button data-now-filter="available" onclick="setNowState('available')">Available</button>
+        </div>
+      </div>
+      <header><div id="totals"></div></header>
+      <div id="usage"></div>
+      <div id="pinned"></div>
+      <div id="stale">server unreachable — showing last snapshot</div>
+      <div id="providerstate"></div>
+      <div id="notoken">read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
+      <div id="needs"></div>
+      <div id="working"></div>
+      <div id="sessions"></div>
+      <div id="newsess"></div>
+    </section>
+    <section class="destination" id="route-search" data-destination="search" hidden>
+      <div class="desthead"><div><h1>Search</h1><p>Every local Claude and Codex conversation.</p></div></div>
+      <div class="destinationempty"><span>⌕</span><b>Transcript search is next</b><p>The incremental index arrives in M2.</p></div>
+    </section>
+    <section class="destination" id="route-workstreams" data-destination="workstreams" hidden>
+      <div class="desthead"><div><h1>Workstreams</h1><p>Sessions grouped by repository and project.</p></div></div>
+      <div class="destinationempty"><span>⌘</span><b>Repository grouping is next</b><p>Workstreams arrive with the action inbox in M3.</p></div>
+    </section>
+    <section class="destination" id="route-history" data-destination="history" hidden>
+      <div class="desthead"><div><h1>History</h1><p>Inactive, external, reopenable, and closed sessions.</p></div></div>
+      <div id="history"></div>
+    </section>
+    <section class="destination" id="route-insights" data-destination="insights" hidden>
+      <div class="desthead"><div><h1>Insights</h1><p>Measured cost and token behavior.</p></div></div>
+      <div id="rollup"></div>
+    </section>
+  </main>
+</div>
+<nav id="bottomnav" aria-label="Fleet mobile navigation">
+  <button data-route="now" onclick="navigateTo('now')"><span>⌂</span><small>Now</small></button>
+  <button data-route="search" onclick="navigateTo('search')"><span>⌕</span><small>Search</small></button>
+  <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>⌘</span><small>Work</small></button>
+  <button data-route="history" onclick="navigateTo('history')"><span>↺</span><small>History</small></button>
+  <button data-route="more" onclick="toggleMobileMore()"><span>•••</span><small>More</small></button>
+</nav>
+<div id="mobilemore" role="menu">
+  <button role="menuitem" onclick="navigateTo('insights')">⌁ <span>Insights</span></button>
+  <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
+</div>
 <div id="viewer">
   <div id="vhead"><button id="vclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="vtitle"></span><span id="vctrl"></span></div>
   <div id="vbody"></div>
@@ -49,6 +102,5 @@ read-only: this device has no act token — buttons won't work until you open th
   <div id="settings"></div>
 </div>
 <script src="/static/app.js"></script>
-
 </body>
 </html>

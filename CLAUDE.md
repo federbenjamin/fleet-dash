@@ -13,7 +13,8 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
 ~/.claude/projects/<proj>/<sid>/subagents/*.jsonl agent transcripts┘ tails (engine.Tail)
 ~/.claude/fleet-dash/pending/<sid>.json          hook-captured pending prompt (the ONLY source)
         ↓ engine.py (Engine.scan, poll thread, 2s)
-snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html (fetch poll 2s, self-reloads via page_v)
+snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.js (fetch poll 2s,
+                                               self-reloads via page_v)
                           ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
                           │   (SendUserFile deliveries); page refetches only when the session's
                           │   convo_v/files_n fields in /api/fleet move
@@ -273,11 +274,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     incremental, path-confined, row-bounded, and tolerant of malformed/unknown additions. Its result
     may update state, preview, and context, but must never update ownership or enable submit,
     interrupt, archive, close, attach, compact, review, or relay capabilities.
-31. **Main-page placement is an action queue, not a provider-state dump.** `Engine.organize_session`
+31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
-    `reply_requested`, and `new_response`. Page order is Pinned → Needs you → Working → Available →
-    Session history. Pinned/Needs/Working hide when empty; Available stays visible; History is one
-    collapsed chronological list with access/provider filters. `requests_reply` examines the newest
+    `reply_requested`, and `new_response`. Now order is Pinned → Needs you → Working → Available.
+    Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
+    with one chronological list and access/provider filters. `requests_reply` examines the newest
     complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
     or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
     response badge. Provider-wide stale state preserves the last placement and renders one banner.
@@ -314,8 +315,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,
   then `curl -s http://127.0.0.1:8377/api/fleet | python3 -m json.tool | head`.
-  `dashboard.html` needs NO restart — served per-request; open tabs self-reload via `page_v`
-  (the file's mtime in /api/fleet).
+  `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
+  self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
 - Log: `~/.claude/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get
   `print(..., file=sys.stderr, flush=True)` — that's the debugging channel that cracked every
   bug so far. `act` failures and 403s are already logged.
@@ -357,11 +358,16 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   `Engine.update_settings`. Muted sessions skip all per-session pushes.
   Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
   transition (`Engine.quiet_since`), not on a time-bucket dedupe).
-- `dashboard.html` — self-contained page: render loop, pendingBox/sessionCard/convoBox/
-  renderQueue/historySection/rollupTable, built-in markdown renderer (`md()` — no CDN), file viewer overlay
+- `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a left rail;
+  mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
+  routed, participate in browser/native back, and keep History/Insights out of Now.
+- `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
+  motion/mobile rules.
+- `static/app.js` — render loop, pendingBox/sessionCard/convoBox/
+  renderQueue/historySection/insightsSection, built-in markdown renderer (`md()` — no CDN), file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
-  (`open`/`infoOpen`/`doneOpen`/`filesOpen`/`historyOpen`/`rollupOpen`) re-applied at render —
+  (`open`/`infoOpen`/`doneOpen`/`filesOpen` plus route/filter globals) re-applied at render —
   a full innerHTML re-render destroys native `<details>` state otherwise.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
   `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —

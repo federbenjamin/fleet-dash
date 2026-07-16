@@ -14,6 +14,17 @@ async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
 }
 
+async function goTo(page, route) {
+  let control = page.locator(`button[data-route="${route}"]:visible`);
+  if (await control.count() === 0) {
+    await page.locator('button[data-route="more"]:visible').click();
+    control = page.locator(`#mobilemore button[onclick*="'${route}'"]:visible`);
+  }
+  await control.click();
+  if (route === 'settings') await expect(page.locator('#settingsview')).toBeVisible();
+  else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   const failures = [];
   page.on('pageerror', error => failures.push(String(error)));
@@ -25,6 +36,52 @@ test.beforeEach(async ({ page }) => {
 
 test.afterEach(async ({ page }) => {
   expect(page.__failures, 'browser console/runtime errors').toEqual([]);
+});
+
+test('responsive application shell routes, filters, and follows browser back', async ({ page }, testInfo) => {
+  await reset(page);
+  const mobile = testInfo.project.name.startsWith('mobile');
+  if (mobile) {
+    await expect(page.locator('#sidenav')).toBeHidden();
+    await expect(page.locator('#bottomnav')).toBeVisible();
+  } else {
+    await expect(page.locator('#sidenav')).toBeVisible();
+    await expect(page.locator('#bottomnav')).toBeHidden();
+  }
+  const nowControl = page.locator('button[data-route="now"]:visible');
+  await nowControl.focus();
+  await expect(nowControl).toBeFocused();
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => document.activeElement?.dataset?.route)).toBe('search');
+
+  await goTo(page, 'search');
+  await expect(page).toHaveURL(/#search$/);
+  await page.reload();
+  await expect(page.locator('[data-destination="search"]')).toBeVisible();
+  await goTo(page, 'workstreams');
+  await goTo(page, 'history');
+  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
+  await page.goBack();
+  await expect(page.locator('[data-destination="workstreams"]')).toBeVisible();
+
+  await goTo(page, 'settings');
+  await page.goBack();
+  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('[data-destination="workstreams"]')).toBeVisible();
+
+  await goTo(page, 'insights');
+  await expect(page.locator('#rollup')).toContainText(/crunching|agents/);
+  await goTo(page, 'now');
+  await page.locator('#nowfilter').fill('parity work');
+  await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+  await expect(page.locator('[data-sid="claude-one"]')).toBeHidden();
+  await page.locator('[data-now-filter="working"]').click();
+  await expect(page.locator('#needs .card, #working .card, #sessions .card, #pinned .card')).toHaveCount(0);
+  await page.locator('[data-now-filter="all"]').click();
+  await page.locator('#nowfilter').fill('');
+  await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
 });
 
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
@@ -131,7 +188,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   expect(Math.abs(fit.width - fit.available)).toBeLessThan(2);
   await page.locator('#sclose').click();
 
-  await page.locator('#gear').click();
+  await goTo(page, 'settings');
   const settingsPage = page.locator('#settingsview');
   await expect(settingsPage).toBeVisible();
   await expect(settingsPage.locator('#settitle')).toHaveText('Settings');
@@ -141,12 +198,12 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await settingsPage.getByRole('button', { name: 'back to fleet' }).click();
   await expect(settingsPage).toBeHidden();
 
-  await page.locator('#gear').click();
+  await goTo(page, 'settings');
   await page.evaluate(() => history.back());
   await expect(settingsPage).toBeHidden();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
 
-  await page.locator('#gear').click();
+  await goTo(page, 'settings');
   const widthGroup = page.getByRole('group', { name: 'Full-screen reading width' });
   await expect(widthGroup.getByRole('button', { name: 'Fit the screen' }))
     .toHaveAttribute('aria-pressed', 'true');
@@ -226,8 +283,8 @@ test('session card surfaces distinguish active, available, and expanded informat
 
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
-  const history = page.locator('#history details');
-  await history.locator('summary').click();
+  await goTo(page, 'history');
+  const history = page.locator('#history');
   await expect(history.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
   await expect(history.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
   await expect(page.locator('#headless')).toHaveCount(0);
@@ -370,8 +427,8 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await page.locator('#confirm').getByRole('button', { name: 'stop and close' }).click();
   await expect(page.locator('#sview')).toBeHidden();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toHaveCount(0);
-  await expect(page.locator('#history')).toContainText('Session history (2)');
-  await page.locator('#history summary').click();
+  await goTo(page, 'history');
+  await expect(page.locator('#history')).toContainText('2 sessions');
   await expect(page.locator('#history')).toContainText('Codex parity work');
 });
 
@@ -575,7 +632,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
 
 test('closed, external view-only, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
   await reset(page);
-  await page.getByText(/Session history/).click();
+  await goTo(page, 'history');
   await page.locator('[data-history-sid="codex:closed"]').getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Durable closed conversation');
   await page.locator('#sclose').click();
@@ -583,9 +640,8 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   await page.request.post('/test/reset', { data: { scenario: 'reopenable' } });
   await page.reload();
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
-  const history = page.locator('#history details');
-  await expect(history).not.toHaveAttribute('open', '');
-  await history.locator('summary').click();
+  await goTo(page, 'history');
+  const history = page.locator('#history');
   const external = page.locator('[data-history-sid="codex:thread-one"]');
   await expect(external).toContainText('External');
   await expect(external).toContainText('View');
@@ -597,11 +653,13 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
 
   await page.request.post('/test/reset', { data: { scenario: 'stale' } });
   await page.reload();
+  await goTo(page, 'now');
   await expect(page.locator('[data-sid="codex:thread-one"]')).toContainText('app-server exited');
   await page.screenshot({ path: testInfo.outputPath('stale-state.png'), fullPage: true });
 
   await page.request.post('/test/reset', { data: { scenario: 'provider-unavailable' } });
   await page.reload();
+  await goTo(page, 'now');
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#providerstate')).toContainText('codex unavailable');
@@ -616,7 +674,7 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
 
 test('backfilled Claude history supports both view and reopen', async ({ page }) => {
   await reset(page, 'claude-archive');
-  await page.locator('#history summary').click();
+  await goTo(page, 'history');
   const row = page.locator('[data-history-sid="11111111-2222-3333-4444-555555555555"]');
   await expect(row).toContainText('Historical Claude review');
   await expect(row.getByRole('button', { name: 'View' })).toBeVisible();
@@ -636,7 +694,7 @@ test('backfilled Claude history supports both view and reopen', async ({ page })
 
 test('large transcript archives page history without hiding older rows', async ({ page }) => {
   await reset(page, 'large-history');
-  await page.locator('#history summary').click();
+  await goTo(page, 'history');
   const providerFilters = page.locator('.filterline').filter({ hasText: 'Provider' });
   await providerFilters.getByRole('button', { name: 'Claude' }).click();
   await expect(page.locator('[data-history-sid]')).toHaveCount(100);
@@ -649,7 +707,7 @@ test('large transcript archives page history without hiding older rows', async (
   await expect(page.getByText('Archived Claude session 204')).toBeVisible();
 });
 
-test('available stays visible while every inactive lifecycle shares one collapsed history', async ({ page }, testInfo) => {
+test('available stays visible while inactive lifecycles live in the History destination', async ({ page }, testInfo) => {
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
@@ -657,11 +715,10 @@ test('available stays visible while every inactive lifecycle shares one collapse
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
-  const history = page.locator('#history details');
-  await expect(history).not.toHaveAttribute('open', '');
-  await expect(history).toContainText('Session history (3)');
   await expect(page.locator('[data-history-sid="codex:thread-one"]')).toBeHidden();
-  await history.locator('summary').click();
+  await goTo(page, 'history');
+  const history = page.locator('#history');
+  await expect(history).toContainText('3 sessions');
   await expect(page.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
   await expect(page.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
   await expect(page.locator('[data-history-sid="codex:closed"]')).toContainText('Closed');
@@ -727,8 +784,8 @@ test('pins persist and relocate sessions above the needs-you queue', async ({ pa
 
 test('session history text and access/provider chips filter one flat list', async ({ page }) => {
   await reset(page, 'organization');
-  const history = page.locator('#history details');
-  await history.locator('summary').click();
+  await goTo(page, 'history');
+  const history = page.locator('#history');
   await expect(page.locator('#historyrows .historyrow')).toHaveCount(3);
 
   const input = history.getByPlaceholder(/Filter by title/);

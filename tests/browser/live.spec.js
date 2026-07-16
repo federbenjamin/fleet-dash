@@ -2,6 +2,17 @@ const { test, expect } = require('@playwright/test');
 
 const liveURL = process.env.FLEET_DASH_LIVE_URL;
 
+async function goTo(page, route) {
+  let control = page.locator(`button[data-route="${route}"]:visible`);
+  if (await control.count() === 0) {
+    await page.locator('button[data-route="more"]:visible').click();
+    control = page.locator(`#mobilemore button[onclick*="'${route}'"]:visible`);
+  }
+  await control.click();
+  if (route === 'settings') await expect(page.locator('#settingsview')).toBeVisible();
+  else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
+}
+
 test('running Fleet Dash renders both providers without console or network failures', async ({ page }, testInfo) => {
   test.skip(!liveURL, 'set FLEET_DASH_LIVE_URL for the opt-in running-daemon check');
   const failures = [];
@@ -26,7 +37,7 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(usageProviders.nth(1).locator('.uemail').first()).not.toBeEmpty();
   await expect(usageProviders.nth(1)).toContainText('lifetime tokens');
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
-  await page.locator('#gear').click();
+  await goTo(page, 'settings');
   await expect(page.locator('#settingsview')).toBeVisible();
   await expect(page.locator('#settitle')).toHaveText('Settings');
   await page.evaluate(() => history.back());
@@ -36,8 +47,8 @@ test('running Fleet Dash renders both providers without console or network failu
     await expect(codex.locator('select.modesel')).toHaveCount(0);
     await codex.locator('.shead').click();
   } else {
-    const history = page.locator('#history details');
-    await history.locator('summary').click();
+    await goTo(page, 'history');
+    const history = page.locator('#history');
     const codexHistory = page.locator('[data-history-sid^="codex:"]').first();
     await expect(codexHistory).toBeVisible();
     await codexHistory.locator('.historyaction').click();
