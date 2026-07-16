@@ -21,10 +21,16 @@ snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.
                           ├ GET /api/file?sid=&p= (token) ─ Engine.file_content (whitelist)
                           └ POST /api/act (token) ─ Engine.act ─ inject-request.txt ─
                             open -g FleetDashInjector.app ─ iTerm write by tty ─ inject-result.txt
+Claude/Codex JSONL ─ search_index.py --worker (nice 10) ─ search.db WAL/FTS5
+                                      └ server.py separate reader ─ authenticated
+                                        /api/search, /api/search/status, /api/search/context
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
 ```
 
-One process (launchd `com.benjaminfeder.fleet-dash`): HTTP threads + one poll thread.
+The launchd parent has HTTP threads + one provider poll thread. It owns one low-priority child
+indexer process; a file lock prevents overlapping writers during launch-agent restarts, and the
+child exits when its parent disappears. Keep search parsing out of the parent interpreter: a Python
+thread regressed live `/api/fleet` p95 by contending for the GIL on the 2.7 GB local corpus.
 `Engine.scan_lock` serializes ALL Tail folding (poll loop and act's freshness re-poll) — Tails
 are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapshot_cache only.
 
@@ -351,13 +357,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
-  POST `/api/act` + `/api/settings` (both token-gated; settings persists the
+  + token-gated `/api/search`, `/api/search/status`, and `/api/search/context`; POST
+  `/api/act` + `/api/settings` + `/api/search/rebuild` are token-gated. Settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
   the stalled STATE, not just the push), `muted_sessions` (sid → ts, pruned at 30d),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
   `Engine.update_settings`. Muted sessions skip all per-session pushes.
   Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
   transition (`Engine.quiet_since`), not on a time-bucket dedupe).
+- `search_index.py` — isolated incremental Claude/Codex transcript and saved-subagent parser,
+  provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
+  exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
+  repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
 - `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a left rail;
   mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
   routed, participate in browser/native back, and keep History/Insights out of Now.
@@ -422,7 +433,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
-- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `ledger.db`, `pending/`,
+- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `ledger.db`, `search.db*`, `pending/`,
   `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
 
 ## Outside-repo touchpoints (document changes to these here)

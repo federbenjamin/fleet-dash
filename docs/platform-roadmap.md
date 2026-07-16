@@ -8,7 +8,8 @@ Status: approved for sequential implementation on `codex-integration`.
 | --- | --- | --- |
 | M0 — Baseline and roadmap | Complete · 2026-07-16 | Roadmap catalogue, persistent external-thread observation, quick-response delivery, repeatable Python/browser baselines, and pushed commits through `b9bf0e0`. |
 | M1 — App shell and shared components | Complete · 2026-07-16 | Semantic zero-build shell in `dashboard.html`, responsive/navigation/component rules in `static/fleet.css`, route/back/filter behavior in `static/app.js`, 82 Python tests, 40 deterministic Playwright desktop/mobile tests, and 2 running-daemon Playwright checks. |
-| M2 — Incremental global search | Next | Search destination is present but intentionally states that indexing arrives in M2. |
+| M2 — Incremental global search | Complete · 2026-07-16 | Isolated low-priority index process, per-source WAL/FTS5 state, authenticated search/status/context/rebuild APIs, desktop/mobile Search UI, exact session/subagent/artifact context, 88 Python tests, 44 deterministic browser tests, and the 100k-message/2k-source benchmark. Live while indexing 2.7 GB: `/api/fleet` p95 12.653 ms, search p95 26.619 ms, server search p95 24.515 ms. |
+| M3 — Action inbox and Workstreams | Next | Normalize actionable records and add lightweight repository grouping without expanding Now into a control wall. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.

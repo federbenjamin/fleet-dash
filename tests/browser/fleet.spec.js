@@ -84,6 +84,63 @@ test('responsive application shell routes, filters, and follows browser back', a
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
 });
 
+test('cross-provider search filters, exact context, live handoff, and rebuild', async ({ page }, testInfo) => {
+  await reset(page);
+  await goTo(page, 'search');
+  await expect(page.locator('#searchstatus')).toContainText('Indexed 37 items');
+  await expect(page.locator('#searchstatus')).toContainText('1 warning');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(3);
+  await expect(page.locator('#searchproject')).toContainText('fleet-dash');
+
+  await page.locator('#searchquery').fill('protocol regression');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await expect(page.locator('#searchresults')).toContainText('Codex parity work');
+  await page.locator('#searchresults .searchresult').click();
+  await expect(page.locator('#searchview')).toBeVisible();
+  await expect(page.locator('#searchviewbody .hit')).toContainText('Indexed exact context');
+  await expect(page.locator('#searchviewaction')).toContainText('Open live session');
+  await page.goBack();
+  await expect(page.locator('#searchview')).toBeHidden();
+  await expect(page.locator('[data-destination="search"]')).toBeVisible();
+
+  await page.locator('#searchquery').fill('');
+  await page.locator('#searchprovider').selectOption('claude');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await expect(page.locator('#searchresults')).toContainText('Claude review agent');
+  await page.locator('#searchkind').selectOption('reasoning');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await page.locator('#searchproject').selectOption('fleet-dash');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await page.screenshot({ path: testInfo.outputPath('cross-provider-search.png'), fullPage: true });
+
+  await page.locator('#searchprovider').selectOption('');
+  await page.locator('#searchkind').selectOption('artifact');
+  await page.locator('#searchquery').fill('artifact preview');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await page.locator('#searchresults .searchresult').click();
+  await expect(page.locator('#searchviewaction')).toContainText('Open artifact');
+  await page.locator('#searchviewaction').getByRole('button', { name: 'Open artifact' }).click();
+  await expect(page.locator('#viewer')).toBeVisible();
+  await expect(page.locator('#vbody')).toContainText('Safe preview');
+  await page.locator('#vclose').click();
+
+  await page.locator('#search-rebuild').click();
+  await expect(page.locator('#confirm')).toBeVisible();
+  await page.locator('#confirm').getByRole('button', { name: 'rebuild index' }).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type)
+    .toBe('search_rebuild');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('transcript search is action-token protected', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('#totals')).toBeVisible();
+  await goTo(page, 'search');
+  await expect(page.locator('#searchstatus')).toContainText('action token');
+  await expect(page.locator('#searchresults')).toContainText('action token');
+  page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
+});
+
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
   await expect(page.locator('#totals > span')).toHaveText([

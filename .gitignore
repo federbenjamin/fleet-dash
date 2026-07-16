@@ -1,4 +1,5 @@
 ledger.db
+search.db*
 fleet-dash.log
 pending/
 inject-request.txt

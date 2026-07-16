@@ -10,7 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import Engine, load_config, BASE  # noqa: E402
+from engine import Engine, load_config, BASE, PROJECTS  # noqa: E402
+from search_index import SearchIndex  # noqa: E402
 
 
 STATIC_FILES = {
@@ -22,6 +23,9 @@ STATIC_FILES = {
 def poll_loop(eng):
     while True:
         try:
+            search = getattr(eng, "search", None)
+            if search:
+                search.ensure_process()
             fleet = eng.scan()
             eng.check_notifications(fleet)
         except Exception as e:
@@ -47,7 +51,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        if route not in ("/api/act", "/api/settings"):
+        if route not in ("/api/act", "/api/settings", "/api/search/rebuild"):
             return self.reply(404, "text/plain", b"not found")
         if not self.token_ok():
             print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
@@ -68,6 +72,16 @@ class Handler(BaseHTTPRequestHandler):
             result = self.eng.update_settings(action)
             print(f"settings: {json.dumps(action)[:200]}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/search/rebuild":
+            search = getattr(self.eng, "search", None)
+            try:
+                result = (search.rebuild() if search else
+                          {"ok": False, "error": "search index is unavailable"})
+            except Exception as exc:
+                print(f"search rebuild failed: {exc}", file=sys.stderr, flush=True)
+                result = {"ok": False, "error": "search index is temporarily unavailable"}
+            print("search: rebuild requested", file=sys.stderr, flush=True)
+            return self.reply(200, "application/json", json.dumps(result).encode())
         if action.get("type") != "ping":    # audit trail: exactly what was requested
             print(f"act: {json.dumps(action)[:300]}", file=sys.stderr, flush=True)
         result = self.eng.act(action)
@@ -81,6 +95,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = self.path.split("?", 1)[0]
+        if route in ("/api/search", "/api/search/status", "/api/search/context"):
+            if not self.token_ok():
+                return self.reply(403, "application/json",
+                                  b'{"ok": false, "error": "bad or missing act token"}')
+            search = getattr(self.eng, "search", None)
+            if not search:
+                return self.reply(503, "application/json",
+                                  b'{"ok": false, "error": "search index is unavailable"}')
+            try:
+                if route == "/api/search/status":
+                    out = search.status()
+                elif route == "/api/search/context":
+                    out = search.context(self.query("id"), self.query("radius") or 12)
+                else:
+                    out = search.search(query=self.query("q"), provider=self.query("provider"),
+                                        kind=self.query("kind"), project=self.query("project"),
+                                        cursor=self.query("cursor") or 0,
+                                        limit=self.query("limit") or 30)
+            except Exception as exc:
+                print(f"search request failed: {exc}", file=sys.stderr, flush=True)
+                out = {"ok": False, "error": "search index is temporarily unavailable"}
+            return self.reply(200, "application/json", json.dumps(out).encode())
         if route == "/api/context":
             out = self.eng.session_context(self.query("sid"))
             self.reply(200, "application/json", json.dumps(out).encode())
@@ -154,6 +190,12 @@ def main():
     cfg = load_config()
     eng = Engine(cfg)
     eng.scan()
+    if cfg.get("search_enabled", True):
+        eng.search = SearchIndex(os.path.join(BASE, "search.db"), PROJECTS,
+                                 os.path.expanduser("~/.codex/sessions"),
+                                 discover_seconds=cfg.get("search_discover_seconds", 2),
+                                 batch_rows=cfg.get("search_batch_rows", 250))
+        eng.search.start_process()
     threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
     Handler.eng = eng
     srv = ThreadingHTTPServer((cfg["bind"], cfg["port"]), Handler)

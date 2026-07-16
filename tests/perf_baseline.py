@@ -4,9 +4,13 @@ import argparse
 import json
 import os
 import statistics
+import sys
 import time
 import urllib.parse
 import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 
 def percentile(values, quantile):
@@ -17,9 +21,10 @@ def percentile(values, quantile):
     return round(ordered[index], 3)
 
 
-def request_json(url, timeout=60):
+def request_json(url, timeout=60, headers=None):
     started = time.perf_counter()
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
     elapsed = (time.perf_counter() - started) * 1000
     return json.loads(raw), elapsed, len(raw)
@@ -66,6 +71,10 @@ def main():
     parser.add_argument("--sid", help="session used for /api/context timing")
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--context-samples", type=int, default=3)
+    parser.add_argument("--search-samples", type=int, default=0)
+    parser.add_argument("--search-query", default="parity")
+    parser.add_argument("--local-action-auth", action="store_true",
+                        help="read Fleet's local action token without printing it")
     parser.add_argument("--skip-corpus", action="store_true")
     args = parser.parse_args()
     base = args.url.rstrip("/")
@@ -88,6 +97,23 @@ def main():
             context_times.append(elapsed)
             context_sizes.append(size)
 
+    search_times, search_server_times, search_sizes, search_status = [], [], [], None
+    headers = {}
+    if args.local_action_auth:
+        from engine import load_config
+        token = load_config().get("act_token")
+        if token:
+            headers["Cookie"] = "act_token=" + str(token)
+    if args.search_samples:
+        search_url = base + "/api/search?" + urllib.parse.urlencode(
+            {"q": args.search_query, "limit": 30})
+        for _ in range(max(1, args.search_samples)):
+            result, elapsed, size = request_json(search_url, headers=headers)
+            search_times.append(elapsed)
+            search_server_times.append(float(result.get("elapsed_ms") or 0))
+            search_sizes.append(size)
+        search_status, _, _ = request_json(base + "/api/search/status", headers=headers)
+
     out = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "url": base,
@@ -100,6 +126,13 @@ def main():
                     "response_bytes_p50": percentile(context_sizes, .50)},
         "engine": (fleet or {}).get("diagnostics") or {},
     }
+    if search_times:
+        out["search"] = {"query": args.search_query, "samples": len(search_times),
+                         "p50_ms": percentile(search_times, .50),
+                         "p95_ms": percentile(search_times, .95),
+                         "server_p95_ms": percentile(search_server_times, .95),
+                         "response_bytes_p50": percentile(search_sizes, .50),
+                         "status": search_status}
     if not args.skip_corpus:
         out["corpus"] = corpus(["~/.claude/projects", "~/.codex/sessions"])
     print(json.dumps(out, indent=2, sort_keys=True))

@@ -50,8 +50,24 @@
       <div id="newsess"></div>
     </section>
     <section class="destination" id="route-search" data-destination="search" hidden>
-      <div class="desthead"><div><h1>Search</h1><p>Every local Claude and Codex conversation.</p></div></div>
-      <div class="destinationempty"><span>⌕</span><b>Transcript search is next</b><p>The incremental index arrives in M2.</p></div>
+      <div class="desthead"><div><h1>Search</h1><p>Claude, Codex, subagents, and delivered artifacts on this Mac.</p></div>
+        <button class="headsecondary" id="search-rebuild" onclick="rebuildSearch()">Rebuild index</button></div>
+      <div class="searchbar" role="search">
+        <label class="commandinput"><span>⌕</span><input id="searchquery" placeholder="Search every transcript" autocomplete="off"
+          oninput="queueSearch(true)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
+        <div class="searchfilters">
+          <label><span>Provider</span><select id="searchprovider" onchange="runSearch(true)">
+            <option value="">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
+          <label><span>Type</span><select id="searchkind" onchange="runSearch(true)">
+            <option value="">All</option><option value="message">Messages</option><option value="reasoning">Reasoning</option>
+            <option value="tool">Tools</option><option value="event">Events</option><option value="artifact">Artifacts</option></select></label>
+          <label><span>Project</span><select id="searchproject" onchange="runSearch(true)"><option value="">All</option></select></label>
+        </div>
+      </div>
+      <div id="searchstatus" aria-live="polite"></div>
+      <div id="searchwarnings"></div>
+      <div id="searchresults" aria-live="polite"></div>
+      <button id="searchmore" class="searchmore" onclick="runSearch(false)" hidden>Load more</button>
     </section>
     <section class="destination" id="route-workstreams" data-destination="workstreams" hidden>
       <div class="desthead"><div><h1>Workstreams</h1><p>Sessions grouped by repository and project.</p></div></div>
@@ -100,6 +116,11 @@
   <div id="sethead"><button id="setclose" aria-label="back to fleet" title="back to fleet"
     onclick="dismissOverlay()">←</button><span id="settitle">Settings</span></div>
   <div id="settings"></div>
+</div>
+<div id="searchview">
+  <div id="searchviewhead"><button id="searchclose" aria-label="back to search" title="back to search"
+    onclick="dismissOverlay()">←</button><span id="searchviewtitle"></span><span id="searchviewaction"></span></div>
+  <div id="searchviewbody"></div>
 </div>
 <script src="/static/app.js"></script>
 </body>

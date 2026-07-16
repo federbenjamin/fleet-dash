@@ -1,6 +1,17 @@
 const { test, expect } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
 
 const liveURL = process.env.FLEET_DASH_LIVE_URL;
+
+function authenticatedLiveURL() {
+  if (!liveURL || process.env.FLEET_DASH_LIVE_AUTH !== '1') return null;
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'config.json'), 'utf8'));
+  if (!config.act_token) return null;
+  const target = new URL(liveURL);
+  target.searchParams.set('token', config.act_token);
+  return target.toString();
+}
 
 async function goTo(page, route) {
   let control = page.locator(`button[data-route="${route}"]:visible`);
@@ -62,5 +73,28 @@ test('running Fleet Dash renders both providers without console or network failu
   for (let index = 0; index < 10; index += 1) await page.evaluate(() => tick());
   await page.screenshot({ path: testInfo.outputPath('running-fleet.png'), fullPage: true });
   expect(expectedReadOnly).toHaveLength(1);
+  expect(failures).toEqual([]);
+});
+
+test('running Fleet Dash searches indexed transcripts with exact context', async ({ page }, testInfo) => {
+  const target = authenticatedLiveURL();
+  test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
+  const failures = [];
+  page.on('pageerror', error => failures.push(`page: ${error}`));
+  page.on('console', message => {
+    if (message.type() === 'error') failures.push(`console: ${message.text()}`);
+  });
+  page.on('requestfailed', request => failures.push(
+    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  await page.goto(target, { waitUntil: 'domcontentloaded' });
+  await goTo(page, 'search');
+  await expect(page.locator('#searchstatus')).toContainText(/Indexing|Indexed/);
+  await expect(page.locator('#searchresults .searchresult').first()).toBeVisible();
+  await page.locator('#searchquery').fill('fleet');
+  await expect(page.locator('#searchresults .searchresult').first()).toBeVisible();
+  await page.locator('#searchresults .searchresult').first().click();
+  await expect(page.locator('#searchview')).toBeVisible();
+  await expect(page.locator('#searchviewbody .searchcontext')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('running-search.png'), fullPage: true });
   expect(failures).toEqual([]);
 });

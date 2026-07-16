@@ -48,6 +48,9 @@ DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
     "codex_enabled": True,
     "codex_command": "",
+    "search_enabled": True,
+    "search_discover_seconds": 2,
+    "search_batch_rows": 250,
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)

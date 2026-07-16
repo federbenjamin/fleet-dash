@@ -361,6 +361,85 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
         query = parse_qs(urlparse(self.path).query)
         with LOCK:
+            if route in ("/api/search", "/api/search/status", "/api/search/context"):
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                if route == "/api/search/status":
+                    return self.json_reply({"ok": True, "state": "idle", "sources": 4,
+                        "complete_sources": 4, "documents": 37, "bytes_total": 4096,
+                        "pending_sources": 0, "bytes_done": 4096, "progress_pct": 100, "errors": 0,
+                        "malformed_rows": 0, "unknown_rows": 1, "oversized_docs": 0,
+                        "warnings": [{"provider": "codex", "source_kind": "session",
+                            "session_id": "codex:thread-one", "title": "Codex parity work",
+                            "error": None, "malformed_rows": 0, "unknown_rows": 1,
+                            "oversized_docs": 0}], "last_error": None,
+                        "last_discovery_at": time.time(), "parser_version": 1})
+                if route == "/api/search/context":
+                    document_id = int((query.get("id") or ["0"])[0])
+                    if document_id not in (901, 902, 903):
+                        return self.json_reply({"ok": False,
+                                                "error": "search result no longer exists"})
+                    claude = document_id == 902
+                    artifact = document_id == 903
+                    return self.json_reply({"ok": True, "document_id": document_id,
+                        "source": {"provider": "claude" if claude else "codex",
+                            "source_kind": "subagent" if claude else
+                                           ("artifact" if artifact else "session"),
+                            "session_id": "claude-one" if claude else "codex:thread-one",
+                            "agent_id": "agent-review" if claude else None,
+                            "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
+                            "branch": "codex-integration",
+                            "model": "claude-sonnet-4-5" if claude else "gpt-5.4",
+                            "source_title": "Claude review agent" if claude else
+                                            ("artifact.md" if artifact else "Codex parity work"),
+                            "source_error": None,
+                            "artifact_path": "/fixture/artifact.md" if artifact else None},
+                        "messages": [{"id": document_id - 1, "role": "user",
+                            "kind": "message", "timestamp": "2026-07-16T12:00:00Z",
+                            "text": "Find the protocol regression", "artifact_path": None,
+                            "hit": False}, {"id": document_id,
+                            "role": "assistant", "kind": "message",
+                            "timestamp": "2026-07-16T12:00:01Z",
+                            "text": "Indexed artifact preview." if artifact else
+                                    "Indexed exact context for the protocol regression.",
+                            "artifact_path": "/fixture/artifact.md" if artifact else None,
+                            "hit": True}]})
+                q = ((query.get("q") or [""])[0]).lower()
+                provider = (query.get("provider") or [""])[0]
+                kind = (query.get("kind") or [""])[0]
+                project = (query.get("project") or [""])[0]
+                rows = [{"id": 901, "source_id": 41, "provider": "codex",
+                    "source_kind": "session", "session_id": "codex:thread-one",
+                    "agent_id": None, "project": "fleet-dash",
+                    "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
+                    "title": "Codex parity work", "role": "assistant", "kind": "message",
+                    "timestamp": "2026-07-16T12:00:01Z", "timestamp_epoch": time.time(),
+                    "artifact_path": None,
+                    "snippet": "Indexed exact context for the protocol regression.", "rank": -1},
+                    {"id": 902, "source_id": 42, "provider": "claude",
+                    "source_kind": "subagent", "session_id": "claude-one",
+                    "agent_id": "agent-review", "project": "fleet-dash",
+                    "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
+                    "title": "Claude review agent", "role": "assistant",
+                    "kind": "reasoning", "timestamp": "2026-07-16T11:59:00Z",
+                    "timestamp_epoch": time.time() - 60, "artifact_path": None,
+                    "snippet": "Reviewed parser migration and protocol states.", "rank": -0.5},
+                    {"id": 903, "source_id": 43, "provider": "codex",
+                    "source_kind": "artifact", "session_id": "codex:thread-one",
+                    "agent_id": None, "project": "fleet-dash",
+                    "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
+                    "title": "artifact.md", "role": "artifact", "kind": "artifact",
+                    "timestamp": "2026-07-16T11:58:00Z",
+                    "timestamp_epoch": time.time() - 120,
+                    "artifact_path": "/fixture/artifact.md",
+                    "snippet": "Indexed artifact preview.", "rank": -0.25}]
+                rows = [item for item in rows if
+                        (not q or q in (item["title"] + " " + item["snippet"]).lower()) and
+                        (not provider or item["provider"] == provider) and
+                        (not kind or item["kind"] == kind) and
+                        (not project or item["project"] == project)]
+                return self.json_reply({"ok": True, "query": q, "results": rows,
+                    "next_cursor": None, "projects": ["fleet-dash"], "elapsed_ms": 1.2})
             if route == "/api/fleet":
                 return self.json_reply(fleet())
             if route == "/api/context":
@@ -432,8 +511,12 @@ class Handler(BaseHTTPRequestHandler):
                 if session:
                     session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
-            if route in ("/api/act", "/api/settings") and not authorized(self):
+            if route in ("/api/act", "/api/settings", "/api/search/rebuild") \
+                    and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
+            if route == "/api/search/rebuild":
+                STATE["actions"].append({"type": "search_rebuild"})
+                return self.json_reply({"ok": True, "rebuilding": True})
             if route == "/api/settings":
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == payload.get("mute_session")), None)

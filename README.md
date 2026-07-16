@@ -23,6 +23,14 @@ the provider's native control path. Built 2026-07-13; still evolving.
   Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
   fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
   across refresh and browser/native back gestures. Now has a sticky text filter plus state chips.
+- **Incremental global search:** Search covers every retained Claude and Codex main transcript,
+  saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
+  including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
+  each hit opens bounded exact context and can jump to the live session, known subagent, or safe
+  artifact preview. An isolated low-priority worker maintains `search.db` with SQLite WAL/FTS5, so
+  initial indexing and transcript updates do not block the provider poll or `/api/fleet`. Progress,
+  parser/file warnings, and a confirmed rebuild control are visible on the page. Search is action-
+  token protected because it exposes unmanaged local transcripts.
 - **⚙ settings** (desktop rail or mobile More): per-category toggles for the ntfy pushes (waiting-on-you,
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
@@ -308,7 +316,9 @@ immediate; a bare registry `waiting` flag is confirmed for 3 seconds because Cla
 between progress prose and the next tool call. Answers are injected
 by `FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
 applet types into the iTerm session matched by tty). Finished agent runs and closed sessions are
-recorded in `ledger.db` (sqlite).
+recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
+incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
+the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
 
 ## Manual setup — already done on this Mac
 
@@ -342,6 +352,9 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `poll_seconds` | 2 | scan cadence |
 | `codex_enabled` | true | start the Codex App Server adapter |
 | `codex_command` | "" | optional absolute Codex executable path; auto-detected from PATH or `~/.nvm` |
+| `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |
+| `search_discover_seconds` | 2 | filesystem discovery cadence for new/changed transcript sources |
+| `search_batch_rows` | 250 | bounded JSONL rows committed per worker batch |
 | `stall_seconds` | 240 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
 | `dormant_seconds` | 7200 | quiet sessions demote to dormant |
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |
@@ -367,6 +380,7 @@ Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benja
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
+python3 tests/search_benchmark.py
 npm install
 npx playwright install chromium
 npm run test:browser
@@ -375,7 +389,8 @@ npm run test:browser
 The Python suite includes a deterministic fake App Server transport plus adapter and shared-engine
 fixtures. Playwright runs the same provider/UI matrix at desktop and 390×844 mobile sizes. Scripts
 named `tests/live_*_smoke.py` are opt-in checks against the running daemon; paid-turn scripts say so
-in their docstring and archive threads they create.
+in their docstring and archive threads they create. `tests/search_benchmark.py` creates a disposable
+100k-message/2k-source corpus and enforces the warm, cold, and append-lag search gates.
 
 ## Rebuilding the injector applet
 
