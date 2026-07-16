@@ -303,6 +303,11 @@ def set_scenario(name):
         session.update(state="running", reg_status="running", agents_running=1)
         session["agents"][0]["state"] = "running"
         session["capabilities"]["interrupt"] = True
+    elif name == "stalled-agent":
+        session.update(state="running", reg_status="running", agents_running=1)
+        session["agents"][0]["state"] = "stalled"
+        session["agents"][0]["quiet_s"] = 300
+        session["capabilities"]["interrupt"] = True
     elif name == "provider-unavailable":
         STATE["sessions"] = [item for item in STATE["sessions"] if item["provider"] == "claude"]
         STATE["codex_error"] = "codex executable not found"

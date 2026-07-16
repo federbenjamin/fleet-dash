@@ -234,6 +234,21 @@ test('session card surfaces distinguish active, available, and expanded informat
   await expect(page.locator('#dormant')).toHaveCount(0);
 });
 
+test('quiet in-flight subagents use an uncertain amber signal, not stopped red', async ({ page }) => {
+  await reset(page, 'stalled-agent');
+  const dot = page.locator('[data-sid="codex:thread-one"] .dot.stalled');
+  await expect(dot).toHaveAttribute('aria-label', 'quiet — may still be working');
+  const colors = await dot.evaluate(el => {
+    const probe = document.createElement('span');
+    probe.style.background = 'var(--amber)';
+    document.body.appendChild(probe);
+    const expected = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return { actual: getComputedStyle(el).backgroundColor, expected };
+  });
+  expect(colors.actual).toBe(colors.expected);
+});
+
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await reset(page);
   const card = page.locator('[data-sid="codex:thread-one"]');

@@ -284,7 +284,7 @@ details.insfold>summary:hover{color:var(--fg)}
 .dot.running{background:var(--green);animation:pulse 1.2s infinite}
 .dot.done{background:var(--faint)}
 .dot.ended{background:var(--red);opacity:.5}
-.dot.stalled{background:var(--red)}
+.dot.stalled{background:var(--amber);animation:pulse 2s infinite}
 @keyframes pulse{50%{opacity:.35}}
 .atype{font-weight:600;white-space:nowrap}
 .adesc{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
@@ -1487,6 +1487,8 @@ function sendRelay(){
 }
 function agentRow(a){
   const done=['done','ended'].includes(a.state);
+  const signal={running:'working',stalled:'quiet — may still be working',done:'finished',
+    ended:'stopped'}[a.state]||String(a.state||'unknown');
   const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   const tk=a.tokens||{};
   // tapping opens the subagent conversation
@@ -1494,7 +1496,7 @@ function agentRow(a){
   return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
     title="open this subagent's conversation" onclick="${tap}">
     <span class="tree">⎿</span>
-    <span class="dot ${a.state}"></span>
+    <span class="dot ${a.state}" role="img" aria-label="${esc(signal)}" title="${esc(signal)}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>
     <span class="amodel">${modelLabel(a)}</span>
