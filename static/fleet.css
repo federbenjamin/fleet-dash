@@ -460,8 +460,10 @@ details.insfold>summary:hover{color:var(--fg)}
 .pbtn.send{background:var(--blue);color:#03121f}
 .pbtn.sendoption{background:var(--card2);border:1px solid var(--line);color:var(--dim);padding-inline:10px}
 .freetext{display:flex;gap:8px;margin-top:10px}
-.freetext input{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
+.freetext input,.freetext textarea{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
+.freetext.composer{align-items:flex-end}
+.freetext.composer textarea{min-height:42px;max-height:140px;line-height:1.4;resize:vertical}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .sendpair{display:flex;gap:6px;flex:0 0 auto}.sendpair .pbtn{white-space:nowrap}
 .arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
@@ -521,6 +523,15 @@ td.r,th.r{text-align:right}
 .quickfeedback .qftext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .quickfeedback .delivery{flex:0 0 auto;margin-left:auto}
 @keyframes sendspin{to{transform:rotate(360deg)}}
+.spawncardstate{display:flex;align-items:center;gap:7px;padding:8px 12px;color:var(--dim);font-size:11px}
+.spawncardstate.failed{color:var(--red)}
+.spawncardactions{display:flex;gap:7px;padding:0 12px 10px}.spawncardactions .pbtn{padding:6px 10px}
+.spawnstage{display:flex;align-items:flex-start;gap:10px;margin:14px 0;padding:12px;border:1px solid var(--line);
+  border-radius:10px;color:var(--dim)}
+.spawnstage.failed{border-color:rgba(248,81,73,.45);color:var(--red)}
+.spawnstage>div{display:flex;flex-direction:column;gap:3px}.spawnstage span{font-size:11px;color:var(--faint)}
+.spawnrecovery{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.spawnrecovery>span{color:var(--faint);font-size:11px}
+.spawnforecast.loading{display:flex;align-items:center;gap:7px}
 /* system events folded into the convo: compaction, model fallback, API errors,
    slash commands, and the full text of questions you answered */
 .cevt{margin:8px 0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);

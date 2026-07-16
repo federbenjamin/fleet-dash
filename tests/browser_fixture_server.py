@@ -317,7 +317,9 @@ def fixture_budgets(spawn=None):
             "provider": provider, "model": spawn.get("model") or "",
             "project": spawn.get("project") or "fleet-dash",
             "median_usd": 1.25 if provider == "claude" else None,
-            "median_tokens": 22000, "median_runtime_seconds": 900,
+            "median_tokens": (53000 if spawn.get("model") == "gpt-5.3-codex" else
+                              54000 if spawn.get("model") == "gpt-5.4" else 22000),
+            "median_runtime_seconds": 900,
             "currency_scope": "exact" if provider == "claude" else "unavailable"}
     spawn_budgets = [item for item in evaluated if spawn and (
         item["scope_type"] == "fleet" or item["scope_type"] == "provider" and
@@ -489,7 +491,9 @@ def fleet():
             "models": ["sonnet", "opus"], "efforts": ["low", "medium", "high"],
             "models_by_provider": {"claude": [{"id": "sonnet", "name": "sonnet",
                 "efforts": ["low", "high"]}], "codex": [{"id": "gpt-5.4",
-                "name": "GPT-5.4", "efforts": ["medium", "high"]}]},
+                "name": "GPT-5.4", "efforts": ["medium", "high"]},
+                {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex",
+                 "efforts": ["medium", "high"]}]},
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(STATE.get("codex_error")),
                                     "error": STATE.get("codex_error")}},
@@ -886,6 +890,9 @@ class Handler(BaseHTTPRequestHandler):
                 spawn = {key: (query.get(key) or [""])[0]
                          for key in ("provider", "model", "project", "cwd")
                          if (query.get(key) or [""])[0]}
+                if (STATE.get("scenario") == "forecast-race" and
+                        spawn.get("model") == "gpt-5.4"):
+                    time.sleep(.35)
                 return self.json_reply(fixture_budgets(spawn if spawn else None))
             if route == "/api/workstreams":
                 return self.json_reply(fixture_workstreams())
@@ -1206,9 +1213,16 @@ class Handler(BaseHTTPRequestHandler):
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == payload.get("session_id")), None)
                 if payload.get("type") == "spawn":
+                    if STATE.get("scenario") == "spawn-failure":
+                        time.sleep(.2)
+                        return self.json_reply({"ok": False,
+                                                "error": "fixture startup rejected"})
+                    if STATE.get("scenario") == "spawn-slow":
+                        time.sleep(.5)
                     exact = "codex:new" if payload.get("provider") == "codex" else "claude-new"
                     STATE["sessions"].append(base_session(payload.get("provider") or "claude",
                                                           exact, "New coding session"))
+                    STATE.setdefault("contexts", {})[exact] = []
                     return self.json_reply({"ok": True, "session_id": exact,
                                             "cwd": payload.get("cwd")})
                 if payload.get("type") == "handoff":

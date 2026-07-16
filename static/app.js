@@ -832,6 +832,12 @@ function addOptimistic(sid,text,kind='text'){
   }
   return item.id;
 }
+function composerKey(event,send){
+  const mac=/Mac|iPhone|iPad|iPod/.test(navigator.platform||'');
+  if(event.key!=='Enter'||(mac?!event.metaKey:!event.ctrlKey))return;
+  event.preventDefault();
+  send();
+}
 function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
   const item=optimisticList(sid).find(entry=>entry.id===id);
   if(!item)return;
@@ -1339,7 +1345,7 @@ function renderViewerBar(force){
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
   $('#vctrl').innerHTML=overflowMenu('viewer',s,'viewer');
   const ae=document.activeElement;
-  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  if(ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&bar.contains(ae))return; // don't clobber typing
   if(!force&&touching())return;                           // or a swipe/tap in flight
   const old=bar.querySelector&&bar.querySelector('.vconvo');
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
@@ -1365,9 +1371,9 @@ function renderViewerBar(force){
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
-      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
+      onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()"></textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
@@ -1539,6 +1545,7 @@ function toggleSessionEvidence(encodedSid){
   if(sessionView&&!sessionView.closed)renderSession(true);else if(sessionView)renderClosed(true);
 }
 function primarySessionAction(sid){
+  if(spawnProvisional&&spawnProvisional.id===sid){openSession(sid);return;}
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(s){openSession(sid);return;}
   if(isClosedSession(sid))openClosed(sid);
@@ -1574,7 +1581,8 @@ async function markAvailable(sid,encodedRevision){
 }
 function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
-  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid)||
+    (spawnProvisional&&spawnProvisional.id===sid?provisionalSessionObject():null);
   if(session?.new_response)markRead(session);
   sessionView={sid,closed:false};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
@@ -1650,12 +1658,14 @@ async function reopenClosed(sid,button){
 function renderSession(force){
   if(!sessionView||!last)return;
   if(sessionView.closed)return renderClosed(force);
-  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid);
+  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid)||
+    (spawnProvisional&&spawnProvisional.id===sessionView.sid?provisionalSessionObject():null);
   if(!s){closeSession();return;}          // session died while open
+  if(s.provisional)return renderProvisionalSession(s);
   ensureCtx(s.session_id,ctxVersion(s));
   const c=ctxCache[s.session_id];
   const ae=document.activeElement;
-  const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
+  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#sview').contains(ae);
   const done=['done','ended'];
   $('#stitle2').innerHTML=sessTitleBlock(s);
   $('#sctrl').innerHTML=evidenceButton(s)+terminalButton(s)+overflowMenu('session',s,'session');
@@ -1669,7 +1679,10 @@ function renderSession(force){
   // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
   const wantBottom=sessionOpened||old.atBottom;
   sessionOpened=false;
-  if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  const optimisticOnly=optimisticHtml(s.session_id,(c&&c.messages)||[]);
+  if((!c||!c.messages)&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
+  else if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  else if(!c.messages.length&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
   else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
   else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
   body.scrollTop=wantBottom?body.scrollHeight:old.top;
@@ -1687,9 +1700,9 @@ function renderSession(force){
     ${fileStrip(s.session_id,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+    ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
-      onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
+      onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()"></textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div>`:''}
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
     <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
@@ -1748,7 +1761,7 @@ function renderAgent(force){
   const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
   $('#actrl').innerHTML=overflowMenu('subagent',par,'subagent',done);
   const ae=document.activeElement;
-  const typing=ae&&ae.tagName==='INPUT'&&$('#aview').contains(ae);
+  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#aview').contains(ae);
   if(!force&&(typing||touching()))return;
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
@@ -1765,8 +1778,8 @@ function renderAgent(force){
       <div class="relaynote">${done?'this agent has finished — ':''}${codex
         ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
-      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
-        onkeydown="if(event.key==='Enter')sendRelay()">
+      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
+        onkeydown="composerKey(event,sendRelay)"></textarea>
         <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
       <div class="actmsg" id="amsg"></div>
       <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
@@ -1921,6 +1934,7 @@ function cardCls(s){
 // running agents, the more/less toggle). No native <details> here, so replacing it
 // each tick doesn't flash.
 function cardTop(s){
+  if(s.provisional)return provisionalCardTop(s);
   const isOpen=open.has(s.session_id);
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const activeSession=s.ui_group==='working';
@@ -2818,7 +2832,83 @@ function filterChips(kind,current,items){
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
 let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
+let spawnProvisional=null;
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
+function spawnSnapshot(){
+  return{provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    worktree:newProvider==='claude'&&newWt,
+    worktree_name:newProvider==='claude'?newWtName:'',message:newMessage.trim()};
+}
+function provisionalSessionObject(){
+  const p=spawnProvisional;if(!p)return null;
+  const failed=p.status==='failed';
+  return{session_id:p.id,provider:p.spec.provider,project:p.spec.cwd.split('/').filter(Boolean).pop()||'new session',
+    title:'New coding session',cwd:p.spec.cwd,branch:p.spec.worktree_name||'',model:p.spec.model,
+    effort:p.spec.effort,collaboration_mode:p.spec.mode,ui_group:failed?'needs_you':'working',
+    reason_label:failed?'Start failed':'Starting',state:failed?'idle':'running',reg_status:'starting',
+    quiet_s:0,ctx_tokens:0,ctx_pct:null,total_tokens:0,cost:null,agent_cost:null,
+    agents:[],agents_running:0,agents_total:0,last_msg:null,pending:null,provisional:true,
+    error:p.error||'',capabilities:{submit:false,focus_terminal:false},access:'interactive'};
+}
+function sessionsWithProvisional(f){
+  const sessions=[...((f&&f.sessions)||[])],provisional=provisionalSessionObject();
+  if(provisional&&!sessions.some(item=>item.session_id===provisional.session_id))sessions.push(provisional);
+  return sessions;
+}
+function provisionalCardTop(s){
+  const p=spawnProvisional,failed=p?.status==='failed';
+  return`<div class="shead" title="open startup details" onclick="sessionTap(event,'${s.session_id}')">
+      <span class="chip ${failed?'problem':'working'}">${failed?'Start failed':'Starting'}</span>
+      <span class="sname"><span class="stitle">New coding session</span><small>${esc(s.project)} · ${esc(s.provider)}</small></span>
+      <span class="m amodel">${modelLabel(s)}</span>
+    </div>
+    ${p?.spec.message?`<div class="lastmsg"><span class="lmwho user">you</span><span class="lmtext">${esc(p.spec.message)}</span><span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span></div>`:''}
+    <div class="spawncardstate ${failed?'failed':''}">${failed?esc(p.error||'Session did not start'):`<span class="delivery sending" aria-hidden="true">◌</span> ${esc(p?.status==='discovering'?'Finding the new session…':'Starting session…')}`}</div>
+    ${failed&&p?.canRetry?`<div class="spawncardactions"><button class="pbtn send" onclick="event.stopPropagation();retrySpawn()">retry</button><button class="pbtn" onclick="event.stopPropagation();restoreSpawnForm()">restore form</button></div>`:''}`;
+}
+function renderProvisionalSession(s){
+  const p=spawnProvisional;if(!p)return;
+  const failed=p.status==='failed';
+  $('#stitle2').innerHTML=`<b>New coding session</b><small>${esc(s.project)} · ${esc(s.provider)}${s.model?` · ${esc(s.model)}`:''}</small>`;
+  $('#sctrl').innerHTML='';renderEvidenceRail({});
+  const message=p.spec.message?`<div class="cmsg user optimistic"><span class="crole">you</span>
+      <span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span>
+      <div class="cbody"><p>${esc(p.spec.message).replace(/\n/g,'<br>')}</p></div></div>`:'';
+  $('#sbody').innerHTML=`<div class="aconvo">${message}<div class="spawnstage ${failed?'failed':''}">
+    ${failed?'!':`<span class="delivery sending" aria-hidden="true">◌</span>`}
+    <div><b>${failed?'Session did not start':p.status==='discovering'?'Finding the new session…':'Starting session…'}</b>
+    <span>${failed?esc(p.error||'Startup failed'):'Your message is saved here while Fleet waits for the exact native session.'}</span></div></div></div>`;
+  $('#sact').innerHTML=failed?`<div class="spawnrecovery">
+    ${p.canRetry?`<button class="pbtn send" onclick="retrySpawn()">retry same session setup</button><button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`:
+      p.serverSessionId?`<button class="pbtn send" onclick="keepWaitingForSpawn()">keep waiting</button>`:
+      `<button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`}
+    <span>${p.canRetry?'No native session was created.':p.serverSessionId?'Fleet has the exact session ID and can keep looking.':'The request outcome is unknown, so Fleet will not risk creating a duplicate.'}</span></div>`:'';
+  requestAnimationFrame(()=>{const body=$('#sbody');body.scrollTop=body.scrollHeight;});
+}
+function restoreSpawnForm(){
+  const p=spawnProvisional;if(!p)return;
+  newProvider=p.spec.provider;newDir=p.spec.cwd;newModel=p.spec.model;newEffort=p.spec.effort;
+  newMode=p.spec.mode;newWt=p.spec.worktree;newWtName=p.spec.worktree_name;newMessage=p.spec.message;
+  const sid=p.id;spawnProvisional=null;spawnWait=null;newOpen=true;spawnMsg='';
+  if(sessionView?.sid===sid)closeSession();
+  render(last,true);
+}
+function keepWaitingForSpawn(){
+  if(!spawnProvisional?.serverSessionId)return;
+  spawnProvisional.status='discovering';spawnProvisional.error='';
+  spawnWait={sessionId:spawnProvisional.serverSessionId,until:Date.now()+120000,
+    provider:spawnProvisional.spec.provider,initialMessage:spawnProvisional.spec.message,
+    provisionalId:spawnProvisional.id};render(last,true);
+}
+function retrySpawn(){
+  if(!spawnProvisional?.canRetry)return;
+  startSpawn(spawnProvisional.spec,spawnProvisional);
+}
+function changeNewProvider(value){
+  newProvider=value;newModel='';spawnForecast=null;queueSpawnForecast(0);render(last,true);
+}
+function changeNewDirectory(value){newDir=value;queueSpawnForecast(120);}
+function changeNewModel(value){newModel=value;queueSpawnForecast(0);}
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
   if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
@@ -2838,22 +2928,22 @@ function newSection(){
   return`<div class="newform">
     <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
     <label class="nflab">provider</label>
-    <select class="nfsel" onchange="newProvider=this.value;newModel='';spawnForecast=null;queueSpawnForecast();render(last,true)">
+    <select class="nfsel" onchange="changeNewProvider(this.value)">
       <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
       <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
     </select>
     <label class="nflab">directory</label>
-    <select class="nfsel" onchange="newDir=this.value;spawnForecast=null;queueSpawnForecast();render(last,true)">
+    <select class="nfsel" onchange="changeNewDirectory(this.value)">
       <option value="">— pick a recent directory —</option>
       ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
     </select>
     <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
-      oninput="newDir=this.value;spawnForecast=null;queueSpawnForecast()" autocomplete="off">
+      oninput="changeNewDirectory(this.value)" autocomplete="off">
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
     <div class="nfrow">
       <div class="nfcol"><label class="nflab">model</label>
-        <select class="nfsel" onchange="newModel=this.value;spawnForecast=null;queueSpawnForecast()">
+        <select class="nfsel" onchange="changeNewModel(this.value)">
           <option value="">default</option>
           ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
         </select></div>
@@ -2883,22 +2973,34 @@ function newSection(){
 }
 async function doSpawn(){
   if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
-  spawnMsg='starting…';render(last,true);
+  if(spawnProvisional){openSession(spawnProvisional.id);return;}
+  const feedbackStarted=performance.now();
+  const spec=spawnSnapshot();
+  const id='spawn-'+(globalThis.crypto?.randomUUID?.()||String(Date.now()));
+  spawnProvisional={id,spec,status:'starting',error:'',canRetry:false,serverSessionId:null};
+  spawnMsg='';newMessage='';newOpen=false;
+  openSession(id);render(last,true);
+  recordInputFeedback(feedbackStarted);
+  await startSpawn(spec,spawnProvisional);
+}
+async function startSpawn(spec,provisional){
+  if(!provisional||spawnProvisional!==provisional)return;
+  provisional.status='starting';provisional.error='';provisional.canRetry=false;render(last,true);
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type:'spawn',provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
-                           worktree:newWt,worktree_name:newWtName,initial_text:newMessage||undefined})});
+      body:JSON.stringify({type:'spawn',provider:spec.provider,cwd:spec.cwd,model:spec.model,effort:spec.effort,mode:spec.mode,
+                           worktree:spec.worktree,worktree_name:spec.worktree_name,initial_text:spec.message||undefined})});
     const d=await r.json();
-    if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}
-    spawnMsg=d.trust_prompt
-      ? '⚠ started — but it is waiting on the trust prompt on your Mac ("do you trust the files in this folder?")'
-      : 'started ✓ — opening it here as soon as it appears…';
+    if(spawnProvisional!==provisional)return;
+    if(!r.ok||!d.ok){provisional.status='failed';provisional.error=d.error||'Session could not be started';
+      provisional.canRetry=true;render(last,true);return;}
+    provisional.serverSessionId=d.session_id;provisional.status='discovering';provisional.trustPrompt=!!d.trust_prompt;
     // Both providers return the exact native session identity. Never guess by cwd:
     // a sibling session in the same repo must not be opened by mistake.
-    spawnWait={sessionId:d.session_id,until:Date.now()+120000,provider:newProvider,initialMessage:newMessage};
-    newMessage='';
-    newOpen=false;render(last,true);
-  }catch(e){spawnMsg='✗ '+e;render(last,true);}
+    spawnWait={sessionId:d.session_id,until:Date.now()+120000,provider:spec.provider,
+      initialMessage:spec.message,provisionalId:provisional.id};render(last,true);
+  }catch(e){if(spawnProvisional===provisional){provisional.status='failed';
+    provisional.error='Fleet lost the startup response: '+String(e.message||e);provisional.canRetry=false;render(last,true);}}
 }
 function doScheduleNew(){
   if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
@@ -2910,14 +3012,27 @@ function doScheduleNew(){
 // a spawned session only enters the fleet once it writes a transcript
 async function checkSpawn(f){
   if(!spawnWait)return;
-  if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
-  const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
-  if(s){const waiting=spawnWait;spawnWait=null;spawnMsg='';
-    if(waiting.provider==='claude'&&waiting.initialMessage){
-      const delivered=await act(s.session_id,{type:'text',text:waiting.initialMessage},'spawnmsg');
-      if(!delivered.ok)spawnMsg='✗ session started, but the initial message failed: '+(delivered.error||'failed');
+  if(Date.now()>spawnWait.until){
+    if(spawnProvisional&&spawnProvisional.id===spawnWait.provisionalId){
+      spawnProvisional.status='failed';spawnProvisional.error='The native session started, but Fleet could not discover it within two minutes.';
+      spawnProvisional.canRetry=false;
     }
-    openSession(s.session_id);}
+    spawnWait=null;render(last,true);return;
+  }
+  const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
+  if(s){const waiting=spawnWait,provisional=spawnProvisional;spawnWait=null;spawnMsg='';
+    const wasOpen=sessionView?.sid===waiting.provisionalId;
+    let optimisticId=null;
+    if(waiting.initialMessage)optimisticId=addOptimistic(s.session_id,waiting.initialMessage,'text');
+    spawnProvisional=null;
+    if(wasOpen){sessionView={sid:s.session_id,closed:false};sessionOpened=false;}
+    render(last,true);
+    if(waiting.provider==='claude'&&waiting.initialMessage){
+      const delivered=await act(s.session_id,{type:'text',text:waiting.initialMessage},'spawnmsg',optimisticId);
+      if(!delivered.ok)spawnMsg='✗ session started, but the initial message failed: '+(delivered.error||'failed');
+    }else if(optimisticId)updateOptimistic(s.session_id,optimisticId,true,'',true);
+    if(!wasOpen)openSession(s.session_id);
+  }
 }
 function historySection(f){
   const items=historyItems(f);
@@ -3009,6 +3124,7 @@ window.addEventListener('resize',schedulePeekOverflow);
 // ---- budgets and forecasts ------------------------------------------------
 let budgetData={ok:true,budgets:[],forecasts:{},measurement_labels:{}},budgetLoading=false,budgetLoadedAt=0;
 let budgetDraft=null,spawnForecast=null,spawnBudgetHeadroom=[],spawnForecastTimer=null;
+let spawnForecastAbort=null,spawnForecastSequence=0;
 async function loadBudgets(force=false,spawn=null){
   if(budgetLoading&&!spawn)return;
   if(!spawn&&!force&&Date.now()-budgetLoadedAt<10000)return;
@@ -3073,9 +3189,39 @@ async function saveBudgets(){const msg=$('#setmsg');if(msg)msg.textContent='savi
   const data=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budgets:budgetDraft})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
   if(!data.ok){if(msg)msg.textContent='✗ '+(data.error||'failed');return;}
   budgetDraft=(data.budgets||[]).map(budgetEditable);if(msg)msg.textContent='saved ✓';await loadBudgets(true);}
-function queueSpawnForecast(){clearTimeout(spawnForecastTimer);spawnForecastTimer=setTimeout(()=>{
-  spawnForecastTimer=null;if(!newOpen||!newProvider)return;loadBudgets(false,{provider:newProvider,model:newModel,project:(newDir.split('/').filter(Boolean).pop()||''),cwd:newDir});},250);}
+function updateSpawnForecastDisplay(){
+  const current=document.querySelector('#newsess .spawnforecast');
+  if(current)current.outerHTML=spawnForecastHtml();
+}
+async function loadSpawnForecast(spawn,sequence){
+  const controller=new AbortController();spawnForecastAbort=controller;
+  try{
+    const query='?'+new URLSearchParams(Object.entries(spawn).filter(([,value])=>value)).toString();
+    const response=await fetch('/api/budgets'+query,{cache:'no-store',signal:controller.signal});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Forecast unavailable');
+    if(sequence!==spawnForecastSequence)return;
+    spawnForecast=data.spawn_forecast;spawnBudgetHeadroom=data.spawn_budgets||[];
+  }catch(error){
+    if(error.name==='AbortError'||sequence!==spawnForecastSequence)return;
+    spawnForecast={status:'error',error:String(error.message||error)};
+  }finally{
+    if(sequence===spawnForecastSequence){spawnForecastAbort=null;updateSpawnForecastDisplay();}
+  }
+}
+function queueSpawnForecast(delay=120){
+  clearTimeout(spawnForecastTimer);spawnForecastTimer=null;
+  if(spawnForecastAbort){spawnForecastAbort.abort();spawnForecastAbort=null;}
+  const sequence=++spawnForecastSequence;
+  spawnForecast={status:'loading'};spawnBudgetHeadroom=[];updateSpawnForecastDisplay();
+  spawnForecastTimer=setTimeout(()=>{
+    spawnForecastTimer=null;if(!newOpen||!newProvider)return;
+    loadSpawnForecast({provider:newProvider,model:newModel,
+      project:(newDir.split('/').filter(Boolean).pop()||''),cwd:newDir},sequence);
+  },delay);
+}
 function spawnForecastHtml(){const f=spawnForecast;if(!f)return'<div class="spawnforecast">Forecast and budget headroom load from matching local history.</div>';
+  if(f.status==='loading')return'<div class="spawnforecast loading"><span class="delivery sending" aria-hidden="true">◌</span> Updating forecast…</div>';
   if(f.status==='error')return`<div class="spawnforecast unavailable">${esc(f.error)}</div>`;
   if(f.status!=='forecast')return`<div class="spawnforecast">Not enough matching history · ${f.sample_size||0} sample${f.sample_size===1?'':'s'}</div>`;
   const bits=[f.median_usd!=null?`median ${fmt$(f.median_usd)}`:'currency unavailable',f.median_tokens!=null?`${fmtTok(f.median_tokens)} tokens`:null,
@@ -3159,7 +3305,9 @@ function render(f,force){
   $('#nav-now-count').title=`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`;
   const outChip=$('#outboxchip');if(outChip)outChip.textContent=`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`;
   const activeAgentCount=activeSubagents(f).length;
-  const nowCounts={needs_you:t.needs_me||0,working:t.busy||0,available:t.available||0,
+  const provisional=provisionalSessionObject();
+  const nowCounts={needs_you:(t.needs_me||0)+(provisional?.ui_group==='needs_you'?1:0),
+    working:(t.busy||0)+(provisional?.ui_group==='working'?1:0),available:t.available||0,
     subagents:activeAgentCount};
   const nowLabels={all:'All',needs_you:'Needs you',working:'Working',available:'Available',subagents:'Subagents'};
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
@@ -3185,7 +3333,7 @@ function render(f,force){
       renderActiveSubagents(f);
     }else{
       const subagents=$('#subagents');if(subagents){subagents.innerHTML='';subagents.className='';}
-      const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
+      const unpinned=sessionsWithProvisional(f).filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
       const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
         .map(action=>action.session_id));
       renderPinned(f,matchesNow);

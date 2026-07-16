@@ -66,9 +66,11 @@ the provider's native control path. Built 2026-07-13; still evolving.
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
   effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
   by default. Claude sessions can request a **new git worktree** — it opens
-  a fresh iTerm tab running `claude` with those
-  flags, then auto-opens that session's full chat view here once it appears, so you can send
-  the first prompt from your phone. Untrusted folders are flagged: Claude Code asks "do you
+  a fresh iTerm tab running `claude` with those flags. Fleet immediately opens a provisional
+  card and full chat with the initial message and a startup spinner, then replaces it in place with
+  the exact native session. A rejected start keeps the exact setup available to retry or restore.
+  Model changes paint immediately while stale forecast requests are cancelled or ignored.
+  Untrusted folders are flagged: Claude Code asks "do you
   trust the files in this folder?" at startup and **only your Mac can answer that** — trust is
   inherited from a parent dir, so worktrees under a trusted repo start clean.
 
@@ -272,7 +274,9 @@ the provider without affecting Claude sessions.
   A sent message appears there immediately with a small sending spinner. The placeholder is
   replaced only when the provider transcript confirms it. A failed request, or one still
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
-  never retries automatically. Structured-question answers use the selected option labels and the
+  never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
+  newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
+  Send/Relay button remains available. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.

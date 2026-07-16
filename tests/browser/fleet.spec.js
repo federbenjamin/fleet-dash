@@ -15,6 +15,11 @@ async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
 }
 
+async function sendModifiedReturn(page, locator) {
+  const mac = await page.evaluate(() => /Mac|iPhone|iPad|iPod/.test(navigator.platform || ''));
+  await locator.press(mac ? 'Meta+Enter' : 'Control+Enter');
+}
+
 async function goTo(page, route) {
   let control = page.locator(`button[data-route="${route}"]:visible`);
   if (await control.count() === 0) {
@@ -678,7 +683,7 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
-  await expect(page.locator('#sact input[placeholder^="send a message"]')).toBeVisible();
+  await expect(page.locator('#sact textarea[placeholder^="send a message"]')).toBeVisible();
 });
 
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
@@ -835,7 +840,7 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const input = page.locator('#sft-codex\\:thread-one');
   await input.fill('Ship the optimistic message');
-  await input.press('Enter');
+  await sendModifiedReturn(page, input);
   const sending = page.locator('#sbody .optimistic').filter({ hasText: 'Ship the optimistic message' });
   await expect(sending).toBeVisible();
   await expect(sending.getByLabel('sending')).toBeVisible();
@@ -878,7 +883,7 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const timeoutInput = page.locator('#sft-codex\\:thread-one');
   await timeoutInput.fill('Wait for transcript confirmation');
-  await timeoutInput.press('Enter');
+  await sendModifiedReturn(page, timeoutInput);
   const timedOut = page.locator('#sbody .optimistic').filter({
     hasText: 'Wait for transcript confirmation' });
   const restoreTimedOut = timedOut.getByRole('button', {
@@ -892,13 +897,87 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const failedInput = page.locator('#sft-codex\\:thread-one');
   await failedInput.fill('Restore this message');
-  await failedInput.press('Enter');
+  await sendModifiedReturn(page, failedInput);
   const failed = page.locator('#sbody .optimistic').filter({ hasText: 'Restore this message' });
   const restore = failed.getByRole('button', { name: 'send failed; restore message' });
   await expect(restore).toBeVisible();
   await restore.click();
   await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
   await expect(failedInput).toHaveValue('Restore this message');
+});
+
+test('message composers use Return for newlines and an explicit modified Return to send', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const composer = page.locator('#sft-codex\\:thread-one');
+  await composer.fill('First line');
+  await composer.press('Enter');
+  await expect(composer).toHaveValue('First line\n');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'text')).toHaveLength(0);
+  await composer.fill('First line\nSecond line');
+  await sendModifiedReturn(page, composer);
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)).toMatchObject({
+    type: 'text', text: 'First line\nSecond line' });
+
+  await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"]').getByText('reviewer', { exact: true }).click();
+  const relay = page.locator('#aft');
+  await relay.fill('Relay line');
+  await relay.press('Enter');
+  await expect(relay).toHaveValue('Relay line\n');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'relay')).toHaveLength(0);
+  await relay.fill('Relay line\nMore detail');
+  await sendModifiedReturn(page, relay);
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)).toMatchObject({
+    type: 'relay', text: 'Relay line\nMore detail' });
+});
+
+test('new sessions open a provisional card and chat before native startup returns', async ({ page }) => {
+  await reset(page, 'spawn-slow');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  const form = page.locator('.newform');
+  await form.locator('select').first().selectOption('codex');
+  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
+  await form.locator('textarea.nfmessage').fill('Start with immediate feedback');
+  await form.getByRole('button', { name: /start session/ }).click();
+
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
+  await expect(page.locator('#sbody')).toContainText('Starting session');
+  await expect(page.locator('[data-sid^="spawn-"]')).toBeVisible();
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 1');
+  await expect.poll(async () => page.evaluate(() =>
+    window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
+
+  await expect(page.locator('[data-sid="codex:new"]')).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'spawn')).toHaveLength(1);
+});
+
+test('new-session forecast ignores stale model results and rejected startup restores exact input', async ({ page }) => {
+  await reset(page, 'forecast-race');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  let form = page.locator('.newform');
+  await form.locator('select').first().selectOption('codex');
+  const model = form.locator('select').filter({ has: page.locator('option[value="gpt-5.4"]') });
+  await model.selectOption('gpt-5.4');
+  await expect(form.locator('.spawnforecast')).toContainText('Updating forecast');
+  await model.selectOption('gpt-5.3-codex');
+  await expect(form.locator('.spawnforecast')).toContainText('53k tokens');
+  await expect(form.locator('.spawnforecast')).not.toContainText('54k tokens');
+
+  await page.request.post('/test/reset', { data: { scenario: 'spawn-failure' } });
+  await page.reload();
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  form = page.locator('.newform');
+  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
+  await form.locator('textarea.nfmessage').fill('Keep this exact startup message');
+  await form.getByRole('button', { name: /start session/ }).click();
+  await expect(page.locator('#sbody')).toContainText('fixture startup rejected');
+  await page.locator('#sact').getByRole('button', { name: 'restore setup' }).click();
+  await expect(page.locator('.newform textarea.nfmessage')).toHaveValue('Keep this exact startup message');
 });
 
 test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
@@ -985,7 +1064,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
   await input.fill('$rev');
   await expect(page.locator('.slashmenu')).toContainText('$reviewer');
   await page.getByRole('button', { name: /\$reviewer/ }).click();
-  await input.press('Enter');
+  await sendModifiedReturn(page, input);
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('skill');
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });

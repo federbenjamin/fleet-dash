@@ -243,7 +243,7 @@ and fixed by the test. The unchanged Python suite remains 173/173.
 
 ### M2 — Composer and optimistic startup
 
-Status: Pending
+Status: Complete · 2026-07-16
 
 - Implement `INPUT-001` and `SPAWN-001`–`SPAWN-002` using the existing optimistic conversation-row
   confirmation contract.
@@ -253,6 +253,16 @@ Status: Pending
 
 Exit gate: multiline keyboard tests pass across desktop/mobile; start/model paths visibly respond
 within 100 ms; delayed/success/failure/race fixtures retain the exact user text once.
+
+Implemented `INPUT-001` and `SPAWN-001`–`SPAWN-002`. The full chat, Markdown-viewer chat, and
+subagent relay now use multiline composers with platform-specific modified-Return sending. New
+sessions render a provisional Working card, full chat, initial user row, and startup spinner before
+the spawn response; exact provider identity replaces it in place. Explicit rejection restores the
+full setup, while an unknown/lost response refuses an unsafe duplicate retry. Forecast requests are
+abortable and sequence-gated. Eight focused browser checks passed across desktop/mobile, covering
+ordinary optimistic confirmation/failure, newline/send keys, delayed startup, exact reconciliation,
+forecast races, and rejected-start restoration; measured provisional first feedback remained below
+100 ms p95.
 
 ### M3 — Claude permissions and worktree-safe close
 
@@ -324,7 +334,7 @@ injects into an existing user session.
 | --- | --- | --- |
 | M0 | In progress | Roadmap created; live API/browser baseline recorded; interaction harness pending |
 | M1 | Complete | Focused M1 desktop/mobile checks passed; affected legacy flows passed; Python 173/173 |
-| M2 | Pending | — |
+| M2 | Complete | 8 focused desktop/mobile checks: composer, delayed spawn, race, recovery; <100 ms provisional feedback |
 | M3 | Pending | — |
 | M4 | Pending | — |
 | M5 | Pending | — |

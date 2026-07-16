@@ -333,6 +333,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `#vtitle` contains only the escaped file name/caption; session metadata and `.vfsep` do not belong
     in the Markdown viewer. Ordinary Claude cards open chat through `.shead` and keep only the
     distinct **Terminal** native-focus button; Respond/Review actions remain explicit.
+39. **New-session identity is optimistic but exact.** `spawnProvisional` immediately owns one
+    client-generated card/full-chat identity and the initial user message while `/api/act spawn` is
+    pending. Only the exact server-returned `session_id` may replace it; never reconcile by cwd.
+    Claude's initial text is sent after that exact session becomes discoverable, while Codex accepts
+    it atomically at thread creation. Explicit spawn rejection may offer retry; a lost response may
+    have created a session and must not retry automatically. Forecast requests are abortable and
+    sequence-gated so an older model result cannot overwrite the latest selection. Message and relay
+    composers are `<textarea>` controls: Return is always a newline; only Command-Return on macOS or
+    Control-Return elsewhere sends.
 
 ## Dev workflow
 
