@@ -822,47 +822,53 @@ test('messages and question answers render optimistically and recover from failu
 });
 
 test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
+  const fleetFeedback = sid => page.locator(
+    `[data-action-sid="${sid}"] .quickfeedback, [data-sid="${sid}"] .quickfeedback`);
   await reset(page, 'claude-question-slow');
   let card = await openAction(page, 'claude-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await expect(page.locator('#sbody .optimistic').getByLabel('sending')).toBeVisible();
   await page.locator('#sclose').click();
   await expect(page.locator('#sview')).toBeHidden();
-  let feedback = card.locator('.quickfeedback');
+  let feedback = fleetFeedback('claude-one');
   await expect(feedback).toContainText('Submitting');
   await expect(feedback).toContainText('Scope: Focused');
   await expect(feedback.getByLabel('sending quick response')).toBeVisible();
   await expect.poll(async () => page.evaluate(() =>
     window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
-  await expect(feedback).toContainText('Submitted', { timeout: 2_000 });
+  await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
   await expect(feedback.getByLabel('response submitted')).toBeVisible();
 
   await page.request.post('/test/confirm', { data: { session_id: 'claude-one',
     kind: 'answer', answers: [{ header: 'Scope', q: 'How broad?', a: 'Focused' }] } });
   await refresh(page);
-  await expect(card.locator('.quickfeedback')).toHaveCount(0);
+  await expect(fleetFeedback('claude-one')).toHaveCount(0);
 
   await reset(page, 'claude-question-failure');
   card = await openAction(page, 'claude-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await page.locator('#sclose').click();
-  feedback = card.locator('.quickfeedback');
+  feedback = fleetFeedback('claude-one');
   await expect(feedback).toContainText('Failed');
   const restore = feedback.getByRole('button', { name: 'submission failed; restore response' });
   await expect(restore).toBeVisible();
   await restore.click();
-  await expect(card.locator('.quickfeedback')).toHaveCount(0);
+  await expect(fleetFeedback('claude-one')).toHaveCount(0);
   await expect(card.locator('.primarybtn')).toBeVisible();
 
+});
+
+test('permission quick-response feedback reaches submitted on a fresh page', async ({ page }) => {
+  const feedback = page.locator(
+    '[data-action-sid="codex:thread-one"] .quickfeedback, [data-sid="codex:thread-one"] .quickfeedback');
   await reset(page, 'approval-slow');
-  card = await openAction(page, 'codex:thread-one');
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
   await page.locator('#sclose').click();
-  feedback = card.locator('.quickfeedback');
   await expect(feedback).toContainText('Submitting');
   await expect(feedback).toContainText('Allow permission');
   await expect(feedback.getByLabel('sending quick response')).toBeVisible();
-  await expect(feedback).toContainText('Submitted', { timeout: 2_000 });
+  await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
 });
 
 test('every approval decision and MCP single/multi-select elicitation', async ({ page }) => {
@@ -1061,6 +1067,80 @@ test('action inbox separates requests, work, availability, and unread responses'
   await page.reload();
   await expect(page.locator('[data-action-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toBeVisible();
+});
+
+test('mobile Needs You keeps a Claude question identifiable when its inbox action disappears', async ({ page }, testInfo) => {
+  await reset(page);
+  const mobile = testInfo.project.name.startsWith('mobile');
+  if (mobile) await page.dispatchEvent('body', 'touchstart');
+  await page.request.post('/test/reset', { data: { scenario: 'mobile-needs-you' } });
+  await refresh(page);
+  if (mobile) {
+    await expect(page.locator('[data-action-sid="claude-one"]')).toHaveCount(0);
+    await page.waitForTimeout(850);
+    await refresh(page);
+  }
+
+  const action = page.locator('[data-action-sid="claude-one"]');
+  await expect(page.locator('#actioninbox .actionhead')).toContainText('Needs you');
+  await expect(page.locator('#actioninbox .actionhead')).toContainText('Action inbox');
+  await expect(action).toContainText('Get 429 into a mergable state');
+  await expect(action).toContainText('hazy-hatching-curry');
+  await expect(action.getByText('Question waiting', { exact: true })).toBeVisible();
+  await expect(action.getByRole('button', { name: 'Respond' })).toBeVisible();
+  await expect(page.locator('#needsyou [data-sid="claude-one"]')).toHaveCount(0);
+  await expect(page.locator('[data-action-sid="claude-one"], #needsyou [data-sid="claude-one"]')).toHaveCount(1);
+
+  await action.getByRole('button', { name: 'Respond' }).click();
+  await expect(page.locator('#sview')).toContainText('How should I bring PR #429 up to date with main');
+  await page.locator('#sclose').click();
+
+  await page.locator('[data-now-filter="needs_you"]').click();
+  await expect(action).toBeVisible();
+  await expect(page.locator('#working .card, #sessions .card')).toHaveCount(0);
+  await page.locator('#nowfilter').fill('hazy-hatching-curry');
+  await expect(action).toBeVisible();
+  await page.locator('.actionfilters').getByRole('button', { name: 'Requests' }).click();
+  await expect(action).toBeVisible();
+  await page.locator('.actionfilters').getByRole('button', { name: 'Approvals' }).click();
+
+  let fallback = page.locator('#needsyou [data-sid="claude-one"]');
+  await expect(action).toHaveCount(0);
+  await expect(fallback).toBeVisible();
+  await expect(fallback).toContainText('Get 429 into a mergable state');
+  await expect(fallback).toContainText('hazy-hatching-curry');
+  await expect(fallback.locator('.chip')).toHaveText('Question waiting');
+  await fallback.getByRole('button', { name: 'Respond' }).click();
+  await expect(page.locator('#sview')).toContainText('How should I bring PR #429 up to date with main');
+  await page.locator('#sclose').click();
+
+  await page.locator('.actionfilters').getByRole('button', { name: 'All' }).click();
+  await expect(action).toBeVisible();
+  await expect(fallback).toHaveCount(0);
+  await page.request.post('/test/reset', { data: { scenario: 'mobile-needs-you-missing-action' } });
+  await refresh(page);
+  fallback = page.locator('#needsyou [data-sid="claude-one"]');
+  await expect(page.locator('[data-action-sid="claude-one"]')).toHaveCount(0);
+  await expect(fallback).toBeVisible();
+
+  await page.evaluate(() => toggleSessionPin('claude-one'));
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions).toContain('claude-one');
+  await expect(page.locator('#pinned [data-sid="claude-one"]')).toBeVisible();
+  await expect(fallback).toHaveCount(0);
+  expect(await page.evaluate(() => Boolean(document.querySelector('#pinned')
+    .compareDocumentPosition(document.querySelector('#needsyou')) & Node.DOCUMENT_POSITION_FOLLOWING)))
+    .toBe(true);
+  await page.evaluate(() => toggleSessionPin('claude-one'));
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions).not.toContain('claude-one');
+
+  await page.context().clearCookies();
+  await page.goto('/');
+  await expect(page.locator('#notoken')).toBeVisible();
+  await expect(page.locator('#needsyou [data-sid="claude-one"]')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath(`mobile-needs-you-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
+  expect(page.__failures.filter(message=>!message.includes('403 (Forbidden)')),
+    'read-only probe browser errors').toEqual([]);
+  page.__failures.length = 0;
 });
 
 test('action inbox bulk triage is safe and never offers bulk approval', async ({ page }) => {

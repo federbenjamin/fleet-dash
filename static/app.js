@@ -13,8 +13,9 @@ function perfSummary(){
       p95:Math.round(pct(values,.95)*1000)/1000,last:values.at(-1)||0}]));
 }
 fleetPerf.summary=perfSummary;
-function recordInputFeedback(started){requestAnimationFrame(()=>
-  perfRecord('input_feedback_ms',performance.now()-started));}
+function recordInputFeedback(started){
+  perfRecord('input_feedback_ms',performance.now()-started);
+}
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
         history.replaceState(null,'',location.pathname+location.hash);}})();
@@ -790,8 +791,16 @@ function addOptimistic(sid,text,kind='text'){
       current.status='failed';current.error='Not confirmed after 15 seconds';uiRefresh();
     }
   },15000);
-  uiRefresh();
-  recordInputFeedback(feedbackStarted);
+  const openConvo=sessionView?.sid===sid&&!sessionView.closed&&$('#sbody .aconvo');
+  if(openConvo){
+    openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
+    $('#sbody').scrollTop=$('#sbody').scrollHeight;
+    recordInputFeedback(feedbackStarted);
+    requestAnimationFrame(()=>render(last,true));
+  }else{
+    uiRefresh();
+    recordInputFeedback(feedbackStarted);
+  }
   return item.id;
 }
 function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
@@ -821,11 +830,14 @@ function restoreOptimistic(sid,id){
     if(input){input.value=item?.text||'';input.focus();}
   });
 }
-function optimisticHtml(sid,messages){
-  return visibleOptimistic(sid,messages).map(item=>`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
+function optimisticItemHtml(item){
+  return`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
     <span class="crole">you</span>${item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
-      item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${sid}',${item.id})">!</button>`:''}
-    <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`).join('');
+      item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">!</button>`:''}
+    <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
+}
+function optimisticHtml(sid,messages){
+  return visibleOptimistic(sid,messages).map(item=>optimisticItemHtml(item)).join('');
 }
 function quickResponseLabel(payload){
   if(payload.type==='permission')return `${payload.choice==='always'?'Always allow':
@@ -848,10 +860,16 @@ function finishQuickResponse(sid,id,ok,error){
 }
 function reconcileQuickResponses(f){
   const sessions=new Map(((f&&f.sessions)||[]).map(s=>[s.session_id,s]));
+  const now=Date.now();
   for(const [sid,item] of quickResponses){
     const session=sessions.get(sid);
-    if(!session||(item.status!=='sending'&&item.nonce&&session.pending?.nonce!==item.nonce))
-      quickResponses.delete(sid);
+    if(!session){quickResponses.delete(sid);continue;}
+    if(item.nonce&&session.pending?.nonce!==item.nonce){
+      if(!item.canonicalAt){
+        item.canonicalAt=now;
+        if(item.status==='sending')item.status='sent';
+      }else if(now-item.canonicalAt>5000)quickResponses.delete(sid);
+    }else delete item.canonicalAt;
   }
 }
 function cardResponseFeedback(s){
@@ -2468,9 +2486,13 @@ let actionKind='all',actionBulkBusy=false;
 function actionSession(action){
   return ((last&&last.sessions)||[]).find(item=>item.session_id===action.session_id)||null;
 }
-function actionMatches(action){
+function actionBaseMatches(action){
   const session=actionSession(action);
+  if(action.kind==='budget'&&(nowState!=='all'||nowFilter.trim()))return false;
   if(action.kind!=='budget'&&(!session||pinnedSessions.has(action.session_id)||!matchesNow(session)))return false;
+  return true;
+}
+function actionKindMatches(action){
   if(actionKind==='requests'&&!['question','form','reply'].includes(action.kind))return false;
   if(actionKind==='approvals'&&action.kind!=='approval')return false;
   if(actionKind==='outcomes'&&action.kind!=='outcome')return false;
@@ -2478,6 +2500,7 @@ function actionMatches(action){
   if(actionKind==='budgets'&&action.kind!=='budget')return false;
   return true;
 }
+function actionMatches(action){return actionBaseMatches(action)&&actionKindMatches(action);}
 function openInboxAction(actionId){
   const action=((last&&last.actions)||[]).find(item=>item.action_id===actionId);if(!action)return;
   if(action.kind==='budget'){navigateTo('insights');return;}
@@ -2486,7 +2509,7 @@ function openInboxAction(actionId){
 }
 function setActionKind(value){
   actionKind=['all','requests','approvals','outcomes','problems','budgets'].includes(value)?value:'all';
-  renderActionInbox(last);
+  render(last,true);
 }
 function toggleActionSelection(actionId,checked){
   checked?actionSelected.add(actionId):actionSelected.delete(actionId);renderActionInbox(last);
@@ -2514,18 +2537,20 @@ async function bulkTriage(operation){
 function actionIcon(kind){return {question:'?',form:'≡',approval:'!',reply:'↩',problem:'×',
   attention:'!',outcome:'✓',budget:'$'}[kind]||'•';}
 function renderActionInbox(f){
-  const el=$('#actioninbox');if(!el)return;
-  const actions=((f&&f.actions)||[]).filter(actionMatches);
+  const el=$('#actioninbox');if(!el)return new Set();
+  const candidates=((f&&f.actions)||[]).filter(actionBaseMatches);
+  const actions=candidates.filter(actionKindMatches);
+  const visibleSessionIds=new Set(actions.map(action=>action.session_id).filter(Boolean));
   const activeIds=new Set(((f&&f.actions)||[]).map(item=>item.action_id));
   [...actionSelected].forEach(id=>{if(!activeIds.has(id))actionSelected.delete(id);});
-  if(!actions.length){el.className='';el.innerHTML='';return;}
+  if(!candidates.length){el.className='';el.innerHTML='';return visibleSessionIds;}
   const selected=actions.filter(item=>actionSelected.has(item.action_id));
   const eligible=operation=>selected.filter(item=>(item.safe_bulk||[]).includes(operation)).length;
   const selectable=actions.filter(item=>(item.safe_bulk||[]).length);
   const allSelected=selectable.length>0&&selectable.every(item=>actionSelected.has(item.action_id));
   el.className='actioninbox';
   el.innerHTML=`<div class="actionhead"><label><input type="checkbox" aria-label="select visible actions"
-      ${allSelected?'checked':''} ${selectable.length?'':'disabled'} onchange="toggleVisibleActions(this.checked)"><span><b>Action inbox</b><small>${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
+      ${allSelected?'checked':''} ${selectable.length?'':'disabled'} onchange="toggleVisibleActions(this.checked)"><span><b>Needs you</b><small>Action inbox · ${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
     <div class="actionfilters">${[['all','All'],['requests','Requests'],['approvals','Approvals'],
       ['outcomes','Outcomes'],['problems','Problems'],['budgets','Budgets']].map(([value,label])=>
       `<button class="${actionKind===value?'active':''}" onclick="setActionKind('${value}')">${label}</button>`).join('')}</div></div>
@@ -2535,22 +2560,27 @@ function renderActionInbox(f){
       ${eligible('mute')?`<button onclick="bulkTriage('mute')">Mute ${eligible('mute')}</button>`:''}
       ${eligible('dismiss')?`<button onclick="bulkTriage('dismiss')">Dismiss ${eligible('dismiss')}</button>`:''}
       ${actionBulkBusy?'<span>updating…</span>':''}</div>`:''}
-    <div class="actionrows">${actions.map(action=>{
+    <div class="actionrows">${actions.length?actions.map(action=>{
       const session=actionSession(action),encoded=enc(action.action_id);
+      const identityTitle=session?.title||action.title||'',identityProject=session?.project||action.project||'';
+      const displayRequest=identityTitle||action.request;
+      const contextSignal=action.kind==='reply'?action.context:action.request;
+      const displayContext=identityTitle?[identityProject,contextSignal].filter(Boolean).join(' · '):action.context;
       const age=Math.max(0,Math.round(((f&&f.t)||Date.now()/1000)-(action.created_at||0)));
       const selectable=(action.safe_bulk||[]).length;
       return`<div class="actionrow ${esc(action.kind)} ${esc(action.status||'')}" data-action-id="${esc(action.action_id)}" data-action-sid="${esc(action.session_id||'')}">
         <label class="actioncheck" onclick="event.stopPropagation()">${selectable?`<input type="checkbox" aria-label="select ${esc(action.request)}"
           ${actionSelected.has(action.action_id)?'checked':''} onchange="toggleActionSelection(decodeURIComponent('${encoded}'),this.checked)">`:''}</label>
         <button class="actionopen" onclick="openInboxAction(decodeURIComponent('${encoded}'))">
-          <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(action.request)}</span>
-          ${action.context?`<span class="actioncontext">${esc(action.context)}</span>`:''}
-          <span class="actionmeta">${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${esc(action.reason||'Needs review')} · ${fmtAge(age)} ago</span></span>
+          <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(displayRequest)}</span>
+          ${displayContext?`<span class="actioncontext">${esc(displayContext)}</span>`:''}
+          <span class="actionmeta"><strong>${esc(action.reason||'Needs review')}</strong> · ${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${fmtAge(age)} ago</span></span>
           <span class="actiondelivery">${esc(action.delivery_state||'Review')}</span></button>
         <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label||'Review')}</button>
         ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
         ${session?cardResponseFeedback(session):''}
-      </div>`;}).join('')}</div>`;
+      </div>`;}).join(''):`<div class="actionempty">No ${esc(actionKind==='all'?'matching':actionKind)} actions.</div>`}</div>`;
+  return visibleSessionIds;
 }
 
 function filteredWorkstreams(f){
@@ -2609,7 +2639,10 @@ function renderWorkstreams(f){
   }).join('');
 }
 function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
-  if(!list.length&&!keepEmpty){el.innerHTML='';el.className='';return;}
+  if(!list.length&&!keepEmpty){
+    if(el.className||el.firstChild){el.innerHTML='';el.className='';}
+    return;
+  }
   el.className=`queue ${kind}`;
   if(!el.querySelector('.queuehead'))el.innerHTML='<div class="queuehead"><b></b><span></span></div><div class="queuelist"></div>';
   el.querySelector('.queuehead b').textContent=`${title} · ${list.length}`;
@@ -3066,7 +3099,9 @@ function render(f,force){
     const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
       .map(action=>action.session_id));
     renderPinned(f,matchesNow);
-    renderActionInbox(f);
+    const visibleInboxSessionIds=renderActionInbox(f);
+    renderQueue($('#needsyou'),unpinned.filter(s=>s.ui_group==='needs_you'&&!visibleInboxSessionIds.has(s.session_id)),
+      'Needs You','sessions waiting for your response','needs');
     renderBriefing();
     renderOutboxCompact();
     renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),

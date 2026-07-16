@@ -364,7 +364,9 @@ details.insfold>summary:hover{color:var(--fg)}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.actionmeta{font-size:9.5px;color:var(--faint);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.actiondelivery{color:var(--amber);font-size:9.5px;
   text-transform:uppercase;letter-spacing:.35px;white-space:nowrap}.actionrow.outcome .actiondelivery{color:var(--green)}
+.actionmeta strong{color:var(--amber);font-weight:600}
 .actionmuted{font-size:11px;color:var(--faint)}
+.actionempty{padding:13px;text-align:center;color:var(--faint);font-size:11px}
 .actionrow>.quickfeedback{grid-column:2/-1;margin:0 0 3px;padding:5px 7px;border-radius:6px}
 .workstream{border:1px solid var(--line);border-radius:11px;background:var(--card);overflow:hidden;margin-bottom:10px}
 .workstream.missing{border-style:dashed}.workhead{width:100%;display:grid;grid-template-columns:34px minmax(0,1fr) auto 18px;
