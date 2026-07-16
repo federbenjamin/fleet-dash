@@ -319,6 +319,15 @@ td.r,th.r{text-align:right}
 .delivery.sending{animation:sendspin 1s linear infinite;cursor:default}
 .delivery.failed{color:var(--red);cursor:pointer;border:1px solid var(--red);border-radius:50%}
 .delivery.failed:hover,.delivery.failed:focus-visible{background:#32171b;color:#fff}
+.delivery.sent{color:var(--green)}
+.quickfeedback{display:flex;align-items:center;gap:7px;min-width:0;margin:7px 12px;
+  padding:7px 9px;border:1px solid #1f3a5f;border-radius:8px;background:#132030;
+  color:var(--dim);font-size:12px}
+.quickfeedback.failed{border-color:#6f2a31;background:#211419;color:var(--red)}
+.quickfeedback .qfstate{font-weight:650;color:var(--fg);white-space:nowrap}
+.quickfeedback.failed .qfstate{color:var(--red)}
+.quickfeedback .qftext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.quickfeedback .delivery{flex:0 0 auto;margin-left:auto}
 @keyframes sendspin{to{transform:rotate(360deg)}}
 /* system events folded into the convo: compaction, model fallback, API errors,
    slash commands, and the full text of questions you answered */
@@ -895,6 +904,7 @@ function eventRow(m,provider='claude'){
 }
 const optimisticMessages=new Map();
 let optimisticSequence=0;
+const quickResponses=new Map();
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
 function optimisticList(sid){
   if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
@@ -953,6 +963,49 @@ function optimisticHtml(sid,messages){
     <span class="crole">you</span>${item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
       item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${sid}',${item.id})">!</button>`:''}
     <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`).join('');
+}
+function quickResponseLabel(payload){
+  if(payload.type==='permission')return `${payload.choice==='always'?'Always allow':
+    payload.choice==='allow'?'Allow':payload.choice==='deny'?'Deny':'Cancel'} permission`;
+  if(payload.type==='dismiss')return'Dismiss question';
+  if(payload.type==='elicitation')return payload.choice==='accept'?'Submit form':
+    payload.choice==='decline'?'Decline form':'Cancel form';
+  return'Submit response';
+}
+function beginQuickResponse(sid,payload){
+  const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
+    status:'sending',created:Date.now()};
+  quickResponses.set(sid,item);uiRefresh();return item.id;
+}
+function finishQuickResponse(sid,id,ok,error){
+  const item=quickResponses.get(sid);
+  if(!item||item.id!==id)return;
+  item.status=ok?'sent':'failed';item.error=error||'';uiRefresh();
+}
+function reconcileQuickResponses(f){
+  const sessions=new Map(((f&&f.sessions)||[]).map(s=>[s.session_id,s]));
+  for(const [sid,item] of quickResponses){
+    const session=sessions.get(sid);
+    if(!session||(item.status!=='sending'&&item.nonce&&session.pending?.nonce!==item.nonce))
+      quickResponses.delete(sid);
+  }
+}
+function cardResponseFeedback(s){
+  const messages=((ctxCache[s.session_id]||{}).messages)||[];
+  const answers=visibleOptimistic(s.session_id,messages).filter(item=>item.kind==='answer');
+  const answer=answers.length?answers[answers.length-1]:null;
+  const action=quickResponses.get(s.session_id)||null;
+  const item=!answer?action:!action?answer:(answer.created>=action.created?answer:action);
+  if(!item)return'';
+  const status=item.status==='confirmed'||item.status==='sent'?'sent':item.status;
+  const verb=status==='sending'?'Submitting':status==='failed'?'Failed':'Submitted';
+  const icon=status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
+    status==='failed'?(item.kind==='answer'
+      ?`<button class="delivery failed" title="${esc(item.error||'Submission failed')} — restore" aria-label="submission failed; restore response" onclick="event.stopPropagation();restoreOptimistic('${s.session_id}',${item.id})">!</button>`
+      :`<span class="delivery failed" title="${esc(item.error||'Submission failed')}" aria-label="submission failed">!</span>`)
+      :`<span class="delivery sent" aria-label="response submitted">✓</span>`;
+  return`<div class="quickfeedback ${status}" role="status" aria-live="polite">
+    <span class="qfstate">${verb}</span><span class="qftext">${esc(normalizedMessage(item.text))}</span>${icon}</div>`;
 }
 function convoMsgs(c,sid,includeOptimistic=true){
   const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
@@ -1561,6 +1614,7 @@ function cardTop(s){
     ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
+    ${cardResponseFeedback(s)}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
     <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
@@ -1931,16 +1985,20 @@ async function setSessionMode(sid,mode,pre='msg'){
   }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
 }
 async function act(sid,payload,pre='msg',optimisticId=null){
-  const el=document.getElementById(pre+'-'+sid);
-  if(el&&payload.type!=='ping')el.textContent='sending…';
+  const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
+  const quickId=isQuick?beginQuickResponse(sid,payload):null;
+  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid);
+    if(el)el.textContent=text;return el;};
+  if(payload.type!=='ping')setMessage('sending…');
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
     const d=await r.json();
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
       d.ok&&['option','multiq'].includes(payload.type));
-    if(el)el.textContent=d.ok?'sent ✓':'✗ '+(d.error||'failed');
-    if(!d.ok&&!el)alert(d.error||'failed');
+    if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
+    const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
+    if(!d.ok&&!el&&quickId==null)alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
       answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
@@ -1949,8 +2007,9 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     return d;
   }catch(e){
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
-    if(el)el.textContent='✗ '+e;
-    else alert('request failed: '+e);
+    if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
+    const el=setMessage('✗ '+e);
+    if(!el&&quickId==null)alert('request failed: '+e);
     return {ok:false,error:String(e)};
   }
 }
@@ -2400,6 +2459,7 @@ function insightsSection(){
 let last=null;
 function render(f,force){
   if(!f||!f.sessions)return;
+  reconcileQuickResponses(f);
   applyReaderWidth();
   syncPinnedSessions(f);
   const t=f.totals;

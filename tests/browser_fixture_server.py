@@ -207,19 +207,26 @@ def codex_session():
     return next(item for item in STATE["sessions"] if item["provider"] == "codex")
 
 
+def claude_session():
+    return next(item for item in STATE["sessions"] if item["provider"] == "claude")
+
+
 def set_scenario(name):
     global STATE
     STATE = fresh_state()
     STATE["scenario"] = name
-    session = codex_session()
-    if name in ("single-question", "answer-failure"):
+    session = claude_session() if name.startswith("claude-question") else codex_session()
+    if name in ("single-question", "answer-failure", "claude-question-slow",
+                "claude-question-failure"):
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q1",
             "dismiss_action": "cancel_turn", "questions": [{"header": "Scope",
             "question": "How broad should the change be?", "multiSelect": False,
             "allowOther": True, "options": [{"label": "Focused", "description": "One area"},
                                              {"label": "Full", "description": "All areas"}]}]})
-        if name == "answer-failure":
+        if name in ("answer-failure", "claude-question-failure"):
             STATE["fail_answers"] = True
+        if name == "claude-question-slow":
+            STATE["delay_answers"] = 0.75
     elif name == "multi-question":
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q2",
             "dismiss_action": "cancel_turn", "questions": [
@@ -227,10 +234,12 @@ def set_scenario(name):
                  "allowOther": True, "options": [{"label": "Desktop"}, {"label": "Mobile"}]},
                 {"header": "Depth", "question": "Choose depth", "multiSelect": False,
                  "allowOther": False, "options": [{"label": "Full"}, {"label": "Small"}]}]})
-    elif name == "approval":
+    elif name in ("approval", "approval-slow"):
         session.update(state="needs_you", pending={"kind": "permission", "nonce": "p1",
             "tool": "command", "approval_kind": "command", "input_summary": "npm test",
             "decisions": ["allow", "always", "deny", "cancel"]})
+        if name == "approval-slow":
+            STATE["delay_quick_response"] = 0.75
     elif name == "elicitation":
         session.update(state="needs_you", pending={"kind": "elicitation", "nonce": "e1",
             "server": "deploy", "message": "Choose deployment targets", "fields": [
@@ -499,8 +508,13 @@ class Handler(BaseHTTPRequestHandler):
                 elif typ in ("option", "multiq", "permission", "dismiss", "elicitation"):
                     if not session.get("pending") or payload.get("nonce") != session["pending"].get("nonce"):
                         return self.json_reply({"ok": False, "error": "stale request"})
+                    if typ in ("permission", "dismiss", "elicitation") \
+                            and STATE.get("delay_quick_response"):
+                        time.sleep(STATE["delay_quick_response"])
                     if typ == "option" and not payload.get("digits") and not payload.get("other"):
                         return self.json_reply({"ok": False, "error": "invalid response"})
+                    if typ in ("option", "multiq") and STATE.get("delay_answers"):
+                        time.sleep(STATE["delay_answers"])
                     if typ in ("option", "multiq") and STATE.get("fail_answers"):
                         return self.json_reply({"ok": False,
                                                 "error": "provider rejected answer"})

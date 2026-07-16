@@ -225,7 +225,9 @@ the provider without affecting Claude sessions.
   replaced only when the provider transcript confirms it. A failed request, or one still
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
   never retries automatically. Structured-question answers use the selected option labels and the
-  same placeholder behavior (secret free text is shown only as “private answer”).
+  same placeholder behavior (secret free text is shown only as “private answer”). The owning card
+  on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
+  question answers and inline quick responses such as permissions, dismissals, and MCP forms.
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.

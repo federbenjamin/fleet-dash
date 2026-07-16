@@ -467,6 +467,49 @@ test('messages and question answers render optimistically and recover from failu
   await expect(failedInput).toHaveValue('Restore this message');
 });
 
+test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
+  await reset(page, 'claude-question-slow');
+  let card = page.locator('[data-sid="claude-one"]');
+  await card.locator('.qanswer').click();
+  await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
+  await expect(page.locator('#sbody .optimistic').getByLabel('sending')).toBeVisible();
+  await page.locator('#sclose').click();
+  await expect(page.locator('#sview')).toBeHidden();
+  let feedback = card.locator('.quickfeedback');
+  await expect(feedback).toContainText('Submitting');
+  await expect(feedback).toContainText('Scope: Focused');
+  await expect(feedback.getByLabel('sending quick response')).toBeVisible();
+  await expect(feedback).toContainText('Submitted', { timeout: 2_000 });
+  await expect(feedback.getByLabel('response submitted')).toBeVisible();
+
+  await page.request.post('/test/confirm', { data: { session_id: 'claude-one',
+    kind: 'answer', answers: [{ header: 'Scope', q: 'How broad?', a: 'Focused' }] } });
+  await refresh(page);
+  await expect(card.locator('.quickfeedback')).toHaveCount(0);
+
+  await reset(page, 'claude-question-failure');
+  card = page.locator('[data-sid="claude-one"]');
+  await card.locator('.qanswer').click();
+  await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
+  await page.locator('#sclose').click();
+  feedback = card.locator('.quickfeedback');
+  await expect(feedback).toContainText('Failed');
+  const restore = feedback.getByRole('button', { name: 'submission failed; restore response' });
+  await expect(restore).toBeVisible();
+  await restore.click();
+  await expect(card.locator('.quickfeedback')).toHaveCount(0);
+  await expect(card.locator('.qanswer')).toBeVisible();
+
+  await reset(page, 'approval-slow');
+  card = page.locator('[data-sid="codex:thread-one"]');
+  await card.getByRole('button', { name: 'allow', exact: true }).click();
+  feedback = card.locator('.quickfeedback');
+  await expect(feedback).toContainText('Submitting');
+  await expect(feedback).toContainText('Allow permission');
+  await expect(feedback.getByLabel('sending quick response')).toBeVisible();
+  await expect(feedback).toContainText('Submitted', { timeout: 2_000 });
+});
+
 test('every approval decision and MCP single/multi-select elicitation', async ({ page }) => {
   for (const [label, choice] of [['allow', 'allow'], ['always allow', 'always'],
                                  ['deny', 'deny'], ['cancel', 'cancel']]) {

@@ -295,7 +295,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     may drop the spinner once the provider accepts the native answer response, but remain until the
     canonical QA event arrives. HTTP failure or 15 seconds without direct-text confirmation produces
     a red restore button; restore refills the composer and never retries. A focused composer must not
-    block `#sbody` transcript repaints—preserve the composer below the body update instead.
+    block `#sbody` transcript repaints—preserve the composer below the body update instead. The main
+    fleet card mirrors the newest question-answer placeholder as a compact delivery receipt. Inline
+    permission/dismiss/elicitation actions create the same receipt even when the card's More panel
+    is closed; failures remain visible beside the still-actionable request.
 35. **Session card peeks are capped at exactly 500 characters including the ellipsis.** The server
     caps both providers; CSS controls the collapsed line count. When measured content overflows, the
     final collapsed row is a clickable `...`; expanded state removes the height clamp but does not
