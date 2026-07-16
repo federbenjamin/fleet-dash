@@ -1,0 +1,655 @@
+# Fleet Dash platform roadmap
+
+Status: approved for sequential implementation on `codex-integration`.
+
+This roadmap turns Fleet Dash from a session list into a local operations desk for supervising
+Claude Code and Codex work. It preserves one shared application, provider-independent sessions,
+every existing control, and the current safe-action boundaries.
+
+## Settled decisions
+
+- Global search indexes every local Claude and Codex transcript, including sessions Fleet did not
+  create, saved subagents, delivered/generated artifacts, and session metadata. It does not crawl
+  arbitrary repository files.
+- Search uses an incremental on-disk index. Fleet startup, `/api/fleet`, and the two-second provider
+  poll must never wait for a full transcript scan.
+- Provider handoff opens an editable preview that can be accepted unchanged with one primary action.
+- Git/GitHub supports status, commit, push, draft-PR creation, and an explicitly confirmed
+  ready-for-review action. Fleet never merges a PR.
+- Briefings appear in the app. Immediate blocker pushes and one fleet-quiet completion digest may
+  use ntfy. Scheduled push digests default off.
+- Desktop uses a left navigation rail. Mobile uses bottom navigation. The destinations are Now,
+  Search, Workstreams, History, Insights, and Settings.
+- Workstreams are lightweight repository/project groupings, not a new task-management system.
+- Features must remain usable in a 390×844 viewport and must not turn Now into a control wall.
+- Each milestone gets deterministic tests, a commit, and a push before dependent work starts.
+
+## Requirements catalogue and completion ledger
+
+This catalogue is the source-of-truth checklist for the work below. Every requirement has a stable
+ID, an observable acceptance condition, and an owning milestone. A milestone is not complete until
+its IDs have implementation evidence and passing deterministic tests. M9 re-audits every ID against
+the current source and running app; a checked box or this document's prose is not evidence by itself.
+
+### Product and safety decisions
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| DEC-001 | Keep Claude Code and Codex in one Fleet app. Provider sessions remain independent and no duplicate Codex app or implicit cross-provider spawn is introduced. | All |
+| DEC-002 | Preserve provider-appropriate capabilities. Unsupported values render as unavailable, never fabricated zeroes or hidden controls presented as parity. | All |
+| DEC-003 | Search all local Claude/Codex main and saved-subagent transcripts, Fleet-known artifact text, and session metadata, including sessions Fleet did not create. Never crawl arbitrary repository files. | M2 |
+| DEC-004 | Provider handoff always shows an editable preview with a one-action accept-unchanged path and clearly creates an independent session. | M5 |
+| DEC-005 | Git actions stop at commit, push, draft PR, and explicitly confirmed mark-ready. Fleet never merges. | M6 |
+| DEC-006 | Briefings live in Fleet. ntfy is optional for immediate blockers and one fleet-quiet digest; scheduled push digests default off. | M7 |
+| DEC-007 | Desktop navigation is a left rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1 |
+| DEC-008 | Workstreams are lightweight repo/project groupings, not tasks, kanban, ownership, or dependencies. | M3 |
+| DEC-009 | Every new interaction works at 390×844 and desktop size without overloading Now. Split destinations when density warrants it. | All |
+| DEC-010 | External ChatGPT Desktop/VS Code Codex threads remain view-only unless explicitly connected to Fleet's App Server. They are still discoverable and their observed transcript activity is trackable. | M0/M4 |
+| DEC-011 | Preserve stable insertion order while a session remains Working. Re-sort only when it leaves and later re-enters Working. | M1/M3 |
+| DEC-012 | User messages, quick replies, question answers, and approvals appear optimistically with sending, confirmed, and failed states. Failed content stays retryable. | M0/M1 |
+
+### Navigation, presentation, and interaction
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| UX-001 | Provide Now, Search, Workstreams, History, Insights, and Settings as navigable destinations; deep links, refresh, browser history, and native back/swipe preserve the expected destination. | M1 |
+| UX-002 | Keep pinned sessions above Needs you. Now then presents Needs you, Working, and Available in that order; History owns external inactive, dormant, reopenable, and closed sessions. | M1 |
+| UX-003 | Use one canonical card hierarchy: identity/outcome first, reason and access second, metadata/details on demand. Expanded cards preserve contrast without changing semantic state. | M1 |
+| UX-004 | Render state, reason, access, and provider as separate fields. Color is never the only distinction and counters use consistent typography/color. | M1 |
+| UX-005 | Consolidate questions, approvals, MCP forms, delivery receipts, retry, and validation into one interaction component reused on cards, full chat, and action inbox. | M1/M3 |
+| UX-006 | Add a sticky, destination-aware command bar for text search, filter chips, saved views, and primary actions without duplicating every control on every page. | M1/M3 |
+| UX-007 | Full chat, Markdown viewer, and subagent viewer honor Fit screen versus centered/max-width settings and expose only relevant overflow-menu actions. | M1 |
+| UX-008 | Peek renders safe formatted Markdown, truncates at 500 characters, replaces overflow with a clickable ellipsis, and expands to the complete response without a second truncation limit. | M0/M1 |
+| UX-009 | Mobile scroll gestures collapse the open keyboard, and all touch targets, overlays, sticky regions, and bottom navigation remain usable at 390×844. | M1 |
+| UX-010 | Loading, empty, stale, unavailable, read-only, validation, sending, success, and failure states exist for every destination and mutation. | All |
+| UX-011 | Account summaries show provider, signed-in identity, plan/usage details, and honest locally scoped lifetime token descriptions; multiple Claude identities are supported where local data exposes them. | M7 |
+| UX-012 | Session close/stop controls live in the full-chat overflow menu with confirmation. Stop affects the current turn; Claude close may terminate its terminal, while provider capability text remains explicit. | M1 |
+
+### Intelligent global search
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| SRCH-001 | Incrementally index every source in DEC-003 into a separate WAL/FTS5 database without delaying initial fleet render, provider polling, or `/api/fleet`. | M2 |
+| SRCH-002 | Persist per-source offsets and generations. Correctly handle append, partial final JSON, truncate, replace, delete, parser-version change, duplicate records, and restart. | M2 |
+| SRCH-003 | Normalize provider, session, subagent, project, cwd, branch, role, kind, timestamp, title, text, and authorized artifact metadata while preserving a stable source key. | M2 |
+| SRCH-004 | Support debounced queries, cancellation, prefix matching, relevance/recency boosts, provider/project/kind filters, bounded safe snippets, pagination, and recent-conversation empty queries. | M2 |
+| SRCH-005 | Expose index progress, lag, per-source errors, and a controlled rebuild. Malformed/unknown records degrade visibly without stopping other sources. | M2 |
+| SRCH-006 | Require local action authentication because unmanaged transcripts become searchable. Never disclose unauthorized source paths or bypass artifact preview safety. | M2 |
+| SRCH-007 | Pass the 100k-message/2k-source benchmark: warm p95 <75 ms, cold p95 <150 ms, live lag <2 polls, HTTP blocking slice <25 ms, and `/api/fleet` p95 regression <5 ms. | M2/M8 |
+| SRCH-008 | Search results open the canonical session/subagent/artifact context and work on desktop and mobile with keyboard and screen-reader navigation. | M2 |
+
+### Action inbox and Workstreams
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| ACT-001 | Normalize structured questions, explicit prose questions/reply requests, approvals, permissions, MCP forms, actionable errors, budget alerts, Git/PR failures, and unreviewed completed outcomes into one inbox. | M3 |
+| ACT-002 | Each action shows request, essential context, age, provider, access, reason, primary action, and delivery state, and opens the canonical interaction component. | M3 |
+| ACT-003 | Deduplicate the same underlying request across cards/inbox/refresh/restart and reject stale or duplicate answers without losing the pending request. | M3 |
+| ACT-004 | Bulk actions are limited to mark read/available, mute, and notification dismissal. Never bulk-approve a command or file change. | M3 |
+| ACT-005 | Immediate submission feedback appears both inside full chat and on main-page quick responses; question answers remain visible with sending/confirmed/failed status. | M0/M1 |
+| WORK-001 | Group Git sessions by canonical main repository root, roll linked worktrees underneath it, and group non-Git sessions by canonical cwd. | M3 |
+| WORK-002 | Show per-workstream state counts, active branches/worktrees/providers, latest outcome, changed files/tests/PR summary, measured usage/cost, budget state, and filtered sessions. | M3/M6/M7 |
+| WORK-003 | Handle symlinks, missing paths, nested repositories, detached heads, renamed roots, and one-provider outages without merging unrelated projects. | M3 |
+
+### State evidence and external tracking
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| EVID-001 | Extract a pure provider-neutral placement classifier returning state, reason, access, primary action, ordered evidence, winning rule, suppressed rules, and confidence. | M4 |
+| EVID-002 | Questions are Needs you only when provider structure or unambiguous assistant prose requests a response. Plans, status reports, and quoted/example questions do not create false attention. | M4 |
+| EVID-003 | Persist meaningful deduplicated transitions with bounded safe evidence, expose paginated history, and recover after restart without rewriting past truth. | M4 |
+| EVID-004 | The evidence rail explains the exact current placement using provider signal, transcript event, pending work, age, classifier rule, and stale/inferred status. | M4 |
+| EVID-005 | External view-only Codex transcripts move to Working when current local transcript evidence shows an active turn, then Available/recently completed or History based on completion and inactivity. Fleet never implies it can steer them. | M0/M4 |
+| EVID-006 | Provider/index/account errors retain the last good snapshot as explicitly stale, recover automatically, and never take the other provider down. | M4/M9 |
+
+### Editable provider handoff
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| HAND-001 | Build an editable preview from objective, relevant recent turns, unresolved work, repo/branch/worktree, changes, tests, PR, and artifacts, excluding secrets and credentials. | M5 |
+| HAND-002 | Default controls are useful and the unchanged preview is accepted with one primary action; advanced provider/model/effort/mode/worktree/artifact options stay available. | M5 |
+| HAND-003 | Support Claude→Codex, Codex→Claude, and same-provider continuation while keeping source and destination sessions independent and linked for navigation. | M5 |
+| HAND-004 | Identify the newly created provider-native session before delivery. Never submit to a similar existing session; spawn/delivery failure stays visible and retryable. | M5 |
+| HAND-005 | Keep an extension seam for future provider spawning but do not implement implicit Claude-to-Codex subagent spawning. | M5 |
+
+### Repository and delivery outcome center
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| REPO-001 | Cache bounded, timed, argv-only probes for branch/worktree, dirty state, diffstat, upstream/ahead/behind, commits, PR/check/review state, and observed test/build results. | M6 |
+| REPO-002 | Distinguish observed passing/failing/stale/not observed. GitHub/provider/network failure never turns an unknown into success and never blocks the fleet. | M6 |
+| REPO-003 | Commit shows files and editable message then confirms; push shows remote/branch/ahead then confirms; draft PR shows editable title/body/base; mark-ready re-reads state and separately confirms. | M6 |
+| REPO-004 | All mutations require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, retry/error UI, and no free-form shell. | M6 |
+| REPO-005 | Never offer or execute merge, automatic commit/push/PR readiness, or history rewrite. | M6 |
+
+### Briefings, notifications, usage, and budgets
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| BRIEF-001 | Build deterministic in-app sections for attention, reviewed/unreviewed completion, slow work, Git/test/artifact outcomes, budget warnings, and unavailable measurements. | M7 |
+| BRIEF-002 | Persist a per-device review cursor without deleting evidence/history; deduplicate events across poll/restart and preserve source links. | M7 |
+| BRIEF-003 | Respect persistent session mute across providers. Immediate blocker pushes and one quiet-episode digest are optional; scheduled pushes are off by default and failures are visible. | M7 |
+| BUD-001 | Configure alert-only budgets by session, workstream, provider, or fleet for exact USD, tokens, runtime, and concurrency, with optional explicit blocking of future spawns only. | M7 |
+| BUD-002 | Label exact, partial, token-only, and unavailable measurement. Never convert Codex quota tokens into API spend or display fabricated zero cost/throughput. | M7 |
+| BUD-003 | Forecast from recent measured burn and provider/model/project history, showing sample size/confidence and “not enough history”; never interrupt active work automatically. | M7 |
+| USE-001 | Claude historical totals state their local transcript/stat-cache scope; Codex quota/lifetime/context numbers state their provider scope and omit unused Spark-specific quota. | M7 |
+
+### Cross-cutting quality gates
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| QUAL-001 | Every new read/mutation route validates auth, IDs, enums, lengths, cursors, and canonical paths; outputs are escaped and paginated/bounded. | All |
+| QUAL-002 | Unit, fake-provider/protocol, engine/API, Playwright desktop/mobile, safe-path, auth/read-only, crash/restart, and opt-in live tests cover each requirement's success and failure paths. | All/M9 |
+| QUAL-003 | Capture baseline and final p50/p95 latency, payload, index lag, render/input latency, and memory on the same corpus; optimize only with before/after evidence. | M0/M8 |
+| QUAL-004 | Each milestone is a focused append-only commit pushed to `codex-integration`; unrelated user work is preserved and `main` is never changed. | All |
+| QUAL-005 | Final audit cites current `file:line` implementation and test evidence for every catalogue ID, reloads the daemon, checks HTTP/browser console/network state, and lists any exact provider limitation. | M9 |
+
+### Milestone traceability gate
+
+Before each milestone commit, its catalogue IDs are copied into the commit's verification note with
+the exact tests that prove them. The completion audit must account for every ID in this catalogue;
+missing, partially implemented, or documentation-only IDs keep M9 open. New decisions discovered
+during implementation receive a new ID here before dependent code is written.
+
+## Product model
+
+Fleet exposes four independent dimensions. No feature may collapse them into one ambiguous label.
+
+| Dimension | Question it answers | Examples |
+| --- | --- | --- |
+| State | What requires attention now? | Needs you, Working, Available, History |
+| Reason | Why is it in that state? | Question waiting, Running tests, External, Inactive |
+| Access | What can Fleet safely do? | Interactive, View only, Reopen |
+| Provider | Which runtime owns it? | Claude Code, Codex CLI |
+
+The durable organizational unit remains the provider session. Workstreams group sessions by canonical
+repository root and project identity without introducing task ownership, dependencies, or hidden
+cross-provider coupling.
+
+## UX direction
+
+### Subject and job
+
+The subject is a local operations desk for one person supervising many coding agents. Its single job
+is to make the next useful action obvious while keeping raw runtime evidence one tap away.
+
+### Visual system
+
+Keep Fleet's established dark, terminal-adjacent identity instead of replacing it with a generic SaaS
+dashboard.
+
+| Token | Value | Use |
+| --- | --- | --- |
+| Night deck | `#0d1117` | App background |
+| Session plate | `#161b22` | Available and reading surfaces |
+| Raised plate | `#1c2330` | Active cards and selected navigation |
+| Instrument line | `#2d333b` | Structure and separation |
+| Signal blue | `#58a6ff` | Primary actions and current destination |
+| State signals | `#3fb950`, `#d29922`, `#f85149` | Working, attention, failure only |
+
+- Navigation, headings, and prose use the system UI face for fast scanning.
+- IDs, branches, tokens, timings, and command output use SF Mono/Menlo.
+- Color never carries state alone; every signal has a label or icon.
+- Motion is limited to live delivery, active work, and route transitions, and respects reduced motion.
+
+### Layout
+
+Desktop:
+
+```text
+┌──────────────┬────────────────────────────────────────────────────────┐
+│ Fleet Dash   │ Destination title                 account / new       │
+│              ├────────────────────────────────────────────────────────┤
+│ Now       3  │ sticky query + filters + saved view                   │
+│ Search       ├────────────────────────────────────────────────────────┤
+│ Workstreams  │ destination content                                   │
+│ History      │                                                        │
+│ Insights     │                                                        │
+│ Settings     │                                                        │
+└──────────────┴────────────────────────────────────────────────────────┘
+```
+
+Mobile:
+
+```text
+┌──────────────────────────────┐
+│ title              primary   │
+│ query / filter button        │
+│                              │
+│ destination content          │
+│                              │
+├──────────────────────────────┤
+│ Now Search Work History More │
+└──────────────────────────────┘
+```
+
+Search and Workstreams remain reachable from the bottom bar. Insights and Settings live under More
+when six equal-width targets would become cramped. Browser history and the native back swipe return
+from detail screens without losing scroll, filters, or drafts.
+
+### Signature element: evidence rail
+
+Every session has a narrow state rail that opens a chronological explanation: provider signal,
+normalized state transition, pending work, last meaningful transcript event, and the exact placement
+rule. This is Fleet-specific instrumentation, not decoration. The rest of the interface stays quiet.
+
+### Design self-critique
+
+A sidebar, cards, and bottom navigation alone would look like any operations dashboard. The revision
+anchors the design in Fleet's actual material: session plates read like compact flight strips, state
+colors are sparse instrument signals, and the evidence rail exposes the classifier instead of adding
+decorative charts. No gradients, ornamental metrics, or duplicate desktop/mobile controls are added.
+
+## Shared interaction architecture
+
+The current single HTML file must not absorb seven feature systems. Split it without changing the
+zero-build deployment model:
+
+```text
+dashboard.html                 semantic shell and overlay roots
+static/fleet.css               tokens, shell, responsive layout, shared components
+static/app.js                  boot and compatibility exports
+static/store.js                fleet cache, route state, optimistic actions
+static/api.js                  fetch, auth, cancellation, latency capture
+static/router.js               destinations, overlay history, swipe/back behavior
+static/components.js           cards, questions, approvals, files, delivery, evidence
+static/views/now.js            action inbox and live inventory
+static/views/search.js         indexed search
+static/views/workstreams.js    repository/project grouping
+static/views/history.js        inactive and closed sessions
+static/views/insights.js       costs, briefings, and budgets
+static/views/settings.js       grouped settings
+```
+
+These remain browser-native modules served locally by `server.py`; no framework or build service is
+introduced. Existing inline event handlers are migrated to delegated events so the same question,
+approval, delivery, and session-card components render in Now, full chat, Markdown, and subagent
+surfaces.
+
+## Indexed global search
+
+### Data sources
+
+- `~/.claude/projects/*/*.jsonl` main transcripts.
+- `~/.claude/projects/*/*/subagents/*.jsonl` saved subagent transcripts.
+- `~/.codex/sessions/**/*.jsonl` Codex transcripts, whether or not Fleet loaded the thread.
+- Delivered/generated artifact metadata and safe text extracted only from files explicitly recorded
+  by the owning session.
+- Fleet session metadata: title, provider, project, cwd, branch, model, state, and access.
+
+### Storage
+
+Use a separate `~/.claude/fleet-dash/search.db` so indexing cannot lock the usage/session ledger.
+Enable WAL, `busy_timeout`, and FTS5. Keep one writer connection in the index worker and short-lived
+read connections for HTTP requests.
+
+```text
+search_sources(
+  path PRIMARY KEY, provider, session_id, agent_id, kind,
+  size, mtime_ns, byte_offset, generation, indexed_at, error
+)
+search_documents(
+  id PRIMARY KEY, source_path, source_key UNIQUE,
+  provider, session_id, agent_id, project, cwd, branch,
+  role, kind, timestamp, title, text, artifact_path
+)
+search_fts USING fts5(title, text, project, branch, content=search_documents)
+```
+
+`source_key` is stable within a transcript. Appended complete JSONL records index from `byte_offset`.
+Truncation, inode replacement, or parser-version changes increment `generation` and rebuild only that
+source. Partial trailing records remain unconsumed. Deleted sources are tombstoned in bounded batches.
+
+### Scheduling and query behavior
+
+- Initial discovery runs after the first fleet snapshot in a low-priority worker.
+- Live sources are checked every poll; archive discovery runs on a slower cadence.
+- Each indexing slice has a time and document budget, yields, and resumes from durable offsets.
+- The UI debounces by 150 ms, cancels superseded requests, requests 40 results, and paginates by an
+  opaque cursor.
+- FTS queries use prefix matching for the final token, BM25 ranking, recency, exact title/branch
+  boosts, provider/access filters, and escaped snippets.
+- Empty queries return recent indexed conversations rather than scanning the database.
+- Unknown or malformed rows create a visible per-source indexing warning without stopping the worker.
+
+### Performance gates
+
+- `/api/fleet` p95 regression from the pre-index baseline: less than 5 ms.
+- Warm search p95: under 75 ms; cold search p95: under 150 ms on the real local corpus.
+- A newly completed transcript line becomes searchable within two fleet polls.
+- Initial backfill never holds the engine scan lock and never blocks an HTTP response for more than
+  25 ms.
+- Deterministic benchmark corpus: at least 100,000 messages, 2,000 sources, long text, malformed rows,
+  truncation, and concurrent queries.
+
+Search endpoints require the local action token because this feature exposes conversations Fleet did
+not previously surface. Search results return bounded snippets, never raw source paths outside safe
+metadata, and artifact previews retain the existing session/path authorization rules.
+
+## Action inbox
+
+Now begins with an action inbox, not another duplicate session list. It normalizes:
+
+- Structured questions, approvals, permissions, and MCP forms.
+- Explicit prose reply requests.
+- Session/provider errors requiring intervention.
+- Budget alerts and Git/PR failures.
+- Completed work not yet reviewed.
+
+Each row shows the request, essential context, age, provider, access, primary action, and delivery
+state. Safe bulk actions are limited to mark-read, mark-available, mute, and dismiss notifications.
+Fleet never bulk-approves commands or file changes. Selecting an action opens the canonical response
+component; it does not create a second action implementation.
+
+Working and Available remain below the inbox on Now. Pinned items remain first. Empty groups collapse;
+Available keeps a small empty state. Stable Working insertion order remains unchanged.
+
+## Lightweight Workstreams
+
+Workstreams group sessions by canonical Git root; non-Git directories group by canonical cwd. Linked
+worktrees roll up under the main repository while preserving their branch/worktree labels.
+
+Each workstream shows:
+
+- Needs-you, working, available, and historical session counts.
+- Active branches/worktrees and providers.
+- Latest meaningful outcome and changed-file/test/PR summary.
+- Measured token/cost totals with unavailable values kept explicit.
+- Budget state and a filtered session list.
+
+It does not add manual tasks, dependencies, ownership, kanban stages, or a second session lifecycle.
+
+## State evidence
+
+### Durable model
+
+Add a transition journal to the ledger:
+
+```text
+state_events(
+  id INTEGER PRIMARY KEY, session_id, provider, at,
+  raw_state, reg_status, normalized_state, ui_group,
+  reason, access, evidence_kind, evidence_summary, revision
+)
+```
+
+Write only meaningful changes, not every poll. Dedupe identical transitions by session/revision.
+Evidence summaries contain bounded, user-safe facts rather than full provider payloads.
+
+### Classifier contract
+
+Extract placement into a pure provider-neutral classifier. Its result includes:
+
+- State, reason, access, and primary action.
+- Ordered evidence facts.
+- The rule identifier that won.
+- Suppressed lower-priority rules for diagnostics.
+- Confidence: confirmed, inferred, stale, or unknown.
+
+The evidence rail displays the latest facts immediately and pages historical transitions on demand.
+Every user-facing state and stale/error recovery path gets fixture coverage.
+
+## Editable provider handoff
+
+“Continue in Claude” and “Continue in Codex” open a preview containing:
+
+- Objective inferred from the first meaningful user request and current title.
+- Latest relevant user/assistant exchanges.
+- Unresolved questions, approvals, failures, and TODO-like statements.
+- Repository, cwd, branch/worktree, changed files, tests, PR, and delivered artifacts.
+- Source-session link and an explicit statement that this creates an independent session.
+
+The preview is plain editable text with sensible defaults. The primary button accepts it unchanged.
+Advanced controls choose provider, model, effort, mode, same directory versus new worktree, and which
+artifact references to include. Secret fields and raw credentials never enter the preview.
+
+Creation uses provider-native starts where available. Codex starts through Fleet's App Server. Claude
+starts through the existing validated terminal path, then submits the approved handoff only after the
+new registered session is identified. Failure at either stage remains visible and retryable; Fleet
+never sends the handoff to a merely similar pre-existing session.
+
+## Git, PR, build, and delivery outcomes
+
+### Read model
+
+Repository probes use argv arrays, fixed subcommands, per-command timeouts, canonical repository
+roots, and a TTL cache. They collect:
+
+- Branch, detached state, worktree path, dirty counts, diffstat, upstream, ahead/behind.
+- Latest local commit and whether the session's changed files are committed.
+- GitHub PR number/state, draft status, URL, review decision, mergeability, and check rollup through
+  `gh --json` when authenticated.
+- Recent test/build commands and exit status from normalized transcript tool events. These are labeled
+  with their source and age; absence is “not observed,” never “passing.”
+
+Provider or GitHub failure marks the cached result stale and leaves the other provider operational.
+
+### Actions
+
+- Commit: preview changed files and editable message, then confirm.
+- Push: show destination remote/branch and ahead count, then confirm.
+- Create draft PR: editable title/body/base, always draft.
+- Mark ready: separate explicit confirmation after current PR state is re-read.
+- Merge: never offered.
+
+Actions require authentication, run only inside the canonical repository, stream bounded progress,
+record outcomes, and cannot accept free-form shell commands.
+
+## Briefings and digests
+
+Briefings are deterministic selections from state transitions, Git outcomes, delivery events, and
+budget alerts. They do not claim model-generated conclusions that the underlying evidence cannot
+support.
+
+The in-app Briefing on Now contains:
+
+- Needs attention now.
+- Completed since last review.
+- Still working and unusually slow.
+- Commits, PRs, test/build results, and artifacts delivered.
+- Budget warnings and unavailable measurements.
+
+Reading a briefing advances a per-device cursor; events remain available in evidence/history. The
+existing immediate blocker notification remains. When the fleet transitions from active to quiet,
+one optional ntfy digest summarizes the episode. Scheduled ntfy digests are configurable but off by
+default. Muted sessions stay out of per-session pushes and identify their omission in the in-app
+briefing.
+
+## Budgets and forecasts
+
+Budgets can target a session, workstream, provider, or global fleet and can limit:
+
+- Exact USD where the provider exposes enough measured data.
+- Tokens where currency is unavailable.
+- Runtime and concurrent agent count.
+
+Codex session currency remains unavailable unless the protocol begins reporting it; Fleet must not
+price quota tokens as API spend. A mixed-provider budget therefore shows exact, partial, or
+token-only scope.
+
+Forecasts use recent measured burn rate and historical medians for the same provider/model/project.
+They show the sample size and confidence; insufficient history is “not enough history.” Before spawn,
+Fleet shows the relevant historical median and budget headroom without blocking creation unless the
+user explicitly configured a hard limit. Initial budget enforcement is alert-only; a separate setting
+may enable blocking new spawns, never interrupt active work automatically.
+
+## API surface
+
+Planned read routes:
+
+```text
+GET /api/search?q=&provider=&project=&kind=&cursor=
+GET /api/search/status
+GET /api/actions
+GET /api/workstreams
+GET /api/evidence?sid=&cursor=
+GET /api/handoff?sid=&provider=
+GET /api/repo?root=
+GET /api/briefing?cursor=
+GET /api/budgets
+```
+
+Planned authenticated mutations remain under the existing action/settings boundary:
+
+```text
+POST /api/act  type=handoff
+POST /api/act  type=git_commit | git_push | pr_create_draft | pr_mark_ready
+POST /api/settings  budgets, digest preferences, saved views
+```
+
+Every route validates lengths, enums, IDs, cursors, canonical paths, and authorization. Large lists
+paginate. Provider, index, Git, and notification failures return scoped stale/error objects rather
+than taking down `/api/fleet`.
+
+## Sequential milestones and commits
+
+### M0 — Baseline and roadmap
+
+- Commit this roadmap alone.
+- Commit the already-tested main-card quick-response feedback separately.
+- Record baseline scan, fleet API, context API, browser-load, and corpus-size measurements.
+
+Exit: clean tree, baseline results saved in the optimization section of this document, all existing
+tests green.
+
+### M1 — App shell and shared components
+
+- Split static assets and introduce the responsive router/shell.
+- Add desktop rail, mobile bottom navigation, sticky command bar, and destinations.
+- Move existing Now, History, Insights, and Settings without dropping controls.
+- Standardize card hierarchy and state/reason/access/provider presentation.
+- Consolidate question/approval/delivery rendering.
+
+Commit: `Build responsive Fleet application shell`.
+
+Exit: behavior-parity tests, desktop/mobile screenshots, keyboard focus, back swipe, reduced motion,
+read-only mode, and no lost settings or actions.
+
+### M2 — Incremental global search
+
+- Add index worker, parsers, schema, authenticated APIs, Search destination, filters, snippets,
+  pagination, progress, errors, and rebuild control.
+- Index all settled sources and benchmark the real and deterministic corpora.
+
+Commit: `Add incremental cross-provider transcript search`.
+
+Exit: correctness, restart, append/truncate, malformed-input, concurrency, authorization, latency,
+mobile, and large-corpus tests pass.
+
+### M3 — Action inbox and Workstreams
+
+- Add normalized action records/view and safe bulk triage.
+- Add canonical repository grouping and workstream summaries.
+- Make the sticky command bar destination-aware with saved filters.
+
+Commit: `Add action inbox and repository workstreams`.
+
+Exit: no duplicate actions, stable Working order, provider outage isolation, mobile triage, and
+worktree rollup tests pass.
+
+### M4 — State evidence
+
+- Extract pure placement classifier.
+- Add evidence facts, transition journal/API, evidence rail, and diagnostic history.
+
+Commit: `Explain session state with durable evidence`.
+
+Exit: every provider/raw state, transition, ambiguity, stale recovery, and classifier regression has
+deterministic coverage.
+
+### M5 — Provider handoff
+
+- Add handoff synthesis, editable preview, worktree/provider controls, safe spawn/identification, and
+  retryable delivery.
+
+Commit: `Add editable cross-provider session handoff`.
+
+Exit: Claude→Codex, Codex→Claude, same-provider continuation, same cwd, new worktree, spawn failure,
+wrong-session protection, and mobile acceptance tests pass.
+
+### M6 — Repository outcome center
+
+- Add cached Git/GitHub/test outcome probes and Workstream/session presentation.
+- Add confirmed commit, push, draft-PR, and mark-ready actions.
+
+Commit: `Add repository and pull-request outcome center`.
+
+Exit: clean/dirty/detached/ahead/behind/no-remote/no-gh/unauthenticated/stale-network fixtures,
+action validation, confirmation, and real opt-in repository smoke tests pass.
+
+### M7 — Briefings, digests, budgets, and forecasts
+
+- Add event selection, briefing cursors, quiet digest, optional schedules, budget scopes, alerts, and
+  honest mixed-provider forecasts.
+
+Commit: `Add fleet briefings and measurable budgets`.
+
+Exit: dedupe, mute, quiet episodes, restart, partial cost, token-only Codex, forecast confidence,
+settings persistence, and push-failure tests pass.
+
+### M8 — Optimization pass
+
+- Instrument server timing, poll duration, index lag, DB waits, payload sizes, render duration, input
+  latency, and memory.
+- Profile real archives, many live sessions, large conversations, rapid events, and repeated mobile
+  refreshes.
+- Remove redundant scans/renders, batch writes, add bounded caches, tighten payloads, and retest every
+  performance gate.
+
+Commit: `Optimize fleet indexing and interaction latency`.
+
+Exit: before/after measurements recorded below, no correctness regression, and no hidden background
+work on the HTTP hot path.
+
+### M9 — Bug-fix and resilience pass
+
+- Audit every route, action, empty/error/loading/stale state, desktop/mobile surface, and provider
+  capability branch.
+- Fuzz JSONL parsers, query syntax, cursors, action bodies, path handling, DB recovery, process exits,
+  restarts during mutations, stale credentials, and one-provider outages.
+- Run deterministic unit/integration/browser suites plus every safe opt-in live flow.
+
+Commit: `Harden Fleet platform workflows`.
+
+Exit: no known P0/P1 defects, all lower-severity findings documented or fixed, daemon reloaded, live
+console/network logs clean, and branch pushed.
+
+## Verification matrix
+
+Each milestone runs the relevant subset; M8 and M9 run all of it.
+
+- Python unit and provider-fixture suite.
+- Protocol/failure harnesses and index parser fixtures.
+- Engine/API tests with fake Claude, Codex, Git, GitHub, ntfy, and filesystem sources.
+- Playwright desktop 1440×1000 and mobile 390×844, including focused screenshots.
+- Authentication/read-only testing for every read and mutation route.
+- Safe-path and hostile-input tests for transcript, artifact, repository, cursor, and action inputs.
+- Opt-in live Claude and Codex session matrix.
+- Daemon/App Server/index-worker crash and restart soak.
+
+## Optimization results
+
+Populate in M0 and M8. Measurements use the same real corpus and deterministic benchmark fixtures.
+
+| Metric | M0 baseline | M8 result | Gate |
+| --- | ---: | ---: | ---: |
+| Engine scan p50/p95 | pending | pending | no regression from indexing |
+| `/api/fleet` p50/p95 | pending | pending | baseline + <5 ms p95 |
+| Search warm p50/p95 | n/a | pending | <75 ms p95 |
+| Search cold p50/p95 | n/a | pending | <150 ms p95 |
+| Live index lag p95 | n/a | pending | <2 poll intervals |
+| Initial index wall time | n/a | pending | background only |
+| Desktop first useful render | pending | pending | improve or unchanged |
+| Mobile input-to-feedback | pending | pending | <100 ms |
+| Poll payload bytes | pending | pending | bounded with pagination |
+| Daemon steady-state RSS | pending | pending | measured and justified |
+
+## Explicit non-goals
+
+- Merging Claude and Codex sessions or pretending they share runtime state.
+- Automatic cross-provider agent spawning without an explicit user handoff.
+- Full task/kanban/dependency management in Workstreams.
+- Indexing arbitrary repository files or remote cloud conversations absent locally.
+- Fabricating Codex currency costs.
+- Automatic commits, pushes, PR readiness, merges, or active-turn interruption.
+- Multi-user permissions, hosted deployment, or replacing provider-native trust controls.
