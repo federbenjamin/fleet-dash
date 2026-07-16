@@ -13,6 +13,7 @@ CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
 import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib
 from collections import deque
 from codex_adapter import CodexAdapter
+from codex_observer import CodexRolloutObserver
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -675,11 +676,14 @@ class Engine:
                 process_factory=lambda *args, **kwargs: UnixWebSocketProcess(
                     control_socket, timeout=8),
                 startup=lambda: ensure_shared_codex_runtime(executable, control_socket))
+            self.codex_observer = CodexRolloutObserver()
             self.codex = CodexAdapter(enabled=bool(cfg.get("codex_enabled", True)),
                                       client=codex_client,
                                       state_path=os.path.join(BASE, "codex_threads.json"),
-                                      stall_seconds=int(cfg.get("stall_seconds") or 180))
+                                      stall_seconds=int(cfg.get("stall_seconds") or 180),
+                                      external_observer=self.codex_observer)
         except Exception as exc:
+            self.codex_observer = None
             self.codex = CodexAdapter(enabled=False, client=object())
             self.codex.error = str(exc)
 
@@ -974,6 +978,8 @@ class Engine:
         # Codex is a second provider inside the same fleet. A failed/missing Codex
         # installation must not take down the existing Claude dashboard.
         try:
+            if hasattr(self.codex, "track_external"):
+                self.codex.track_external(self.cfg.get("pinned_sessions") or [])
             codex_sessions = self.codex.sessions()
         except Exception as exc:
             self.codex.error = str(exc)

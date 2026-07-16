@@ -117,6 +117,45 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(external["capabilities"]["takeover"])
         self.assertFalse(external["capabilities"]["submit"])
 
+    def test_pinned_external_rollout_is_live_but_remains_view_only(self):
+        class Observer:
+            def observe(self, thread_id):
+                self.seen = thread_id
+                return {"active": True, "turn_id": "desktop-turn",
+                        "started_at": 995, "completed_at": None,
+                        "last_activity_at": 998,
+                        "messages": [{"role": "user", "text": "Build it"},
+                                     {"role": "assistant", "text": "Working now",
+                                      "phase": "commentary"}],
+                        "revision": "rollout:2", "confidence": "observed_local_rollout",
+                        "warning": None, "error": None}
+
+        thread = {**self.thread("external", {"type": "notLoaded"}, updated=100),
+                  "source": "vscode"}
+        client = FixtureClient([thread])
+        observer = Observer()
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, stall_seconds=30,
+                               external_observer=observer)
+        adapter.track_external(["codex:external"])
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertEqual((session["state"], session["reg_status"], session["quiet_s"]),
+                         ("running", "running", 2))
+        self.assertEqual(session["last_msg"],
+                         {"role": "assistant", "text": "Working now"})
+        self.assertTrue(session["observed_external"])
+        self.assertEqual(session["observation_confidence"], "observed_local_rollout")
+        self.assertTrue(session["read_only"])
+        self.assertFalse(session["capabilities"]["submit"])
+        self.assertFalse(session["capabilities"]["interrupt"])
+
+        context = adapter.context("codex:external")
+        self.assertTrue(context["ok"])
+        self.assertTrue(context["read_only"])
+        self.assertEqual(context["messages"][-1]["text"], "Working now")
+
     def test_cli_connected_to_shared_socket_is_adopted_without_resuming_a_copy(self):
         thread = {**self.thread("attached", {"type": "active"}), "source": "cli"}
         thread["turns"] = [{"id": "same-turn", "status": "inProgress",

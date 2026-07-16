@@ -773,7 +773,7 @@ class CodexAdapter:
     PROVIDER = "codex"
 
     def __init__(self, enabled=True, client=None, state_path=None, clock=None,
-                 stall_seconds=180):
+                 stall_seconds=180, external_observer=None):
         self.enabled = enabled
         self.client = client or CodexAppServer()
         self.state_path = state_path
@@ -793,6 +793,8 @@ class CodexAdapter:
         self._account_error_at = None
         self._last_account_refresh = 0
         self._skills = {}
+        self.external_observer = external_observer
+        self._tracked_external = set()
 
     @staticmethod
     def key(native_id):
@@ -801,6 +803,16 @@ class CodexAdapter:
     @staticmethod
     def native(key):
         return key.split(":", 1)[1] if str(key).startswith("codex:") else key
+
+    def track_external(self, keys):
+        """Choose external threads whose local lifecycle should be observed.
+
+        Observation never changes ownership or capabilities. Fleet tracks only
+        explicitly pinned threads so archive discovery remains cheap.
+        """
+        values = {self.native(key) for key in (keys or []) if str(key).startswith("codex:")}
+        with self._lock:
+            self._tracked_external = values
 
     def sessions(self):
         if not self.enabled:
@@ -846,6 +858,8 @@ class CodexAdapter:
         thread_meta = dict(persisted.get("thread_meta") or {})
         managed = {tid for tid in (persisted.get("threads") or [])
                    if (thread_meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"}
+        with self._lock:
+            tracked_external = set(self._tracked_external)
         out = []
         listed = set()
         for thread in threads:
@@ -871,6 +885,12 @@ class CodexAdapter:
                     "unmaterialized": False})
                 managed.add(tid)
                 is_managed = True
+            observation = None
+            if not is_managed and tid in tracked_external and self.external_observer:
+                try:
+                    observation = self.external_observer.observe(tid)
+                except Exception as exc:
+                    observation = {"error": str(exc), "messages": []}
             detail_error = None
             if is_managed:
                 try:
@@ -885,12 +905,15 @@ class CodexAdapter:
             turn_lifecycle = _latest_turn_lifecycle(thread)
             live_completed = _epoch(live.get("completed_at"))
             completion_times = [value for value in
-                                (turn_lifecycle.get("completed_at"), live_completed)
+                                (turn_lifecycle.get("completed_at"), live_completed,
+                                 (observation or {}).get("completed_at"))
                                 if value is not None]
             completed_epoch = max(completion_times) if completion_times else None
             activity_times = [value for value in
                               (_epoch(updated), _epoch(live.get("updated_at")),
-                               turn_lifecycle.get("started_at"), completed_epoch)
+                               turn_lifecycle.get("started_at"), completed_epoch,
+                               (observation or {}).get("last_activity_at"),
+                               (observation or {}).get("started_at"))
                               if value is not None]
             # thread.updatedAt can remain stale when ChatGPT desktop owns the turn.
             # Prefer the newest lifecycle evidence instead of the first truthy field.
@@ -902,7 +925,8 @@ class CodexAdapter:
             turn_started = turn_lifecycle.get("started_at")
             observed_running = turn_lifecycle.get("active", False) and (
                 completed_epoch is None or turn_started is None or turn_started > completed_epoch)
-            running = native_running or observed_running
+            running = native_running or observed_running or bool(
+                (observation or {}).get("active"))
             quiet = max(0, now - updated_epoch)
             if detail_error or live.get("error") or recorded_type == "systemError":
                 state = "error"
@@ -927,6 +951,8 @@ class CodexAdapter:
             ctx_window = _usage_window(usage)
             files = _files(thread, cwd)
             messages = _conversation(thread)
+            if (observation or {}).get("messages"):
+                messages = observation["messages"]
             agents = _agents(thread, tid)
             for agent in agents:
                 try:
@@ -957,6 +983,8 @@ class CodexAdapter:
                     pass
             agents_running = sum(a["state"] in ("running", "stalled") for a in agents)
             revision = _revision(thread, live)
+            if observation and observation.get("revision"):
+                revision = observation["revision"]
             if is_managed and not detail_error:
                 self._cache_snapshot(tid, messages, files, revision, thread)
             canonical_turn_id = live.get("turn_id")
@@ -993,6 +1021,10 @@ class CodexAdapter:
                                      "This thread is not loaded in Fleet's shared App Server; "
                                      "its transcript is view only"),
                 "codex_source": source,
+                "observed_external": bool(observation),
+                "observation_confidence": (observation or {}).get("confidence"),
+                "observation_warning": ((observation or {}).get("warning") or
+                                        (observation or {}).get("error")),
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,
@@ -1317,6 +1349,16 @@ class CodexAdapter:
 
     def context(self, key):
         tid = self.native(key)
+        with self._lock:
+            known = next((item for item in self._sessions
+                          if item.get("native_session_id") == tid), None)
+        if known and known.get("read_only") and self.external_observer:
+            observed = self.external_observer.observe(tid)
+            if observed and observed.get("messages"):
+                return {"ok": True, "messages": observed["messages"], "files": [],
+                        "revision": observed.get("revision"), "read_only": True,
+                        "observation_confidence": observed.get("confidence"),
+                        "warning": observed.get("warning") or observed.get("error")}
         try:
             thread = self.client.read_thread(tid)
             messages = _conversation(thread)

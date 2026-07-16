@@ -267,6 +267,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
     headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
     server creates a second runtime agent.
+    `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: only
+    explicitly pinned external threads consume an allowlist of local lifecycle and visible-message
+    events so `notLoaded` does not hide active Desktop/VS Code work. The observer is read-only,
+    incremental, path-confined, row-bounded, and tolerant of malformed/unknown additions. Its result
+    may update state, preview, and context, but must never update ownership or enable submit,
+    interrupt, archive, close, attach, compact, review, or relay capabilities.
 31. **Main-page placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Page order is Pinned → Needs you → Working → Available →

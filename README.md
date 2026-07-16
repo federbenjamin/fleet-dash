@@ -47,7 +47,10 @@ Fleet Dash owns one detached App Server as the canonical Codex runtime. It start
 WebSocket-over-Unix protocol at `~/.claude/fleet-dash/codex-app-server.sock`. The detached listener
 survives a Fleet web daemon restart and is reused instead of duplicated. (`codex app-server daemon
 start` is not used: that manager requires Codex's standalone installer, while this machine uses the
-npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
+npm CLI.) Fleet never scrapes the Codex TUI. App Server remains the only control surface. For an
+explicitly pinned external thread, Fleet may defensively observe a small allowlist of lifecycle and
+visible-message events in its local `~/.codex/sessions` rollout so the view-only card can track work
+that the separate Desktop/VS Code App Server reports only as `notLoaded`.
 
 - Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
   ownership, mode, and last normalized conversation, and resume after daemon restarts. Every new
@@ -62,7 +65,10 @@ npm CLI.) Fleet does not scrape the Codex TUI or parse `~/.codex` rollout files.
   active turn without resuming a second agent. The card's **attach** button opens this TUI form.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
   transcripts through paginated `thread/list`, puts active work under **Working** and inactive work
-  in **Session history**, and exposes them as view-only. There is deliberately no **take over** action: `thread/resume`
+  in **Session history**, and exposes them as view-only. Pinned external threads also observe local
+  `task_started`, `task_complete`, `turn_aborted`, user-message, and agent-message rollout events, so
+  their state and preview stay current without claiming control. Unknown/malformed rollout additions
+  are ignored with a visible observation warning. There is deliberately no **take over** action: `thread/resume`
   on Fleet's server would create a second runtime copy, not attach to Desktop's active agent.
   Independently launched CLI threads that are not connected to Fleet's socket are likewise view-only.
   Child subagent threads never become duplicate top-level cards.
@@ -150,7 +156,9 @@ the provider without affecting Claude sessions.
   then newest activity, and are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
   **mobile**, **long-press** the header (a short tap still opens
-  its chat). Pins persist in server settings across reloads, daemon restarts, and devices.
+  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. Pinning an
+  external Codex thread also opts it into read-only local lifecycle/message observation; it does not
+  make the thread interactive.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
   subagent's conversation (the prompt it was given, its replies, its tool calls), an agent-info
   dropdown (id, type, description, model, state, started/last activity, token split, $), and a
