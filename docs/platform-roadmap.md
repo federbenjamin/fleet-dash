@@ -15,9 +15,11 @@ Status: approved for sequential implementation on `codex-integration`.
 | M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
 | M7 — Message Outbox and light automations | Complete · 2026-07-16 | Durable SQLite outbox, four one-time send modes, atomic claim/lease recovery, exact target/account/session validation, central responsive UI, 139 Python tests, 70 deterministic browser checks, 10 safe running-daemon checks, and a real create/cancel smoke with no message dispatched. |
 | M8 — Briefings, budgets, and forecasts | Complete · 2026-07-16 | Durable per-device briefings, reviewed history, source links, mute-aware quiet/scheduled digests, persistent notification failures, scoped cumulative budgets, optional fail-closed future-spawn limits, honest mixed-provider measurement, action-inbox alerts, 156 Python tests, 74 deterministic browser checks, and 12 live checks. |
+| M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
+| M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 
-Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
-verifies the current implementation and tests against the full catalogue.
+Completion here records the milestone gate, not proof by assertion. M10 reopened the catalogue rows,
+verified the current implementation and tests, and recorded the final source/runtime limitations.
 
 This roadmap turns Fleet Dash from a session list into a local operations desk for supervising
 Claude Code and Codex work. It preserves one shared application, provider-independent sessions,
@@ -920,16 +922,98 @@ work on the HTTP hot path.
 
 ### M10 — Bug-fix and resilience pass
 
-- Audit every route, action, empty/error/loading/stale state, desktop/mobile surface, and provider
-  capability branch.
-- Fuzz JSONL parsers, query syntax, cursors, action bodies, path handling, DB recovery, process exits,
-  restarts during mutations, stale credentials, and one-provider outages.
-- Run deterministic unit/integration/browser suites plus every safe opt-in live flow.
+Completed 2026-07-16. The final audit covered every route family, provider branch, persistent
+mutation, large paged surface, empty/error/loading/stale state, and desktop/mobile destination.
+
+Hardening and bug fixes:
+
+- The HTTP boundary now limits request bodies, times out stalled clients, contains unexpected route
+  failures, survives client disconnects, and never logs the local action URL/token. Conversation,
+  closed-session, and subagent pagination share one newest-first contract.
+- Settings updates are staged under a lock and written only after strict validation. Unknown fields,
+  orphan companion fields, control characters, overlong IDs, booleans disguised as numbers, and
+  invalid notification/digest/budget/outbox values are rejected without partially changing memory
+  or disk.
+- Confirmed corrupt search indexes and shared ledgers are preserved under unique quarantine names.
+  Fleet starts clean with an explicit recovery warning instead of taking down both providers or
+  exposing raw SQLite details.
+- A final live soak uncovered a separate concurrency defect: the scan loop's long-lived SQLite
+  connection was also used by threaded Insights requests. Concurrent browser/API traffic could
+  poison that connection until restart with `database disk image is malformed` or `file is not a
+  database`, even while the file passed `PRAGMA quick_check`. HTTP ledger reads now use independent,
+  short-lived connections. A poisoned-scan-connection regression test and a 120-request concurrent
+  live refresh soak both pass with no new daemon errors.
+- New Claude registry sessions are now visible and interactive before their first transcript row is
+  written. They report an honest empty starting conversation and unavailable cost/context rather
+  than disappearing until the first message.
+- Newly created managed Codex threads remain visible while `thread/list` propagation catches up.
+  The adapter preserves runtime-proven state instead of briefly dropping the session.
+- Large live, closed, and subagent conversations load 50 newest messages at a time, preserve scroll
+  position while prepending history, and isolate subagent caches by parent plus child ID. Load and
+  recovery failures are visible rather than silently retaining stale content.
+- Workstream refreshes use a stable session digest and eight-second repository/budget bucket. The UI
+  polls this derived destination every eight seconds instead of rebuilding it on every fleet tick.
+
+Deterministic verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 173 passed. Coverage includes malformed
+  protocol data, Codex `thread/list` propagation races, all mapped conversation/state fixtures,
+  same-second revisions, invalid/stale/duplicate questions and approvals, large conversations,
+  one-provider outages, atomic settings, hostile action bodies, path validation, disconnects,
+  timeouts, database quarantine, poisoned SQLite connections, and Claude sessions with no transcript.
+- `npx playwright test tests/browser/fleet.spec.js` — 82 passed across desktop 1440×1000 and mobile
+  390×844. This includes all shared-provider session states, optimistic sends/answers, approvals,
+  files, commands/skills, subagents, History, settings, Outbox, Insights, responsive navigation,
+  large paged conversations, ledger recovery, and the pre-transcript Claude state.
+- `python3 tests/search_benchmark.py` remained within every deterministic large-corpus gate from M9.
+- `git diff --check` passed.
+
+Live and recovery verification:
+
+- `python3 tests/live_api_smoke.py` — passed against 27 live sessions, seven Codex models, and 54
+  provider commands after the request-local SQLite fix.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377 FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 12 passed across both viewports with no console or network failures.
+- `python3 tests/live_refresh_soak.py` — 120 concurrent read requests across fleet, Insights,
+  History, Briefing, Search, and conversation endpoints passed with eight workers and no new log
+  errors.
+- `python3 tests/live_restart_smoke.py` — restart during an active Codex turn recovered both
+  providers and the exact thread, then archived the test thread.
+- The safe provider matrix passed discovery, Plan/Default, send, interruption, structured question,
+  artifact, native compact, quota/context, restart, Claude focus/question/permission/mute/close,
+  temporary-repository commit/push, and outbox create/cancel flows. The real Codex subagent run
+  produced and discovered a child lifecycle with the default model; two earlier model attempts
+  returned prose without spawning and were not counted as lifecycle success. The live approval run
+  auto-denied the protected action before an approval request surfaced, verified the protected path
+  remained unchanged, and relies on deterministic protocol/UI coverage for every approval shape and
+  decision.
+- `python3 tests/perf_baseline.py --samples 40 --context-samples 10 --history-samples 20
+  --search-samples 40 --search-query fleet --local-action-auth --skip-corpus` measured fleet p50/p95
+  2.944/3.521 ms, context 0.707/0.821 ms, History 3.277/3.726 ms, and live search
+  0.821/1.340 ms. The live fleet response was 165,452 bytes and a 50-message context page was 17,499
+  bytes.
+- `node tests/browser_baseline.js http://127.0.0.1:8377/ 8` measured first useful render p50/p95
+  51.945/91.734 ms desktop and 53.842/58.278 ms mobile. The browser poll payload was 165,539 bytes.
+- Repeated `launchctl kickstart -k gui/501/com.benjaminfeder.fleet-dash` restarts settled at HTTP 200.
+
+Exact remaining limitations:
+
+- This ChatGPT desktop task still exposes no in-app Browser surface. The installed Browser skill was
+  initialized, and the current desktop log identifies a helper/socket peer rejection as
+  `untrusted-code-signing-identity`. This is not evidence that the reinstalled ChatGPT application
+  signature is invalid. Repository-native and live Playwright provide the deterministic visual
+  coverage until that desktop-runtime connection is repaired outside Fleet Dash.
+- External ChatGPT Desktop/IDE Codex threads are intentionally view-only unless they were explicitly
+  started against Fleet's App Server. Fleet will not claim safe control over another App Server's
+  in-memory thread.
+- Codex account quota and context tokens are exposed, but the provider does not supply exact local
+  per-session USD cost through the current App Server path. Fleet renders cost as unavailable rather
+  than zero. Claude and Codex lifetime/account scopes remain provider-specific and are labeled.
 
 Commit: `Harden Fleet platform workflows`.
 
-Exit: no known P0/P1 defects, all lower-severity findings documented or fixed, daemon reloaded, live
-console/network logs clean, and branch pushed.
+Exit: no known P0/P1 defects, every discovered lower-severity defect was fixed, the daemon was
+reloaded, fresh live console/network and daemon logs were clean, and the branch was pushed.
 
 ## Verification matrix
 

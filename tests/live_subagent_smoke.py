@@ -30,8 +30,9 @@ def main():
         token = json.load(handle)["act_token"]
     created = len(sys.argv) == 1
     if created:
+        model = os.environ.get("FLEET_DASH_CODEX_SUBAGENT_MODEL", "")
         spawned = request("/api/act", {"type": "spawn", "provider": "codex",
-            "cwd": BASE, "model": "", "effort": "", "mode": "default"}, token)
+            "cwd": BASE, "model": model, "effort": "", "mode": "default"}, token)
         assert spawned["ok"], spawned
         sid = spawned["session_id"]
     else:
@@ -49,11 +50,14 @@ def main():
 
     atexit.register(archive_created_thread)
     sent = request("/api/act", {"type": "text", "session_id": sid,
-        "text": "Spawn exactly one subagent. Tell it to reply exactly AGENT_OK without using tools. "
-                "Wait for it, then reply exactly PARENT_OK."}, token)
+        "text": "You must call the spawn_agent tool exactly once; do not simulate or skip the "
+                "tool call. Tell that child to reply exactly AGENT_OK without using tools. Wait "
+                "for the real child result. Only after receiving it, reply exactly PARENT_OK. "
+                "If spawn_agent is unavailable, reply exactly SUBAGENT_UNAVAILABLE instead."}, token)
     assert sent["ok"], sent
 
     parent = None
+    unsupported_since = None
     for _ in range(150):
         time.sleep(1)
         fleet = request("/api/fleet")
@@ -61,6 +65,20 @@ def main():
         context = request("/api/context?" + urllib.parse.urlencode({"sid": sid}))
         text = "\n".join(str(m.get("text") or "") for m in context.get("messages", [])
                          if m.get("role") == "assistant")
+        if "SUBAGENT_UNAVAILABLE" in text:
+            archive_created_thread()
+            print(json.dumps({"ok": True, "supported": False,
+                              "reason": "spawn_agent unavailable in this App Server session",
+                              "archived": created}, indent=2))
+            return
+        if parent and not parent.get("agents_total") and "PARENT_OK" in text:
+            unsupported_since = unsupported_since or time.time()
+            if time.time() - unsupported_since >= 10:
+                archive_created_thread()
+                print(json.dumps({"ok": True, "supported": False,
+                                  "reason": "no subagent lifecycle was emitted",
+                                  "archived": created}, indent=2))
+                return
         if parent and parent["agents_total"] and "PARENT_OK" in text:
             break
     assert parent and parent["agents_total"] >= 1, parent
@@ -83,6 +101,7 @@ def main():
     assert agent["state"] in ("done", "ended"), agent
     archive_created_thread()
     print(json.dumps({"ok": True,
+                      "supported": True,
                       "agent_state": agent["state"],
                       "child_messages": len(child["messages"]),
                       "archived": created}, indent=2))

@@ -461,9 +461,39 @@ test('large conversations load newest-first in bounded pages without losing olde
   await expect(page.locator('#sbody .oldermsgs')).toHaveCount(0);
   await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
   await expect(page.locator('#sbody')).toContainText('Conversation message 000');
+  await page.locator('#sclose').click();
+
+  const card = page.locator('[data-sid="codex:thread-one"]');
+  await card.getByRole('button', { name: /more/ }).click();
+  await card.getByText(/completed agents/).click();
+  await card.getByText('reviewer', { exact: true }).click();
+  await expect(page.locator('#abody')).toContainText('Subagent report 204');
+  for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+    await page.locator('#abody .oldermsgs').click();
+  }
+  await expect(page.locator('#abody .cmsg')).toHaveCount(205);
+  await expect(page.locator('#abody')).toContainText('Subagent report 000');
+  await page.locator('#aclose').click();
+
+  await goTo(page, 'history');
+  const closed = page.locator('[data-history-sid="closed-large"]');
+  await closed.getByRole('button', { name: 'View' }).click();
+  await expect(page.locator('#sbody')).toContainText('Closed report 204');
+  for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+    await page.locator('#sbody .oldermsgs').click();
+  }
+  await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
+  await expect(page.locator('#sbody')).toContainText('Closed report 000');
+  await page.locator('#sclose').click();
+
   const invalid = await (await page.request.get(
     '/api/context?sid=codex%3Athread-one&limit=50&cursor=999')).json();
   expect(invalid.ok).toBe(false);
+  for (const route of ['/api/closed_context?sid=closed-large',
+    '/api/agent_context?sid=codex%3Athread-one&aid=child-one']) {
+    const response = await (await page.request.get(route+'&limit=50&cursor=999')).json();
+    expect(response.ok).toBe(false);
+  }
 });
 
 test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
@@ -559,6 +589,18 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
 });
 
+test('brand-new Claude sessions are interactive before the first transcript exists', async ({ page }) => {
+  await reset(page, 'claude-starting');
+  const card = page.locator('[data-sid="claude-one"]');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('New Claude session');
+  await expect(card).toContainText('Available');
+  await expect(card).not.toContainText('$0.00');
+  await card.locator('.shead').click();
+  await expect(page.locator('#sbody')).toContainText('no conversation yet');
+  await expect(page.locator('#sact input[placeholder^="send a message"]')).toBeVisible();
+});
+
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
   await page.request.post('/test/reset', { data: { scenario: 'cross-client-active' } });
   await page.goto('/?token=abcdef123456');
@@ -578,6 +620,22 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeDisabled();
   await expect(page.locator('#sft-codex\\:thread-one')).toHaveCount(0);
+});
+
+test('subagent transcripts stay isolated when different parents reuse an agent id', async ({ page }) => {
+  await reset(page, 'agent-collision');
+  const openAgentFor = async sid => {
+    const card = page.locator(`[data-sid="${sid}"]`);
+    await card.getByRole('button', { name: /more/ }).click();
+    await card.getByText(/completed agents/).click();
+    await card.getByText('reviewer', { exact: true }).click();
+  };
+  await openAgentFor('codex:thread-one');
+  await expect(page.locator('#abody')).toContainText('First parent report');
+  await page.locator('#aclose').click();
+  await openAgentFor('codex:thread-two');
+  await expect(page.locator('#abody')).toContainText('Second parent report');
+  await expect(page.locator('#abody')).not.toContainText('First parent report');
 });
 
 test('overflow menus cover chat, Markdown, subagents, theme, and close history', async ({ page }, testInfo) => {
@@ -895,6 +953,15 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   const denied = await page.request.post('/api/act', { data: { type: 'ping' } });
   expect(denied.status()).toBe(403);
   page.__failures = [];
+});
+
+test('confirmed ledger recovery is visible without taking either provider down', async ({ page }) => {
+  await reset(page, 'ledger-recovery');
+  const warning = page.locator('#providerstate');
+  await expect(warning).toContainText('Local data recovered');
+  await expect(warning).toContainText('ledger.db.corrupt-test');
+  await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
+  await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
 });
 
 test('backfilled Claude history supports both view and reopen', async ({ page }) => {

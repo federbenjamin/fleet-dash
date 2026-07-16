@@ -37,13 +37,14 @@ def main():
     spawned = request("/api/act", {"type": "spawn", "provider": "claude",
         "cwd": BASE, "model": "haiku", "effort": "low", "worktree": False}, token)
     assert spawned["ok"], spawned
-    sid = None
+    sid = spawned["session_id"]
     session = None
     for _ in range(120):
         time.sleep(0.5)
         fleet = request("/api/fleet")
         session = next((item for item in fleet["sessions"]
                         if item.get("provider") == "claude"
+                        and item["session_id"] == sid
                         and item["session_id"] not in existing
                         and os.path.realpath(item.get("cwd") or "") == os.path.realpath(BASE)), None)
         if session:

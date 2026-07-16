@@ -579,25 +579,41 @@ class FleetOperations:
             metric = str(raw.get("metric") or "")
             if scope not in BUDGET_SCOPES or metric not in BUDGET_METRICS:
                 raise OperationsError("unsupported budget scope or metric")
-            scope_id = self._text(raw.get("scope_id"), 320) or None
+            raw_scope_id = str(raw.get("scope_id") or "")
+            if len(raw_scope_id) > 320 or any(ord(char) < 32 for char in raw_scope_id):
+                raise OperationsError("budget target is too long or invalid")
+            scope_id = self._text(raw_scope_id, 320) or None
             if scope != "fleet" and not scope_id:
                 raise OperationsError(f"{scope} budget needs a target")
+            raw_limit = raw.get("limit_value")
+            if isinstance(raw_limit, bool):
+                raise OperationsError("budget limit must be a number")
             try:
-                limit_value = float(raw.get("limit_value"))
+                limit_value = float(raw_limit)
             except (TypeError, ValueError):
                 raise OperationsError("budget limit must be a number")
             if not math.isfinite(limit_value) or limit_value <= 0 or limit_value > 1e15:
                 raise OperationsError("budget limit must be greater than zero")
-            budget_id = self._text(raw.get("id"), 80) or self.id_factory()
+            raw_id = str(raw.get("id") or "")
+            if len(raw_id) > 80 or any(ord(char) < 32 for char in raw_id):
+                raise OperationsError("budget ID is too long or invalid")
+            budget_id = self._text(raw_id, 80) or self.id_factory()
             if budget_id in seen:
                 raise OperationsError("duplicate budget ID")
             seen.add(budget_id)
+            if "block_spawns" in raw and not isinstance(raw["block_spawns"], bool):
+                raise OperationsError("block_spawns must be boolean")
+            if "enabled" in raw and not isinstance(raw["enabled"], bool):
+                raise OperationsError("enabled must be boolean")
+            raw_label = str(raw.get("label") or "")
+            if len(raw_label) > 160 or any(ord(char) < 32 for char in raw_label):
+                raise OperationsError("budget label is too long or invalid")
             normalized.append({
                 "id": budget_id, "scope_type": scope, "scope_id": scope_id,
                 "metric": metric, "limit_value": limit_value,
-                "block_spawns": bool(raw.get("block_spawns")),
+                "block_spawns": raw.get("block_spawns") is True,
                 "enabled": raw.get("enabled") is not False,
-                "label": self._text(raw.get("label"), 160) or None,
+                "label": self._text(raw_label, 160) or None,
             })
         with self.lock, self._transaction(immediate=True) as db:
             prior_created = {row[0]: row[1] for row in db.execute(

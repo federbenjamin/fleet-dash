@@ -84,6 +84,7 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual(session["provider"], "codex")
         self.assertEqual(session["branch"], "feature")
         self.assertEqual(session["cost_source"], "unavailable")
+        self.assertTrue(session["capabilities"]["spawn_agent"])
         self.assertEqual(session["_latest_prose"],
                          {"role": "assistant", "text": "hi"})
 

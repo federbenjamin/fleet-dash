@@ -114,6 +114,7 @@ def fresh_state():
         "pr_mark_ready": {"enabled": False, "reason": "No pull request",
             "number": None, "url": None}}
     return {"sessions": [claude, codex], "closed": [], "actions": [],
+            "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
             "scenario": "base", "codex_error": None,
@@ -488,6 +489,7 @@ def fleet():
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(STATE.get("codex_error")),
                                     "error": STATE.get("codex_error")}},
+            "ledger": copy.deepcopy(STATE.get("ledger") or {"ok": True}),
             "notify": copy.deepcopy(STATE["notify"]),
             "settings": copy.deepcopy(STATE["settings"]),
             "page_v": 1}
@@ -506,7 +508,14 @@ def set_scenario(name):
     STATE = fresh_state()
     STATE["scenario"] = name
     session = claude_session() if name.startswith("claude-question") else codex_session()
-    if name in ("single-question", "answer-failure", "claude-question-slow",
+    if name == "claude-starting":
+        session = claude_session()
+        session.update(title="New Claude session", name="New Claude session",
+                       last_msg=None, ctx_tokens=None, ctx_pct=None,
+                       total_tokens=None, cost=None, cost_source="unavailable",
+                       convo_v="starting:4242:idle")
+        STATE["contexts"]["claude-one"] = []
+    elif name in ("single-question", "answer-failure", "claude-question-slow",
                 "claude-question-failure"):
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q1",
             "dismiss_action": "cancel_turn", "questions": [{"header": "Scope",
@@ -603,6 +612,10 @@ def set_scenario(name):
     elif name == "provider-unavailable":
         STATE["sessions"] = [item for item in STATE["sessions"] if item["provider"] == "claude"]
         STATE["codex_error"] = "codex executable not found"
+    elif name == "ledger-recovery":
+        STATE["ledger"] = {"ok": False, "recovered": True,
+            "error": "Fleet's local ledger was corrupt. It was preserved and a clean ledger was started; Session History, Outbox, budgets, and local usage totals may be incomplete.",
+            "quarantine": "ledger.db.corrupt-test"}
     elif name == "claude-archive":
         STATE["closed"].append({"session_id": "11111111-2222-3333-4444-555555555555",
             "provider": "claude", "title": "Historical Claude review",
@@ -630,6 +643,22 @@ def set_scenario(name):
              "text": f"Conversation message {index:03d}"}
             for index in range(205)]
         session["convo_v"] = "large:205"
+        STATE["closed"].append({
+            "session_id": "closed-large", "provider": "claude",
+            "title": "Large closed conversation", "project": "fleet-dash",
+            "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
+            "model": "claude-sonnet", "closed_at": int(time.time()) - 60,
+            "first_seen": int(time.time()) - 3600, "last_seen": int(time.time()) - 60,
+            "can_reopen": False, "primary_action": "view",
+            "primary_action_label": "View", "ui_group": "history",
+            "reason_label": "Closed"})
+    elif name == "agent-collision":
+        other = base_session("codex", "codex:thread-two", "Second Codex parent")
+        other["agents"] = copy.deepcopy(session["agents"])
+        for agent in other["agents"]:
+            agent["session_id"] = other["session_id"]
+        other.update(agents_running=0, agents_total=1)
+        STATE["sessions"].append(other)
     elif name in ("workstreams", "repo-action-failure"):
         session.update(cwd="/Users/test/fleet-dash-worktrees/ui",
                        branch="feature/action-inbox", project="fleet-dash")
@@ -641,6 +670,21 @@ def authorized(handler):
     cookie = SimpleCookie(handler.headers.get("Cookie", ""))
     return ((cookie.get("act_token") and cookie["act_token"].value == TOKEN) or
             handler.headers.get("X-Act-Token") == TOKEN)
+
+
+def paginate_messages(query, messages):
+    messages = copy.deepcopy(messages)
+    try:
+        limit = max(1, min(100, int((query.get("limit") or ["50"])[0])))
+        cursor = (len(messages) if "cursor" not in query else
+                  int((query.get("cursor") or [str(len(messages))])[0]))
+        if cursor < 0 or cursor > len(messages):
+            raise ValueError
+    except ValueError:
+        return None
+    start = max(0, cursor - limit)
+    return {"messages": messages[start:cursor], "message_total": len(messages),
+            "next_cursor": start if start > 0 else None}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -845,32 +889,40 @@ class Handler(BaseHTTPRequestHandler):
                     "next_cursor": rows[-1]["id"] if more and rows else None})
             if route == "/api/context":
                 sid = (query.get("sid") or [""])[0]
-                messages = copy.deepcopy(STATE.get("contexts", {}).get(sid, []))
-                try:
-                    limit = max(1, min(100, int((query.get("limit") or ["50"])[0])))
-                    cursor = (len(messages) if "cursor" not in query else
-                              int((query.get("cursor") or [str(len(messages))])[0]))
-                    if cursor < 0 or cursor > len(messages):
-                        raise ValueError
-                except ValueError:
+                page = paginate_messages(query, STATE.get("contexts", {}).get(sid, []))
+                if page is None:
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
-                start = max(0, cursor - limit)
-                return self.json_reply({"ok": True,
-                    "messages": messages[start:cursor], "message_total": len(messages),
-                    "next_cursor": start if start > 0 else None,
+                return self.json_reply({"ok": True, **page,
                     "files": [{"name": "artifact.md", "path": "/fixture/artifact.md",
                     "kind": "text", "missing": False, "caption": "Codex updated this file",
                     "delivered": False}]})
             if route == "/api/agent_context":
-                return self.json_reply({"ok": True, "messages": [{"role": "assistant",
-                    "text": "Subagent report"}], "info": {"agent_id": "child-one",
+                sid = (query.get("sid") or [""])[0]
+                messages = ([{"role": "assistant", "text": f"Subagent report {index:03d}"}
+                            for index in range(205)] if STATE["scenario"] == "large-conversation" else
+                            [{"role": "assistant", "text": (
+                                "Second parent report" if STATE["scenario"] == "agent-collision" and
+                                sid == "codex:thread-two" else
+                                "First parent report" if STATE["scenario"] == "agent-collision" else
+                                "Subagent report")}])
+                page = paginate_messages(query, messages)
+                if page is None:
+                    return self.json_reply({"ok": False,
+                                            "error": "invalid conversation pagination"})
+                return self.json_reply({"ok": True, **page, "info": {"agent_id": "child-one",
                     "agent_type": "reviewer", "description": "Review protocol mapping",
                     "model": "gpt-5.4", "effort": "high", "tokens": {},
                     "total_tokens": None, "cost": None}})
             if route == "/api/closed_context":
-                return self.json_reply({"ok": True, "closed": True, "messages": [
-                    {"role": "assistant", "text": "Durable closed conversation"}],
+                messages = ([{"role": "assistant", "text": f"Closed report {index:03d}"}
+                            for index in range(205)] if STATE["scenario"] == "large-conversation" else
+                            [{"role": "assistant", "text": "Durable closed conversation"}])
+                page = paginate_messages(query, messages)
+                if page is None:
+                    return self.json_reply({"ok": False,
+                                            "error": "invalid conversation pagination"})
+                return self.json_reply({"ok": True, "closed": True, **page,
                     "info": {"project": "fleet-dash", "branch": "old"}})
             if route == "/api/commands":
                 if not authorized(self):

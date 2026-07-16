@@ -342,12 +342,58 @@ class SearchIndex:
         except OSError:
             pass
 
+    @staticmethod
+    def _confirmed_corruption(error):
+        detail = str(error).lower()
+        return any(marker in detail for marker in (
+            "not a database", "database disk image is malformed",
+            "file is encrypted", "malformed database schema"))
+
+    def _quarantine_corrupt_db(self, error):
+        for connection_name in ("read_connection", "connection"):
+            connection = getattr(self, connection_name, None)
+            if connection is not None:
+                try:
+                    connection.close()
+                except sqlite3.Error:
+                    pass
+                setattr(self, connection_name, None)
+        quarantine = (self.db_path + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S") +
+                      "-" + hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:8])
+        for suffix in ("", "-wal", "-shm"):
+            source = self.db_path + suffix
+            if os.path.exists(source):
+                os.replace(source, quarantine + suffix)
+        self.last_error = ("Search index storage was corrupt and was rebuilt from local "
+                           "transcripts. Preserved as " + os.path.basename(quarantine) +
+                           f" ({type(error).__name__}).")
+        self.last_discovery = 0
+        self.projects_cache = []
+        self.projects_cached_at = 0
+        self._invalidate_search_cache()
+
     def _db(self):
+        try:
+            return self._open_db()
+        except sqlite3.DatabaseError as exc:
+            if not self._confirmed_corruption(exc):
+                if self.connection is not None:
+                    try:
+                        self.connection.close()
+                    except sqlite3.Error:
+                        pass
+                    self.connection = None
+                raise
+            self._quarantine_corrupt_db(exc)
+            return self._open_db()
+
+    def _open_db(self):
         with self.lock:
             if self.connection is not None:
                 return self.connection
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             db = sqlite3.connect(self.db_path, timeout=3, check_same_thread=False)
+            self.connection = db
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
@@ -433,7 +479,6 @@ class SearchIndex:
             db.execute("INSERT OR REPLACE INTO search_meta(key,value) VALUES('parser_version',?)",
                        (str(PARSER_VERSION),))
             db.commit()
-            self.connection = db
             return db
 
     def _read_db(self):

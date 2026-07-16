@@ -52,7 +52,9 @@ def main():
     for _ in range(30):
         time.sleep(0.5)
         fleet = request("/api/fleet")
-        session = next(s for s in fleet["sessions"] if s["session_id"] == sid)
+        session = next((s for s in fleet["sessions"] if s["session_id"] == sid), None)
+        if session is None:
+            continue
         if session["state"] == "running":
             running = True
             break

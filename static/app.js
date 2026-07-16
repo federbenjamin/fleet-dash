@@ -701,21 +701,34 @@ async function ensureCtx(sid,v){
     render(last);
   }catch(e){delete ctxCache[sid];}
 }
-async function loadOlderCtx(sid){
-  const c=ctxCache[sid];if(!c||c.loadingOlder||c.next_cursor==null)return;
-  const body=sessionView&&sessionView.sid===sid&&!sessionView.closed?$('#sbody'):null;
+function conversationCache(scope,sid,aid=''){
+  if(scope==='closed')return closedCtx[sid];
+  if(scope==='agent')return agentCache[agentCacheKey(sid,aid)];
+  return ctxCache[sid];
+}
+function conversationEndpoint(scope,sid,aid='',cursor=null){
+  const route=scope==='closed'?'/api/closed_context':scope==='agent'?'/api/agent_context':'/api/context';
+  const params=new URLSearchParams({sid,limit:'50'});
+  if(aid)params.set('aid',aid);
+  if(cursor!=null)params.set('cursor',String(cursor));
+  return route+'?'+params.toString();
+}
+async function loadOlderConversation(scope,sid,aid=''){
+  const c=conversationCache(scope,sid,aid);
+  if(!c||c.loadingOlder||c.next_cursor==null)return;
+  const body=(scope==='agent'&&agentView&&agentView.sid===sid&&agentView.aid===aid)?$('#abody'):
+    (scope!=='agent'&&sessionView&&sessionView.sid===sid&&Boolean(sessionView.closed)===(scope==='closed')?$('#sbody'):null);
   const old=body?{height:body.scrollHeight,top:body.scrollTop}:null;
   c.loadingOlder=true;uiRefresh();
   try{
-    const response=await fetch('/api/context?sid='+encodeURIComponent(sid)+
-      '&limit=50&cursor='+encodeURIComponent(c.next_cursor),{cache:'no-store'});
+    const response=await fetch(conversationEndpoint(scope,sid,aid,c.next_cursor),{cache:'no-store'});
     const data=await response.json();
     if(!response.ok||!data.ok)throw new Error(data.error||'Older messages unavailable');
     c.messages=[...(data.messages||[]),...(c.messages||[])];
     c.next_cursor=data.next_cursor;c.message_total=data.message_total;c.olderError='';
   }catch(error){c.olderError=String(error.message||error);}
   finally{c.loadingOlder=false;uiRefresh();}
-  if(body&&old)requestAnimationFrame(()=>{
+  if(body&&old&&document.body.contains(body))requestAnimationFrame(()=>{
     body.scrollTop=old.top+Math.max(0,body.scrollHeight-old.height);
   });
 }
@@ -858,7 +871,7 @@ function cardResponseFeedback(s){
   return`<div class="quickfeedback ${status}" role="status" aria-live="polite">
     <span class="qfstate">${verb}</span><span class="qftext">${esc(normalizedMessage(item.text))}</span>${icon}</div>`;
 }
-function convoMsgs(c,sid,includeOptimistic=true){
+function convoMsgs(c,sid,includeOptimistic=true,scope='session',aid=''){
   const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
   const canonical=(c.messages||[]).map(m=>{
     if(m.role==='event')return eventRow(m,provider);
@@ -871,7 +884,7 @@ function convoMsgs(c,sid,includeOptimistic=true){
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
-  const older=c.next_cursor!=null?`<button class="historyaction oldermsgs" onclick="loadOlderCtx(decodeURIComponent('${enc(sid)}'))"
+  const older=c.next_cursor!=null?`<button class="historyaction oldermsgs" onclick="loadOlderConversation('${scope}',decodeURIComponent('${enc(sid)}'),decodeURIComponent('${enc(aid)}'))"
     ${c.loadingOlder?'disabled':''}>${c.loadingOlder?'loading older messages…':'load older messages'}</button>`:'';
   const error=c.olderError?`<div class="ctxload">✗ ${esc(c.olderError)}</div>`:'';
   return older+error+canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
@@ -1557,9 +1570,10 @@ async function renderClosed(){
   if(!closedCtx[sid]){
     body.innerHTML='<div class="ctxload">loading conversation…</div>';
     try{
-      const r=await fetch('/api/closed_context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+      const r=await fetch(conversationEndpoint('closed',sid),{cache:'no-store'});
       const d=await r.json();
-      closedCtx[sid]=d.ok?{messages:d.messages||[],info:d.info||{}}
+      closedCtx[sid]=d.ok?{messages:d.messages||[],info:d.info||{},next_cursor:d.next_cursor,
+                           message_total:d.message_total}
                          :{messages:[],info:{},error:d.error||'unavailable'};
     }catch(e){closedCtx[sid]={messages:[],info:{},error:String(e)};}
     if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
@@ -1569,7 +1583,7 @@ async function renderClosed(){
     <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
   if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
   else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid)}</div>`;
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid,true,'closed')}</div>`;
   body.scrollTop=body.scrollHeight;
   if(sessionOpened){sessionOpened=false;
     requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
@@ -1639,7 +1653,8 @@ function renderSession(force){
 // A subagent has NO tty: its "send" box relays through the PARENT session (the
 // parent forwards with SendMessage), so it is labelled as a relay, not a channel.
 let agentView=null;              // {sid, aid} of the open overlay
-const agentCache={};             // aid -> {v, messages, info}
+const agentCache={};             // parent session + aid -> {v, messages, info}
+const agentCacheKey=(sid,aid)=>String(sid||'')+'\0'+String(aid||'');
 let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
 function openAgent(sid,aid){
   agentView={sid,aid};
@@ -1659,23 +1674,25 @@ function agentMeta(){
 }
 async function ensureAgentCtx(){
   if(!agentView)return;
-  const a=agentMeta(),aid=agentView.aid;
+  const a=agentMeta(),aid=agentView.aid,key=agentCacheKey(agentView.sid,aid);
   const v=a?a.convo_v:0;
-  const c=agentCache[aid];
+  const c=agentCache[key];
   if(c&&c.v===v)return;
   if(c&&c.fetching)return;
-  agentCache[aid]={...(c||{}),fetching:true};
+  agentCache[key]={...(c||{}),fetching:true};
   try{
-    const r=await fetch(`/api/agent_context?sid=${encodeURIComponent(agentView.sid)}&aid=${encodeURIComponent(aid)}`,{cache:'no-store'});
+    const r=await fetch(conversationEndpoint('agent',agentView.sid,aid),{cache:'no-store'});
     const d=await r.json();
-    agentCache[aid]=d.ok?{v,messages:d.messages||[],info:d.info||{}}:{v,messages:[],info:{}};
-  }catch(e){delete agentCache[aid];}
+    agentCache[key]=d.ok?{v,messages:d.messages||[],info:d.info||{},
+      next_cursor:d.next_cursor,message_total:d.message_total}:
+      {v,messages:[],info:{},error:d.error||'unavailable'};
+  }catch(e){agentCache[key]={v,messages:[],info:{},error:String(e)};}
   renderAgent(true);
 }
 function renderAgent(force){
   if(!agentView)return;
   ensureAgentCtx();
-  const a=agentMeta(),c=agentCache[agentView.aid];
+  const a=agentMeta(),c=agentCache[agentCacheKey(agentView.sid,agentView.aid)];
   const info=(c&&c.info)||{};
   const done=a?['done','ended'].includes(a.state):true;
   $('#atitle').innerHTML=`<b>${esc(info.agent_type||(a&&a.agent_type)||'subagent')}</b>
@@ -1688,8 +1705,9 @@ function renderAgent(force){
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
+  else if(c.error){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}
   else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false)}</div>`;
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false,'agent',agentView.aid)}</div>`;
   body.scrollTop=old.atBottom?body.scrollHeight:old.top;
   if(!typing){
     const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
@@ -3036,7 +3054,9 @@ function render(f,force){
       <b>${t.agents_running}</b> subagent${t.agents_running===1?'':'s'}</span>`;
   usageBar(f.usage,f.provider_usage);
   const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
-  $('#providerstate').innerHTML=providerProblems.map(([provider,value])=>
+  const ledgerProblem=f.ledger&&f.ledger.ok===false?
+    `<div class="provideralert"><b>Local data recovered</b> — ${esc(f.ledger.error||'Fleet started a clean local ledger after a storage failure.')}${f.ledger.quarantine?` Preserved as <code>${esc(f.ledger.quarantine)}</code>.`:''}</div>`:'';
+  $('#providerstate').innerHTML=ledgerProblem+providerProblems.map(([provider,value])=>
     `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
   const ae=document.activeElement;
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
@@ -3090,6 +3110,6 @@ async function tick(){
 navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);
 setInterval(()=>{if(currentRoute==='search')loadSearchStatus();},5000);
-setInterval(()=>{if(currentRoute==='workstreams')loadWorkstreams();},2000);
+setInterval(()=>{if(currentRoute==='workstreams')loadWorkstreams();},8000);
 fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
   .then(r=>{$('#notoken').style.display=r.status===403?'block':'none';}).catch(()=>{});

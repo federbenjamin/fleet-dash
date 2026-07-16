@@ -113,6 +113,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.begin_request()
+        try:
+            return self._do_POST()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return None
+        except Exception as exc:
+            print(f"POST {self._request_route} failed ({type(exc).__name__})",
+                  file=sys.stderr, flush=True)
+            return self.error_reply("request failed")
+
+    def _do_POST(self):
         route = self.path.split("?", 1)[0]
         if route not in ("/api/act", "/api/settings", "/api/search/rebuild"):
             return self.reply(404, "text/plain", b"not found")
@@ -126,6 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             if n < 0 or n > 65536:
                 return self.reply(413, "application/json",
                                   b'{"ok": false, "error": "request too large"}')
+            self.connection.settimeout(5)
             action = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(action, dict):
                 raise ValueError("JSON body must be an object")
@@ -133,7 +144,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
         if route == "/api/settings":
             result = self.eng.update_settings(action)
-            print(f"settings: {json.dumps(action)[:200]}", file=sys.stderr, flush=True)
+            audit = dict(action)
+            if audit.get("dashboard_url"):
+                audit["dashboard_url"] = "[URL omitted]"
+            print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/search/rebuild":
             search = getattr(self.eng, "search", None)
@@ -179,6 +193,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.begin_request()
+        try:
+            return self._do_GET()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return None
+        except Exception as exc:
+            print(f"GET {self._request_route} failed ({type(exc).__name__})",
+                  file=sys.stderr, flush=True)
+            return self.error_reply("request failed")
+
+    def _do_GET(self):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
                      "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics"):
@@ -231,10 +255,11 @@ class Handler(BaseHTTPRequestHandler):
             out = self.paginate_context(self.eng.session_context(self.query("sid")))
             self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/closed_context":
-            out = self.eng.closed_context(self.query("sid"))
+            out = self.paginate_context(self.eng.closed_context(self.query("sid")))
             self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/agent_context":
-            out = self.eng.agent_context(self.query("sid"), self.query("aid"))
+            out = self.paginate_context(
+                self.eng.agent_context(self.query("sid"), self.query("aid")))
             self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/file":
             # reads file bytes off disk -> token-gated like /api/act
@@ -314,6 +339,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.reply(404, "text/plain", b"not found")
 
+    def error_reply(self, message):
+        if getattr(self, "_request_route", "").startswith("/api/"):
+            body = json.dumps({"ok": False, "error": str(message)[:300]}).encode()
+            return self.reply(500, "application/json", body)
+        return self.reply(500, "text/plain; charset=utf-8", b"request failed")
+
     def reply(self, code, ctype, body):
         elapsed_ms = ((time.perf_counter() - getattr(self, "_request_started",
                                                      time.perf_counter())) * 1000)
@@ -323,16 +354,16 @@ class Handler(BaseHTTPRequestHandler):
             metrics["elapsed_ms"].append(elapsed_ms)
             metrics["payload_bytes"].append(len(body))
             metrics["statuses"].append(int(code))
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
-        self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
         try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
+            self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             # Browser navigation and cancelled searches can close the socket
             # after the response has already been prepared. That is not a
             # daemon failure and should not create a traceback in the log.

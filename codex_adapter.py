@@ -861,6 +861,10 @@ class CodexAdapter:
                    if (thread_meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"}
         with self._lock:
             tracked_external = set(self._tracked_external)
+            previous_by_tid = {
+                item.get("native_session_id"): {
+                    **item, "capabilities": dict(item.get("capabilities") or {})}
+                for item in self._sessions if item.get("native_session_id")}
         out = []
         listed = set()
         for thread in threads:
@@ -1075,6 +1079,52 @@ class CodexAdapter:
         # ID can never be resumed or used and must not become an Available ghost.
         for tid in managed - listed:
             meta = thread_meta.get(tid) or {}
+            live = self.client.thread_state.get(tid, {})
+            previous = previous_by_tid.get(tid)
+            created_at = float(meta.get("created_at") or 0)
+            recently_created = bool(created_at and 0 <= now - created_at < 30)
+            runtime_present = (tid in loaded or live.get("status") == "running" or
+                               bool(live.get("turn_id")))
+            # thread/start and turn/start can become usable before thread/list
+            # exposes the new row. Preserve the locally owned card through that
+            # propagation window instead of making it disappear from Fleet.
+            if runtime_present or (previous and recently_created):
+                fallback = previous or self._stub_session(
+                    tid, meta, modes.get(tid) or "default")
+                pending = self._pending(tid, live.get("pending"))
+                completed_at = _epoch(live.get("completed_at"))
+                owned_turn = bool(live.get("turn_id"))
+                active = live.get("status") == "running" or owned_turn
+                if pending:
+                    state = "needs_you"
+                elif active:
+                    state = "running"
+                elif completed_at is not None and 0 <= now - completed_at < 90:
+                    state = "turn_done"
+                else:
+                    state = fallback.get("state") or "idle"
+                fallback.update(state=state, pending=pending, stale=False,
+                                error=live.get("error"),
+                                reg_status=("running" if state == "running" else
+                                            "turn_done" if state == "turn_done" else
+                                            live.get("status") or
+                                            fallback.get("reg_status")))
+                capabilities = fallback["capabilities"]
+                uncontrolled_active = state in ("running", "needs_you") and not owned_turn
+                capabilities.update(
+                    submit=not uncontrolled_active,
+                    interrupt=owned_turn and state in ("running", "needs_you"),
+                    close=not uncontrolled_active,
+                    focus_terminal=False,
+                    focus_terminal_mode=None,
+                    focus_terminal_label=("turn active" if state in
+                                          ("running", "needs_you") else "starting"),
+                    focus_terminal_reason=(
+                        "Wait for the current Codex turn to finish before attaching"
+                        if state in ("running", "needs_you") else
+                        "Fleet is syncing this Codex session with the shared App Server"))
+                out.append(fallback)
+                continue
             if meta.get("unmaterialized"):
                 if tid in loaded:
                     out.append(self._stub_session(tid, meta,

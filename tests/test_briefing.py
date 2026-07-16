@@ -168,6 +168,23 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(budgets["runtime"]["status"], "exceeded")
         self.assertEqual(budgets["missing"]["measurement_scope"], "unavailable")
 
+    def test_budget_identifiers_and_booleans_are_not_silently_coerced(self):
+        invalid = [
+            {"id": "x" * 81, "scope_type": "fleet", "metric": "tokens",
+             "limit_value": 1},
+            {"id": "strict", "scope_type": "fleet", "metric": "tokens",
+             "limit_value": 1, "block_spawns": "false"},
+            {"id": "strict", "scope_type": "fleet", "metric": "tokens",
+             "limit_value": 1, "enabled": 1},
+            {"id": "strict", "scope_type": "fleet", "metric": "tokens",
+             "limit_value": True},
+            {"id": "strict", "scope_type": "provider", "scope_id": "bad\nprovider",
+             "metric": "tokens", "limit_value": 1},
+        ]
+        for budget in invalid:
+            with self.subTest(budget=budget), self.assertRaises(OperationsError):
+                self.ops.replace_budgets([budget])
+
     def test_hard_budget_blocks_only_matching_future_spawns(self):
         self.ops.replace_budgets([
             {"id": "hard", "scope_type": "provider", "scope_id": "claude",

@@ -196,6 +196,8 @@ class OutboxManager:
 
     @staticmethod
     def _message(value):
+        if not isinstance(value, str):
+            raise OutboxError("message must be text")
         message = str(value or "").replace("\x00", "").strip()
         if not message:
             raise OutboxError("message is required")
@@ -205,7 +207,11 @@ class OutboxManager:
 
     @staticmethod
     def _zone(value):
-        zone = str(value or "UTC")[:120]
+        if value is not None and not isinstance(value, str):
+            raise OutboxError("invalid IANA timezone", code="bad_timezone")
+        zone = str(value or "UTC")
+        if len(zone) > 120 or any(ord(char) < 32 for char in zone):
+            raise OutboxError("invalid IANA timezone", code="bad_timezone")
         try:
             ZoneInfo(zone)
         except ZoneInfoNotFoundError:
@@ -216,7 +222,13 @@ class OutboxManager:
         if kind not in ("at_time", "new_session"):
             return None, None, None
         zone = self._zone(payload.get("created_zone"))
-        local_time = str(payload.get("local_time") or "")[:40] or None
+        raw_local_time = payload.get("local_time")
+        if raw_local_time is not None and not isinstance(raw_local_time, str):
+            raise OutboxError("invalid local date and time")
+        local_time = str(raw_local_time or "") or None
+        if local_time and (len(local_time) > 40 or
+                           any(ord(char) < 32 for char in local_time)):
+            raise OutboxError("invalid local date and time")
         fold = payload.get("trigger_fold")
         if local_time:
             trigger_at, fold = resolve_local_time(local_time, zone, fold)
@@ -231,18 +243,32 @@ class OutboxManager:
         message = self._message(payload.get("message"))
         zone = self._zone(payload.get("created_zone"))
         trigger_at, local_time, fold = self._trigger(payload, kind)
-        target_provider = str(payload.get("target_provider") or "")[:30] or None
-        target_session = str(payload.get("target_session_id") or "")[:320] or None
-        target_agent = str(payload.get("target_agent_id") or "")[:320] or None
-        usage_account = str(payload.get("usage_account_id") or "")[:320] or None
-        usage_window = str(payload.get("usage_window_id") or "")[:320] or None
+        if kind in ("at_time", "new_session") and trigger_at is None:
+            raise OutboxError("choose when this message should be sent")
+
+        def bounded(value, label, limit):
+            if value is not None and not isinstance(value, str):
+                raise OutboxError(f"invalid {label}")
+            text = str(value or "")
+            if len(text) > limit or any(ord(char) < 32 for char in text):
+                raise OutboxError(f"invalid {label}")
+            return text or None
+
+        target_provider = bounded(payload.get("target_provider"), "provider", 30)
+        target_session = bounded(payload.get("target_session_id"), "session target", 320)
+        target_agent = bounded(payload.get("target_agent_id"), "agent target", 320)
+        usage_account = bounded(payload.get("usage_account_id"), "usage account", 320)
+        usage_window = bounded(payload.get("usage_window_id"), "usage window", 320)
         reset_at = _epoch(payload.get("observed_reset_at"))
         spawn_spec = payload.get("spawn_spec")
         if kind == "new_session":
             if not isinstance(spawn_spec, dict):
                 raise OutboxError("new-session settings are required")
             provider = str(spawn_spec.get("provider") or "")
-            cwd = str(spawn_spec.get("cwd") or "").strip()
+            raw_cwd = spawn_spec.get("cwd")
+            if not isinstance(raw_cwd, str):
+                raise OutboxError("new session needs a provider and directory")
+            cwd = raw_cwd.strip()
             if provider not in ("claude", "codex") or not cwd:
                 raise OutboxError("new session needs a provider and directory")
             target_provider = provider
@@ -295,9 +321,10 @@ class OutboxManager:
             raise OutboxError("invalid outbox cursor")
         states = []
         if state:
-            states = [part for part in str(state).split(",") if part in ALL_STATES]
-            if not states:
+            requested = [part for part in str(state).split(",") if part]
+            if not requested or any(part not in ALL_STATES for part in requested):
                 raise OutboxError("unknown outbox state")
+            states = requested
         where = " WHERE state IN (%s)" % ",".join("?" for _ in states) if states else ""
         with self._connect() as db:
             rows = db.execute(

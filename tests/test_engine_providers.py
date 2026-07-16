@@ -1,7 +1,10 @@
+import copy
 import json
 import os
 import plistlib
+import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -159,6 +162,19 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(second["diagnostics"]["scan_samples"], 2)
         self.assertGreaterEqual(second["diagnostics"]["scan_p95_ms"], 0)
 
+    def test_new_claude_registry_session_is_interactive_before_first_transcript(self):
+        os.unlink(self.transcript)
+        fleet = self.engine.scan()
+        session = next(item for item in fleet["sessions"]
+                       if item["provider"] == "claude")
+        self.assertEqual((session["state"], session["ui_group"]),
+                         ("idle", "available"))
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertIsNone(session["ctx_tokens"])
+        self.assertIsNone(session["cost"])
+        self.assertEqual(self.engine.session_context("same"), {
+            "ok": True, "messages": [], "files": [], "starting": True})
+
     def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
         with open(self.claude_account, "w") as handle:
             json.dump({"oauthAccount": {"emailAddress": "claude@example.com"}}, handle)
@@ -273,6 +289,48 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual((codex["state"], codex["provider_stale"],
                           recovered["providers"]["codex"]["ok"]),
                          ("idle", False, True))
+
+    def test_corrupt_shared_ledger_is_quarantined_and_fleet_still_starts(self):
+        recovery_base = os.path.join(self.tmp.name, "recovery")
+        os.makedirs(recovery_base)
+        ledger_path = os.path.join(recovery_base, "ledger.db")
+        with open(ledger_path, "wb") as handle:
+            handle.write(b"not a sqlite database")
+        cfg = dict(DEFAULT_CONFIG)
+        cfg.update({"codex_enabled": False, "ntfy_topic": ""})
+        with mock.patch.object(engine_module, "BASE", recovery_base):
+            recovered = Engine(cfg)
+            try:
+                fleet = recovered.scan()
+                self.assertFalse(fleet["ledger"]["ok"])
+                self.assertTrue(fleet["ledger"]["recovered"])
+                self.assertNotIn("detail", fleet["ledger"])
+                self.assertTrue(os.path.exists(ledger_path))
+                quarantine = os.path.join(recovery_base, fleet["ledger"]["quarantine"])
+                self.assertTrue(os.path.exists(quarantine))
+                with sqlite3.connect(ledger_path) as db:
+                    self.assertEqual(db.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            finally:
+                if recovered.db:
+                    recovered.db.close()
+
+    def test_http_ledger_reads_do_not_share_the_scan_connection(self):
+        original = self.engine.ensure_db()
+
+        class PoisonedScanConnection:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.DatabaseError("file is not a database")
+
+            def close(self):
+                pass
+
+        self.engine.db = PoisonedScanConnection()
+        try:
+            insights = self.engine.insights(7)
+            self.assertTrue(insights["ok"], insights)
+            self.assertEqual(self.engine.recent_dirs()[0]["path"], self.cwd)
+        finally:
+            self.engine.db = original
 
     def test_claude_history_backfill_is_viewable_reopenable_and_idempotent(self):
         sid = "11111111-2222-3333-4444-555555555555"
@@ -590,6 +648,43 @@ class EngineProviderTest(unittest.TestCase):
         invalid = self.engine.update_settings({"reader_width": "left"})
         self.assertFalse(invalid["ok"])
         self.assertEqual(self.engine.cfg["reader_width"], "centered")
+
+    def test_settings_validation_is_atomic_strict_and_concurrency_safe(self):
+        before_notify = copy.deepcopy(self.engine.cfg["notify"])
+        rejected = self.engine.update_settings({
+            "notify": {"needs_you": False}, "reader_width": "left"})
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(self.engine.cfg["notify"], before_notify)
+        config_path = os.path.join(self.base, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as handle:
+                self.assertNotEqual((json.load(handle).get("notify") or {}).get("needs_you"), False)
+
+        for patch in ({"preview_agents": "false"},
+                      {"notify": {"needs_you": "false"}},
+                      {"mute_session": "same", "muted": 1},
+                      {"pin_session": "same", "pinned": "yes"},
+                      {"unknown_setting": True},
+                      {"fleet_quiet_minutes": True}):
+            with self.subTest(patch=patch):
+                self.assertFalse(self.engine.update_settings(patch)["ok"])
+
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(
+                self.engine.update_settings({"preview_agents": True}))),
+            threading.Thread(target=lambda: results.append(
+                self.engine.update_settings({"reader_width": "centered"}))),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertTrue(all(item["ok"] for item in results))
+        with open(config_path) as handle:
+            saved = json.load(handle)
+        self.assertTrue(saved["preview_agents"])
+        self.assertEqual(saved["reader_width"], "centered")
 
     def test_handoff_preview_redacts_credentials_and_exposes_safe_defaults(self):
         fleet = self.engine.scan()
@@ -987,6 +1082,11 @@ class EngineProviderTest(unittest.TestCase):
         invalid = self.engine.update_settings({"digest_schedule_zone": "Not/AZone"})
         self.assertFalse(invalid["ok"])
         self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
+        overlong = self.engine.update_settings({"digest_schedule_zone": "A" * 121})
+        self.assertFalse(overlong["ok"])
+        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
+        self.assertFalse(self.engine.update_settings(
+            {"mute_session": "", "muted": True})["ok"])
 
     def test_explicit_hard_budget_blocks_new_spawns_but_not_existing_work(self):
         self.engine.update_settings({"budgets": [{
@@ -1109,6 +1209,33 @@ class EngineProviderTest(unittest.TestCase):
         self.assertNotEqual(records[0]["workstream_id"], records[1]["workstream_id"])
         self.assertEqual(sum(item["counts"]["available"] for item in records), 1)
         self.assertEqual(sum(item["counts"]["history"] for item in records), 1)
+
+    def test_workstreams_cache_ignores_poll_timestamps_but_invalidates_on_state(self):
+        session = codex_session()
+        session.update(cwd=self.cwd, ui_group="available", reason_label="Available",
+                       activity_at=2)
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"t": 1, "sessions": [session], "closed": []}
+        with mock.patch.object(self.engine.operations, "budgets_snapshot",
+                               return_value={"budgets": []}), mock.patch.object(
+                                   self.engine, "workstream_records",
+                                   wraps=self.engine.workstream_records) as records:
+            first = self.engine.workstreams_snapshot()
+            with self.engine.lock:
+                self.engine.snapshot_cache = {"t": 2, "sessions": [dict(session)],
+                                              "closed": []}
+            second = self.engine.workstreams_snapshot()
+            self.assertIs(first, second)
+            self.assertEqual(records.call_count, 1)
+
+            changed = dict(session, ui_group="working", state="running",
+                           reason_label="Working")
+            with self.engine.lock:
+                self.engine.snapshot_cache = {"t": 3, "sessions": [changed], "closed": []}
+            third = self.engine.workstreams_snapshot()
+            self.assertIsNot(third, second)
+            self.assertEqual(records.call_count, 2)
+            self.assertEqual(third["workstreams"][0]["counts"]["working"], 1)
 
     def test_workstream_identity_prefers_nested_repo_and_resolves_symlinks(self):
         outer = os.path.join(self.tmp.name, "outer")

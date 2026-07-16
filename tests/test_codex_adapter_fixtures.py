@@ -434,6 +434,30 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertEqual(adapter.sessions(), [])
         self.assertNotIn("ghost", adapter._managed())
 
+    def test_new_materialized_thread_does_not_disappear_before_thread_list_catches_up(self):
+        adapter, client = self.adapter([])
+        meta = {"cwd": "/work/project", "model": "gpt-5.4", "effort": "high",
+                "name": "fresh", "created_at": 995, "unmaterialized": False}
+        adapter._remember("fresh", "default", meta)
+        previous = adapter._stub_session("fresh", meta, "default")
+        previous.update(state="running", reg_status="running")
+        adapter._sessions = [previous]
+        client.loaded = ["fresh"]
+        client.thread_state["fresh"] = {
+            "status": "running", "turn_id": "turn-1", "updated_at": 1000}
+
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertEqual(session["native_session_id"], "fresh")
+        self.assertEqual(session["state"], "running")
+        self.assertTrue(session["capabilities"]["interrupt"])
+
+        client.thread_state["fresh"].update(
+            status="idle", turn_id=None, completed_at=1000)
+        adapter._refresh()
+        self.assertEqual(adapter.sessions()[0]["state"], "turn_done")
+
     def test_failed_detail_read_does_not_materialize_transient_list_row(self):
         adapter, client = self.adapter([self.thread("empty")])
         meta = {"cwd": "/work/project", "model": "gpt-5.4", "effort": "high",

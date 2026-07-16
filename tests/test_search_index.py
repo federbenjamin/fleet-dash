@@ -199,6 +199,27 @@ class SearchIndexTest(unittest.TestCase):
             self.index.discover()
             self.assertEqual(self.index.status()["pending_sources"], 0)
 
+    def test_confirmed_corrupt_derived_index_is_quarantined_and_rebuilt(self):
+        self.index.close()
+        with open(self.db_path, "wb") as handle:
+            handle.write(b"not a sqlite database")
+        recovered = SearchIndex(self.db_path, self.claude, self.codex,
+                                discover_seconds=.01, batch_rows=20)
+        try:
+            status = recovered.status()
+            self.assertTrue(status["ok"])
+            self.assertEqual(status["documents"], 0)
+            self.assertIn("rebuilt", recovered.last_error)
+            quarantined = [name for name in os.listdir(self.tmp.name)
+                           if name.startswith("search.db.corrupt-")]
+            self.assertEqual(len(quarantined), 1)
+            recovered.discover()
+            while recovered.run_once():
+                pass
+            self.assertTrue(recovered.search("needle")["ok"])
+        finally:
+            recovered.close()
+
     def test_search_prefixes_only_short_typeahead_fragments(self):
         self.assertEqual(self.index._match_query("fle"), '"fle"*')
         self.assertEqual(self.index._match_query("fleet session"),

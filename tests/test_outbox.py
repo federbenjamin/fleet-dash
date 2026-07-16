@@ -62,6 +62,25 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(fold, 0)
         self.assertEqual(second - first, 3600)
 
+    def test_identifiers_times_and_state_filters_are_rejected_not_truncated(self):
+        invalid = [
+            {"target_session_id": "x" * 321},
+            {"target_agent_id": "agent\nchild"},
+            {"target_session_id": {"unexpected": "object"}},
+            {"message": {"unexpected": "object"}},
+            {"created_zone": "UTC" + "x" * 121},
+            {"created_zone": ["UTC"]},
+            {"kind": "at_time", "trigger_at": None},
+            {"kind": "new_session", "trigger_at": None,
+             "spawn_spec": {"provider": "codex", "cwd": self.tmp.name}},
+        ]
+        for overrides in invalid:
+            with self.subTest(overrides=overrides), self.assertRaises(OutboxError):
+                self.create(**overrides)
+        self.create()
+        with self.assertRaises(OutboxError):
+            self.manager.list(state="scheduled,future_state")
+
     def test_timed_message_runs_once_and_equal_times_keep_creation_order(self):
         for text in ("first", "second"):
             self.create(kind="at_time", message=text,

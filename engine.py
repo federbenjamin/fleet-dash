@@ -892,7 +892,8 @@ class Engine:
         self.prev_fleet_busy = None
         self.quiet_since = None         # when the fleet last went fully idle
         self.lock = threading.Lock()
-        self.config_lock = threading.Lock()
+        self.config_lock = threading.RLock()
+        self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
         self.scan_timings_ms = deque(maxlen=240)
@@ -903,8 +904,10 @@ class Engine:
         self._workstreams_snapshot_cache = None
         self._closed_sessions_cache = None
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
-        self.outbox = OutboxManager(os.path.join(BASE, "ledger.db"))
-        self.operations = FleetOperations(os.path.join(BASE, "ledger.db"))
+        ledger_path = os.path.join(BASE, "ledger.db")
+        self.ledger_status = self._prepare_ledger(ledger_path)
+        self.outbox = OutboxManager(ledger_path)
+        self.operations = FleetOperations(ledger_path)
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -935,6 +938,42 @@ class Engine:
             self.codex_observer = None
             self.codex = CodexAdapter(enabled=False, client=object())
             self.codex.error = str(exc)
+
+    @staticmethod
+    def _prepare_ledger(path):
+        """Quarantine only a confirmed-corrupt shared ledger so Fleet can start.
+
+        The corrupt bytes are preserved for manual recovery. Starting empty is
+        safer than restoring an old backup that could resend already-delivered
+        outbox messages.
+        """
+        if not os.path.exists(path):
+            return {"ok": True, "recovered": False}
+        db = None
+        try:
+            db = sqlite3.connect(path, timeout=2)
+            result = db.execute("PRAGMA quick_check").fetchone()
+            if result and result[0] == "ok":
+                return {"ok": True, "recovered": False}
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                return {"ok": True, "recovered": False, "check_deferred": True}
+        except sqlite3.DatabaseError:
+            pass
+        finally:
+            if db is not None:
+                db.close()
+        quarantine = path + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                source = path + suffix
+                if os.path.exists(source):
+                    os.replace(source, quarantine + suffix)
+        except OSError as exc:
+            raise RuntimeError(f"ledger is corrupt and could not be quarantined: {exc}")
+        return {"ok": False, "recovered": True,
+                "error": "Fleet's local ledger was corrupt. It was preserved and a clean ledger was started; Session History, Outbox, budgets, and local usage totals may be incomplete.",
+                "quarantine": os.path.basename(quarantine)}
 
     # -- live sessions from the CLI registry
     def live_sessions(self):
@@ -1342,6 +1381,33 @@ class Engine:
             proj_dir = cwd_to_project_dir(cwd)
             main_path = os.path.join(proj_dir, f"{sid}.jsonl")
             if not os.path.isfile(main_path):
+                reg_status = reg.get("status")
+                state = "running" if reg_status == "busy" else "idle"
+                sessions.append({
+                    "session_id": sid, "native_session_id": sid,
+                    "provider": "claude", "pid": reg.get("pid"),
+                    "name": reg.get("name"), "title": reg.get("name"),
+                    "project": os.path.basename(cwd) or cwd, "cwd": cwd,
+                    "branch": None, "model": "", "family": "other",
+                    "effort": self.effort_for(sid), "running": None,
+                    "last_msg": None, "_latest_prose": None, "repo_outcome": None,
+                    "state": state, "reg_status": reg_status, "quiet_s": 0,
+                    "ctx_tokens": None, "ctx_pct": None, "total_tokens": None,
+                    "cost": None, "cost_source": "unavailable",
+                    "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
+                                   if reg.get("bridgeSessionId") else None),
+                    "started_ms": reg.get("startedAt"), "pending": None,
+                    "compacting": None,
+                    "muted": sid in (cfg.get("muted_sessions") or {}),
+                    "convo_v": f"starting:{reg.get('pid')}:{reg_status}",
+                    "files_n": 0, "agents": [], "agents_running": 0,
+                    "agents_total": 0, "agent_cost": None,
+                    "capabilities": {"submit": True, "interrupt": state == "running",
+                        "close": True, "focus_terminal": True,
+                        "answer_structured": True, "decide_approval": True,
+                        "spawn_agent": True, "relay_agent": True,
+                        "account_usage": True, "exact_cost": True},
+                })
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
@@ -1567,6 +1633,7 @@ class Engine:
             "provider_usage": {"claude": claude_usage, "codex": codex_usage},
             "actions": actions,
             "closed": closed,
+            "ledger": dict(self.ledger_status),
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
             "models_by_provider": {"claude": [{"id": m, "name": m,
@@ -1653,9 +1720,22 @@ class Engine:
         """Build the heavier repository rollup outside the two-second fleet path."""
         with self.lock:
             snapshot = self.snapshot_cache
-            stamp = snapshot.get("t")
             sessions = list(snapshot.get("sessions") or [])
             closed = list(snapshot.get("closed") or [])
+        digest = hashlib.blake2b(digest_size=16)
+        fields = ("session_id", "provider", "title", "name", "project", "cwd",
+                  "branch", "state", "ui_group", "reason_label", "access",
+                  "access_label", "primary_action", "primary_action_label",
+                  "activity_at", "last_seen", "closed_at", "can_reopen", "cost",
+                  "ctx_tokens", "last_msg", "repo_outcome")
+        for item in sessions + closed:
+            digest.update(json.dumps(
+                {key: item.get(key) for key in fields}, sort_keys=True,
+                separators=(",", ":"), default=str).encode("utf-8"))
+            digest.update(b"\0")
+        # Repository and budget observations can change without a conversation
+        # event, so refresh those at the same cadence as their underlying cache.
+        stamp = (digest.hexdigest(), int(time.monotonic() // 8))
         cached = self._workstreams_snapshot_cache
         if cached and cached[0] == stamp:
             return cached[1]
@@ -1690,7 +1770,8 @@ class Engine:
                                    ("ok", "state", "worktree", "observed_at",
                                     "elapsed_ms", "cached", "error") if key in repo}
             group["repo_summary"] = self._repository_summary(repo)
-        result = {"ok": True, "t": stamp or time.time(), "workstreams": records,
+        result = {"ok": True, "t": snapshot.get("t") or time.time(),
+                  "version": stamp[0], "workstreams": records,
                   "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
         self._workstreams_snapshot_cache = (stamp, result)
         return result
@@ -2144,8 +2225,11 @@ class Engine:
 
     # -------------------------------------------------------------- ledger
     def ensure_db(self):
-        if self.db is None:
-            # single sequential user (the poll loop; main thread only pre-loop)
+        with self.db_lock:
+            if self.db is not None:
+                return self.db
+            # This long-lived connection belongs to the sequential scan loop.
+            # HTTP request threads use their own short-lived connections below.
             self.db = sqlite3.connect(os.path.join(BASE, "ledger.db"), check_same_thread=False)
             self.db.execute("""CREATE TABLE IF NOT EXISTS agent_runs(
                 agent_id TEXT PRIMARY KEY, session_id TEXT, project TEXT,
@@ -2199,7 +2283,20 @@ class Engine:
             self.db.execute("""CREATE INDEX IF NOT EXISTS repo_actions_root
                 ON repo_actions(root, id DESC)""")
             self.db.commit()
-        return self.db
+            return self.db
+
+    def ledger_reader(self):
+        """Open a request-local ledger connection.
+
+        Sharing the scan loop's sqlite connection with ThreadingHTTPServer can
+        leave the connection poisoned after overlapping reads and writes even
+        when the on-disk database passes quick_check. Request handlers therefore
+        get an independent connection and close it after the response is built.
+        """
+        self.ensure_db()
+        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=5)
+        db.execute("PRAGMA busy_timeout=5000")
+        return db
 
     @staticmethod
     def _safe_claude_transcript(sid, path):
@@ -2789,8 +2886,9 @@ Treat this as an independent session. Verify the repository state before changin
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
                 "closed_at", "title", "provider", "transcript_path")
+        db = None
         try:
-            db = self.ensure_db()
+            db = self.ledger_reader()
             signature = db.execute("""SELECT COUNT(*),MAX(closed_at)
                 FROM session_runs WHERE closed_at IS NOT NULL""").fetchone()
             now_mono = time.monotonic()
@@ -2811,6 +2909,9 @@ Treat this as an independent session. Verify the repository state before changin
             return out
         except Exception:
             return []
+        finally:
+            if db is not None:
+                db.close()
 
     def closed_context(self, sid):
         """Conversation of a CLOSED session: its process is gone, so the registry
@@ -2818,13 +2919,18 @@ Treat this as an independent session. Verify the repository state before changin
         if str(sid).startswith("codex:"):
             return self.codex.context(sid)
         row = None
+        db = None
         try:
-            row = self.ensure_db().execute(
+            db = self.ledger_reader()
+            row = db.execute(
                 "SELECT cwd, model, cost, title, project, branch, transcript_path "
                 "FROM session_runs "
                 "WHERE session_id = ?", (sid,)).fetchone()
         except Exception:
             pass
+        finally:
+            if db is not None:
+                db.close()
         if not row:
             return {"ok": False, "error": "unknown session"}
         fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
@@ -2890,14 +2996,19 @@ Treat this as an independent session. Verify the repository state before changin
             return rp == home or rp.startswith(home + os.sep)
 
         paths = []
+        db = None
         try:
-            rows = self.ensure_db().execute(
+            db = self.ledger_reader()
+            rows = db.execute(
                 "SELECT cwd, MAX(COALESCE(last_seen, 0)) t FROM session_runs "
                 "WHERE cwd IS NOT NULL AND cwd != '' GROUP BY cwd "
                 "ORDER BY t DESC LIMIT ?", (limit,)).fetchall()
             paths = [r[0] for r in rows if ok(r[0])]
         except Exception:
             pass
+        finally:
+            if db is not None:
+                db.close()
         for r in self.live_sessions():           # live cwds first, even if unledgered
             cwd = r.get("cwd")
             if ok(cwd) and cwd not in paths:
@@ -2909,11 +3020,12 @@ Treat this as an independent session. Verify the repository state before changin
         (real $ from the ledger) + usage_stats (tool/skill volumes; skill $ is
         the attributed cost of turns run while that skill was active)."""
         cfg = self.cfg
-        db = self.ensure_db()
         since_d = f"-{int(days)} days"
         since_e = int(time.time()) - int(days) * 86400
         out = {"days": days}
+        db = None
         try:
+            db = self.ledger_reader()
             rows = db.execute("""SELECT agent_type, count(*), sum(cost), sum(in_tok),
                 sum(cw_tok), sum(cr_tok), sum(out_tok) FROM agent_runs
                 WHERE started >= date('now', ?) GROUP BY agent_type
@@ -3011,6 +3123,9 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception as e:
             print(f"insights error: {e}", file=sys.stderr, flush=True)
             out.update(ok=False, error=str(e))
+        finally:
+            if db is not None:
+                db.close()
         return out
 
     def hook_pending(self, sid, reg_status):
@@ -3194,8 +3309,10 @@ Treat this as an independent session. Verify the repository state before changin
         if str(sid).startswith("codex:"):
             return self.codex.context(sid)
         reg, path = self._reg_main_path(sid)
-        if not reg or not os.path.isfile(path):
+        if not reg:
             return {"ok": False, "error": "session not live"}
+        if not os.path.isfile(path):
+            return {"ok": True, "messages": [], "files": [], "starting": True}
         with self.scan_lock:
             mt = self.tail_for(path)
             mt.poll()
@@ -3353,12 +3470,17 @@ Treat this as an independent session. Verify the repository state before changin
         """
         if any(row.get("sessionId") == sid for row in self.live_sessions()):
             return {"ok": False, "error": "session is already live"}
+        db = None
         try:
-            row = self.ensure_db().execute(
+            db = self.ledger_reader()
+            row = db.execute(
                 "SELECT cwd, provider, transcript_path, closed_at FROM session_runs "
                 "WHERE session_id=?", (sid,)).fetchone()
         except Exception as exc:
             return {"ok": False, "error": f"session lookup failed: {exc}"}
+        finally:
+            if db is not None:
+                db.close()
         if not row or row[1] != "claude" or row[3] is None:
             return {"ok": False, "error": "session is not a closed Claude conversation"}
         if not self._safe_claude_transcript(sid, row[2]):
@@ -4226,80 +4348,124 @@ Treat this as an independent session. Verify the repository state before changin
     def update_settings(self, patch):
         """Persist dashboard-editable settings: notify toggles, notification
         thresholds, session pins, read state, and per-session mutes."""
+        if not isinstance(patch, dict):
+            return {"ok": False, "error": "settings patch must be an object"}
+        with self.config_lock:
+            return self._update_settings(patch)
+
+    def _update_settings(self, patch):
+        allowed = (set(self.NUM_KEYS) | set(self.BOOL_KEYS) | {
+            "notify", "reader_width", "dashboard_url", "digest_schedule_time",
+            "digest_schedule_zone", "mute_session", "muted", "pin_session", "pinned",
+            "mark_available_session", "mark_read_session", "revision", "bulk_triage",
+            "budgets"})
+        unknown = sorted(str(key) for key in patch if key not in allowed)
+        if unknown:
+            return {"ok": False, "error": f"unknown settings field: {unknown[0]}"}
+        if "muted" in patch and "mute_session" not in patch:
+            return {"ok": False, "error": "muted requires mute_session"}
+        if "pinned" in patch and "pin_session" not in patch:
+            return {"ok": False, "error": "pinned requires pin_session"}
+        if "revision" in patch and not ({"mark_available_session", "mark_read_session"} & set(patch)):
+            return {"ok": False, "error": "revision requires a session marker"}
+        staged = copy.deepcopy(self.cfg)
         changed = {}
         nt = patch.get("notify")
-        if isinstance(nt, dict):
-            cur = {**DEFAULT_CONFIG["notify"], **(self.cfg.get("notify") or {})}
+        if nt is not None:
+            if not isinstance(nt, dict):
+                return {"ok": False, "error": "notify must be an object"}
+            cur = {**DEFAULT_CONFIG["notify"], **(staged.get("notify") or {})}
             for k, v in nt.items():
-                if k in self.NOTIFY_KEYS:
-                    cur[k] = bool(v)
-            self.cfg["notify"] = changed["notify"] = cur
+                if k not in self.NOTIFY_KEYS:
+                    return {"ok": False, "error": f"unknown notification field: {k}"}
+                if not isinstance(v, bool):
+                    return {"ok": False, "error": f"notify.{k} must be boolean"}
+                cur[k] = v
+            staged["notify"] = changed["notify"] = cur
         for k, (typ, lo, hi) in self.NUM_KEYS.items():
             if k in patch:
+                if isinstance(patch[k], bool):
+                    return {"ok": False, "error": f"bad value for {k}"}
                 try:
                     v = typ(float(patch[k]))
                 except (TypeError, ValueError):
                     return {"ok": False, "error": f"bad value for {k}"}
                 if not lo <= v <= hi:
                     return {"ok": False, "error": f"{k} must be {lo}–{hi}"}
-                self.cfg[k] = changed[k] = v
+                staged[k] = changed[k] = v
         for k in self.BOOL_KEYS:
             if k in patch:
-                self.cfg[k] = changed[k] = bool(patch[k])
+                if not isinstance(patch[k], bool):
+                    return {"ok": False, "error": f"{k} must be boolean"}
+                staged[k] = changed[k] = patch[k]
         if "reader_width" in patch:
             width = str(patch["reader_width"] or "")
             if width not in ("fit", "centered"):
                 return {"ok": False, "error": "reader_width must be fit or centered"}
-            self.cfg["reader_width"] = changed["reader_width"] = width
+            staged["reader_width"] = changed["reader_width"] = width
         if "dashboard_url" in patch:
-            u = str(patch["dashboard_url"] or "").strip()[:300]
-            if u and not u.startswith(("http://", "https://")):
+            u = str(patch["dashboard_url"] or "").strip()
+            if len(u) > 300 or any(ord(char) < 32 for char in u):
+                return {"ok": False, "error": "dashboard_url is too long or invalid"}
+            if u and (not u.startswith(("http://", "https://")) or
+                      re.fullmatch(r"https?://[^\s/]+(?:/.*)?", u) is None):
                 return {"ok": False, "error": "dashboard_url must start with http(s)://"}
-            self.cfg["dashboard_url"] = changed["dashboard_url"] = u
+            staged["dashboard_url"] = changed["dashboard_url"] = u
         if "digest_schedule_time" in patch:
             wall = str(patch.get("digest_schedule_time") or "").strip()
             if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", wall):
                 return {"ok": False, "error": "digest_schedule_time must be HH:MM"}
-            self.cfg["digest_schedule_time"] = changed["digest_schedule_time"] = wall
+            staged["digest_schedule_time"] = changed["digest_schedule_time"] = wall
         if "digest_schedule_zone" in patch:
-            zone = str(patch.get("digest_schedule_zone") or "").strip()[:120]
+            zone = str(patch.get("digest_schedule_zone") or "").strip()
+            if len(zone) > 120 or any(ord(char) < 32 for char in zone):
+                return {"ok": False,
+                        "error": "digest_schedule_zone is too long or invalid"}
             try:
                 ZoneInfo(zone)
             except ZoneInfoNotFoundError:
                 return {"ok": False, "error": "digest_schedule_zone must be an IANA timezone"}
-            self.cfg["digest_schedule_zone"] = changed["digest_schedule_zone"] = zone
+            staged["digest_schedule_zone"] = changed["digest_schedule_zone"] = zone
         ms = patch.get("mute_session")
-        if ms:
-            mu = dict(self.cfg.get("muted_sessions") or {})
-            if patch.get("muted"):
-                mu[str(ms)] = time.time()
+        if "mute_session" in patch:
+            if (not isinstance(ms, str) or not ms.strip() or len(ms) > 300 or
+                    any(ord(char) < 32 for char in ms)):
+                return {"ok": False, "error": "invalid mute_session"}
+            if not isinstance(patch.get("muted"), bool):
+                return {"ok": False, "error": "muted must be boolean"}
+            mu = dict(staged.get("muted_sessions") or {})
+            if patch["muted"]:
+                mu[ms] = time.time()
             else:
-                mu.pop(str(ms), None)
+                mu.pop(ms, None)
             mu = {k: v for k, v in mu.items() if time.time() - v < 30 * 86400}
-            self.cfg["muted_sessions"] = changed["muted_sessions"] = mu
+            staged["muted_sessions"] = changed["muted_sessions"] = mu
         if "pin_session" in patch:
-            sid = str(patch.get("pin_session") or "").strip()[:300]
-            if not sid:
-                return {"ok": False, "error": "pin_session is required"}
-            pins = [str(item) for item in (self.cfg.get("pinned_sessions") or [])
+            sid = str(patch.get("pin_session") or "").strip()
+            if not sid or len(sid) > 300 or any(ord(char) < 32 for char in sid):
+                return {"ok": False, "error": "valid pin_session is required"}
+            if not isinstance(patch.get("pinned"), bool):
+                return {"ok": False, "error": "pinned must be boolean"}
+            pins = [str(item) for item in (staged.get("pinned_sessions") or [])
                     if str(item) != sid]
-            if patch.get("pinned"):
+            if patch["pinned"]:
                 pins.append(sid)
             pins = pins[-500:]
-            self.cfg["pinned_sessions"] = changed["pinned_sessions"] = pins
+            staged["pinned_sessions"] = changed["pinned_sessions"] = pins
         for patch_key, config_key in (("mark_available_session", "reply_available"),
                                       ("mark_read_session", "read_sessions")):
             if patch_key not in patch:
                 continue
-            sid = str(patch.get(patch_key) or "").strip()[:300]
-            revision = str(patch.get("revision") or "").strip()[:300]
-            if not sid or not revision:
+            sid = str(patch.get(patch_key) or "").strip()
+            revision = str(patch.get("revision") or "").strip()
+            if (not sid or not revision or len(sid) > 300 or len(revision) > 300 or
+                    any(ord(char) < 32 for char in sid + revision)):
                 return {"ok": False, "error": f"{patch_key} and revision are required"}
-            values = dict(self.cfg.get(config_key) or {})
+            values = dict(staged.get(config_key) or {})
             values.pop(sid, None)
             values[sid] = revision
             values = dict(list(values.items())[-1000:])
-            self.cfg[config_key] = changed[config_key] = values
+            staged[config_key] = changed[config_key] = values
         bulk = patch.get("bulk_triage")
         if bulk is not None:
             if not isinstance(bulk, dict):
@@ -4314,10 +4480,12 @@ Treat this as an independent session. Verify the repository state before changin
             for item in items:
                 if not isinstance(item, dict):
                     return {"ok": False, "error": "invalid bulk triage item"}
-                sid = str(item.get("session_id") or "").strip()[:300]
-                action_id = str(item.get("action_id") or "").strip()[:80]
-                revision = str(item.get("revision") or "").strip()[:300]
-                if not sid or not action_id:
+                sid = str(item.get("session_id") or "").strip()
+                action_id = str(item.get("action_id") or "").strip()
+                revision = str(item.get("revision") or "").strip()
+                invalid_text = (len(sid) > 300 or len(action_id) > 80 or len(revision) > 300 or
+                                any(ord(char) < 32 for char in sid + action_id + revision))
+                if not sid or not action_id or invalid_text:
                     return {"ok": False, "error": "bulk triage item needs session and action IDs"}
                 if operation in ("mark_read", "mark_available") and not revision:
                     return {"ok": False, "error": "bulk triage revision is required"}
@@ -4335,26 +4503,26 @@ Treat this as an independent session. Verify the repository state before changin
                                 "error": "stale or ineligible bulk triage action"}
             now = time.time()
             if operation == "mute":
-                values = dict(self.cfg.get("muted_sessions") or {})
+                values = dict(staged.get("muted_sessions") or {})
                 for sid, _, _ in normalized:
                     values[sid] = now
                 values = {key: value for key, value in values.items()
                           if now - float(value or 0) < 30 * 86400}
-                self.cfg["muted_sessions"] = changed["muted_sessions"] = values
+                staged["muted_sessions"] = changed["muted_sessions"] = values
             elif operation == "dismiss":
-                values = dict(self.cfg.get("dismissed_actions") or {})
+                values = dict(staged.get("dismissed_actions") or {})
                 for _, action_id, _ in normalized:
                     values[action_id] = now
                 values = dict(list(values.items())[-2000:])
-                self.cfg["dismissed_actions"] = changed["dismissed_actions"] = values
+                staged["dismissed_actions"] = changed["dismissed_actions"] = values
             else:
                 key = "read_sessions" if operation == "mark_read" else "reply_available"
-                values = dict(self.cfg.get(key) or {})
+                values = dict(staged.get(key) or {})
                 for sid, _, revision in normalized:
                     values.pop(sid, None)
                     values[sid] = revision
                 values = dict(list(values.items())[-1000:])
-                self.cfg[key] = changed[key] = values
+                staged[key] = changed[key] = values
         if "budgets" in patch:
             try:
                 changed["budgets"] = self.operations.replace_budgets(patch.get("budgets"))
@@ -4365,6 +4533,7 @@ Treat this as an independent session. Verify the repository state before changin
         persisted = {key: value for key, value in changed.items() if key != "budgets"}
         if persisted:
             self._persist_config_fields(persisted)
+            self.cfg.update(persisted)
         return {"ok": True, **changed}
 
     def once(self, key, title, body, tags="robot", priority="default", force=False):
