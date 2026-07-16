@@ -13,6 +13,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine import Engine, load_config, BASE  # noqa: E402
 
 
+STATIC_FILES = {
+    "/static/fleet.css": "text/css; charset=utf-8",
+    "/static/app.js": "text/javascript; charset=utf-8",
+}
+
+
 def poll_loop(eng):
     while True:
         try:
@@ -110,10 +116,19 @@ class Handler(BaseHTTPRequestHandler):
             with self.eng.lock:
                 snap = dict(self.eng.snapshot_cache)
             try:  # page version: lets stale tabs self-reload on dashboard.html changes
-                snap["page_v"] = int(os.path.getmtime(os.path.join(BASE, "dashboard.html")))
+                assets = [os.path.join(BASE, "dashboard.html")]
+                assets.extend(os.path.join(BASE, route.removeprefix("/"))
+                              for route in STATIC_FILES)
+                snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
             except OSError:
                 pass
             self.reply(200, "application/json", json.dumps(snap).encode())
+        elif route in STATIC_FILES:
+            try:
+                with open(os.path.join(BASE, route.removeprefix("/")), "rb") as f:
+                    self.reply(200, STATIC_FILES[route], f.read())
+            except FileNotFoundError:
+                self.reply(404, "text/plain", b"asset missing")
         elif route == "/" or route.startswith("/index"):
             try:
                 with open(os.path.join(BASE, "dashboard.html"), "rb") as f:

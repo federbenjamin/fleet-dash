@@ -1,0 +1,1821 @@
+const $=q=>document.querySelector(q);
+(()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
+  if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
+        history.replaceState(null,'',location.pathname);}})();
+const open=new Set();
+const expandedPeeks=new Set();
+const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-panel fold state, survives re-renders
+// input guard, two windows: a scroll gesture (touchmove OR desktop wheel/trackpad)
+// holds POLL re-renders 1500ms so the scrollbox isn't replaced mid-gesture (a
+// replaced node kills wheel momentum: "scroll stops after a second"); a tap
+// (touchstart) holds them 800ms so the 2s tick can't detach a button between
+// touch and its click event (detached node = swallowed click). User-action
+// renders pass force=true and bypass the guard — tap feedback must paint
+// immediately.
+let lastMove=0,lastTap=0;
+document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
+document.addEventListener('touchmove',()=>{lastMove=Date.now()},{passive:true});
+document.addEventListener('wheel',()=>{lastMove=Date.now()},{passive:true});
+const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
+// scrollbar auto-hide: thumbs are transparent until the element actually scrolls
+// (class fades 700ms after the last scroll event). Deliberately NOT tied into
+// lastMove — programmatic scrolls (sticky-bottom restores) fire scroll events
+// too, and feeding those into the render guard would starve re-renders.
+let sbFade;
+let fstripScroll=0;   // shared so the file strip keeps its position across the md
+                      // viewer ↔ full chat view switch (a fresh DOM element each side)
+document.addEventListener('scroll',e=>{
+  const el=e.target===document?document.documentElement:e.target;
+  if(el.classList){
+    el.classList.add('scrolling');
+    if(el.classList.contains('fstrip'))fstripScroll=el.scrollLeft;   // remember it live
+  }
+  clearTimeout(sbFade);
+  sbFade=setTimeout(()=>document.querySelectorAll('.scrolling').forEach(x=>x.classList.remove('scrolling')),700);
+},{passive:true,capture:true});
+const fmt$=v=>v==null?'unavailable':'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
+const fmtTok=v=>v==null?'—':v>=1e9?(v/1e9).toFixed(2)+'B':v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
+const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
+const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const stateLabel={running:'Working',needs_you:'Response needed',turn_done:'Available',idle:'Available',
+  stalled:'Slow',stalled_or_prompt:'Check session',dormant:'Inactive',reopenable:'Reopenable',
+  stale:'Unavailable',error:'Fix needed'};
+
+// ---- provider plan-usage header (currently Claude supplies these account gauges) ----
+function usageReset(iso){
+  if(!iso)return'';
+  const t=Date.parse(iso);if(isNaN(t))return'';
+  const secs=Math.round((t-Date.now())/1000);
+  const near=secs<86400;
+  const when=new Date(t).toLocaleString([],near?{hour:'numeric',minute:'2-digit'}
+    :{weekday:'short',hour:'numeric',minute:'2-digit'});
+  return secs>0?`resets ${when} · ${fmtAge(secs)} left`:`resets ${when}`;
+}
+function ugauge(label,pct,reset){
+  if(pct==null)return'';
+  const col=pct>=90?'var(--red)':pct>=70?'var(--amber)':'var(--green)';
+  return`<div class="ugauge"><span class="ulabel">${esc(String(label||''))}</span>
+    <span class="ubar"><i style="width:${Math.min(pct,100)}%;background:${col}"></i></span>
+    <span class="upct">${pct}%</span>
+    ${reset?`<span class="ureset">${reset}</span>`:''}</div>`;
+}
+function usageBar(legacy,providers){
+  const el=$('#usage');
+  const claude=(providers&&providers.claude)||legacy;
+  const codex=providers&&providers.codex;
+  // Spark has a separate preview-model allowance. Keep it in the provider/API
+  // data, but omit the unused model-specific bucket from the account summary.
+  const codexBuckets=(codex?.buckets||[]).filter(b=>
+    !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
+  const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
+  const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
+    ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
+      <div class="uhead"><span class="uname">Claude Code</span>
+        ${profile.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(profile.email)}</span></span>`:''}
+        ${claude.show_active!==false&&profile.active?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uactive">active</span></span>`:''}
+        ${index===0&&claude.lifetime_tokens!=null?`<span class="useg" title="All local Claude transcripts on this Mac across profiles, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
+      ${ugauge('5-hour',profile.five_hour_pct,usageReset(profile.five_hour_reset))}
+      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}</div>`).join('')}</div>`:'';
+  const codexHtml=codex&&(codexBuckets.length||codex.email||codex.plan_type||codex.lifetime_tokens!=null||codex.reset_credits||codex.error)?`<div class="uprovider">
+    <div class="uhead"><span class="uname">Codex CLI</span>
+      ${codex.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(codex.email)}</span></span>`:''}
+      ${codex.plan_type?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${esc(codex.plan_type.replaceAll('_',' '))}</span></span>`:''}
+      ${codex.lifetime_tokens!=null?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(codex.lifetime_tokens)} lifetime tokens</span></span>`:''}
+      ${codex.reset_credits?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${codex.reset_credits} reset credit</span></span>`:''}</div>
+    ${codex.error?`<span class="umeta">${codex.stale?'stale — ':''}${esc(codex.error)}</span>`:''}
+    ${codexBuckets.map(b=>ugauge(b.label,b.used_pct,usageReset(b.reset))).join('')}</div>`:'';
+  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='';return;}
+  el.className='';
+  el.innerHTML=claudeHtml+codexHtml;
+}
+
+function spark(pts,w=64,h=16){
+  if(!pts||pts.length<2)return'';
+  const min=Math.min(...pts),max=Math.max(...pts),r=max-min||1;
+  const p=pts.map((v,i)=>`${(i/(pts.length-1)*w).toFixed(1)},${(h-2-(v-min)/r*(h-4)).toFixed(1)}`).join(' ');
+  return`<svg class="spark" width="${w}" height="${h}"><polyline points="${p}" fill="none" stroke="#58a6ff" stroke-width="1.5"/></svg>`;
+}
+
+// ---- tiny markdown renderer (self-contained: no CDN on the tailnet path) ----
+function mdInline(s){
+  return esc(s).split(/(`[^`]*`)/).map(p=>{
+    if(p.length>1&&p.startsWith('`')&&p.endsWith('`'))return'<code>'+p.slice(1,-1)+'</code>';
+    return p
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
+      .replace(/\*([^*\n]+)\*/g,'<i>$1</i>');
+  }).join('');
+}
+function md(src){
+  const lines=(src||'').replace(/\r/g,'').split('\n');
+  let html='',i=0,m;
+  const isList=l=>/^\s*([-*+]|\d+\.)\s+/.test(l);
+  const cells=r=>r.replace(/^\s*\|/,'').replace(/\|\s*$/,'').split('|').map(c=>c.trim());
+  const isTableSep=l=>/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l)&&l.includes('-');
+  while(i<lines.length){
+    const l=lines[i];
+    if(/^\s*```/.test(l)){
+      const buf=[];i++;
+      while(i<lines.length&&!/^\s*```/.test(lines[i]))buf.push(lines[i++]);
+      i++;html+='<pre><code>'+esc(buf.join('\n'))+'</code></pre>';continue;
+    }
+    if(!l.trim()){i++;continue;}
+    if(m=l.match(/^(#{1,6})\s+(.*)/)){const n=m[1].length;html+=`<h${n}>${mdInline(m[2])}</h${n}>`;i++;continue;}
+    if(/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)){html+='<hr>';i++;continue;}
+    if(/^\s*>/.test(l)){
+      const buf=[];while(i<lines.length&&/^\s*>/.test(lines[i]))buf.push(lines[i++].replace(/^\s*>\s?/,''));
+      html+='<blockquote>'+md(buf.join('\n'))+'</blockquote>';continue;
+    }
+    if(isList(l)){
+      const ord=/^\s*\d+\./.test(l),items=[];
+      while(i<lines.length&&isList(lines[i])){
+        let it=lines[i].replace(/^\s*([-*+]|\d+\.)\s+/,'');i++;
+        while(i<lines.length&&/^\s{2,}\S/.test(lines[i])&&!isList(lines[i]))it+=' '+lines[i++].trim();
+        items.push(it);
+      }
+      html+=(ord?'<ol>':'<ul>')+items.map(x=>'<li>'+mdInline(x)+'</li>').join('')+(ord?'</ol>':'</ul>');continue;
+    }
+    if(l.includes('|')&&i+1<lines.length&&isTableSep(lines[i+1])){
+      const head=cells(l);i+=2;let rows='';
+      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())
+        rows+='<tr>'+cells(lines[i++]).map(c=>'<td>'+mdInline(c)+'</td>').join('')+'</tr>';
+      html+='<table><tr>'+head.map(c=>'<th>'+mdInline(c)+'</th>').join('')+'</tr>'+rows+'</table>';continue;
+    }
+    const buf=[l];i++;
+    while(i<lines.length&&lines[i].trim()&&!/^\s*(#{1,6}\s|```|>)/.test(lines[i])
+          &&!isList(lines[i])&&!(lines[i].includes('|')&&i+1<lines.length&&isTableSep(lines[i+1])))
+      buf.push(lines[i++]);
+    html+='<p>'+buf.map(mdInline).join('<br>')+'</p>';
+  }
+  return html;
+}
+
+// Compact Markdown for card peeks. Preserve headings/emphasis/lists while
+// collapsing document-scale code and tables into short, safe prose.
+function peekMd(src){
+  const withoutCode=String(src||'').replace(/```[^\n]*\n[\s\S]*?(?:```|$)/g,'`code block`');
+  const lines=withoutCode.replace(/\r/g,'').split('\n'),out=[];
+  const tableSep=l=>/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l)&&l.includes('-');
+  for(let i=0;i<lines.length;i++){
+    if(lines[i].includes('|')&&i+1<lines.length&&tableSep(lines[i+1])){
+      out.push(lines[i].replace(/^\s*\||\|\s*$/g,'').split('|').map(x=>x.trim()).join(' · '));
+      i+=2;
+      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())i++;
+      i--;
+    }else out.push(lines[i]);
+  }
+  return md(out.join('\n'));
+}
+
+// ---- conversation context + delivered files (fetched per session on demand) ----
+const ctxCache={};   // sid -> {v, messages, files} | {fetching:true}
+const ctxVersion=s=>(s.convo_v||'')+':'+(s.files_n||0);
+async function ensureCtx(sid,v){
+  const c=ctxCache[sid];
+  if(c&&(c.v===v||c.fetching))return;
+  ctxCache[sid]={...(c||{}),fetching:true};
+  try{
+    const r=await fetch('/api/context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+    const d=await r.json();
+    ctxCache[sid]=d.ok?{v,messages:d.messages||[],files:d.files||[]}:{v,messages:[],files:[]};
+    render(last);
+  }catch(e){delete ctxCache[sid];}
+}
+// "opus · high". Effort comes from the statusline side-write, so a session whose
+// statusline hasn't rendered yet (or isn't installed) shows the model alone.
+const modelLabel=s=>esc(s.model||s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
+function modeSelect(s,pre='msg'){
+  if(!s||s.provider!=='codex')return'';
+  const mode=s.collaboration_mode||'default';
+  const locked=!s.capabilities?.submit||['running','needs_you','stalled'].includes(s.state);
+  return`<select class="modesel" title="Codex collaboration mode — Plan enables structured questions; Default executes work"
+    onclick="event.stopPropagation()" onchange="setSessionMode('${s.session_id}',this.value,'${pre}')" ${locked?'disabled':''}>
+    <option value="plan" ${mode==='plan'?'selected':''}>Plan</option>
+    <option value="default" ${mode==='default'?'selected':''}>Default</option></select>`;
+}
+const enc=v=>encodeURIComponent(v||'').replace(/'/g,'%27');  // onclick-attr-safe
+const cpb=v=>`<b class="copyable" title="tap to copy" data-copy="${esc(v)}" onclick="copyTxt(event,this)">${esc(v)}</b>`;
+function fchip(sid,f,cap){
+  return`<button class="fchip" ${f.missing?'disabled':''} title="${esc(cap||f.path)}"
+    onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
+}
+const EVT_ICON={compact:'⧉',model:'⇄',api_error:'⚠',command:'›',qa:'☑'};
+function eventRow(m,provider='claude'){
+  if(m.kind==='qa'){
+    const rows=(m.qa||[]).map(q=>`<div class="qarow">
+      <div class="qaq">${q.header?`<span class="qah">${esc(q.header)}</span>`:''}${esc(q.q)}</div>
+      <div class="qaa">${esc(q.a||'—')}</div></div>`).join('');
+    return`<div class="cevt info"><div class="evline"><span class="evi">☑</span> <b>You answered ${esc(provider)}'s questions</b></div>
+      <div class="qawrap">${rows}</div></div>`;
+  }
+  return`<div class="cevt ${m.level||'info'}">
+    <div class="evline"><span class="evi">${EVT_ICON[m.kind]||'•'}</span> <b>${esc(m.title)}</b>${m.n>1?`<span class="evn">×${m.n}</span>`:''}</div>
+    ${m.detail?`<div class="evd">${esc(m.detail)}</div>`:''}</div>`;
+}
+const optimisticMessages=new Map();
+let optimisticSequence=0;
+const quickResponses=new Map();
+const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
+function optimisticList(sid){
+  if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
+  return optimisticMessages.get(sid);
+}
+function canonicalCount(messages,item){
+  if(item.kind==='answer')return(messages||[]).filter(message=>
+    message.role==='event'&&message.kind==='qa').length;
+  const wanted=normalizedMessage(item.text);
+  return(messages||[]).filter(message=>message.role==='user'&&
+    normalizedMessage(message.text)===wanted).length;
+}
+function addOptimistic(sid,text,kind='text'){
+  const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
+  const item={id:++optimisticSequence,sid,text:String(text||''),kind,status:'sending',
+    baseCount:canonicalCount(messages,{kind,text}),created:Date.now()};
+  optimisticList(sid).push(item);
+  setTimeout(()=>{
+    const current=optimisticList(sid).find(entry=>entry.id===item.id);
+    if(current&&current.status==='sending'){
+      current.status='failed';current.error='Not confirmed after 15 seconds';uiRefresh();
+    }
+  },15000);
+  uiRefresh();
+  return item.id;
+}
+function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
+  const item=optimisticList(sid).find(entry=>entry.id===id);
+  if(!item)return;
+  if(!ok){item.status='failed';item.error=error||'Send failed';}
+  else if(providerConfirmed)item.status='confirmed';
+  uiRefresh();
+}
+function visibleOptimistic(sid,messages){
+  const list=optimisticList(sid);
+  const keep=list.filter(item=>{
+    if(canonicalCount(messages,item)>item.baseCount)return false;
+    return true;
+  });
+  if(keep.length!==list.length)optimisticMessages.set(sid,keep);
+  return keep;
+}
+function restoreOptimistic(sid,id){
+  const list=optimisticList(sid),item=list.find(entry=>entry.id===id);
+  optimisticMessages.set(sid,list.filter(entry=>entry.id!==id));
+  if(item?.kind==='answer'){delete answered[sid];uiRefresh();return;}
+  uiRefresh();
+  requestAnimationFrame(()=>{
+    const input=document.getElementById('sft-'+sid)||document.getElementById('vft-'+sid)||
+      document.getElementById('ft-'+sid);
+    if(input){input.value=item?.text||'';input.focus();}
+  });
+}
+function optimisticHtml(sid,messages){
+  return visibleOptimistic(sid,messages).map(item=>`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
+    <span class="crole">you</span>${item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
+      item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${sid}',${item.id})">!</button>`:''}
+    <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`).join('');
+}
+function quickResponseLabel(payload){
+  if(payload.type==='permission')return `${payload.choice==='always'?'Always allow':
+    payload.choice==='allow'?'Allow':payload.choice==='deny'?'Deny':'Cancel'} permission`;
+  if(payload.type==='dismiss')return'Dismiss question';
+  if(payload.type==='elicitation')return payload.choice==='accept'?'Submit form':
+    payload.choice==='decline'?'Decline form':'Cancel form';
+  return'Submit response';
+}
+function beginQuickResponse(sid,payload){
+  const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
+    status:'sending',created:Date.now()};
+  quickResponses.set(sid,item);uiRefresh();return item.id;
+}
+function finishQuickResponse(sid,id,ok,error){
+  const item=quickResponses.get(sid);
+  if(!item||item.id!==id)return;
+  item.status=ok?'sent':'failed';item.error=error||'';uiRefresh();
+}
+function reconcileQuickResponses(f){
+  const sessions=new Map(((f&&f.sessions)||[]).map(s=>[s.session_id,s]));
+  for(const [sid,item] of quickResponses){
+    const session=sessions.get(sid);
+    if(!session||(item.status!=='sending'&&item.nonce&&session.pending?.nonce!==item.nonce))
+      quickResponses.delete(sid);
+  }
+}
+function cardResponseFeedback(s){
+  const messages=((ctxCache[s.session_id]||{}).messages)||[];
+  const answers=visibleOptimistic(s.session_id,messages).filter(item=>item.kind==='answer');
+  const answer=answers.length?answers[answers.length-1]:null;
+  const action=quickResponses.get(s.session_id)||null;
+  const item=!answer?action:!action?answer:(answer.created>=action.created?answer:action);
+  if(!item)return'';
+  const status=item.status==='confirmed'||item.status==='sent'?'sent':item.status;
+  const verb=status==='sending'?'Submitting':status==='failed'?'Failed':'Submitted';
+  const icon=status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
+    status==='failed'?(item.kind==='answer'
+      ?`<button class="delivery failed" title="${esc(item.error||'Submission failed')} — restore" aria-label="submission failed; restore response" onclick="event.stopPropagation();restoreOptimistic('${s.session_id}',${item.id})">!</button>`
+      :`<span class="delivery failed" title="${esc(item.error||'Submission failed')}" aria-label="submission failed">!</span>`)
+      :`<span class="delivery sent" aria-label="response submitted">✓</span>`;
+  return`<div class="quickfeedback ${status}" role="status" aria-live="polite">
+    <span class="qfstate">${verb}</span><span class="qftext">${esc(normalizedMessage(item.text))}</span>${icon}</div>`;
+}
+function convoMsgs(c,sid,includeOptimistic=true){
+  const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
+  const canonical=(c.messages||[]).map(m=>{
+    if(m.role==='event')return eventRow(m,provider);
+    if(m.role==='tool'){
+      if(m.name==='SendUserFile')
+        return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
+          ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
+      return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div></div>`;
+    }
+    return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
+      <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
+  }).join('');
+  return canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
+}
+function convoBox(s,short){
+  const c=ctxCache[s.session_id];
+  if(!c||c.fetching&&!c.messages)return'<div class="ctxbox"><div class="ctxload">loading context…</div></div>';
+  const msgs=convoMsgs(c,s.session_id);
+  if(!msgs)return'';
+  return`<div class="ctxbox"><div class="convo${short?' short':''}" data-sid="${s.session_id}">${msgs}</div></div>`;
+}
+let viewerSid=null;
+// one persisted reading theme shared by chat, Markdown, and subagent views
+function setTheme(light){
+  $('#vbody').classList.toggle('light',light);
+  $('#sbody').classList.toggle('light',light);
+  $('#abody').classList.toggle('light',light);
+  try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
+}
+function toggleTheme(){setTheme(!$('#vbody').classList.contains('light'));}
+(()=>{try{setTheme(localStorage.getItem('viewer_light')==='1');}catch(e){}})();
+
+let overflowOpen=null;
+function closeOverflow(){
+  overflowOpen=null;
+  document.querySelectorAll('.ovmenu.open').forEach(el=>el.classList.remove('open'));
+  document.querySelectorAll('.ovbtn[aria-expanded="true"]').forEach(el=>el.setAttribute('aria-expanded','false'));
+}
+function toggleOverflow(event,key){
+  event.stopPropagation();
+  const wasOpen=overflowOpen===key;
+  closeOverflow();
+  if(wasOpen)return;
+  overflowOpen=key;
+  event.currentTarget.setAttribute('aria-expanded','true');
+  const menu=event.currentTarget.parentElement.querySelector('.ovmenu');
+  if(menu)menu.classList.add('open');
+}
+function overflowMenu(key,s,kind='session',done=false){
+  const open=overflowOpen===key;
+  const label=kind==='viewer'?'viewer actions':kind==='subagent'?'subagent actions':'session actions';
+  const lifecycle=kind==='session'||kind==='viewer';
+  const canMode=lifecycle&&s&&s.provider==='codex';
+  const mode=s?.collaboration_mode||'default';
+  const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state);
+  const canStop=kind==='subagent'
+    ? Boolean(!done&&s?.capabilities?.interrupt)
+    : Boolean(s?.capabilities?.interrupt);
+  const canClose=Boolean(lifecycle&&s?.capabilities?.close);
+  return`<span class="ovwrap">
+    <button class="ovbtn" aria-label="${label}" aria-haspopup="menu" aria-expanded="${open?'true':'false'}"
+      onclick="toggleOverflow(event,'${key}')">⋮</button>
+    <span class="ovmenu${open?' open':''}" role="menu" onclick="event.stopPropagation()">
+      ${canMode?`<span class="ovgroup"><span class="ovlabel">Codex mode</span><span class="ovseg">
+        <button aria-pressed="${mode==='plan'}" ${modeLocked?'disabled':''}
+          onclick="closeOverflow();setSessionMode('${s.session_id}','plan','${kind==='viewer'?'vmsg':'smsg'}')">Plan</button>
+        <button aria-pressed="${mode==='default'}" ${modeLocked?'disabled':''}
+          onclick="closeOverflow();setSessionMode('${s.session_id}','default','${kind==='viewer'?'vmsg':'smsg'}')">Default</button>
+      </span></span><span class="ovsep"></span>`:''}
+      <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
+        <span>Appearance</span><small>light / dark</small></button>
+      ${(lifecycle||kind==='subagent')?`<span class="ovsep"></span>
+        <button class="ovitem danger" role="menuitem" ${canStop?'':'disabled'}
+          onclick="closeOverflow();${kind==='subagent'
+            ?`stopAgentParent('${s?.session_id||''}')`
+            :`sendInterrupt('${s?.session_id||''}','${kind==='viewer'?'vmsg':'smsg'}')`}">
+          <span>${kind==='subagent'?'Stop parent turn':'Stop turn'}</span><small>${canStop?'active':'not running'}</small></button>`:''}
+      ${lifecycle?`<button class="ovitem danger" role="menuitem" ${canClose?'':'disabled'}
+          onclick="closeOverflow();sendCloseSession('${s?.session_id||''}','${kind==='viewer'?'vmsg':'smsg'}')">
+          <span>Close session</span><small>${canClose?'move to history':'unavailable'}</small></button>`:''}
+    </span></span>`;
+}
+function terminalButton(s,card=false){
+  if(!s)return'';
+  const cls=`expandbtn termbtn${card?' deskonly':''}`;
+  if(s.capabilities?.focus_terminal){
+    const attach=s.capabilities?.focus_terminal_mode==='attach';
+    const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
+    return`<button class="${cls}" title="${esc(title)}"
+      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'attach':'open'}</button>`;
+  }
+  if(s.provider==='codex'){
+    const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
+    return`<button class="${cls}" disabled
+      title="${esc(s.capabilities?.focus_terminal_reason||'Codex terminal unavailable')}">${label}</button>`;
+  }
+  return'';
+}
+let viewerChatOpen=false,viewerQOpen=true,viewerPath=null;
+// one question's full interaction block (options + descriptions + Other + ✕ dismiss);
+// shared by the card's amber box (pre='msg') and the viewer's docked bar (pre='vmsg')
+function singleQBlock(s,p,pre){
+  const sid=s.session_id;
+  const q=p.questions[0],ms=q.multiSelect,n=(q.options||[]).length;
+  const sel=multiSel[sid]=multiSel[sid]||new Set();
+  return`<div class="ptool"><span class="ptlabel">${esc(q.header||'question')} — waiting on you</span>
+      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+    ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
+    <div class="qtext">${esc(q.question)}</div>
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
+        onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
+        ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
+      value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
+      ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
+      ${ms?'':`<button class="pbtn send" onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
+    ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
+}
+// The delivered-file strip: identical markup and position (docked bar, directly
+// above the send box) in BOTH full-screen surfaces, so they read as one screen.
+// `cur` marks the file the viewer currently shows.
+function fileStrip(sid,files){
+  if(!files||!files.length)return'';
+  return`<div class="stripbox"><div class="fstrip">${files.map(f=>`<button class="fchip ${f.path===viewerPath?'cur':''}"
+    ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
+    onclick="viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`).join('')}</div></div>`;
+}
+// horizontal scroll position survives the 2s re-render AND the viewer↔chat switch
+// (fstripScroll is a shared global, updated live on scroll)
+function keepStripScroll(root,fn){
+  const old=root.querySelector('.fstrip');
+  if(old)fstripScroll=old.scrollLeft;
+  fn();
+  const ns=root.querySelector('.fstrip');
+  if(ns)ns.scrollLeft=fstripScroll;
+}
+function renderViewerBar(force){
+  if(!viewerSid)return;
+  const bar=$('#vact');
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
+  $('#vctrl').innerHTML=overflowMenu('viewer',s,'viewer');
+  const ae=document.activeElement;
+  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  if(!force&&touching())return;                           // or a swipe/tap in flight
+  const old=bar.querySelector&&bar.querySelector('.vconvo');
+  const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
+  if(s)ensureCtx(viewerSid,ctxVersion(s));
+  const c=ctxCache[viewerSid];
+  let h=`<div class="togbox">
+      <div class="togrow">
+        <button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
+        <button class="expandbtn" title="open the full conversation (closes this file)"
+          onclick="openSession('${viewerSid}')">⤢ full view</button>
+      </div>
+      ${viewerChatOpen?`<div class="togbody">${c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'}</div>`:''}
+    </div>`;
+  const p=s&&s.pending;
+  if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
+    h+=`<div class="togbox waiting">
+      <button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
+      ${viewerQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg')}</div>`:''}
+    </div>`;
+  }else if(p&&answered[viewerSid]!==p.nonce){
+    h+=pendingBox(s,'vmsg');
+  }
+  h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
+    ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+    ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+      oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
+      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
+      <button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button></div>`:''}
+    <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
+    <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
+  keepStripScroll(bar,()=>{bar.innerHTML=h;});
+  const nw=bar.querySelector&&bar.querySelector('.vconvo');
+  if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
+}
+// the chat view's title/subtitle block for a session (title on its own line,
+// project · branch · model beneath) — shared by the full chat view and the md viewer
+function sessTitleBlock(s){
+  if(!s)return '<b>session</b>';
+  return `<b>${esc(s.title||s.project)}</b>
+    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}${s.family?` · ${modelLabel(s)}`:''}</small>`;
+}
+function viewFile(sid,ep,en,kind,ecap){
+  closeSession();          // the two full-screen surfaces are mutually exclusive
+  const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
+  const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  // same session heading as the chat view, then a rule, then the file name
+  $('#vtitle').innerHTML=`${sessTitleBlock(s)}
+    <span class="vfsep"></span>
+    <span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
+  $('#viewer').style.display='flex';
+  viewerSid=sid;viewerPath=path;syncOverlayHistory();renderViewerBar(true);
+  const vb=$('#vbody');
+  if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
+  vb.textContent='loading…';
+  fetch(url,{cache:'no-store'}).then(async r=>{
+    if(!r.ok){vb.textContent=(r.status===403?'read-only device — open the ?token= URL once to view files. ':'')+await r.text();return;}
+    const t=await r.text();
+    vb.innerHTML=/\.(md|markdown)$/i.test(name)?'<div class="mdoc">'+md(t)+'</div>':'<pre class="raw">'+esc(t)+'</pre>';
+  }).catch(e=>{vb.textContent='✗ '+e;});
+}
+function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
+  $('#vctrl').innerHTML='';
+  viewerSid=null;viewerPath=null;}
+// ---- back-gesture / Esc closes the open full-screen overlay ----------------
+// The fullscreen surfaces are mutually exclusive, so we model
+// "an overlay is open" as ONE logical state: push a single history entry when we
+// go from none-open to open, and the phone's back-swipe (popstate) closes it
+// instead of navigating away from the dashboard. Closing via ✕/Esc calls
+// history.back() so the pushed entry is consumed and history stays balanced.
+let histPushed=false;
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview'].some(id=>$(id).style.display==='flex');
+function syncOverlayHistory(){
+  if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
+}
+window.addEventListener('popstate',()=>{
+  if(!histPushed)return;                 // an entry we didn't push — leave it
+  histPushed=false;
+  closeConfirm();closeViewer();closeAgent();closeSession();closeSettings();
+});
+function dismissOverlay(){
+  if(overflowOpen)return closeOverflow();
+  if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(histPushed)history.back();          // → popstate does the actual close
+  else{closeViewer();closeAgent();closeSession();closeSettings();}
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
+document.addEventListener('click',e=>{if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();});
+
+// ---- full-screen session view ----------------------------------------------
+// Same overlay shape as the subagent view, but this one is a real terminal
+// channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
+// prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
+let sessionView=null;            // {sid, closed} of the open overlay
+let sessQOpen=true;              // the question block inside the chat view
+let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
+const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
+function primarySessionAction(sid){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(s){openSession(sid);return;}
+  if(((last&&last.closed)||[]).some(x=>x.session_id===sid))openClosed(sid);
+}
+async function markSessionRevision(payload){
+  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)});
+  const d=await r.json();
+  if(!d.ok)throw new Error(d.error||'failed');
+  return d;
+}
+async function markRead(s){
+  if(!s?.new_response)return;
+  s.new_response=false;uiRefresh();
+  try{await markSessionRevision({mark_read_session:s.session_id,revision:String(s.convo_v||'')});}
+  catch(e){s.new_response=true;uiRefresh();}
+}
+async function markAvailable(sid,encodedRevision){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(!s)return;
+  const revision=decodeURIComponent(encodedRevision||'');
+  s.reply_requested=false;
+  if(s.external||s.headless||s.read_only){
+    Object.assign(s,{ui_group:'history',reason_label:'External',primary_action:'view',primary_action_label:'View'});
+  }else if(s.state==='dormant'){
+    Object.assign(s,{ui_group:'history',reason_label:'Inactive',primary_action:'continue',primary_action_label:'Continue'});
+  }else{
+    Object.assign(s,{ui_group:'available',reason_label:'Available',primary_action:'continue',primary_action_label:'Continue'});
+  }
+  render(last,true);
+  try{await markSessionRevision({mark_available_session:sid,revision});}
+  catch(e){alert('mark available failed: '+e);tick();}
+}
+function openSession(sid){
+  closeViewer();           // never stack the file viewer and the chat view
+  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(session?.new_response)markRead(session);
+  sessionView={sid,closed:false};sessionOpened=true;
+  $('#sview').style.display='flex';
+  syncOverlayHistory();
+  renderSession(true);
+}
+// a closed session has no process: read its transcript, offer no controls
+function openClosed(sid){
+  closeViewer();
+  sessionView={sid,closed:true};sessionOpened=true;
+  $('#sview').style.display='flex';
+  syncOverlayHistory();
+  renderClosed(true);
+}
+function closeSession(){
+  closeOverflow();sessionView=null;slashClose();
+  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';$('#sctrl').innerHTML='';
+}
+async function renderClosed(){
+  if(!sessionView||!sessionView.closed)return;
+  const sid=sessionView.sid;
+  const body=$('#sbody');
+  const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
+  $('#sctrl').innerHTML=overflowMenu('session',null,'closed');
+  $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
+    so there is nothing to send to. The conversation is read-only.</div>
+    ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
+      onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
+      <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  if(!closedCtx[sid]){
+    body.innerHTML='<div class="ctxload">loading conversation…</div>';
+    try{
+      const r=await fetch('/api/closed_context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+      const d=await r.json();
+      closedCtx[sid]=d.ok?{messages:d.messages||[],info:d.info||{}}
+                         :{messages:[],info:{},error:d.error||'unavailable'};
+    }catch(e){closedCtx[sid]={messages:[],info:{},error:String(e)};}
+    if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
+  }
+  const c=closedCtx[sid],info=c.info||{};
+  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>
+    <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
+  if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
+  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid)}</div>`;
+  body.scrollTop=body.scrollHeight;
+  if(sessionOpened){sessionOpened=false;
+    requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
+}
+async function reopenClosed(sid,button){
+  const original=button&&button.textContent;
+  if(button){button.disabled=true;button.textContent='opening…';}
+  const result=await act(sid,{type:'reopen'},'reopenmsg');
+  if(button){
+    button.textContent=result.ok?'opened ✓':original;
+    if(!result.ok)button.disabled=false;
+  }
+  if(result.ok)setTimeout(()=>tick(),500);
+  return result;
+}
+function renderSession(force){
+  if(!sessionView||!last)return;
+  if(sessionView.closed)return renderClosed(force);
+  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid);
+  if(!s){closeSession();return;}          // session died while open
+  ensureCtx(s.session_id,ctxVersion(s));
+  const c=ctxCache[s.session_id];
+  const ae=document.activeElement;
+  const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
+  const done=['done','ended'];
+  $('#stitle2').innerHTML=sessTitleBlock(s);
+  $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,'session');
+  // A focused composer must not freeze transcript confirmation. The composer
+  // itself is preserved below; only defer the body repaint during an active
+  // touch gesture so mobile scrolling is not interrupted.
+  if(!force&&touching())return;
+  const body=$('#sbody');
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
+  const wantBottom=sessionOpened||old.atBottom;
+  sessionOpened=false;
+  if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
+  body.scrollTop=wantBottom?body.scrollHeight:old.top;
+  if(typing)return;                        // never replace the input being typed into
+  const p=s.pending;
+  const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
+  const qHtml=hasQ?`<div class="togbox waiting">
+      <button class="vchat-toggle" onclick="sessQOpen=!sessQOpen;renderSession(true)">${sessQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
+      ${sessQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'smsg'):singleQBlock(s,p,'smsg')}</div>`:''}
+    </div>`
+    :pendingBox(s,'smsg');   // permission prompts render whole
+  const act=$('#sact');
+  keepStripScroll(act,()=>{act.innerHTML=`
+    ${qHtml}
+    ${fileStrip(s.session_id,(c&&c.files)||[])}
+    ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+    ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+      oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
+      onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
+      <button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></div>`:''}
+    <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
+    <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
+  // #sact just shrank #sbody — re-pin to the true bottom after layout settles
+  if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
+}
+
+// ---- subagent chat overlay -------------------------------------------------
+// A subagent has NO tty: its "send" box relays through the PARENT session (the
+// parent forwards with SendMessage), so it is labelled as a relay, not a channel.
+let agentView=null;              // {sid, aid} of the open overlay
+const agentCache={};             // aid -> {v, messages, info}
+let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
+function openAgent(sid,aid){
+  agentView={sid,aid};
+  agentInfoOpen2=false;
+  $('#aview').style.display='flex';
+  syncOverlayHistory();
+  renderAgent(true);
+}
+function closeAgent(){
+  closeOverflow();agentView=null;agentInfoOpen2=false;
+  $('#aview').style.display='none';$('#abody').innerHTML='';$('#aact').innerHTML='';$('#actrl').innerHTML='';
+}
+function agentMeta(){
+  if(!agentView||!last)return null;
+  const s=(last.sessions||[]).find(x=>x.session_id===agentView.sid);
+  return s?(s.agents||[]).find(a=>a.agent_id===agentView.aid):null;
+}
+async function ensureAgentCtx(){
+  if(!agentView)return;
+  const a=agentMeta(),aid=agentView.aid;
+  const v=a?a.convo_v:0;
+  const c=agentCache[aid];
+  if(c&&c.v===v)return;
+  if(c&&c.fetching)return;
+  agentCache[aid]={...(c||{}),fetching:true};
+  try{
+    const r=await fetch(`/api/agent_context?sid=${encodeURIComponent(agentView.sid)}&aid=${encodeURIComponent(aid)}`,{cache:'no-store'});
+    const d=await r.json();
+    agentCache[aid]=d.ok?{v,messages:d.messages||[],info:d.info||{}}:{v,messages:[],info:{}};
+  }catch(e){delete agentCache[aid];}
+  renderAgent(true);
+}
+function renderAgent(force){
+  if(!agentView)return;
+  ensureAgentCtx();
+  const a=agentMeta(),c=agentCache[agentView.aid];
+  const info=(c&&c.info)||{};
+  const done=a?['done','ended'].includes(a.state):true;
+  $('#atitle').innerHTML=`<b>${esc(info.agent_type||(a&&a.agent_type)||'subagent')}</b>
+    <small>${esc(info.description||(a&&a.description)||'')}</small>`;
+  const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
+  $('#actrl').innerHTML=overflowMenu('subagent',par,'subagent',done);
+  const ae=document.activeElement;
+  const typing=ae&&ae.tagName==='INPUT'&&$('#aview').contains(ae);
+  if(!force&&(typing||touching()))return;
+  const body=$('#abody');
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
+  else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false)}</div>`;
+  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  if(!typing){
+    const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
+    const tk=info.tokens||{};
+    const codex=par&&par.provider==='codex';
+    $('#aact').innerHTML=`
+      <div class="relaynote">${done?'this agent has finished — ':''}${codex
+        ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
+        :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
+      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
+        onkeydown="if(event.key==='Enter')sendRelay()">
+        <button class="pbtn send" onclick="sendRelay()">relay</button></div>`:''}
+      <div class="actmsg" id="amsg"></div>
+      <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
+        <summary>agent info</summary>
+        <div class="kv">
+          <span>agent</span>${cpb(info.agent_id||agentView.aid)}
+          <span>type</span><b>${esc(info.agent_type||'?')}</b>
+          <span>description</span><b>${esc(info.description||'—')}</b>
+          <span>model</span><b>${esc(info.model||'?')}${info.effort?` · ${esc(info.effort)}`:''}</b>
+          <span>state</span><b>${a?a.state:'closed'}${a&&!done?` · quiet ${fmtAge(a.quiet_s)}`:''}</b>
+          <span>parent</span>${cpb(agentView.sid)}
+          <span>started</span><b>${ago(info.started)}</b>
+          <span>last activity</span><b>${ago(info.last)}</b>
+          <span>tokens</span><b>${info.total_tokens==null&&tk.in==null?'unavailable':`${fmtTok(tk.in||0)} in · ${fmtTok(tk.cache_write||0)} cache write · ${fmtTok(tk.cache_read||0)} cache read · ${fmtTok(tk.out||0)} out`}</b>
+          <span>cost</span><b>${info.cost==null?'unavailable':fmt$(info.cost)}</b>
+        </div>
+      </details>`;
+  }
+}
+function sendRelay(){
+  if(!agentView)return;
+  const inp=$('#aft'),v=(inp&&inp.value||'').trim();
+  if(!v)return;
+  act(agentView.sid,{type:'relay',agent_id:agentView.aid,text:v},'amsg');
+  if(inp)inp.value='';
+}
+function agentRow(a){
+  const done=['done','ended'].includes(a.state);
+  const signal={running:'working',stalled:'quiet — may still be working',done:'finished',
+    ended:'stopped'}[a.state]||String(a.state||'unknown');
+  const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
+  const tk=a.tokens||{};
+  // tapping opens the subagent conversation
+  const tap=`agentTap(event,'${a.session_id}','${a.agent_id}')`;
+  return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
+    title="open this subagent's conversation" onclick="${tap}">
+    <span class="tree">⎿</span>
+    <span class="dot ${a.state}" role="img" aria-label="${esc(signal)}" title="${esc(signal)}"></span>
+    <span class="atype">${esc(a.agent_type)}</span>
+    <span class="adesc">${esc(a.description)}</span>
+    <span class="amodel">${modelLabel(a)}</span>
+    ${!done&&a.tok_per_s>0?`<span class="anum" title="throughput: tokens per second this agent is processing, cache reads included — a liveness signal, not output speed">${fmtTok(Math.round(a.tok_per_s))} tok/s</span>`:''}
+    ${!done?spark(a.spark):''}
+    <span class="anum">${fmtTok(a.total_tokens)}</span>
+    <span class="acost">${fmt$(a.cost)}</span>
+    <span class="aopen">›</span>
+  </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px" onclick="${tap}">
+    <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext peekmd" style="--peek-lines:${clampA()}">${peekMd(a.last_msg.text)}</span></div>`:''}`;
+}
+// Pins are one shared server-side watchlist. Cards relocate to the top; they are
+// never duplicated in their normal action group.
+const pinnedSessions=new Set();
+function syncPinnedSessions(f){
+  pinnedSessions.clear();
+  (((f||{}).settings||{}).pinned_sessions||[]).forEach(sid=>pinnedSessions.add(sid));
+}
+function agentListHtml(agents){
+  return agents.map(agentRow).join('');
+}
+async function toggleSessionPin(sid){
+  const pinned=!pinnedSessions.has(sid);
+  pinned?pinnedSessions.add(sid):pinnedSessions.delete(sid);
+  if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
+  render(last,true);
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pin_session:sid,pinned})});
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'failed');
+    if(last?.settings)last.settings.pinned_sessions=d.pinned_sessions||[];
+    syncPinnedSessions(last);render(last,true);
+  }catch(e){
+    pinned?pinnedSessions.delete(sid):pinnedSessions.add(sid);
+    if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
+    render(last,true);alert('pin failed: '+e);
+  }
+}
+// mobile: long-press a session header to pin; a short tap still opens its chat
+let sessionPressTimer=null,sessionLongFired=false;
+function sessionPressStart(sid){
+  sessionLongFired=false;
+  sessionPressTimer=setTimeout(()=>{sessionLongFired=true;toggleSessionPin(sid);
+    if(navigator.vibrate)navigator.vibrate(15);},500);
+}
+function sessionPressEnd(){if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}}
+function sessionTap(e,sid){
+  if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
+  openSession(sid);
+}
+function agentTap(e,sid,aid){
+  e.stopPropagation();
+  openAgent(sid,aid);
+}
+function renderPinned(f){
+  const el=$('#pinned');
+  const sessions=(f&&f.sessions)||[],closed=(f&&f.closed)||[];
+  const items=sessions.filter(s=>pinnedSessions.has(s.session_id));
+  const archived=closed.filter(s=>pinnedSessions.has(s.session_id));
+  if(!items.length&&!archived.length){el.className='empty';el.innerHTML='';return;}
+  el.className='';
+  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div><div class="pinarchived"></div>';
+  reconcileCards(el.querySelector('.pinlist'),items,'');
+  el.querySelector('.pinarchived').innerHTML=archived.map(c=>historyRow(c,true)).join('');
+}
+const setg=()=>((last&&last.settings)||{});
+const previewAgents=()=>!!setg().preview_agents;
+const previewSessions=()=>setg().preview_sessions!==false;
+const clampS=()=>Math.max(1,Math.min(6,setg().preview_session_lines??2));
+const clampA=()=>Math.max(1,Math.min(6,setg().preview_agent_lines??1));
+const readerWidth=()=>setg().reader_width==='centered'?'centered':'fit';
+function applyReaderWidth(){document.documentElement.dataset.readerWidth=readerWidth();}
+
+function cardCls(s){
+  if(s.ui_group==='needs_you')return s.reason_label==='Fix needed'?'stalled':'needs';
+  if(s.ui_group==='available')return'idle';
+  if(s.ui_group==='history')return'dorm';
+  return s.reason_label==='Slow'?'stalled':'';
+}
+// The volatile top of the card — rebuilt every poll (header, meta, peek, pending,
+// running agents, the more/less toggle). No native <details> here, so replacing it
+// each tick doesn't flash.
+function cardTop(s){
+  const isOpen=open.has(s.session_id);
+  const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
+  const activeSession=s.ui_group==='working';
+  // delivered-file chips + the session peek both need the context cache; the
+  // conversation itself now lives only in the full view
+  if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
+  const pinned=pinnedSessions.has(s.session_id);
+  return`<div class="shead" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
+      ontouchstart="sessionPressStart('${s.session_id}')" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
+      <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
+      <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
+      <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
+      ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
+      ${s.new_response?`<span class="newbadge">new</span>`:''}
+      <button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>
+      ${terminalButton(s,true)}
+      <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
+        aria-label="${pinned?'unpin session':'pin session to top'}"
+        onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
+    </div>
+    <div class="smeta">
+      <div class="smeta-l">
+        ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''}</b></span>`:''}
+        ${s.running?`<span class="m runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
+        ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
+        <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
+      </div>
+      <div class="smeta-r">
+        ${s.ctx_pct==null?`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`:`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
+        <span class="m amodel">${modelLabel(s)}</span>
+      </div>
+    </div>
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
+    ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
+    ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
+    ${cardResponseFeedback(s)}
+    ${cardPending(s)}
+    ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
+    <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
+}
+// The card tail ("more"): reference material with native <details> folds. It is
+// rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns
+// don't remount every tick — that remount was the "blinking".
+function cardDetail(s){
+  const done=s.agents.filter(a=>['done','ended'].includes(a.state));
+  const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
+  return`<div class="detail">
+      <div class="mutebox">
+        <button class="bell ${s.muted?'muted':''}"
+          onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
+        <span>${s.muted?'push notifications muted for this session':'notify me about this session'}</span>
+      </div>
+      <div class="actmsg" id="msg-${s.session_id}"></div>
+      <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
+        ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>session info</summary>
+        <div class="kv">
+          <span>session</span>${cpb(s.session_id)}
+          <span>provider</span><b>${esc(s.provider||'claude')}</b>
+          <span>pid</span><b>${s.pid}</b>
+          <span>cwd</span>${cpb(s.cwd)}
+          <span>model</span><b>${esc(s.model||'?')}${s.effort?` · ${esc(s.effort)}`:''}</b>
+          ${s.provider==='codex'?`<span>mode</span><b>${esc(s.collaboration_mode||'default')}</b>`:''}
+          <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
+          <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
+          <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
+          <span>spend</span><b>${s.cost_source==='unavailable'?'unavailable — App Server reports tokens, not currency':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}`}</b>
+          ${s.error?`<span>provider error</span><b>${esc(s.error)}</b>`:''}
+          ${!s.capabilities?.focus_terminal&&s.provider==='codex'?`<span>terminal focus</span><b>${esc(s.capabilities?.focus_terminal_reason||'unavailable')}</b>`:''}
+        </div>
+      </details>
+      <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
+        ontoggle="filesOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>${s.provider==='codex'?'changed / generated':'delivered'} files (${ctxFiles.length})</summary>
+        <div class="foldscroll">${ctxFiles.length?ctxFiles.map(f=>`<div class="frow">${fchip(s.session_id,f,f.caption)}
+          <span class="fmeta">${esc(f.caption||'')}</span>
+          <span class="anum">${f.ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(f.ts))/1000)))+' ago':''}</span>
+        </div>`).join(''):'<div class="dhead">none yet</div>'}</div>
+      </details>
+      <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
+        ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
+        <summary>completed agents (${done.length})</summary>
+        <div class="foldscroll">${done.length?agentListHtml(done):'<div class="dhead">none yet</div>'}</div>
+      </details>
+      ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
+    </div>`;
+}
+// what the tail depends on, EXCLUDING per-second time (started/delivered ages) so
+// the panel isn't rebuilt every poll just because a clock ticked
+function detailSig(s){
+  const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
+  const files=((ctxCache[s.session_id]||{}).files||[]).length;
+  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.reg_status,s.ctx_tokens,
+    s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files].join('|');
+}
+// used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
+function sessionCard(s){
+  const isOpen=open.has(s.session_id);
+  return`<div class="card ${cardCls(s)}${isOpen?' open':''}" data-sid="${s.session_id}">
+    <div class="ctop">${cardTop(s)}</div>${isOpen?cardDetail(s):''}</div>`;
+}
+// Reconcile #sessions in place: persist each card node, rebuild only the volatile
+// top every poll, and rebuild the tail only when detailSig changes. This keeps an
+// expanded card's open <details> from remounting (and flashing) every tick.
+function reconcileCards(container,list,emptyMessage='no live sessions'){
+  if(!list.length){container.innerHTML=emptyMessage?`<div class="empty">${esc(emptyMessage)}</div>`:'';return;}
+  if(container.querySelector('.empty'))container.innerHTML='';
+  const seen=new Set();
+  list.forEach(s=>{
+    seen.add(s.session_id);
+    const isOpen=open.has(s.session_id);
+    let card=container.querySelector('.card[data-sid="'+s.session_id+'"]');
+    if(!card){
+      card=document.createElement('div');card.dataset.sid=s.session_id;
+      const top=document.createElement('div');top.className='ctop';card.appendChild(top);
+      container.appendChild(card);
+    }
+    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'')+(pinnedSessions.has(s.session_id)?' pinned':'');
+    card.querySelector('.ctop').innerHTML=cardTop(s);
+    let detail=card.querySelector(':scope > .detail');
+    if(isOpen){
+      const sig=detailSig(s);
+      if(!detail||card.dataset.dsig!==sig){
+        if(detail)detail.remove();
+        card.insertAdjacentHTML('beforeend',cardDetail(s));
+        card.dataset.dsig=sig;
+      }
+    }else if(detail){detail.remove();delete card.dataset.dsig;}
+  });
+  [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
+  list.forEach((s,i)=>{
+    const el=container.querySelector('.card[data-sid="'+s.session_id+'"]');
+    if(el&&container.children[i]!==el)container.insertBefore(el,container.children[i]||null);
+  });
+}
+
+const multiSel={};   // sessionId -> Set of chosen digits (multiSelect questions)
+const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qIdx:text}}
+const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
+const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
+const answered={};   // sessionId -> nonce already sent: hide the selector instantly
+let settingsOpen=false;
+function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
+  if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
+function openSettings(){
+  settingsOpen=true;
+  $('#settingsview').style.display='flex';
+  $('#settings').scrollTop=0;
+  renderSettings();
+  syncOverlayHistory();
+}
+function closeSettings(){
+  settingsOpen=false;
+  $('#settingsview').style.display='none';
+  $('#settings').innerHTML='';
+}
+function renderSettings(){
+  const el=$('#settings');
+  if(!settingsOpen){el.innerHTML='';return;}
+  const nt=(last&&last.notify)||{};
+  const st=(last&&last.settings)||{};
+  const num=(k,step)=>`<input type="number" value="${st[k]??''}" min="0" step="${step}"
+    onchange="setNum('${k}',this.value)">`;
+  const row=(k,lbl,tail)=>`<label class="setrow"><input type="checkbox" ${nt[k]!==false?'checked':''}
+    onchange="setNotify('${k}',this.checked)">${lbl}${tail?`<span class="setnum"> — ${tail}</span>`:''}</label>`;
+  el.innerHTML=`<div class="setpanel"><div class="dhead">push notifications (ntfy)</div>
+    ${row('needs_you','waiting on you',`after ${num('awaiting_input_notify_seconds',30)} s blocked`)}
+    ${row('stall','session stalled',`frozen > ${num('stall_seconds',30)} s (also drives the chip)`)}
+    ${row('spend','spend threshold',`every $ ${num('spend_threshold_usd',1)}`)}
+    ${row('fleet_quiet','fleet gone quiet',`idle ${num('fleet_quiet_minutes',1)} min first (0 = right away)`)}
+    <div class="setnum" style="padding:6px 0 2px">tap-target for pushes (opens on tap; blank = none)</div>
+    <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
+      value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
+    <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
+    <div class="dhead" style="margin-top:12px">full-screen reading width</div>
+    <div class="setchoice" role="group" aria-label="Full-screen reading width">
+      <button aria-pressed="${(st.reader_width||'fit')==='fit'}"
+        onclick="setStr('reader_width','fit')">Fit the screen</button>
+      <button aria-pressed="${st.reader_width==='centered'}"
+        onclick="setStr('reader_width','centered')">Centered · fixed width</button>
+    </div>
+    <div class="sethint">Applies to session chat, Markdown, and subagent conversations.</div>
+    <div class="dhead" style="margin-top:12px">conversation peek</div>
+    <label class="setrow"><input type="checkbox" ${st.preview_sessions!==false?'checked':''}
+      onchange="setBool('preview_sessions',this.checked)">on session cards<span class="setnum">
+      — ${num('preview_session_lines',1)} line(s)</span></label>
+    <label class="setrow"><input type="checkbox" ${st.preview_agents?'checked':''}
+      onchange="setBool('preview_agents',this.checked)">on subagent rows<span class="setnum">
+      — ${num('preview_agent_lines',1)} line(s)</span></label>
+    <div class="actmsg" id="setmsg"></div></div>`;
+}
+async function setNotify(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({notify:{[k]:v}})});
+    const d=await r.json();
+    if(d.ok){if(last)last.notify=d.notify;if(msg)msg.textContent='saved ✓';}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setNum(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:parseFloat(v)})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';
+      uiRefresh();}   // a peek-line change must repaint the cards, not wait for the poll
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setBool(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:v})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function setStr(k,v){
+  const msg=$('#setmsg');
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({[k]:v})});
+    const d=await r.json();
+    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
+    else if(msg)msg.textContent='✗ '+(d.error||'failed');
+  }catch(e){if(msg)msg.textContent='✗ '+e;}
+}
+async function toggleMute(sid,mute){
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mute_session:sid,muted:mute})});
+    const d=await r.json();
+    if(!d.ok)return alert(d.error||'failed');
+    const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
+    if(s)s.muted=mute;
+    uiRefresh();
+  }catch(e){alert(e);}
+}
+// multi-question asks: ONE question on screen at a time, ‹ › to move between them
+// (keeps a 3-question ask from swallowing the whole screen)
+function mqBlock(s,p,pre){
+  const sid=s.session_id;
+  let st=mqSel[sid];
+  if(!st||st.nonce!==p.nonce)st=mqSel[sid]={nonce:p.nonce,qi:0,a:{},other:{}};
+  const qs=p.questions;
+  if(st.qi>=qs.length)st.qi=qs.length-1;
+  const qi=st.qi,q=qs[qi],ms=!!q.multiSelect;
+  const sel=st.a[qi]||new Set();
+  const ansd=i=>((st.a[i]&&st.a[i].size)||(st.other[i]||'').trim())?1:0;
+  const donecnt=qs.reduce((a,_,i)=>a+ansd(i),0);
+  const oth=(st.other[qi]||'').trim();
+  const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label)
+    .concat(oth?['“'+oth+'”']:[]).join(', ');
+  return`<div class="ptool"><span class="ptlabel">multi-part question (${qs.length}) — waiting on you</span>
+      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+    ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
+    <div class="mqnav"><button class="mqarr" ${qi===0?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
+      <span class="mqpos"><b>${qi+1}</b> of ${qs.length} · ${donecnt}/${qs.length} answered</span>
+      <button class="mqarr" ${qi===qs.length-1?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
+    <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
+        onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+    ${q.allowOther!==false?`<div class="freetext"><input placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
+      oninput="mqOther('${sid}',${qi},this.value)"></div>`:''}
+    <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
+    <div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
+}
+function mqToggle(sid,qi,d,multi,total){
+  const st=mqSel[sid];if(!st)return;
+  const sel=st.a[qi]||(st.a[qi]=new Set());
+  if(multi){sel.has(d)?sel.delete(d):sel.add(d);}
+  else{st.a[qi]=new Set([d]);st.other[qi]='';
+       if(st.qi<total-1)st.qi++;}      // picked → advance, like the TUI
+  uiRefresh();
+}
+function mqNav(sid,d){const st=mqSel[sid];if(!st)return;st.qi=Math.max(0,st.qi+d);uiRefresh();}
+function mqOther(sid,qi,v){const st=mqSel[sid];if(st)st.other[qi]=v;}
+function mqSend(sid,nonce,pre){
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
+  const p=s&&s.pending;const st=mqSel[sid];
+  if(!p||!st||st.nonce!==nonce)return alert('the prompt changed — refresh');
+  const answers=[];
+  for(let qi=0;qi<p.questions.length;qi++){
+    const digits=[...(st.a[qi]||[])].sort();
+    const other=(st.other[qi]||'').trim();
+    if(!digits.length&&!other){st.qi=qi;uiRefresh();return alert('answer question '+(qi+1)+' first');}
+    const a={multi:!!p.questions[qi].multiSelect,n_options:(p.questions[qi].options||[]).length};
+    if(a.multi){if(digits.length)a.digits=digits;if(other)a.other=other;}
+    else if(other)a.other=other;
+    else a.digits=digits;
+    answers.push(a);
+  }
+  const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
+  act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
+}
+function elicitationBlock(s,p,pre){
+  const sid=s.session_id;
+  const draft=elicitDraft[sid]=elicitDraft[sid]||{};
+  const fields=(p.fields||[]).map((f,i)=>{
+    const key=enc(f.name),value=draft[f.name];
+    if(f.type==='select'&&f.multiSelect)return`<div class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}</div>
+      ${(f.options||[]).map(o=>`<button class="optbtn ${(value||[]).some(v=>String(v)===String(o.value))?'sel':''}"
+        onclick="elicitSet('${sid}','${key}','${enc(JSON.stringify(o.value))}',true)">${esc(o.label)}</button>`).join('')}`;
+    if(f.type==='select')return`<label class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}
+      <select onchange="elicitValue('${sid}','${key}',this.value)"><option value="">choose…</option>
+      ${(f.options||[]).map(o=>`<option value="${enc(JSON.stringify(o.value))}" ${String(value)===String(o.value)?'selected':''}>${esc(o.label)}</option>`).join('')}</select></label>`;
+    if(f.type==='boolean')return`<label class="setrow"><input type="checkbox" ${value?'checked':''}
+      onchange="elicitBool('${sid}','${key}',this.checked)">${esc(f.label)}</label>`;
+    return`<label class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}<input ${f.secret?'type="password"':''}
+      value="${esc(value??'')}" oninput="elicitText('${sid}','${key}',this.value)"></label>`;
+  }).join('');
+  const safeUrl=String(p.url||'').startsWith('https://')||String(p.url||'').startsWith('http://');
+  return`<div class="pend"><div class="ptool"><span class="ptlabel">${esc(p.server||'MCP')} request — waiting on you</span></div>
+    <div class="qtext">${esc(p.message||'')}</div>${fields}
+    ${safeUrl?`<a class="jump" href="${esc(p.url)}" target="_blank" rel="noopener">open request ↗</a>`:''}
+    <div class="pbtns">
+      <button class="pbtn allow" onclick="sendElicitation('${sid}','${p.nonce}','accept','${pre}')">accept</button>
+      <button class="pbtn deny" onclick="sendElicitation('${sid}','${p.nonce}','decline','${pre}')">decline</button>
+      <button class="pbtn" onclick="sendElicitation('${sid}','${p.nonce}','cancel','${pre}')">cancel</button>
+    </div><div class="actmsg" id="${pre}-${sid}"></div></div>`;
+}
+function elicitText(sid,key,value){(elicitDraft[sid]||(elicitDraft[sid]={}))[decodeURIComponent(key)]=value;}
+function elicitBool(sid,key,value){(elicitDraft[sid]||(elicitDraft[sid]={}))[decodeURIComponent(key)]=value;}
+function elicitValue(sid,key,value){
+  const name=decodeURIComponent(key);if(!value)delete (elicitDraft[sid]||{})[name];
+  else (elicitDraft[sid]||(elicitDraft[sid]={}))[name]=JSON.parse(decodeURIComponent(value));
+}
+function elicitSet(sid,key,encoded,toggle){
+  const name=decodeURIComponent(key),value=JSON.parse(decodeURIComponent(encoded));
+  const draft=elicitDraft[sid]||(elicitDraft[sid]={}),values=Array.isArray(draft[name])?draft[name]:[];
+  const at=values.findIndex(v=>String(v)===String(value));if(at>=0)values.splice(at,1);else values.push(value);
+  draft[name]=values;uiRefresh();
+}
+function sendElicitation(sid,nonce,choice,pre){
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===sid),p=s&&s.pending;
+  if(!p||p.nonce!==nonce)return alert('the request changed — refresh');
+  const content={...(elicitDraft[sid]||{})};
+  if(choice==='accept')for(const f of p.fields||[]){
+    if(f.required&&(content[f.name]==null||content[f.name]===''||(Array.isArray(content[f.name])&&!content[f.name].length)))
+      return alert(`${f.label||f.name} is required`);
+  }
+  act(sid,{type:'elicitation',nonce,choice,content:choice==='accept'?content:undefined},pre);
+}
+// On the CARD a question is only a SIGNAL — the option buttons, Other input and
+// per-question nav ate the fleet list. Tapping it opens the full view with the
+// question expanded. Permission prompts are small and stay inline (allow/deny).
+function cardPending(s){
+  const p=s.pending;
+  if(!p||(p.nonce&&answered[s.session_id]===p.nonce))return'';
+  if(p.kind==='permission')return pendingBox(s,'msg');
+  if(p.kind==='elicitation')return`<div class="pend qsignal" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
+    <div class="ptool"><span class="ptlabel">${esc(p.server||'MCP')} request — waiting on you</span></div>
+    <button class="pbtn qanswer" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">respond ⤢</button></div>`;
+  if(p.kind!=='question'||!p.questions||!p.questions.length)return'';
+  const n=p.questions.length;
+  const label=n>1?`multi-part question (${n})`:(p.questions[0].header||'question');
+  return`<div class="pend qsignal" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
+    <div class="ptool"><span class="ptlabel">${esc(label)} — waiting on you</span></div>
+    ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
+    <button class="pbtn qanswer" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">answer ⤢</button>
+  </div>`;
+}
+function openSessionQ(sid){sessQOpen=true;openSession(sid);}
+function pendingBox(s,pre='msg'){
+  const p=s.pending; if(!p)return'';
+  if(p.nonce&&answered[s.session_id]===p.nonce)return'';   // sent: dismiss instantly
+  if(p.kind==='question'){
+    if(!p.questions||!p.questions.length)return'';
+    return`<div class="pend">${p.questions.length>1?mqBlock(s,p,pre):singleQBlock(s,p,pre)}
+      <div class="actmsg" id="${pre}-${s.session_id}"></div></div>`;
+  }
+  if(p.kind==='permission'){
+    return`<div class="pend">
+      <div class="ptool">permission: ${esc(p.tool)} — waiting on you</div>
+      <pre>${esc(p.input_summary||'')}</pre>
+      <div class="pbtns">
+        <button class="pbtn allow" onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
+        <button class="pbtn always" onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
+        <button class="pbtn deny" onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
+        ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
+      </div>
+      <div class="actmsg" id="${pre}-${s.session_id}"></div>
+    </div>`;
+  }
+  if(p.kind==='elicitation')return elicitationBlock(s,p,pre);
+  return'';
+}
+async function setSessionMode(sid,mode,pre='msg'){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(!s||s.provider!=='codex')return;
+  const previous=s.collaboration_mode||'default';
+  s.collaboration_mode=mode;uiRefresh();
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'mode',mode})});
+    const d=await r.json();
+    if(!d.ok){s.collaboration_mode=previous;uiRefresh();alert(d.error||'mode change failed');return;}
+    s.collaboration_mode=d.mode||mode;uiRefresh();
+  }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
+}
+async function act(sid,payload,pre='msg',optimisticId=null){
+  const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
+  const quickId=isQuick?beginQuickResponse(sid,payload):null;
+  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid);
+    if(el)el.textContent=text;return el;};
+  if(payload.type!=='ping')setMessage('sending…');
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,...payload})});
+    const d=await r.json();
+    if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
+      d.ok&&['option','multiq'].includes(payload.type));
+    if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
+    const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
+    if(!d.ok&&!el&&quickId==null)alert(d.error||'failed');
+    if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
+      answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
+      delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
+      uiRefresh();
+    }
+    return d;
+  }catch(e){
+    if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
+    if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
+    const el=setMessage('✗ '+e);
+    if(!el&&quickId==null)alert('request failed: '+e);
+    return {ok:false,error:String(e)};
+  }
+}
+function pendingQuestion(sid){
+  const session=((last||{}).sessions||[]).find(item=>item.session_id===sid);
+  return session&&session.pending&&session.pending.kind==='question'?session.pending:null;
+}
+function answerLabel(question,digits,other){
+  if(other)return question?.secret?'(private answer)':other;
+  return(digits||[]).map(d=>question?.options?.[Number(d)-1]?.label||`Option ${d}`).join(', ');
+}
+function answerPreview(sid,answers){
+  const pending=pendingQuestion(sid),questions=(pending&&pending.questions)||[];
+  return answers.map((answer,index)=>{
+    const question=questions[index]||{};
+    const label=answerLabel(question,answer.digits,answer.other)||'(no answer)';
+    return `${question.header||question.question||`Question ${index+1}`}: ${label}`;
+  }).join('\n');
+}
+function sendOption(sid,nonce,digits,pre){
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
+  act(sid,{type:'option',nonce,digits},pre,optimisticId);
+}
+function toggleOpt(sid,d){
+  const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);uiRefresh();
+}
+function sendMulti(sid,nonce,n,pre){
+  const digits=[...(multiSel[sid]||[])].sort();
+  const other=(otherDraft[sid]||'').trim();
+  if(!digits.length&&!other)return alert('pick at least one option');
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
+  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
+}
+function sendOther(sid,nonce,n,pre){
+  const other=(otherDraft[sid]||'').trim();
+  if(!other)return alert('type your answer first');
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
+  act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
+}
+function sendDismiss(sid,nonce,pre){
+  act(sid,{type:'dismiss',nonce},pre);
+}
+// desktop only: pointless from the phone — it focuses a tab on the Mac
+function focusSession(sid){act(sid,{type:'focus'});}
+
+// in-app interstitial — a native confirm() is easy to dismiss by reflex on a phone,
+// and stopping a turn is destructive (the work in flight is lost)
+let confirmYes=null;
+function askConfirm(title,body,confirmLabel,onYes){
+  closeOverflow();
+  confirmYes=onYes;
+  $('#confirm').innerHTML=`<div class="cfbox">
+    <div class="cftitle">${esc(title)}</div>
+    <div class="cfbody">${body}</div>
+    <div class="cfbtns">
+      <button class="pbtn" onclick="closeConfirm()">cancel</button>
+      <button class="pbtn cfgo" onclick="const f=confirmYes;closeConfirm();f&&f()">${esc(confirmLabel)}</button>
+    </div></div>`;
+  $('#confirm').style.display='flex';
+}
+function closeConfirm(){confirmYes=null;$('#confirm').style.display='none';$('#confirm').innerHTML='';}
+function sendInterrupt(sid,pre='msg'){
+  askConfirm('Stop this turn?',
+    'Sends <b>Esc</b> to the session. Whatever it is doing right now is abandoned — '
+    +'including any subagents it has running.',
+    'stop the turn',
+    ()=>act(sid,{type:'interrupt'},pre));
+}
+function sendCloseSession(sid,pre='smsg'){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(!s||!s.capabilities?.close)return alert('This session cannot be closed here.');
+  const active=['running','stalled','needs_you','stalled_or_prompt'].includes(s.state);
+  const provider=s.provider==='codex'
+    ?'The Codex thread will be archived.'
+    :'The registered Claude process will end. Its iTerm tab stays open.';
+  const activeBody=active
+    ?' The current turn and every subagent under it will stop first.'
+    :'';
+  askConfirm('Close this session?',
+    provider+activeBody+' The conversation remains available in <b>Session history</b>.',
+    active?'stop and close':'close session',
+    async()=>{
+      const result=await act(sid,{type:'close'},pre);
+      if(result?.ok){dismissOverlay();setTimeout(()=>tick(),0);}
+    });
+}
+// A subagent has NO terminal: the only way to stop it is to Esc its PARENT, which
+// ends the parent's whole turn and every other agent under it. Say so plainly.
+function stopAgentParent(sid,pre='amsg'){
+  askConfirm('Stop this subagent?',
+    'A subagent has no terminal of its own — the only way to stop it is to send <b>Esc</b> '
+    +'to its <b>parent session</b>. That ends the parent\'s entire turn and kills '
+    +'<b>every other subagent</b> it is running, not just this one.',
+    'stop parent turn',
+    ()=>act(sid,{type:'interrupt'},pre));
+}
+function copyTxt(ev,el){
+  ev.stopPropagation();
+  if(!navigator.clipboard)return;
+  navigator.clipboard.writeText(el.dataset.copy).then(()=>{
+    const o=el.textContent;el.textContent='copied ✓';
+    setTimeout(()=>{el.textContent=o},900);   // UX flash only
+  });
+}
+function sendPerm(sid,nonce,choice,pre='msg'){
+  act(sid,{type:'permission',nonce,choice},pre);
+}
+function sendText(sid,ftPre='ft',msgPre='msg'){
+  const inp=document.getElementById(ftPre+'-'+sid);
+  const v=(inp&&inp.value||'').trim();
+  if(!v)return;
+  const cmd=(v.startsWith('/')||v.startsWith('$'))?(cmdCache[sid]||[]).find(c=>c.name===v.split(/\s+/)[0]):null;
+  if(cmd&&cmd.danger&&!confirm(`${cmd.name} destroys this session's conversation state.\n\n${cmd.desc}\n\nSend it?`))return;
+  slashClose();
+  if(inp)inp.value='';        // clear NOW: the round-trip is the terminal's, not yours
+  if(cmd&&cmd.execution==='action')return act(sid,{type:cmd.action},msgPre);
+  if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
+  const optimisticId=addOptimistic(sid,v,'text');
+  act(sid,{type:'text',text:v},msgPre,optimisticId);
+}
+
+// ---- slash-command autocomplete -------------------------------------------
+// Menu INSERTS (never sends): most skills take args, and it keeps the send path
+// — with its destructive-command confirm — as the single way anything fires.
+const cmdCache={};          // sessionId -> [{name,desc,scope,danger}]
+let slashBox=null;          // id of the open menu's container, or null
+function slashClose(){
+  if(!slashBox)return;
+  const el=document.getElementById(slashBox);
+  if(el)el.innerHTML='';
+  slashBox=null;
+}
+async function slashInput(sid,pre){
+  const inp=document.getElementById(pre+'-'+sid);
+  const v=(inp&&inp.value)||'';
+  // menu lives while the text is a single command/skill token; a space starts args
+  if((!v.startsWith('/')&&!v.startsWith('$'))||/\s/.test(v))return slashClose();
+  if(!cmdCache[sid]){
+    cmdCache[sid]=[];       // in-flight guard: one fetch per session
+    try{
+      const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
+      const d=await r.json();
+      cmdCache[sid]=d.commands||[];
+    }catch(e){cmdCache[sid]=[];}
+  }
+  const q=v.slice(1).toLowerCase();
+  const hits=cmdCache[sid].filter(c=>c.name[0]===v[0]&&c.name.slice(1).toLowerCase().includes(q))
+    .sort((a,b)=>(a.name.slice(1).toLowerCase().startsWith(q)?0:1)-(b.name.slice(1).toLowerCase().startsWith(q)?0:1))
+    .slice(0,40);
+  const box=document.getElementById('slash-'+pre+'-'+sid);
+  if(!box)return;
+  slashBox='slash-'+pre+'-'+sid;
+  box.innerHTML=hits.length?`<div class="slashmenu">${hits.map(c=>`
+    <button class="slashrow" onmousedown="event.preventDefault()" onclick="slashPick('${sid}','${pre}','${enc(c.name)}')">
+      <span class="scmd">${esc(c.name)}${c.danger?' <span class="sdanger">destructive</span>':''}</span>
+      <span class="sdesc">${esc(c.desc||'')}</span>
+      <span class="sscope">${esc(c.scope)}</span>
+    </button>`).join('')}</div>`
+    :`<div class="slashmenu"><div class="slashempty">no command matches “${esc(v)}”</div></div>`;
+}
+function slashPick(sid,pre,name){
+  const inp=document.getElementById(pre+'-'+sid);
+  if(!inp)return;
+  inp.value=decodeURIComponent(name)+' ';   // trailing space: args go right here
+  slashClose();
+  inp.focus();
+}
+let historyOpen=false,historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
+const historyInfoOpen=new Set();
+function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
+  if(!list.length&&!keepEmpty){el.innerHTML='';el.className='';return;}
+  el.className=`queue ${kind}`;
+  if(!el.querySelector('.queuehead'))el.innerHTML='<div class="queuehead"><b></b><span></span></div><div class="queuelist"></div>';
+  el.querySelector('.queuehead b').textContent=`${title} · ${list.length}`;
+  el.querySelector('.queuehead span').textContent=subtitle;
+  reconcileCards(el.querySelector('.queuelist'),list,
+    keepEmpty?'No sessions are ready for another message.':'');
+}
+function toggleHistory(encoded){
+  const sid=decodeURIComponent(encoded);
+  historyInfoOpen.has(sid)?historyInfoOpen.delete(sid):historyInfoOpen.add(sid);
+  updateHistoryRows();
+}
+function setHistoryFilter(kind,value){
+  if(kind==='access')historyAccess=value;else historyProvider=value;
+  historyVisible=100;
+  render(last,true);
+}
+function historyItems(f){
+  const live=(f.sessions||[]).filter(s=>s.ui_group==='history'&&!pinnedSessions.has(s.session_id));
+  const closed=(f.closed||[]).filter(s=>!pinnedSessions.has(s.session_id));
+  return [...live,...closed].sort((a,b)=>(b.activity_at||0)-(a.activity_at||0));
+}
+function filteredHistory(f){
+  const query=historyFilter.trim().toLowerCase();
+  return historyItems(f).filter(item=>{
+    const accessOk=historyAccess==='all'||item.primary_action===historyAccess;
+    const providerOk=historyProvider==='all'||(item.provider||'claude')===historyProvider;
+    const hay=[item.title,item.name,item.project,item.branch,item.provider,item.reason_label,
+      item.access_label,item.state,item.reg_status].filter(Boolean).join(' ').toLowerCase();
+    return accessOk&&providerOk&&(!query||hay.includes(query));
+  });
+}
+function updateHistoryRows(){
+  const el=document.getElementById('historyrows');
+  if(el&&last)el.innerHTML=historyRows(filteredHistory(last));
+}
+function filterChips(kind,current,items){
+  return`<div class="filterline"><span class="filterlabel">${kind}</span>${items.map(([value,label])=>
+    `<button class="filterchip${current===value?' on':''}" aria-pressed="${current===value}"
+      onclick="setHistoryFilter('${kind.toLowerCase()}','${value}')">${label}</button>`).join('')}</div>`;
+}
+
+// ---- new session -----------------------------------------------------------
+// form state lives in globals: the 2s poll re-renders this section, so anything
+// held only in the DOM (typed path, status line) would be wiped mid-use
+let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',spawnWait=null,spawnMsg='';
+const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
+function newSection(){
+  const dirs=(last&&last.recent_dirs)||[];
+  if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
+  const catalog=(((last&&last.models_by_provider)||{})[newProvider])||[];
+  const models=catalog.length?catalog.map(m=>m.id):
+    (newProvider==='claude'?((last&&last.models)||[]):[]);
+  const picked=catalog.find(m=>m.id===newModel);
+  const efforts=(picked&&picked.efforts&&picked.efforts.length)?picked.efforts:
+    ((last&&last.efforts)||[]);
+  if(!newOpen)
+    return`<button class="newbtn" onclick="newOpen=true;render(last,true)">+ new coding session</button>
+      ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
+      <div class="dsep"></div>`;
+  const cur=dirs.find(d=>d.path===newDir);
+  const untrusted=newDir&&(!cur||!cur.trusted);
+  return`<div class="newform">
+    <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
+    <label class="nflab">provider</label>
+    <select class="nfsel" onchange="newProvider=this.value;newModel='';render(last,true)">
+      <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
+      <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
+    </select>
+    <label class="nflab">directory</label>
+    <select class="nfsel" onchange="newDir=this.value;render(last,true)">
+      <option value="">— pick a recent directory —</option>
+      ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
+    </select>
+    <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
+      oninput="newDir=this.value" autocomplete="off">
+    ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
+      “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
+    <div class="nfrow">
+      <div class="nfcol"><label class="nflab">model</label>
+        <select class="nfsel" onchange="newModel=this.value">
+          <option value="">default</option>
+          ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
+        </select></div>
+      <div class="nfcol"><label class="nflab">effort</label>
+        <select class="nfsel" onchange="newEffort=this.value">
+          <option value="">default</option>
+          ${efforts.map(e=>`<option value="${e}" ${e===newEffort?'selected':''}>${e}</option>`).join('')}
+        </select></div>
+      ${newProvider==='codex'?`<div class="nfcol"><label class="nflab">mode</label>
+        <select class="nfsel" onchange="newMode=this.value">
+          <option value="plan" ${newMode==='plan'?'selected':''}>Plan</option>
+          <option value="default" ${newMode==='default'?'selected':''}>Default</option>
+        </select></div>`:''}
+    </div>
+    ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
+      onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
+    ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
+      oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
+    <button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
+    ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
+  </div>
+  <div class="dsep"></div>`;
+}
+async function doSpawn(){
+  if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
+  spawnMsg='starting…';render(last,true);
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'spawn',provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+                           worktree:newWt,worktree_name:newWtName})});
+    const d=await r.json();
+    if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}
+    spawnMsg=d.trust_prompt
+      ? '⚠ started — but it is waiting on the trust prompt on your Mac ("do you trust the files in this folder?")'
+      : 'started ✓ — opening it here as soon as it appears…';
+    // a `-w` spawn lands in a NEW dir under the repo, so match by prefix — but only
+    // against sessions that did NOT already exist, or we'd hijack a sibling session
+    spawnWait={cwd:d.cwd,worktree:newWt,until:Date.now()+120000,
+               known:new Set(((last||{}).sessions||[]).map(x=>x.session_id))};
+    newOpen=false;render(last,true);
+  }catch(e){spawnMsg='✗ '+e;render(last,true);}
+}
+// a spawned session only enters the fleet once it writes a transcript
+function checkSpawn(f){
+  if(!spawnWait)return;
+  if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
+  const s=(f.sessions||[]).find(x=>!spawnWait.known.has(x.session_id)&&
+    (x.cwd===spawnWait.cwd||(spawnWait.worktree&&(x.cwd||'').startsWith(spawnWait.cwd+'/'))));
+  if(s){spawnWait=null;spawnMsg='';openSession(s.session_id);}
+}
+function historySection(f){
+  const items=historyItems(f);
+  if(!items.length)return'';
+  return`<details class="foldbox historybox" ${historyOpen?'open':''}
+      ontoggle="historyOpen=this.open">
+    <summary>Session history (${items.length}) <small>— inactive, external, reopenable, and closed</small></summary>
+    <div class="historytools">
+      <div class="freetext"><input placeholder="Filter by title, project, branch, provider, or state"
+        value="${esc(historyFilter)}" oninput="historyFilter=this.value;historyVisible=100;updateHistoryRows()"></div>
+      ${filterChips('Access',historyAccess,[['all','All'],['continue','Continue'],['view','View only'],['reopen','Reopen']])}
+      ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
+    </div>
+    <div id="historyrows">${historyRows(filteredHistory(f))}</div>
+  </details>`;
+}
+function historyRows(items){
+  if(!items.length)return'<div class="empty">no matches</div>';
+  const shown=items.slice(0,historyVisible);
+  return shown.map(item=>historyRow(item)).join('')+
+    (shown.length<items.length?`<button class="newbtn" onclick="historyVisible+=100;updateHistoryRows()">
+      show ${Math.min(100,items.length-shown.length)} more of ${items.length}</button>`:'');
+}
+function historyRow(item,pinnedView=false){
+  const sid=String(item.session_id||''),encoded=enc(sid);
+  const isClosed=item.closed_at!=null&&!item.capabilities;
+  const open=historyInfoOpen.has(sid);
+  const activity=item.activity_at||item.last_seen||item.closed_at||((last&&last.t)||0);
+  const title=item.title||item.name||item.project||'Session';
+  const action=item.primary_action_label||'View';
+  const provider=item.provider||'claude';
+  const raw=item.state||'closed';
+  const canReopen=isClosed&&item.can_reopen;
+  return`<div class="historyrow" data-history-sid="${esc(sid)}">
+    <div class="historymain" onclick="toggleHistory('${encoded}')">
+      <span class="historyreason">${esc(item.reason_label||'Inactive')}</span>
+      <span class="historyname"><b>${esc(title)}</b><small>${esc(item.project||'')}${item.branch&&item.branch!=='HEAD'?` · ${esc(item.branch)}`:''} · ${esc(provider)}</small></span>
+      <span class="historyage">${fmtAge(Math.max(0,Math.round(((last&&last.t)||Date.now()/1000)-activity)))} ago</span>
+      ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
+        ${canReopen?`<button class="historyaction" onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">Reopen</button>`:''}`
+        :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(action)}</button>`}
+      <button class="spin${pinnedSessions.has(sid)?' on':''}" aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
+        title="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
+        onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${encoded}'))">📌</button>
+    </div>
+    ${open?`<div class="historydetail"><div class="kv">
+      <span>session</span>${cpb(sid)}
+      <span>provider</span><b>${esc(provider)}</b>
+      <span>access</span><b>${esc(item.access_label||'View only')}</b>
+      <span>provider state</span><b>${esc(raw)}</b>
+      <span>cwd</span>${cpb(item.cwd||'?')}
+      <span>branch</span><b>${esc(item.branch||'—')}</b>
+      <span>model</span><b>${esc(item.model||'?')}</b>
+      ${item.error?`<span>error</span><b>${esc(item.error)}</b>`:''}
+      ${item.bridge_url?`<span>link</span><b><a class="jump" href="${esc(item.bridge_url)}" target="_blank">open in claude.ai ↗</a></b>`:''}
+    </div></div>`:''}
+  </div>`;
+}
+
+function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,true);}
+function togglePeek(sid,expanded){
+  expanded?expandedPeeks.add(sid):expandedPeeks.delete(sid);
+  render(last,true);
+}
+let peekMeasurePending=false;
+function schedulePeekOverflow(){
+  if(peekMeasurePending)return;
+  peekMeasurePending=true;
+  requestAnimationFrame(()=>{
+    peekMeasurePending=false;
+    document.querySelectorAll('.sessionpeek').forEach(row=>{
+      row.classList.remove('truncated');
+      if(row.classList.contains('expanded'))return;
+      const body=row.querySelector('.peekmd');
+      if(body&&body.scrollHeight>body.clientHeight+1)row.classList.add('truncated');
+    });
+  });
+}
+window.addEventListener('resize',schedulePeekOverflow);
+
+let insightsOpen=false,insightsDays=7;
+const insightsCache={};   // days -> {t, data, fetching}
+function loadInsights(force){
+  const c=insightsCache[insightsDays];
+  if(!force&&c&&(c.fetching||(c.data&&Date.now()-c.t<60000)))return;
+  insightsCache[insightsDays]={...(c||{}),fetching:true};
+  fetch('/api/insights?days='+insightsDays,{cache:'no-store'}).then(r=>r.json()).then(d=>{
+    insightsCache[insightsDays]={t:Date.now(),data:d};
+    render(last,true);
+  }).catch(()=>{delete insightsCache[insightsDays];});
+}
+function setInsightsDays(n){insightsDays=n;render(last,true);loadInsights();}
+function insTable(heads,rows){
+  if(!rows||!rows.length)return'<div class="setnum" style="padding:2px 8px 8px">no data in window</div>';
+  return`<table><tr>${heads.map(h=>`<th${h[1]?' class="r"':''}>${h[0]}</th>`).join('')}</tr>${rows.join('')}</table>`;
+}
+const insOpen=new Set();   // per-subsection fold state, survives re-renders
+function insFold(key,title,inner){
+  return`<details class="insfold" ${insOpen.has(key)?'open':''} ontoggle="insOpen[this.open?'add':'delete']('${key}')">
+    <summary>${title}</summary>${inner}</details>`;
+}
+function insightsSection(){
+  const c=insightsCache[insightsDays],d=c&&c.data;
+  let body='<div class="ctxload">crunching…</div>';
+  if(d&&d.ok){
+    const mixTot=(d.token_mix||[]).reduce((a,x)=>({input:a.input+x.input,write:a.write+x.write,
+      read:a.read+x.read,output:a.output+x.output}),{input:0,write:0,read:0,output:0});
+    const mixRow=x=>`<tr><td>${x.day}</td><td class="r">${x.input.toFixed(2)}</td><td class="r">${x.write.toFixed(2)}</td><td class="r">${x.read.toFixed(2)}</td><td class="r">${x.output.toFixed(2)}</td><td class="r"><b>${(x.input+x.write+x.read+x.output).toFixed(2)}</b></td></tr>`;
+    body=`<div class="insbar">${[7,30,90].map(n=>`<button class="mqarr${insightsDays===n?' cur':''}" onclick="setInsightsDays(${n})">${n}d</button>`).join('')}
+        <span class="setnum">agents ${fmt$(d.totals.agent_cost)} · sessions active in window ${fmt$(d.totals.session_cost)} (lifetime $) · cache busts ~${fmt$(d.totals.bust_cost||0)}</span></div>`
+      +insFold('cache',`cache invalidations — est ${fmt$(d.totals.bust_cost||0)} re-paid in window`,
+        insTable([['cause'],['events',1],['tokens re-paid',1],['est $',1]],
+          (d.cache_busts||[]).map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.events}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
+      +insFold('mix','$ by token class per day — where the money actually goes',
+        insTable([['day'],['uncached $',1],['cache write $',1],['cache read $',1],['output $',1],['total',1]],
+          (d.token_mix||[]).length?[mixRow({day:'window',...mixTot})].concat(d.token_mix.map(mixRow)):[]))
+      +insFold('agents','by agent type',
+        insTable([['agent'],['runs',1],['total $',1],['avg $',1],['cache hit',1]],
+          d.agents.map(a=>`<tr><td>${esc(a.name)}</td><td class="r">${a.runs}</td><td class="r">${a.cost.toFixed(2)}</td><td class="r">${a.avg.toFixed(3)}</td><td class="r">${a.cache_pct}%</td></tr>`)))
+      +insFold('skills','by skill — attributed cost of turns run while the skill was active',
+        insTable([['skill'],['uses',1],['total $',1],['avg $/use',1]],
+          d.skills.map(s=>`<tr><td>${esc(s.name)}</td><td class="r">${s.uses}</td><td class="r">${s.cost.toFixed(2)}</td><td class="r">${s.avg.toFixed(3)}</td></tr>`)))
+      +insFold('tools','by tool — context injected by tool results (est tokens)',
+        insTable([['tool'],['uses',1],['tokens in',1],['avg/use',1]],
+          d.tools.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.uses}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${fmtTok(x.avg_tokens)}</td></tr>`)))
+      +insFold('models','by model',
+        insTable([['model'],['agents $',1],['sessions $',1]],
+          d.models.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${m.agents.toFixed(2)}</td><td class="r">${m.sessions.toFixed(2)}</td></tr>`)))
+      +insFold('projects','by project (sessions active in window; lifetime $)',
+        insTable([['project'],['agents $',1],['sessions $',1]],
+          d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`)))
+      +insFold('bydayy','agent $ by day',
+        insTable([['day'],['$',1]],d.by_day.map(x=>`<tr><td>${x.day}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
+      +insFold('topsess','top sessions (lifetime $)',
+        insTable([['session'],['project'],['$',1]],
+          d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
+  }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
+  // leading separator: closes off the session/closed lists. Its margin-bottom (8)
+  // collapses with the foldbox margin-top (14) → a 14px gap to cost insights,
+  // matching the dormant-to-its-separator gap above.
+  return`<div class="dsep"></div>
+    <details class="foldbox" ${insightsOpen?'open':''} ontoggle="insightsOpen=this.open;if(this.open)loadInsights()">
+    <summary>cost insights</summary>${body}</details>`;
+}
+
+let last=null;
+function render(f,force){
+  if(!f||!f.sessions)return;
+  reconcileQuickResponses(f);
+  applyReaderWidth();
+  syncPinnedSessions(f);
+  const t=f.totals;
+  $('#totals').innerHTML=`<span><b${t.needs_me?' style="color:var(--amber)"':''}>${t.needs_me}</b> need you</span>
+    <span><b>${t.busy}</b> working</span>
+    <span><b>${t.available||0}</b> available <i class="sep">·</i>
+      <b>${t.agents_running}</b> subagent${t.agents_running===1?'':'s'}</span>`;
+  usageBar(f.usage,f.provider_usage);
+  const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
+  $('#providerstate').innerHTML=providerProblems.map(([provider,value])=>
+    `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
+  const ae=document.activeElement;
+  const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
+  const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
+  if(force||!touching()){
+    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id));
+    renderPinned(f);
+    renderQueue($('#needs'),unpinned.filter(s=>s.ui_group==='needs_you'),
+      'Needs you','waiting for a response or intervention','needs');
+    renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
+      'Working','turns in progress','working');
+    renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'),
+      'Available','ready for another message','available',true);
+    if(!typingNew)$('#newsess').innerHTML=newSection();
+    if(!typingHistory)$('#history').innerHTML=historySection(f);
+    $('#rollup').innerHTML=insightsSection();
+  }
+  checkSpawn(f);
+  renderViewerBar();
+  renderAgent();
+  renderSession();
+  schedulePeekOverflow();
+  document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
+}
+
+async function tick(){
+  try{
+    const r=await fetch('/api/fleet',{cache:'no-store'});
+    last=await r.json();
+    if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
+    $('#stale').style.display='none';
+    render(last);
+  }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
+}
+tick();setInterval(tick,2000);
+fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
+  .then(r=>{$('#notoken').style.display=r.status===403?'block':'none';}).catch(()=>{});

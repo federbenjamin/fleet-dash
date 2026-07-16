@@ -404,6 +404,11 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html"):
             with open(os.path.join(ROOT, "dashboard.html"), "rb") as handle:
                 return self.reply(200, "text/html; charset=utf-8", handle.read())
+        if route in ("/static/fleet.css", "/static/app.js"):
+            ctype = ("text/css; charset=utf-8" if route.endswith(".css")
+                     else "text/javascript; charset=utf-8")
+            with open(os.path.join(ROOT, route.removeprefix("/")), "rb") as handle:
+                return self.reply(200, ctype, handle.read())
         return self.reply(404, "text/plain", "not found")
 
     def do_POST(self):
