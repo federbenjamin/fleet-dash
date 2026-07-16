@@ -375,7 +375,8 @@ function usageBar(legacy,providers){
   const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
   const visiblePercentages=[
     ...claudeProfiles.filter(Boolean).flatMap(profile=>[
-      profile.five_hour_pct,claude?.show_week===false?null:profile.weekly_pct]),
+      profile.five_hour_pct,claude?.show_week===false?null:profile.weekly_pct,
+      claude?.show_week===false?null:profile.fable_weekly_pct]),
     ...codexBuckets.map(bucket=>bucket.used_pct),
   ].filter(value=>Number.isFinite(Number(value))).map(Number);
   const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
@@ -389,7 +390,8 @@ function usageBar(legacy,providers){
         ${claude.show_active!==false&&profile.active?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uactive">active</span></span>`:''}
         ${index===0&&claude.lifetime_tokens!=null?`<span class="useg" title="All local Claude transcripts on this Mac across profiles, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
       ${ugauge('5-hour',profile.five_hour_pct,usageReset(profile.five_hour_reset))}
-      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}</div>`).join('')}</div>`:'';
+      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}
+      ${claude.show_week===false?'':ugauge('Fable weekly',profile.fable_weekly_pct,usageReset(profile.fable_weekly_reset))}</div>`).join('')}</div>`:'';
   const codexHtml=codex&&(codexBuckets.length||codex.email||codex.plan_type||codex.lifetime_tokens!=null||codex.reset_credits||codex.error)?`<div class="uprovider">
     <div class="uhead"><span class="uname">Codex CLI</span>
       ${codex.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(codex.email)}</span></span>`:''}
@@ -765,6 +767,27 @@ async function loadOlderConversation(scope,sid,aid=''){
 // "opus · high". Effort comes from the statusline side-write, so a session whose
 // statusline hasn't rendered yet (or isn't installed) shows the model alone.
 const modelLabel=s=>esc(s.model||s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
+const CLAUDE_PERMISSION_LABELS={default:'Manual',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto',
+  dontAsk:"Don't ask",bypassPermissions:'Bypass permissions'};
+const claudePermissionLabel=mode=>CLAUDE_PERMISSION_LABELS[mode]||'Detecting…';
+function claudePermissionLocked(s){return !s?.capabilities?.change_permission_mode;}
+function claudePermissionSelect(s,pre='msg'){
+  if(!s||s.provider!=='claude')return'';
+  const current=s.permission_mode||'';const available=new Set(s.permission_modes||[]);
+  const locked=claudePermissionLocked(s);
+  const option=(mode,label,extra='')=>`<option value="${mode}" ${current===mode?'selected':''}
+    ${!available.has(mode)||locked?'disabled':''}>${label}${extra}</option>`;
+  return`<select class="modesel permissionselect" title="Claude permission mode"
+    onclick="event.stopPropagation()" onchange="setClaudePermissionMode('${s.session_id}',this.value,'${pre}')"
+    ${locked?'disabled':''}>
+    ${current?'':`<option selected disabled>Detecting…</option>`}
+    ${option('default','Manual')}${option('auto','Auto',available.has('auto')?'':' — unavailable')}
+    ${option('acceptEdits','Accept edits')}${option('plan','Plan')}
+    <optgroup label="Advanced"><option value="dontAsk" disabled>Don't ask — new sessions only</option>
+      ${available.has('bypassPermissions')?option('bypassPermissions','Bypass permissions'):''}</optgroup>
+    ${current==='dontAsk'?`<option value="dontAsk" selected disabled>Don't ask — startup mode</option>`:''}
+    </select>`;
+}
 function modeSelect(s,pre='msg'){
   if(!s||s.provider!=='codex')return'';
   const mode=s.collaboration_mode||'default';
@@ -983,8 +1006,14 @@ function overflowMenu(key,s,kind='session',done=false){
   const label=kind==='viewer'?'viewer actions':kind==='subagent'?'subagent actions':'session actions';
   const lifecycle=kind==='session'||kind==='viewer';
   const canMode=lifecycle&&s&&s.provider==='codex';
+  const canClaudeMode=lifecycle&&s&&s.provider==='claude'&&!s.provisional;
   const mode=s?.collaboration_mode||'default';
   const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state);
+  const permissionModes=new Set(s?.permission_modes||[]);
+  const permissionLocked=claudePermissionLocked(s);
+  const permissionButton=(value,label,shown=true)=>shown?`<button aria-pressed="${s?.permission_mode===value}"
+    ${permissionLocked||!permissionModes.has(value)?'disabled':''}
+    onclick="closeOverflow();setClaudePermissionMode('${s?.session_id||''}','${value}','${kind==='viewer'?'vmsg':'smsg'}')">${label}</button>`:'';
   const canStop=kind==='subagent'
     ? Boolean(!done&&s?.capabilities?.interrupt)
     : Boolean(s?.capabilities?.interrupt);
@@ -1001,6 +1030,14 @@ function overflowMenu(key,s,kind='session',done=false){
         <button aria-pressed="${mode==='default'}" ${modeLocked?'disabled':''}
           onclick="closeOverflow();setSessionMode('${s.session_id}','default','${kind==='viewer'?'vmsg':'smsg'}')">Default</button>
       </span></span><span class="ovsep"></span>`:''}
+      ${canClaudeMode?`<span class="ovgroup"><span class="ovlabel">Claude permissions · ${esc(claudePermissionLabel(s.permission_mode))}</span>
+        <span class="ovseg permissionseg">${permissionButton('default','Manual')}${permissionButton('auto','Auto')}
+          ${permissionButton('acceptEdits','Accept edits')}${permissionButton('plan','Plan')}</span>
+        <span class="ovlabel">Advanced</span><span class="ovseg permissionseg">
+          <button disabled title="Claude Code exposes this only at startup">Don't ask · new session</button>
+          ${permissionButton('bypassPermissions','Bypass permissions',permissionModes.has('bypassPermissions'))}</span>
+        ${permissionLocked?`<small class="ovhint">${s?.permission_mode?"Available only while Claude is idle":"Waiting for Claude to report its mode"}</small>`:''}
+      </span><span class="ovsep"></span>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
       ${canRepo?`<button class="ovitem" role="menuitem" onclick="closeOverflow();openRepository('',decodeURIComponent('${enc(s.cwd)}'))">
@@ -2006,6 +2043,8 @@ function cardDetail(s){
           <span>cwd</span>${cpb(s.cwd)}
           <span>model</span><b>${esc(s.model||'?')}${s.effort?` · ${esc(s.effort)}`:''}</b>
           ${s.provider==='codex'?`<span>mode</span><b>${esc(s.collaboration_mode||'default')}</b>`:''}
+          ${s.provider==='claude'?`<span>permission mode</span><span class="permissiondetail">
+            <b>${esc(claudePermissionLabel(s.permission_mode))}</b>${claudePermissionSelect(s,'msg')}</span>`:''}
           <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
           <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
           <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
@@ -2035,7 +2074,8 @@ function cardDetail(s){
 function detailSig(s){
   const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
-  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.reg_status,s.ctx_tokens,
+  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.permission_mode,
+    (s.permission_modes||[]).join(','),Boolean(s.capabilities?.change_permission_mode),s.reg_status,s.ctx_tokens,
     s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files,
     s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh',
     (s.handoff_links||[]).map(link=>[link.direction,link.session_id,link.status].join(':')).join(',')].join('|');
@@ -2377,6 +2417,30 @@ async function setSessionMode(sid,mode,pre='msg'){
     s.collaboration_mode=d.mode||mode;uiRefresh();
   }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
 }
+function setClaudePermissionMode(sid,mode,pre='msg'){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(!s||s.provider!=='claude'||claudePermissionLocked(s))return;
+  if(mode==='bypassPermissions'){
+    askConfirm('Use Bypass permissions?',
+      '<b>Claude will stop asking before dangerous commands.</b> This removes almost all permission checks for this session. '
+      +'Use it only in an isolated, disposable environment whose files and network access cannot cause harm.',
+      'use bypass permissions',()=>applyClaudePermissionMode(s,mode,pre),true);
+    return;
+  }
+  applyClaudePermissionMode(s,mode,pre);
+}
+async function applyClaudePermissionMode(s,mode,pre){
+  const previous=s.permission_mode;
+  if(previous===mode)return;
+  s.permission_mode=mode;uiRefresh();
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:s.session_id,type:'permission_mode',mode})});
+    const d=await r.json();
+    if(!r.ok||!d.ok){s.permission_mode=previous;uiRefresh();alert(d.error||'permission mode change failed');return;}
+    s.permission_mode=d.mode||mode;uiRefresh();
+  }catch(e){s.permission_mode=previous;uiRefresh();alert('permission mode change failed: '+e);}
+}
 async function act(sid,payload,pre='msg',optimisticId=null){
   const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
   const quickId=isQuick?beginQuickResponse(sid,payload):null;
@@ -2451,15 +2515,15 @@ function focusSession(sid){act(sid,{type:'focus'});}
 // in-app interstitial — a native confirm() is easy to dismiss by reflex on a phone,
 // and stopping a turn is destructive (the work in flight is lost)
 let confirmYes=null;
-function askConfirm(title,body,confirmLabel,onYes){
+function askConfirm(title,body,confirmLabel,onYes,danger=false){
   closeOverflow();
   confirmYes=onYes;
-  $('#confirm').innerHTML=`<div class="cfbox">
+  $('#confirm').innerHTML=`<div class="cfbox${danger?' cfhigh':''}">
     <div class="cftitle">${esc(title)}</div>
     <div class="cfbody">${body}</div>
     <div class="cfbtns">
       <button class="pbtn" onclick="closeConfirm()">cancel</button>
-      <button class="pbtn cfgo" onclick="const f=confirmYes;closeConfirm();f&&f()">${esc(confirmLabel)}</button>
+      <button class="pbtn cfgo${danger?' danger':''}" onclick="const f=confirmYes;closeConfirm();f&&f()">${esc(confirmLabel)}</button>
     </div></div>`;
   $('#confirm').style.display='flex';
 }
@@ -2471,23 +2535,112 @@ function sendInterrupt(sid,pre='msg'){
     'stop the turn',
     ()=>act(sid,{type:'interrupt'},pre));
 }
-function sendCloseSession(sid,pre='smsg'){
+function closeWorktreeFiles(preview){
+  const dirty=(preview.dirty_files||[]).map(item=>`<li><span>${esc(item.category||'changed')}</span> ${esc(item.path||'')}</li>`).join('');
+  const ignored=(preview.ignored_files||[]).map(path=>`<li><span>ignored</span> ${esc(path)}</li>`).join('');
+  const dirtyMore=preview.dirty_files_truncated?`<li>…and more changed paths (${preview.dirty_total} total)</li>`:'';
+  const ignoredMore=preview.ignored_files_truncated?`<li>…and more ignored paths (${preview.ignored_count} total)</li>`:'';
+  return dirty||ignored?`<ul class="closefiles">${dirty}${dirtyMore}${ignored}${ignoredMore}</ul>`:'';
+}
+function closeProviderCopy(s,active){
+  const provider=s.provider==='codex'?'The Codex thread will be archived.':
+    'The registered Claude process will end. Its iTerm tab stays open.';
+  return provider+(active?' The current turn and every subagent under it will stop first.':'')+
+    ' The conversation remains available in <b>Session history</b>.';
+}
+function renderCloseWorktree(s,pre,preview,active){
+  const shared=(preview.shared_sessions||[]).map(item=>esc(item.title||item.session_id)).join(', ');
+  const reason=shared?`<div class="closeblock">Removal is blocked while this worktree is also used by: <b>${shared}</b>.</div>`:
+    preview.reason?`<div class="closeblock">${esc(preview.reason)}</div>`:'';
+  const path=esc(preview.worktree||s.cwd||'');
+  $('#confirm').innerHTML=`<div class="cfbox closechoice">
+    <div class="cftitle">Close this session?</div>
+    <div class="cfbody">${closeProviderCopy(s,active)}<div class="closepath"><b>Secondary worktree</b>${path}</div>
+      ${reason}${closeWorktreeFiles(preview)}</div>
+    <div class="closechoices">
+      <button class="pbtn" onclick="closeConfirm()">cancel</button>
+      <button class="pbtn cfgo" onclick="executeCloseSession('${s.session_id}','${pre}','preserve')">close · preserve worktree</button>
+      <button class="pbtn remover" ${preview.remove_allowed?'':'disabled'}
+        onclick="executeCloseSession('${s.session_id}','${pre}','remove')">close · remove clean worktree</button>
+      ${preview.force_remove_allowed?`<button class="pbtn force" onclick="confirmForceClose('${s.session_id}','${pre}')">force remove dirty worktree</button>`:''}
+    </div></div>`;
+  $('#confirm').style.display='flex';
+}
+function confirmForceClose(sid,pre){
+  const preview=closePreviewCache.get(sid);if(!preview)return;
+  askConfirm('Force remove dirty worktree?',
+    '<b>This permanently deletes every listed worktree file, including ignored files.</b> The Git branch survives.'+
+    closeWorktreeFiles(preview),
+    'close and force remove',()=>executeCloseSession(sid,pre,'force_remove'),true);
+}
+const closePreviewCache=new Map();
+async function closeSessionSurfaceAfterClose(){
+  closeConfirm();
+  if(histPushed){
+    await new Promise(resolve=>{
+      window.addEventListener('popstate',()=>resolve(),{once:true});
+      history.back();
+    });
+  }else{closeViewer();closeSession();}
+}
+async function executeCloseSession(sid,pre,cleanup){
+  const preview=closePreviewCache.get(sid);const destructive=cleanup!=='preserve';
+  let providerClosed=false;
+  $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">Closing session…</div>
+    <div class="cfbody"><span class="delivery sending" aria-hidden="true">◌</span> ${destructive?'Closing the provider before removing the worktree.':'Preserving the worktree.'}</div></div>`;
+  try{
+    const closeResponse=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'close',cleanup_ticket:destructive?preview?.cleanup_ticket:undefined})});
+    const closed=await closeResponse.json();
+    if(!closeResponse.ok||!closed.ok)throw new Error(closed.error||'session close failed');
+    providerClosed=true;
+    if(!destructive){closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);return;}
+    $('#confirm .cfbody').innerHTML='<span class="delivery sending" aria-hidden="true">◌</span> Session closed. Rechecking the worktree before removal…';
+    const cleanupResponse=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'worktree_cleanup',cleanup_ticket:preview.cleanup_ticket,
+                           force:cleanup==='force_remove'})});
+    const result=await cleanupResponse.json();
+    closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);
+    if(!cleanupResponse.ok||!result.ok){
+      $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">Session closed · worktree preserved</div>
+        <div class="cfbody">${esc(result.error||'Cleanup failed')}<div class="closepath">${esc(result.worktree||preview.worktree||'')}</div></div>
+        <div class="cfbtns"><button class="pbtn" onclick="closeConfirm()">close</button></div></div>`;
+      $('#confirm').style.display='flex';
+      return;
+    }
+    closeConfirm();
+  }catch(error){
+    if(providerClosed){
+      closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);
+    }
+    $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">${providerClosed?'Session closed · worktree preserved':'Could not close session'}</div>
+      <div class="cfbody">${esc(String(error.message||error))}${providerClosed?`<div class="closepath">${esc(preview?.worktree||'')}</div>`:''}</div><div class="cfbtns">
+      <button class="pbtn" onclick="closeConfirm()">close</button></div></div>`;
+    $('#confirm').style.display='flex';
+  }
+}
+async function sendCloseSession(sid,pre='smsg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(!s||!s.capabilities?.close)return alert('This session cannot be closed here.');
   const active=['running','stalled','needs_you','stalled_or_prompt'].includes(s.state);
-  const provider=s.provider==='codex'
-    ?'The Codex thread will be archived.'
-    :'The registered Claude process will end. Its iTerm tab stays open.';
-  const activeBody=active
-    ?' The current turn and every subagent under it will stop first.'
-    :'';
-  askConfirm('Close this session?',
-    provider+activeBody+' The conversation remains available in <b>Session history</b>.',
-    active?'stop and close':'close session',
-    async()=>{
-      const result=await act(sid,{type:'close'},pre);
-      if(result?.ok){dismissOverlay();setTimeout(()=>tick(),0);}
-    });
+  closeOverflow();
+  $('#confirm').innerHTML='<div class="cfbox"><div class="cftitle">Checking worktree…</div><div class="cfbody"><span class="delivery sending" aria-hidden="true">◌</span> Looking for files that closing could remove.</div></div>';
+  $('#confirm').style.display='flex';
+  try{
+    const response=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'close_preview'})});
+    const preview=await response.json();
+    if(!response.ok||!preview.ok)throw new Error(preview.error||'worktree check failed');
+    if(preview.secondary_worktree){closePreviewCache.set(sid,preview);renderCloseWorktree(s,pre,preview,active);return;}
+    closeConfirm();
+    askConfirm('Close this session?',closeProviderCopy(s,active),active?'stop and close':'close session',
+      ()=>executeCloseSession(sid,pre,'preserve'));
+  }catch(error){
+    closeConfirm();
+    askConfirm('Close this session?',closeProviderCopy(s,active)+
+      `<div class="closeblock">Fleet could not inspect the worktree: ${esc(String(error.message||error))}. Closing will preserve it.</div>`,
+      active?'stop and close':'close session',()=>executeCloseSession(sid,pre,'preserve'));
+  }
 }
 // A subagent has NO terminal: the only way to stop it is to Esc its PARENT, which
 // ends the parent's whole turn and every other agent under it. Say so plainly.
@@ -2831,11 +2984,12 @@ function filterChips(kind,current,items){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
+let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newPermissionMode='default',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
 let spawnProvisional=null;
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 function spawnSnapshot(){
   return{provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    permission_mode:newProvider==='claude'?newPermissionMode:'',
     worktree:newProvider==='claude'&&newWt,
     worktree_name:newProvider==='claude'?newWtName:'',message:newMessage.trim()};
 }
@@ -2844,7 +2998,8 @@ function provisionalSessionObject(){
   const failed=p.status==='failed';
   return{session_id:p.id,provider:p.spec.provider,project:p.spec.cwd.split('/').filter(Boolean).pop()||'new session',
     title:'New coding session',cwd:p.spec.cwd,branch:p.spec.worktree_name||'',model:p.spec.model,
-    effort:p.spec.effort,collaboration_mode:p.spec.mode,ui_group:failed?'needs_you':'working',
+    effort:p.spec.effort,collaboration_mode:p.spec.mode,permission_mode:p.spec.permission_mode,
+    permission_modes:['default','acceptEdits','plan'],ui_group:failed?'needs_you':'working',
     reason_label:failed?'Start failed':'Starting',state:failed?'idle':'running',reg_status:'starting',
     quiet_s:0,ctx_tokens:0,ctx_pct:null,total_tokens:0,cost:null,agent_cost:null,
     agents:[],agents_running:0,agents_total:0,last_msg:null,pending:null,provisional:true,
@@ -2888,7 +3043,8 @@ function renderProvisionalSession(s){
 function restoreSpawnForm(){
   const p=spawnProvisional;if(!p)return;
   newProvider=p.spec.provider;newDir=p.spec.cwd;newModel=p.spec.model;newEffort=p.spec.effort;
-  newMode=p.spec.mode;newWt=p.spec.worktree;newWtName=p.spec.worktree_name;newMessage=p.spec.message;
+  newMode=p.spec.mode;newPermissionMode=p.spec.permission_mode||'default';newWt=p.spec.worktree;
+  newWtName=p.spec.worktree_name;newMessage=p.spec.message;
   const sid=p.id;spawnProvisional=null;spawnWait=null;newOpen=true;spawnMsg='';
   if(sessionView?.sid===sid)closeSession();
   render(last,true);
@@ -2957,6 +3113,14 @@ function newSection(){
           <option value="plan" ${newMode==='plan'?'selected':''}>Plan</option>
           <option value="default" ${newMode==='default'?'selected':''}>Default</option>
         </select></div>`:''}
+      ${newProvider==='claude'?`<div class="nfcol"><label class="nflab">permission mode</label>
+        <select class="nfsel" onchange="newPermissionMode=this.value">
+          <option value="default" ${newPermissionMode==='default'?'selected':''}>Manual</option>
+          <option value="auto" ${newPermissionMode==='auto'?'selected':''}>Auto</option>
+          <option value="acceptEdits" ${newPermissionMode==='acceptEdits'?'selected':''}>Accept edits</option>
+          <option value="plan" ${newPermissionMode==='plan'?'selected':''}>Plan</option>
+          <optgroup label="Advanced"><option value="dontAsk" ${newPermissionMode==='dontAsk'?'selected':''}>Don't ask</option></optgroup>
+        </select></div>`:''}
     </div>
     ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
       onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
@@ -2989,6 +3153,7 @@ async function startSpawn(spec,provisional){
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({type:'spawn',provider:spec.provider,cwd:spec.cwd,model:spec.model,effort:spec.effort,mode:spec.mode,
+                           permission_mode:spec.permission_mode,
                            worktree:spec.worktree,worktree_name:spec.worktree_name,initial_text:spec.message||undefined})});
     const d=await r.json();
     if(spawnProvisional!==provisional)return;
@@ -3006,6 +3171,7 @@ function doScheduleNew(){
   if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
   if(!newMessage.trim()){spawnMsg='✗ add the message this new session should receive';render(last,true);return;}
   const spec={provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    permission_mode:newProvider==='claude'?newPermissionMode:'',
     worktree:newProvider==='claude'&&newWt,worktree_name:newProvider==='claude'?newWtName:''};
   openSchedule('',null,'',null,spec,newMessage);
 }

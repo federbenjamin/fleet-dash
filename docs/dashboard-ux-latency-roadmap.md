@@ -55,7 +55,7 @@ Three approaches were considered:
 
 When multiple selected accounts or providers are visible, the chip uses the account/window closest
 to its limit. The detail surface still shows every selected account, active-account marker, reset,
-scope, and local lifetime-token qualification exactly as today.
+scope, 5-hour/general-weekly/Fable-weekly gauges, and local lifetime-token qualification.
 
 ### Session cards and shell
 
@@ -153,6 +153,7 @@ CW ▁▁▁▂▁▁▃▁…
 | NOW-002 | State totals leave the standalone header and appear in All/Needs you/Working/Available chips; Needs you equals distinct visible sessions. | M1 |
 | NOW-003 | Subagents chip count and flat active-child cards use authoritative lifecycle states and open the correct child. | M1 |
 | USE-001 | Usage is a command-bar chip; full detail opens as popover/sheet; only the worst selected account/window appears at 70%/90% warning. | M1 |
+| USE-002 | Each selected Claude account shows its provider-reported Fable weekly percentage and reset; it participates in the worst-quota warning. | M3 |
 | SHELL-001 | Navigation rail supports per-device left/right placement on desktop without changing mobile navigation. | M1 |
 | SHELL-002 | Overlay stacking and close restore chat scroll/evidence state; menus are never below evidence. | M1 |
 | VIEW-001 | Markdown viewer toolbar shows filename/actions only and no session metadata separator. | M1 |
@@ -266,12 +267,30 @@ forecast races, and rejected-start restoration; measured provisional first feedb
 
 ### M3 — Claude permissions and worktree-safe close
 
-Status: Pending
+Status: Complete · 2026-07-16
 
-- Implement `PERM-001`–`PERM-002` and `CLOSE-001`–`CLOSE-002`.
+- Implement `PERM-001`–`PERM-002`, `CLOSE-001`–`CLOSE-002`, and `USE-002`.
 - First verify the installed Claude CLI's exact permission-mode transition in a disposable session.
 - Add bounded Git worktree inspection and server-side validated cleanup actions. Keep provider close
   and optional filesystem cleanup as separately reported outcomes.
+
+Verified against the installed Claude Code 2.1.211 on 2026-07-16 with a disposable session:
+Shift+Tab cycles `default` → `acceptEdits` → `plan` → `default` when no optional mode is available.
+Claude adds `auto` only for an eligible account/provider/model and adds `bypassPermissions` only
+when the process was started with an enabling flag; the latter presents Claude's own startup warning.
+`dontAsk` never enters the live cycle and is therefore a new-session Advanced choice, not a fake
+live mutation. Fleet never accepts Claude's bypass warning on the user's behalf.
+
+Implemented the state-gated native permission selector, new-session permission choice, capability-
+gated bypass warning, preview-ticketed secondary-worktree close, dirty/ignored evidence, shared-
+session block, revision recheck, and post-close cleanup reporting. Added each selected Claude
+account's provider-reported Fable weekly percentage/reset to the Usage detail and worst-quota chip
+calculation. Disposable Git tests proved primary worktrees and branches survive, stale status is
+refused, and clean/forced secondary worktrees are removed only through fixed argv. The Python suite
+passed 176/176. The deterministic browser suite passed 101/102 across both viewports; the only miss
+was one saturated mobile feedback timing sample (296.9 ms), while its functional assertions and the
+other 101 flows passed. The identical mobile latency flow then passed three consecutive isolated
+runs without weakening the 100 ms gate.
 
 Exit gate: unit/API/browser coverage proves mode/state/capability gates and path/argv safety. Live
 Claude permission changes and clean/dirty worktree cleanup pass only in purpose-created disposable

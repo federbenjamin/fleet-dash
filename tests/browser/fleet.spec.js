@@ -114,10 +114,12 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   }
 
   await reset(page, 'usage-warning');
-  await expect(page.locator('#usagechip')).toHaveText('Usage · 94%');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · 96%');
   await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('Fable weekly');
+  await expect(page.locator('#usagebody')).toContainText('96%');
   await expect(page.locator('#usagebody')).toContainText('second@example.com');
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(page.locator('#usagepanel')).toBeHidden();
@@ -368,6 +370,8 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
     '·codex@example.com', '·pro', '·12k lifetime tokens']);
   await expect(page.locator('#usagebody .uaccount')).toHaveCount(2);
   await expect(page.locator('#usagebody')).toContainText('weekly');
+  await expect(page.locator('#usagebody')).toContainText('Fable weekly');
+  await expect(page.locator('#usagebody .uaccount').nth(0)).toContainText('41%');
   await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
@@ -674,6 +678,40 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
 });
 
+test('Claude permission modes are capability-gated and bypass always warns', async ({ page }) => {
+  await reset(page);
+  const card = page.locator('[data-sid="claude-one"]');
+  await card.locator('.shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByRole('button', { name: 'Auto', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /Don't ask/ })).toBeDisabled();
+  await page.getByRole('button', { name: 'Accept edits', exact: true }).click();
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('acceptEdits');
+
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('button', { name: 'Bypass permissions', exact: true }).click();
+  await expect(page.locator('#confirm')).toContainText('Use Bypass permissions?');
+  await expect(page.locator('#confirm')).toContainText('isolated, disposable environment');
+  await page.locator('#confirm').getByRole('button', { name: 'cancel' }).click();
+  expect((await fixtureState(page)).sessions[0].permission_mode).toBe('acceptEdits');
+
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('button', { name: 'Bypass permissions', exact: true }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'use bypass permissions' }).click();
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('bypassPermissions');
+
+  await page.locator('#sclose').click();
+  await card.getByRole('button', { name: /more/ }).click();
+  await card.getByText('session info', { exact: true }).click();
+  const selector = card.locator('select.permissionselect');
+  await expect(selector).toHaveValue('bypassPermissions');
+  await selector.selectOption('plan');
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('plan');
+});
+
 test('brand-new Claude sessions are interactive before the first transcript exists', async ({ page }) => {
   await reset(page, 'claude-starting');
   const card = page.locator('[data-sid="claude-one"]');
@@ -773,7 +811,7 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await openTerminal.click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
-  await expect(page.getByRole('button', { name: 'Plan', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Plan', exact: true })).toBeVisible();
   await page.getByRole('menuitem', { name: /Close session/ }).click();
   await expect(page.locator('#confirm')).toContainText('iTerm tab stays open');
   await page.locator('#confirm').getByRole('button', { name: 'cancel' }).click();
@@ -795,6 +833,52 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await goTo(page, 'history');
   await expect(page.locator('#history')).toContainText('2 sessions');
   await expect(page.locator('#history')).toContainText('Codex parity work');
+});
+
+test('secondary-worktree close preserves by default and force removal lists every risk', async ({ page }) => {
+  await reset(page, 'close-worktree-dirty');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  const modal = page.locator('#confirm');
+  await expect(modal).toContainText('Secondary worktree');
+  await expect(modal).toContainText('engine.py');
+  await expect(modal).toContainText('static/app.js');
+  await expect(modal).toContainText('notes.txt');
+  await expect(modal).toContainText('build/cache.bin');
+  await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();
+  await modal.getByRole('button', { name: 'force remove dirty worktree' }).click();
+  await expect(modal).toContainText('permanently deletes every listed worktree file');
+  await modal.getByRole('button', { name: 'close and force remove' }).click();
+  await expect(page.locator('#sview')).toBeHidden();
+  const state = await fixtureState(page);
+  expect(state.worktree_removed).toBe(true);
+  expect(state.actions.slice(-3).map(item => item.type)).toEqual([
+    'close_preview', 'close', 'worktree_cleanup']);
+  expect(state.actions.at(-1).force).toBe(true);
+
+  await reset(page, 'close-worktree-shared');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  await expect(modal).toContainText('Codex parity work');
+  await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();
+  await expect(modal.getByRole('button', { name: 'force remove dirty worktree' })).toHaveCount(0);
+  await modal.getByRole('button', { name: 'cancel' }).click();
+});
+
+test('cleanup failure closes the session but reports the preserved worktree', async ({ page }) => {
+  await reset(page, 'close-worktree-cleanup-failure');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'force remove dirty worktree' }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'close and force remove' }).click();
+  await expect(page.locator('#confirm')).toContainText('Session closed · worktree preserved');
+  await expect(page.locator('#confirm')).toContainText('fixture Git removal failed');
+  await expect(page.locator('#sview')).toBeHidden();
+  await page.locator('#confirm').getByRole('button', { name: 'close' }).click();
+  expect((await fixtureState(page)).worktree_removed).not.toBe(true);
 });
 
 test('single, multi, free-text, dismiss, invalid, and stale questions', async ({ page }) => {
@@ -937,6 +1021,10 @@ test('new sessions open a provisional card and chat before native startup return
   await reset(page, 'spawn-slow');
   await page.getByRole('button', { name: '+ new coding session' }).click();
   const form = page.locator('.newform');
+  const permission = form.locator('select').filter({ has: page.locator('option[value="dontAsk"]') });
+  await expect(permission).toHaveValue('default');
+  await expect(permission.locator('option[value="auto"]')).toHaveCount(1);
+  await expect(permission.locator('option[value="dontAsk"]')).toHaveText("Don't ask");
   await form.locator('select').first().selectOption('codex');
   await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
   await form.locator('textarea.nfmessage').fill('Start with immediate feedback');

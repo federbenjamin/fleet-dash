@@ -23,7 +23,7 @@ def capabilities(**overrides):
            "decide_approval": False, "spawn_agent": True, "relay_agent": True,
            "relay_agent_direct": False, "account_usage": True, "exact_cost": False,
            "measured_throughput": False, "archive": True, "compact": True,
-           "review": True, "files": True}
+           "review": True, "files": True, "change_permission_mode": False}
     out.update(overrides)
     return out
 
@@ -37,6 +37,9 @@ def base_session(provider, sid, title):
             "model": "gpt-5.4" if codex else "claude-sonnet-4-5",
             "family": "codex" if codex else "sonnet", "effort": "high",
             "collaboration_mode": "plan" if codex else None,
+            "permission_mode": None if codex else "default",
+            "permission_modes": [] if codex else ["default", "acceptEdits", "plan",
+                                                     "bypassPermissions"],
             "running": None, "last_msg": {"role": "assistant",
                 "text": "Ready for the next task."}, "state": "idle",
             "reg_status": "idle", "quiet_s": 3, "ctx_tokens": 1200,
@@ -69,7 +72,7 @@ def base_session(provider, sid, title):
                  "confidence": "confirmed"}],
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
-                measured_throughput=not codex)}
+                measured_throughput=not codex, change_permission_mode=not codex)}
 
 
 def fresh_state():
@@ -471,13 +474,16 @@ def fleet():
                     "show_week": True, "show_active": True, "refresh_seconds": 30,
                     "profiles": [{"id": "one", "email": "claude@example.com",
                         "active": True, "five_hour_pct": 20, "weekly_pct": 30,
+                        "fable_weekly_pct": 96 if STATE.get("scenario") == "usage-warning" else 41,
                         "five_hour_reset": "2099-01-01T00:00:00Z",
-                        "weekly_reset": "2099-01-07T00:00:00Z"},
+                        "weekly_reset": "2099-01-07T00:00:00Z",
+                        "fable_weekly_reset": "2099-01-08T00:00:00Z"},
                         {"id": "two", "email": "second@example.com", "active": False,
                          "five_hour_pct": 94 if STATE.get("scenario") == "usage-warning" else 4,
-                         "weekly_pct": 8,
+                         "weekly_pct": 8, "fable_weekly_pct": 12,
                          "five_hour_reset": "2099-01-01T02:00:00Z",
-                         "weekly_reset": "2099-01-07T02:00:00Z"}]},
+                         "weekly_reset": "2099-01-07T02:00:00Z",
+                         "fable_weekly_reset": "2099-01-08T02:00:00Z"}]},
                 "codex": {"provider": "codex", "email": "codex@example.com",
                     "account_id": "codex@example.com", "plan_type": "pro",
                     "lifetime_tokens": 12345, "buckets": [{"id": "codex:primary",
@@ -516,7 +522,7 @@ def set_scenario(name):
     STATE = fresh_state()
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
-        name.startswith("mobile-needs-you")) else codex_session()
+        name.startswith("mobile-needs-you") or name.startswith("close-worktree")) else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -614,6 +620,13 @@ def set_scenario(name):
         STATE["fail_text"] = True
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
+    elif name.startswith("close-worktree"):
+        session.update(cwd="/Users/test/fleet-dash-worktrees/close-me",
+                       branch="feature/close-me", project="fleet-dash")
+        if name == "close-worktree-shared":
+            codex_session()["cwd"] = session["cwd"]
+        if name == "close-worktree-cleanup-failure":
+            STATE["fail_cleanup"] = True
     elif name == "reply-requested":
         session.update(state="turn_done", reg_status="idle", reply_requested=True,
                        convo_v="reply:1", quiet_s=12,
@@ -1220,8 +1233,11 @@ class Handler(BaseHTTPRequestHandler):
                     if STATE.get("scenario") == "spawn-slow":
                         time.sleep(.5)
                     exact = "codex:new" if payload.get("provider") == "codex" else "claude-new"
-                    STATE["sessions"].append(base_session(payload.get("provider") or "claude",
-                                                          exact, "New coding session"))
+                    spawned = base_session(payload.get("provider") or "claude",
+                                           exact, "New coding session")
+                    if spawned["provider"] == "claude":
+                        spawned["permission_mode"] = payload.get("permission_mode") or "default"
+                    STATE["sessions"].append(spawned)
                     STATE.setdefault("contexts", {})[exact] = []
                     return self.json_reply({"ok": True, "session_id": exact,
                                             "cwd": payload.get("cwd")})
@@ -1276,9 +1292,51 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_reply({"ok": False,
                                                 "error": "session is not reopenable"})
                     return self.json_reply({"ok": True, "reopened": True})
+                if payload.get("type") == "worktree_cleanup":
+                    if payload.get("cleanup_ticket") != "fixture-cleanup-ticket":
+                        return self.json_reply({"ok": False, "error": "cleanup preview expired"})
+                    if STATE.get("fail_cleanup"):
+                        return self.json_reply({"ok": False,
+                            "error": "fixture Git removal failed", "preserved": True,
+                            "worktree": "/Users/test/fleet-dash-worktrees/close-me"})
+                    STATE["worktree_removed"] = True
+                    return self.json_reply({"ok": True, "removed": True,
+                        "forced": payload.get("force") is True,
+                        "worktree": "/Users/test/fleet-dash-worktrees/close-me",
+                        "branch_preserved": True})
                 if not session:
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")
+                if typ == "close_preview":
+                    secondary = "fleet-dash-worktrees" in session.get("cwd", "")
+                    if not secondary:
+                        return self.json_reply({"ok": True, "secondary_worktree": False,
+                            "remove_allowed": False, "force_remove_allowed": False})
+                    dirty = STATE.get("scenario") != "close-worktree-clean"
+                    shared = ([{"session_id": "codex:thread-one", "provider": "codex",
+                                "title": "Codex parity work"}]
+                              if STATE.get("scenario") == "close-worktree-shared" else [])
+                    return self.json_reply({"ok": True, "secondary_worktree": True,
+                        "inspect_ok": True, "root": "/Users/test/fleet-dash",
+                        "worktree": session["cwd"], "branch": session["branch"],
+                        "revision": "fixture-close-revision",
+                        "cleanup_ticket": "fixture-cleanup-ticket", "dirty": dirty,
+                        "dirty_counts": {"staged": 1 if dirty else 0,
+                            "unstaged": 1 if dirty else 0, "untracked": 1 if dirty else 0,
+                            "conflicts": 0}, "dirty_total": 3 if dirty else 0,
+                        "dirty_files": ([
+                            {"path": "engine.py", "category": "staged", "status": "M."},
+                            {"path": "static/app.js", "category": "unstaged", "status": ".M"},
+                            {"path": "notes.txt", "category": "untracked", "status": "??"}]
+                            if dirty else []),
+                        "ignored_count": 1 if dirty else 0,
+                        "ignored_files": ["build/cache.bin"] if dirty else [],
+                        "shared_sessions": shared,
+                        "remove_allowed": not dirty and not shared,
+                        "force_remove_allowed": dirty and not shared,
+                        "reason": ("Another live Fleet session is using this worktree."
+                                   if shared else "The worktree contains files that removal would erase."
+                                   if dirty else None)})
                 if typ == "text":
                     if STATE.get("fail_text"):
                         return self.json_reply({"ok": False, "error": "terminal rejected input"})
@@ -1297,6 +1355,13 @@ class Handler(BaseHTTPRequestHandler):
                         "Open a Codex TUI attached to Fleet's shared App Server")
                 elif typ == "mode":
                     session["collaboration_mode"] = payload.get("mode")
+                    return self.json_reply({"ok": True, "mode": payload.get("mode")})
+                elif typ == "permission_mode":
+                    if not session.get("capabilities", {}).get("change_permission_mode"):
+                        return self.json_reply({"ok": False, "error": "Claude is not idle"})
+                    if payload.get("mode") not in session.get("permission_modes", []):
+                        return self.json_reply({"ok": False, "error": "mode unavailable"})
+                    session["permission_mode"] = payload.get("mode")
                     return self.json_reply({"ok": True, "mode": payload.get("mode")})
                 elif typ == "close":
                     STATE["sessions"] = [item for item in STATE["sessions"]

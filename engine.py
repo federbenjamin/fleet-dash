@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, datetime as dt
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, datetime as dt
 from collections import deque
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
@@ -421,6 +421,10 @@ class Tail:
         self.offset = 0
         self.ti = self.tw = self.tr = self.to = 0
         self.model = ""
+        # Claude writes mode changes as top-level `permission-mode` records and
+        # also stamps the effective mode onto human prompt rows. Keep the newest
+        # observed value; the live registry does not expose it.
+        self.permission_mode = None
         self.last_usage = None          # usage dict of last assistant row
         self.last_shape = None          # ('assistant', stop_reason, [content types]) or ('user', kind)
         self.first_ts = None
@@ -481,6 +485,14 @@ class Tail:
             self.last_ts = ts
         if o.get("isCompactSummary"):
             self.saw_compaction = True
+        permission_mode = o.get("permissionMode")
+        if o.get("type") == "permission-mode":
+            permission_mode = o.get("permissionMode")
+        if permission_mode in ("default", "acceptEdits", "plan", "auto",
+                               "dontAsk", "bypassPermissions"):
+            self.permission_mode = permission_mode
+        if o.get("type") == "permission-mode":
+            return
         if o.get("type") == "system":
             self._system_event(o, ts)
             return
@@ -886,6 +898,9 @@ class Engine:
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
+        self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
+        self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
+        self._cleanup_lock = threading.Lock()
         self.db = None
         self.notified = {}              # dedupe keys -> t
         self.seeded = False             # first pass registers pre-existing states silently
@@ -1390,6 +1405,8 @@ class Engine:
                     "project": os.path.basename(cwd) or cwd, "cwd": cwd,
                     "branch": None, "model": "", "family": "other",
                     "effort": self.effort_for(sid), "running": None,
+                    "permission_mode": None,
+                    "permission_modes": ["default", "acceptEdits", "plan"],
                     "last_msg": None, "_latest_prose": None, "repo_outcome": None,
                     "state": state, "reg_status": reg_status, "quiet_s": 0,
                     "ctx_tokens": None, "ctx_pct": None, "total_tokens": None,
@@ -1404,6 +1421,7 @@ class Engine:
                     "agents_total": 0, "agent_cost": None,
                     "capabilities": {"submit": True, "interrupt": state == "running",
                         "close": True, "focus_terminal": True,
+                        "change_permission_mode": False,
                         "answer_structured": True, "decide_approval": True,
                         "spawn_agent": True, "relay_agent": True,
                         "account_usage": True, "exact_cost": True},
@@ -1483,6 +1501,7 @@ class Engine:
             ctx = mt.context_tokens()
             fam = model_family(mt.model)
             cw = cfg["context_windows"].get(fam, cfg["context_windows"]["default"])
+            permission_modes = self._claude_permission_modes(reg, mt)
             sessions.append({
                 "session_id": sid,
                 "native_session_id": sid,
@@ -1495,6 +1514,8 @@ class Engine:
                 "branch": mt.git_branch,
                 "model": mt.model, "family": fam,
                 "effort": self.effort_for(sid),
+                "permission_mode": mt.permission_mode,
+                "permission_modes": permission_modes,
                 # what this turn is running: a Skill beats the slash command that
                 # launched it (a /command whose body invokes a skill shows the skill)
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
@@ -1530,6 +1551,8 @@ class Engine:
                 "cost_source": "calculated",
                 "capabilities": {"submit": True, "interrupt": state == "running",
                     "close": True,
+                    "change_permission_mode": (reg_status == "idle" and
+                        mt.permission_mode in permission_modes),
                     "focus_terminal": True, "answer_structured": True,
                     "decide_approval": True, "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
@@ -1538,6 +1561,12 @@ class Engine:
         self.registry_status_since = {
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
+        }
+        live_pids = {int(session.get("pid") or 0) for session in sessions
+                     if session.get("provider") == "claude"}
+        self._claude_command_cache = {
+            pid: command for pid, command in self._claude_command_cache.items()
+            if pid in live_pids
         }
         # Codex is a second provider inside the same fleet. A failed/missing Codex
         # installation must not take down the existing Claude dashboard.
@@ -2035,6 +2064,9 @@ class Engine:
                 "five_hour_reset": self._claude_usage_iso(usage.get("sessionResetTime")),
                 "weekly_pct": pct("weeklyPercentage"),
                 "weekly_reset": self._claude_usage_iso(usage.get("weeklyResetTime")),
+                "fable_weekly_pct": pct("fableWeeklyPercentage"),
+                "fable_weekly_reset": self._claude_usage_iso(
+                    usage.get("fableWeeklyResetTime")),
                 "updated_at": self._claude_usage_iso(usage.get("lastUpdated")),
             })
         def refresh_interval(profile):
@@ -3405,6 +3437,356 @@ Treat this as an independent session. Verify the repository state before changin
         return ctype, data, None
 
     # ------------------------------------------------------------ injection
+    @staticmethod
+    def _bounded_process(argv, timeout=8, max_output=524_288):
+        """Run fixed argv while bounding combined stdout/stderr in memory."""
+        try:
+            process = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        except (FileNotFoundError, OSError) as exc:
+            return {"ok": False, "code": None, "stdout": "", "stderr": str(exc),
+                    "truncated": False}
+        selector = selectors.DefaultSelector()
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + timeout
+        total = 0
+        truncated = timed_out = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    process.kill()
+                    break
+                events = selector.select(min(0.1, remaining))
+                if not events and process.poll() is not None:
+                    events = [(key, selectors.EVENT_READ)
+                              for key in list(selector.get_map().values())]
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 65_536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    available = max_output - total
+                    if len(chunk) > available:
+                        buffers[key.data].extend(chunk[:max(0, available)])
+                        total = max_output
+                        truncated = True
+                        process.kill()
+                        break
+                    buffers[key.data].extend(chunk)
+                    total += len(chunk)
+                if truncated:
+                    break
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        stderr = buffers["stderr"].decode("utf-8", "replace")
+        if timed_out:
+            stderr = (stderr + "\nGit probe timed out").strip()
+        if truncated:
+            stderr = (stderr + "\nGit probe exceeded its output limit").strip()
+        return {"ok": process.returncode == 0 and not timed_out and not truncated,
+                "code": process.returncode,
+                "stdout": buffers["stdout"].decode("utf-8", "replace"),
+                "stderr": stderr, "truncated": truncated, "timeout": timed_out}
+
+    @staticmethod
+    def _parse_worktree_list(raw):
+        entries = []
+        current = None
+        for record in raw.split("\0"):
+            if not record:
+                if current:
+                    entries.append(current)
+                    current = None
+                continue
+            if record.startswith("worktree "):
+                if current:
+                    entries.append(current)
+                current = {"path": os.path.realpath(record[9:]), "locked": False,
+                           "prunable": False}
+                continue
+            if current is None:
+                continue
+            if record.startswith("HEAD "):
+                current["head"] = record[5:]
+            elif record.startswith("branch "):
+                current["branch"] = record[7:]
+            elif record == "detached":
+                current["detached"] = True
+            elif record.startswith("locked"):
+                current["locked"] = True
+                current["lock_reason"] = record[6:].strip()
+            elif record.startswith("prunable"):
+                current["prunable"] = True
+                current["prune_reason"] = record[8:].strip()
+        if current:
+            entries.append(current)
+        return entries
+
+    def _sessions_using_worktree(self, worktree, exclude=()):
+        target = os.path.realpath(worktree)
+        excluded = {str(value) for value in exclude}
+        with self.lock:
+            records = copy.deepcopy(self.snapshot_cache.get("sessions") or [])
+        seen = {str(item.get("session_id") or "") for item in records}
+        for reg in self.live_sessions():
+            sid = str(reg.get("sessionId") or "")
+            if sid not in seen:
+                records.append({"session_id": sid, "provider": "claude",
+                                "title": reg.get("name"), "cwd": reg.get("cwd")})
+        users = []
+        for item in records:
+            sid = str(item.get("session_id") or item.get("sessionId") or "")
+            if not sid or sid in excluded or not item.get("cwd"):
+                continue
+            identity = self.workstream_identity(item["cwd"])
+            if identity.get("kind") == "git" and \
+               os.path.realpath(identity.get("worktree") or "") == target:
+                users.append({"session_id": sid, "provider": item.get("provider") or "claude",
+                              "title": item.get("title") or item.get("name") or sid})
+        return users
+
+    def close_worktree_preview(self, session, issue_ticket=True):
+        """Describe optional cleanup without trusting a client path."""
+        sid = str(session.get("session_id") or session.get("sessionId") or "")
+        provider = str(session.get("provider") or "claude")
+        identity = self.workstream_identity(session.get("cwd"))
+        base = {"ok": True, "session_id": sid, "provider": provider,
+                "secondary_worktree": False, "remove_allowed": False,
+                "force_remove_allowed": False, "dirty": False,
+                "dirty_counts": {}, "dirty_files": [], "ignored_count": 0,
+                "ignored_files": [], "shared_sessions": []}
+        if identity.get("kind") != "git":
+            return {**base, "reason": "This session is not in a Git worktree."}
+        root = os.path.realpath(identity.get("root") or "")
+        worktree = os.path.realpath(identity.get("worktree") or "")
+        if not root or not worktree or root == worktree:
+            return {**base, "root": root, "worktree": worktree,
+                    "reason": "The primary worktree is never removable from Fleet."}
+        base.update(secondary_worktree=True, root=root, worktree=worktree)
+        listing = self._bounded_process(
+            ["git", "-C", root, "worktree", "list", "--porcelain", "-z"],
+            timeout=5, max_output=262_144)
+        if not listing["ok"]:
+            return {**base, "inspect_ok": False,
+                    "reason": (listing["stderr"] or "Git worktree registration is unavailable")[:500]}
+        entries = self._parse_worktree_list(listing["stdout"])
+        registered = next((item for item in entries if item["path"] == worktree), None)
+        primary = entries[0]["path"] if entries else None
+        if not registered or primary == worktree or registered.get("prunable"):
+            return {**base, "inspect_ok": False, "registered": bool(registered),
+                    "reason": "The linked worktree registration is stale or unsafe."}
+        if registered.get("locked"):
+            return {**base, "inspect_ok": False, "registered": True, "locked": True,
+                    "reason": "This worktree is locked by Git and cannot be removed from Fleet."}
+
+        status_result = self._bounded_process(
+            ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
+             "--untracked-files=all"], timeout=8, max_output=1_048_576)
+        ignored_result = self._bounded_process(
+            ["git", "-C", worktree, "ls-files", "--others", "--ignored",
+             "--exclude-standard", "-z"], timeout=8, max_output=524_288)
+        if not status_result["ok"] or not ignored_result["ok"]:
+            detail = status_result["stderr"] or ignored_result["stderr"] or \
+                "Git could not completely inspect the worktree"
+            return {**base, "inspect_ok": False, "registered": True,
+                    "reason": detail[:500]}
+
+        status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
+        files = status.get("files") or []
+        ignored = [path for path in ignored_result["stdout"].split("\0") if path]
+        categories = {
+            "staged": [item for item in files if item.get("staged")],
+            "unstaged": [item for item in files if item.get("unstaged") and
+                          not item.get("untracked")],
+            "untracked": [item for item in files if item.get("untracked")],
+            "conflicts": [item for item in files if item.get("conflict")],
+        }
+        dirty_counts = {key: len(value) for key, value in categories.items()}
+        dirty_files = []
+        seen_paths = set()
+        for category in ("conflicts", "staged", "unstaged", "untracked"):
+            for item in categories[category]:
+                path = item.get("path")
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                dirty_files.append({**item, "category": category})
+        shared = self._sessions_using_worktree(worktree, exclude=(sid,))
+        dirty = bool(files)
+        destructive_contents = dirty or bool(ignored)
+        material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
+                    status_result["stdout"] + "\0" + ignored_result["stdout"] + "\0" +
+                    json.dumps(shared, sort_keys=True, separators=(",", ":")))
+        revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+        result = {**base, "inspect_ok": True, "registered": True,
+                  "branch": status.get("branch"), "head_oid": status.get("head_oid"),
+                  "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
+                  "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
+                  "dirty_files_truncated": len(dirty_files) > 100,
+                  "ignored_count": len(ignored), "ignored_files": ignored[:40],
+                  "ignored_files_truncated": len(ignored) > 40,
+                  "shared_sessions": shared,
+                  "remove_allowed": not destructive_contents and not shared,
+                  "force_remove_allowed": destructive_contents and not shared}
+        if shared:
+            result["reason"] = "Another live Fleet session is using this worktree."
+        elif destructive_contents:
+            result["reason"] = "The worktree contains files that removal would erase."
+        if issue_ticket:
+            token = secrets.token_urlsafe(24)
+            ticket = {"session_id": sid, "provider": provider, "root": root,
+                      "worktree": worktree, "revision": revision,
+                      "pid": session.get("pid"), "expires": time.time() + 300,
+                      "closed_at": None}
+            with self._cleanup_lock:
+                now = time.time()
+                self._cleanup_tickets = {key: value for key, value in
+                    self._cleanup_tickets.items() if value.get("expires", 0) > now}
+                self._cleanup_tickets[token] = ticket
+            result["cleanup_ticket"] = token
+        return result
+
+    def _mark_cleanup_ticket_closed(self, token, sid):
+        if not token:
+            return
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.get(str(token))
+            if ticket and ticket.get("session_id") == str(sid) and \
+               ticket.get("expires", 0) > time.time():
+                ticket["closed_at"] = time.time()
+
+    def _cleanup_ticket_matches(self, token, sid):
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.get(str(token or ""))
+            return bool(ticket and ticket.get("session_id") == str(sid) and
+                        ticket.get("expires", 0) > time.time())
+
+    def cleanup_closed_worktree(self, action):
+        token = str(action.get("cleanup_ticket") or "")
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.pop(token, None)
+        if not ticket or ticket.get("expires", 0) <= time.time():
+            return {"ok": False, "error": "cleanup preview expired — the worktree was preserved"}
+        if not ticket.get("closed_at"):
+            return {"ok": False, "error": "the session did not close — the worktree was preserved"}
+        if str(action.get("session_id") or "") != ticket["session_id"]:
+            return {"ok": False, "error": "cleanup ticket does not match this session"}
+        if ticket.get("provider") == "claude" and ticket.get("pid"):
+            command = ""
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                try:
+                    command = subprocess.run(
+                        ["ps", "-p", str(ticket["pid"]), "-o", "command="],
+                        capture_output=True, text=True, timeout=2).stdout.strip()
+                except Exception:
+                    command = "unknown"
+                if not command:
+                    break
+                time.sleep(0.05)
+            if command:
+                return {"ok": False, "error": "the Claude process is still closing — "
+                        "the worktree was preserved", "worktree": ticket["worktree"],
+                        "preserved": True}
+        force = action.get("force") is True
+        session = {"session_id": ticket["session_id"], "provider": ticket["provider"],
+                   "cwd": ticket["worktree"]}
+        preview = self.close_worktree_preview(session, issue_ticket=False)
+        if not preview.get("inspect_ok") or preview.get("revision") != ticket["revision"]:
+            return {"ok": False, "error": "the worktree changed after preview — it was preserved",
+                    "worktree": ticket["worktree"], "preserved": True}
+        if preview.get("root") != ticket["root"] or preview.get("worktree") != ticket["worktree"]:
+            return {"ok": False, "error": "worktree identity changed — it was preserved",
+                    "worktree": ticket["worktree"], "preserved": True}
+        allowed = preview.get("force_remove_allowed") if force else preview.get("remove_allowed")
+        if not allowed:
+            return {"ok": False, "error": preview.get("reason") or
+                    "worktree removal is no longer safe", "worktree": ticket["worktree"],
+                    "preserved": True}
+        argv = ["git", "-C", ticket["root"], "worktree", "remove"]
+        if force:
+            argv.append("--force")
+        argv.append(ticket["worktree"])
+        removed = self._bounded_process(argv, timeout=30, max_output=262_144)
+        if not removed["ok"]:
+            return {"ok": False, "error": (removed["stderr"] or removed["stdout"] or
+                    "Git worktree removal failed")[:500], "worktree": ticket["worktree"],
+                    "preserved": os.path.exists(ticket["worktree"])}
+        self._workstream_cache.clear()
+        self._workstreams_snapshot_cache = None
+        return {"ok": True, "removed": True, "forced": force,
+                "worktree": ticket["worktree"], "branch_preserved": True}
+
+    def _claude_process_command(self, reg):
+        """Return one verified process command per live Claude PID.
+
+        This is used only to discover whether Claude was started with a bypass-
+        enabling flag. Cache it so the two-second fleet scan never gains a `ps`
+        subprocess per session.
+        """
+        try:
+            pid = int(reg.get("pid") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if pid <= 1:
+            return ""
+        if pid in self._claude_command_cache:
+            return self._claude_command_cache[pid]
+        try:
+            command = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="], capture_output=True,
+                text=True, timeout=5).stdout.strip()
+        except Exception:
+            command = ""
+        self._claude_command_cache[pid] = command
+        return command
+
+    @staticmethod
+    def _claude_auto_model(model):
+        """Whether the observed concrete model can expose Claude Auto mode."""
+        value = str(model or "").lower().replace(".", "-")
+        return bool(re.search(
+            r"(?:sonnet-(?:4-6|5)|opus-(?:4-[678]|[5-9])|fable-5)", value))
+
+    def _claude_permission_modes(self, reg, tail):
+        """Native Shift-Tab cycle for this process, in its documented order."""
+        modes = ["default", "acceptEdits", "plan"]
+        command = self._claude_process_command(reg)
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = command.split()
+        bypass = any(item in ("--allow-dangerously-skip-permissions",
+                              "--dangerously-skip-permissions") for item in argv)
+        for index, item in enumerate(argv[:-1]):
+            if item == "--permission-mode" and argv[index + 1] == "bypassPermissions":
+                bypass = True
+        bypass = bypass or "--permission-mode=bypassPermissions" in argv \
+            or tail.permission_mode == "bypassPermissions"
+        if bypass:
+            modes.append("bypassPermissions")
+        if self._claude_auto_model(tail.model) or tail.permission_mode == "auto":
+            modes.append("auto")
+        return modes
+
     def _close_claude_session(self, reg):
         """Terminate only the registered Claude process; never close its terminal tab."""
         try:
@@ -3457,6 +3839,7 @@ Treat this as an independent session. Verify the repository state before changin
         except (PermissionError, OSError) as exc:
             return {"ok": False, "error": f"could not terminate Claude: {exc}"}
         self._tty_cache.pop(pid, None)
+        self._claude_command_cache.pop(pid, None)
         result = {"ok": True, "closed": True, "interrupted": interrupted}
         if interrupt_error:
             result["warning"] = interrupt_error
@@ -3601,7 +3984,11 @@ Treat this as an independent session. Verify the repository state before changin
                 raise OutboxError("unknown Claude model")
             if effort and effort not in self.EFFORTS:
                 raise OutboxError("unknown effort level")
+            permission_mode = str(spec.get("permission_mode") or "default")
+            if permission_mode not in self.CLAUDE_START_PERMISSION_MODES:
+                raise OutboxError("unknown Claude permission mode")
         else:
+            permission_mode = ""
             catalog = {item.get("id"): item for item in self.codex.models}
             if model and model not in catalog:
                 raise OutboxError("unknown Codex model")
@@ -3617,6 +4004,7 @@ Treat this as an independent session. Verify the repository state before changin
             raise OutboxError("new worktree requires a Git repository")
         return {"provider": provider, "cwd": cwd, "model": model, "effort": effort,
                 "mode": str(spec.get("mode") or "plan"),
+                "permission_mode": permission_mode,
                 "worktree": bool(spec.get("worktree")), "worktree_name": name}
 
     def _prepare_outbox_payload(self, payload):
@@ -3711,6 +4099,8 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
         {type:'close', session_id}            (stop if active, then SIGTERM Claude) |
+        {type:'close_preview', session_id}    (read-only secondary-worktree safety probe) |
+        {type:'worktree_cleanup', session_id, cleanup_ticket, force} |
         {type:'reopen', session_id}           (new terminal: claude --resume ID) |
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
@@ -3727,11 +4117,27 @@ Treat this as an independent session. Verify the repository state before changin
         if action.get("type") in ("git_commit", "git_push", "pr_create_draft",
                                   "pr_mark_ready"):
             return self.repository_action(action)
+        if action.get("type") == "worktree_cleanup":
+            return self.cleanup_closed_worktree(action)
         if str(action.get("session_id") or "").startswith("codex:") \
            and action.get("type") == "focus":
             return self.attach_codex_terminal(action)
         if str(action.get("session_id") or "").startswith("codex:"):
-            return self.codex.act(action)
+            sid = action.get("session_id")
+            with self.lock:
+                session = next((copy.deepcopy(item) for item in
+                    self.snapshot_cache.get("sessions") or []
+                    if item.get("session_id") == sid), None)
+            if action.get("type") == "close_preview":
+                return (self.close_worktree_preview(session) if session else
+                        {"ok": False, "error": "session not live"})
+            if action.get("type") == "close" and action.get("cleanup_ticket") and \
+               not self._cleanup_ticket_matches(action.get("cleanup_ticket"), sid):
+                return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            result = self.codex.act(action)
+            if action.get("type") == "close" and result.get("ok"):
+                self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
+            return result
         if action.get("type") == "spawn":    # no session yet — it makes one
             if action.get("provider") == "codex":
                 return self.spawn_codex_session(action)
@@ -3742,8 +4148,18 @@ Treat this as an independent session. Verify the repository state before changin
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live"}
+        if action.get("type") == "close_preview":
+            return self.close_worktree_preview({**reg, "provider": "claude"})
         if action.get("type") == "close":
-            return self._close_claude_session(reg)
+            if action.get("cleanup_ticket") and not self._cleanup_ticket_matches(
+                    action.get("cleanup_ticket"), sid):
+                return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            result = self._close_claude_session(reg)
+            if result.get("ok"):
+                self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
+            return result
+        if action.get("type") == "permission_mode" and reg.get("status") != "idle":
+            return {"ok": False, "error": "permission mode can change only while Claude is idle"}
         # a prompt answer may only go to a session actually blocked on a prompt —
         # a hook-blocked ask leaves a ghost pending file but the session stays
         # 'busy', and injected digits would land in its main input box
@@ -3764,7 +4180,8 @@ Treat this as an independent session. Verify the repository state before changin
         # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it
         # validates the nonce against the live tail); typing, focusing, interrupting
         # and relaying don't touch the tail at all — build those with no lock.
-        needs_tail = action.get("type") in ("option", "multiq", "permission", "dismiss")
+        needs_tail = action.get("type") in (
+            "option", "multiq", "permission", "dismiss", "permission_mode")
         lock = self.scan_lock if needs_tail else contextlib.nullcontext()
         with lock:
             mt = self.tail_for(path)
@@ -3776,7 +4193,35 @@ Treat this as an independent session. Verify the repository state before changin
             # free text typed into a TUI row must never smuggle keys: strip control
             # chars (a \r would fire as Enter, \x1b starts an escape sequence)
             clean = lambda t: re.sub(r"[\x00-\x1f\x7f]+", " ", str(t or "")).strip()[:300]
-            if typ in ("option", "permission", "multiq", "dismiss"):
+            if typ == "permission_mode":
+                target = str(action.get("mode") or "")
+                allowed = self._claude_permission_modes(reg, mt)
+                current = mt.permission_mode
+                if target not in ("default", "acceptEdits", "plan", "auto",
+                                  "bypassPermissions"):
+                    return {"ok": False, "error": "unknown Claude permission mode"}
+                if current == "dontAsk":
+                    return {"ok": False, "error": "Don't ask is startup-only in Claude Code; "
+                            "start a new session to choose another mode"}
+                if current not in allowed:
+                    return {"ok": False, "error": "Claude has not reported a live permission "
+                            "mode yet — send one message from the terminal first"}
+                if target not in allowed:
+                    if target == "auto":
+                        return {"ok": False, "error": "Auto is unavailable for this running "
+                                "session's model or account"}
+                    if target == "bypassPermissions":
+                        return {"ok": False, "error": "Bypass was not enabled when this Claude "
+                                "process started"}
+                    return {"ok": False, "error": "mode is unavailable for this session"}
+                count = (allowed.index(target) - allowed.index(current)) % len(allowed)
+                if count == 0:
+                    return {"ok": True, "mode": current}
+                # Shift+Tab is Claude's own documented mid-session control. The
+                # cycle is server-derived; the client supplies only an allowlisted
+                # target, never arbitrary keys.
+                steps = [("\x1b[Z", False)] * count
+            elif typ in ("option", "permission", "multiq", "dismiss"):
                 nonce = action.get("nonce")
                 hp = self.hook_pending(sid, reg.get("status"))
                 if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
@@ -3924,10 +4369,18 @@ Treat this as an independent session. Verify the repository state before changin
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
         fast = typ in ("text", "handoff_text", "relay", "focus", "interrupt", "noop")
-        return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
+        result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
+        if typ == "permission_mode" and result.get("ok"):
+            # Claude may defer its transcript marker until the next prompt. Keep
+            # Fleet's state responsive; the next native row remains authoritative.
+            with self.scan_lock:
+                self.tail_for(path).permission_mode = target
+            result["mode"] = target
+        return result
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
+    CLAUDE_START_PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk")
 
     def _create_codex_worktree(self, cwd, requested_name=""):
         identity = self.workstream_identity(cwd)
@@ -4136,8 +4589,8 @@ Treat this as an independent session. Verify the repository state before changin
         """Start a NEW Claude Code session in a fresh iTerm tab.
 
         Every value that reaches the shell is allowlisted or quoted: the model and
-        effort must be members of the fixed sets above, the worktree name is regex-
-        bounded, and the directory must be an existing dir under $HOME. Nothing the
+        effort and permission mode must be members of fixed sets above, the worktree
+        name is regex-bounded, and the directory must be an existing dir under $HOME. Nothing the
         client sends is interpolated raw — the act token opens a terminal here, so a
         free-form command string would be a remote shell."""
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
@@ -4156,6 +4609,9 @@ Treat this as an independent session. Verify the repository state before changin
         effort = str(action.get("effort") or "").strip()
         if effort and effort not in self.EFFORTS:
             return {"ok": False, "error": "unknown effort level"}
+        permission_mode = str(action.get("permission_mode") or "default").strip()
+        if permission_mode not in self.CLAUDE_START_PERMISSION_MODES:
+            return {"ok": False, "error": "unknown Claude permission mode"}
         name = str(action.get("worktree_name") or "").strip()
         if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
             return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
@@ -4177,6 +4633,8 @@ Treat this as an independent session. Verify the repository state before changin
             cmd += f" --model {model}"
         if effort:
             cmd += f" --effort {effort}"
+        if permission_mode != "default":
+            cmd += f" --permission-mode {permission_mode}"
         if worktree:
             cmd += " --worktree" + (f" {name}" if name else "")
         r = self._iterm_write("SPAWN", [(cmd, False)])

@@ -65,7 +65,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
   effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
-  by default. Claude sessions can request a **new git worktree** — it opens
+  by default. Claude sessions choose Manual, Auto, Accept Edits, Plan, or the advanced Don't Ask
+  permission mode; Auto remains subject to Claude's account/model eligibility. Claude sessions can
+  request a **new git worktree** — it opens
   a fresh iTerm tab running `claude` with those flags. Fleet immediately opens a provisional
   card and full chat with the initial message and a startup spinner, then replaces it in place with
   the exact native session. A rejected start keeps the exact setup available to retry or restore.
@@ -152,7 +154,7 @@ the provider without affecting Claude sessions.
   most urgent selected account/window percentage in amber; at 90% it turns red. Tapping opens every
   provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
   middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
-  active-account marker, 5-hour/weekly gauges, visibility setting, and live file updates. Fleet reads
+  active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads
   only display-safe identity/quota fields from the app preferences; its stored credentials never enter
   the Fleet API. Without that app, the current Claude Code login and statusline `rate_limits`
   side-write remain the single-account fallback. The local lifetime-token total comes from
@@ -229,10 +231,13 @@ the provider without affecting Claude sessions.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
   autocomplete), the amber question block when it's blocked on you, and a delivered-file strip.
-  Its top-right **⋮ menu** contains Codex Plan/Default (when applicable), light/dark mode, Stop turn,
-  and Close session. Stop and close both confirm first. Closing an active session stops its current
+  Its top-right **⋮ menu** contains Codex Plan/Default or Claude permission mode (when applicable),
+  light/dark mode, Stop turn, and Close session. Stop and close both confirm first. Closing an active session stops its current
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
-  Claude's iTerm tab remains open. The conversation moves to **History**. The card's bounded Markdown
+  Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
+  the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
+  that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
+  session uses that worktree. The conversation moves to **History**. The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**

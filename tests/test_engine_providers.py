@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -203,15 +204,19 @@ class EngineProviderTest(unittest.TestCase):
                  "oauthAccountJSON": json.dumps({"emailAddress": "first@example.com"}),
                  "claudeUsage": {"sessionPercentage": first_pct,
                                   "weeklyPercentage": 22,
+                                  "fableWeeklyPercentage": 7,
                                   "sessionResetTime": 800_000_000,
-                                  "weeklyResetTime": 800_100_000}},
+                                  "weeklyResetTime": 800_100_000,
+                                  "fableWeeklyResetTime": 800_150_000}},
                 {"id": "profile-two", "name": "second", "isSelectedForDisplay": True,
                  "refreshInterval": 30,
                  "oauthAccountJSON": json.dumps({"emailAddress": "second@example.com"}),
                  "claudeUsage": {"sessionPercentage": 33,
                                   "weeklyPercentage": 44,
+                                  "fableWeeklyPercentage": 66,
                                   "sessionResetTime": 800_200_000,
-                                  "weeklyResetTime": 800_300_000}},
+                                  "weeklyResetTime": 800_300_000,
+                                  "fableWeeklyResetTime": 800_350_000}},
             ]
             with open(self.claude_usage_prefs, "wb") as handle:
                 plistlib.dump({"profiles_v3": json.dumps(profiles).encode(),
@@ -225,6 +230,9 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual([item["email"] for item in usage["profiles"]],
                          ["first@example.com", "second@example.com"])
         self.assertEqual([item["active"] for item in usage["profiles"]], [True, False])
+        self.assertEqual([item["fable_weekly_pct"] for item in usage["profiles"]],
+                         [7, 66])
+        self.assertIsNotNone(usage["profiles"][0]["fable_weekly_reset"])
         self.assertEqual(usage["five_hour_pct"], 11)
         self.assertEqual(usage["refresh_seconds"], 30)
         self.assertNotIn("must-never-leave-the-plist", json.dumps(usage))
@@ -584,6 +592,47 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(relayed["ok"])
         self.assertIn("agent-child", writes[-1][1][0][0])
 
+    def test_claude_permission_mode_uses_only_verified_native_cycle(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet-5")
+        self.engine.tail_for = lambda path: tail
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        changed = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                   "mode": "plan"})
+        self.assertEqual(changed, {"ok": True, "mode": "plan"})
+        self.assertEqual(writes[-1], ("/dev/ttys-test",
+            [("\x1b[Z", False), ("\x1b[Z", False)], 0.4))
+        self.assertEqual(tail.permission_mode, "plan")
+
+        self.engine._claude_command_cache[pid] = (
+            "/usr/local/bin/claude --allow-dangerously-skip-permissions")
+        tail.permission_mode = "plan"
+        bypass = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                  "mode": "bypassPermissions"})
+        self.assertTrue(bypass["ok"])
+        self.assertEqual(writes[-1][1], [("\x1b[Z", False)])
+        tail.permission_mode = "plan"
+        auto = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                "mode": "auto"})
+        self.assertTrue(auto["ok"])
+        self.assertEqual(writes[-1][1], [("\x1b[Z", False), ("\x1b[Z", False)])
+
+        tail.permission_mode = "dontAsk"
+        self.assertIn("startup-only", self.engine.act({"type": "permission_mode",
+            "session_id": "same", "mode": "default"})["error"])
+        reg["status"] = "busy"
+        self.assertIn("idle", self.engine.act({"type": "permission_mode",
+            "session_id": "same", "mode": "plan"})["error"])
+
     def test_claude_close_interrupts_then_terminates_only_registered_process(self):
         pid = 424242
         reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
@@ -623,13 +672,18 @@ class EngineProviderTest(unittest.TestCase):
         self.engine.is_trusted = lambda cwd, trusted=None: True
         with mock.patch.object(engine_module, "HOME", self.tmp.name):
             spawned = self.engine.spawn_session({"cwd": self.cwd, "model": "sonnet",
-                "effort": "high", "worktree": True, "worktree_name": "live-e2e"})
+                "effort": "high", "permission_mode": "acceptEdits",
+                "worktree": True, "worktree_name": "live-e2e"})
         self.assertTrue(spawned["ok"])
         command = writes[-1][1][0][0]
         self.assertRegex(command, r"claude --session-id [0-9a-f-]{36} --model sonnet ")
-        self.assertIn("--effort high --worktree live-e2e", command)
+        self.assertIn("--effort high --permission-mode acceptEdits --worktree live-e2e", command)
         self.assertEqual(spawned["session_id"], command.split("--session-id ", 1)[1].split()[0])
         self.assertFalse(spawned["trust_prompt"])
+        rejected = self.engine.spawn_session({"cwd": self.cwd,
+            "permission_mode": "bypassPermissions"})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("permission mode", rejected["error"])
 
         changed = self.engine.update_settings({"mute_session": "same", "muted": True})
         self.assertTrue(changed["ok"])
@@ -1194,6 +1248,96 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(linked_identity["workstream_id"], main_identity["workstream_id"])
         self.assertEqual(linked_identity["worktree"], os.path.realpath(linked))
 
+    def test_secondary_worktree_close_preview_and_cleanup_are_revision_checked(self):
+        main = os.path.join(self.tmp.name, "close-main")
+        os.makedirs(main)
+
+        def git(*args, cwd=main):
+            return subprocess.run(["git", *args], cwd=cwd, check=True,
+                                  capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.email", "fleet@example.test")
+        git("config", "user.name", "Fleet Test")
+        with open(os.path.join(main, ".gitignore"), "w") as handle:
+            handle.write("build/\n")
+        with open(os.path.join(main, "tracked.txt"), "w") as handle:
+            handle.write("base\n")
+        git("add", ".gitignore", "tracked.txt")
+        git("commit", "-m", "base")
+
+        dirty = os.path.join(self.tmp.name, "close-dirty")
+        git("worktree", "add", "-b", "feature/dirty", dirty)
+        with open(os.path.join(dirty, "tracked.txt"), "a") as handle:
+            handle.write("unstaged\n")
+        with open(os.path.join(dirty, "staged.txt"), "w") as handle:
+            handle.write("staged\n")
+        git("add", "staged.txt", cwd=dirty)
+        with open(os.path.join(dirty, "untracked.txt"), "w") as handle:
+            handle.write("untracked\n")
+        os.makedirs(os.path.join(dirty, "build"))
+        with open(os.path.join(dirty, "build", "cache.bin"), "w") as handle:
+            handle.write("ignored\n")
+
+        session = {"session_id": "same", "provider": "codex", "cwd": dirty}
+        preview = self.engine.close_worktree_preview(session)
+        self.assertTrue(preview["secondary_worktree"])
+        self.assertTrue(preview["inspect_ok"])
+        self.assertFalse(preview["remove_allowed"])
+        self.assertTrue(preview["force_remove_allowed"])
+        self.assertEqual(preview["dirty_counts"], {
+            "staged": 1, "unstaged": 1, "untracked": 1, "conflicts": 0})
+        self.assertEqual(preview["ignored_files"], ["build/cache.bin"])
+        self.assertEqual({item["path"] for item in preview["dirty_files"]},
+                         {"tracked.txt", "staged.txt", "untracked.txt"})
+
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"sessions": [{"session_id": "codex:other",
+                "provider": "codex", "title": "Other", "cwd": dirty}]}
+        shared = self.engine.close_worktree_preview(session)
+        self.assertFalse(shared["force_remove_allowed"])
+        self.assertEqual(shared["shared_sessions"][0]["session_id"], "codex:other")
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"sessions": []}
+
+        self.engine._mark_cleanup_ticket_closed(preview["cleanup_ticket"], "same")
+        removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": preview["cleanup_ticket"], "force": True})
+        self.assertTrue(removed["ok"])
+        self.assertTrue(removed["branch_preserved"])
+        self.assertFalse(os.path.exists(dirty))
+        self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/dirty").returncode, 0)
+
+        clean = os.path.join(self.tmp.name, "close-clean")
+        git("worktree", "add", "-b", "feature/clean", clean)
+        clean_session = {"session_id": "same", "provider": "codex", "cwd": clean}
+        clean_preview = self.engine.close_worktree_preview(clean_session)
+        self.assertTrue(clean_preview["remove_allowed"])
+        self.engine._mark_cleanup_ticket_closed(clean_preview["cleanup_ticket"], "same")
+        clean_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": clean_preview["cleanup_ticket"], "force": False})
+        self.assertTrue(clean_removed["ok"])
+        self.assertFalse(os.path.exists(clean))
+        self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/clean").returncode, 0)
+
+        stale = os.path.join(self.tmp.name, "close-stale")
+        git("worktree", "add", "-b", "feature/stale", stale)
+        stale_session = {"session_id": "same", "provider": "codex", "cwd": stale}
+        stale_preview = self.engine.close_worktree_preview(stale_session)
+        with open(os.path.join(stale, "after-preview.txt"), "w") as handle:
+            handle.write("changed\n")
+        self.engine._mark_cleanup_ticket_closed(stale_preview["cleanup_ticket"], "same")
+        rejected = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": stale_preview["cleanup_ticket"], "force": False})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("changed after preview", rejected["error"])
+        self.assertTrue(os.path.isdir(stale))
+
+        primary = self.engine.close_worktree_preview(
+            {"session_id": "same", "provider": "codex", "cwd": main})
+        self.assertFalse(primary["secondary_worktree"])
+        self.assertFalse(primary["remove_allowed"])
+
     def test_workstreams_keep_missing_and_unrelated_folders_separate(self):
         one = codex_session()
         two = codex_session()
@@ -1372,6 +1516,21 @@ class EngineProviderTest(unittest.TestCase):
         preview = tail.last_message(500)["text"]
         self.assertEqual(len(preview), 500)
         self.assertTrue(preview.endswith("…"))
+
+    def test_tail_tracks_only_known_claude_permission_modes(self):
+        path = os.path.join(self.tmp.name, "permission-mode.jsonl")
+        rows = [
+            {"type": "permission-mode", "permissionMode": "acceptEdits"},
+            {"type": "permission-mode", "permissionMode": "invented"},
+            {"type": "user", "permissionMode": "plan",
+             "message": {"role": "user", "content": "continue"}},
+        ]
+        with open(path, "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        tail = Tail(path)
+        self.assertTrue(tail.poll())
+        self.assertEqual(tail.permission_mode, "plan")
 
 
 if __name__ == "__main__":

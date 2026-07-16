@@ -228,8 +228,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
     `Engine.claude_usage_profiles` watches
     `~/Library/Preferences/HamedElfayome.Claude-Usage.plist` by mtime/size and projects ONLY profile
-    id/name, account email, selected/active state, refresh interval, display flags, quota percentages,
-    resets, and last-update time. The same profile objects also contain session keys and credential
+    id/name, account email, selected/active state, refresh interval, display flags, 5-hour/general-
+    weekly/Fable-weekly quota percentages and resets, and last-update time. The same profile objects
+    also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
     selected account and its active marker. The Now command-bar chip normally says `Usage`; at 70% it
     shows the worst selected account/window percentage in amber and at 90% in red. Its popover/sheet
@@ -342,6 +343,23 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     sequence-gated so an older model result cannot overwrite the latest selection. Message and relay
     composers are `<textarea>` controls: Return is always a newline; only Command-Return on macOS or
     Control-Return elsewhere sends.
+40. **Claude permission mode is a native, state-gated control.** `Tail.permission_mode` accepts only
+    Claude's allowlisted transcript values. Live changes are allowed only for an idle registered
+    Claude session whose process exposes the target in `permission_modes`; `act(permission_mode)`
+    composes fixed Shift+Tab steps and retains the 0.4s native-TUI inter-key delay. `dontAsk` is a
+    new-session-only Advanced choice because it is not in Claude's live cycle. `bypassPermissions`
+    is exposed only when the already-running process was launched with Claude's enabling flag and
+    the client must show a separate high-warning confirmation every time. Fleet never accepts
+    Claude's folder-trust or bypass warning on the user's behalf.
+41. **Secondary-worktree cleanup is preview-ticketed and happens after provider close.**
+    `close_worktree_preview` resolves the canonical workstream identity, refuses primary/unregistered/
+    locked/prunable worktrees, and returns bounded porcelain-v2 dirty plus ignored-file evidence.
+    Its opaque five-minute ticket binds session/provider/root/worktree and the exact status revision.
+    Normal removal requires clean status and no ignored files; force requires the explicit dirty path;
+    either is refused while another live Fleet session uses the exact worktree. Only after close marks
+    the ticket may `cleanup_closed_worktree` re-probe the revision and run fixed argv
+    `git -C <root> worktree remove [--force] <worktree>`. Never delete the branch. A close/cleanup
+    partial failure is reported as session closed with the worktree preserved; never retry silently.
 
 ## Dev workflow
 
