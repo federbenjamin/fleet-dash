@@ -20,11 +20,11 @@ test('running Fleet Dash renders both providers without console or network failu
   await page.goto(liveURL, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('#usage')).toContainText('Claude Code');
   await expect(page.locator('#usage')).toContainText('Codex CLI');
-  const usageHeads = page.locator('#usage .uhead');
-  await expect(usageHeads.nth(0).locator('.uemail')).not.toBeEmpty();
-  await expect(usageHeads.nth(0)).toContainText('local lifetime tokens');
-  await expect(usageHeads.nth(1).locator('.uemail')).not.toBeEmpty();
-  await expect(usageHeads.nth(1)).toContainText('lifetime tokens');
+  const usageProviders = page.locator('#usage .uprovider');
+  await expect(usageProviders.nth(0).locator('.uemail').first()).not.toBeEmpty();
+  await expect(usageProviders.nth(0)).toContainText('local lifetime tokens');
+  await expect(usageProviders.nth(1).locator('.uemail').first()).not.toBeEmpty();
+  await expect(usageProviders.nth(1)).toContainText('lifetime tokens');
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
   await page.locator('#gear').click();
   await expect(page.locator('#settingsview')).toBeVisible();

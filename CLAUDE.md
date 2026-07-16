@@ -81,8 +81,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    finalized to the ledger (383 agents across the history, 0 of them actually mid-tool).
    `stop_reason: end_turn` still gets the fast 5s grace. Agents whose PARENT went idle/waiting
    with no end_turn are `ended` (canceled) and finalize to the ledger. Sessions: registry
-   `status` is authoritative (waiting → needs_you; idle → turn_done if fresh end_turn else
-   idle; busy → running/stalled).
+   `status` is authoritative after corroboration (hook-captured waiting → needs_you
+   immediately; a bare waiting flag must persist for `WAITING_CONFIRM_SECONDS` because Claude
+   can flash it between progress prose and the next tool; idle → turn_done if fresh end_turn
+   else idle; busy → running/stalled).
    **CANCELLED is separate, authoritative and immediate:** the parent's `tool_result` for that
    Agent tool_use comes back `is_error: true` ("The user doesn't want to proceed with this tool
    use"). `Tail.errored_tools` collects those ids; `scan_agents` flips any agent whose
@@ -216,22 +218,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
-26. **Plan-usage is READ from the statusline, never fetched — and MUST be the logged-in account.**
-    The only per-login-correct source is the Claude Code statusline payload's `rate_limits`
-    (`five_hour`/`seven_day` → `used_percentage` + `resets_at` epoch secs), present only after a
-    session's first API response. `statusline-command.sh` (fleet-dash side-write, next to the effort
-    one) extracts it via jq to `~/.claude/fleet-dash/usage.json` (write-on-change, account-global so
-    any session writes it). `Engine.read_usage` reads THAT file (epoch resets → ISO; 7-day shown as
-    "weekly") into `/api/fleet` `usage`; `usageBar` renders three stacked lines (email, 5-hour,
-    weekly). The email is `Engine.account_email` (`~/.claude.json` → `oauthAccount.emailAddress`),
-    read once and cached. **Do NOT use `~/.claude/.statusline-usage-cache`** — that's the Claude Usage
-    extension keyed to a DIFFERENT account/org (verified 2026-07-14: extension org ≠ the `~/.claude.json`
-    login org), and its `PROFILE_NAME` is a cosmetic label, not account identity. Don't add an API
-    fetcher (needs a session key we don't hold). The adjacent **local lifetime-token** figure is a
-    different scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json` `modelUsage`
-    and sums `inputTokens` + `cacheCreationInputTokens` + `cacheReadInputTokens` + `outputTokens`
-    across models. It represents retained main-session and saved-subagent transcripts on this Mac;
-    it excludes deleted history, other computers, and claude.ai. Keep the word `local` in the UI.
+26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
+    `Engine.claude_usage_profiles` watches
+    `~/Library/Preferences/HamedElfayome.Claude-Usage.plist` by mtime/size and projects ONLY profile
+    id/name, account email, selected/active state, refresh interval, display flags, quota percentages,
+    resets, and last-update time. The same profile objects also contain session keys and credential
+    JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
+    selected account and its active marker. If the app is absent/unreadable, fall back to the Claude
+    Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
+    `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
+    machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`
+    `modelUsage` and sums `inputTokens` + `cacheCreationInputTokens` + `cacheReadInputTokens` +
+    `outputTokens` across models. Show that aggregate once, not once per profile. It represents
+    retained main-session and saved-subagent transcripts on this Mac; it excludes deleted history,
+    other computers, and claude.ai. Keep the word `local` in the UI.
 27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
     viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
@@ -282,6 +282,24 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     their parent conversation and must not become session cards. Unknown historical cost and agent
     counts stay SQL `NULL`/unavailable rather than becoming fabricated zero measurements. History is
     paged in the browser 100 rows at a time.
+33. **Working order is entry order, not activity order.** `stable_working_order` retains incumbents,
+    appends sessions newly classified as `ui_group=working`, removes sessions that leave, and persists
+    `working_order` in config. `_persist_config_fields` serializes poll/UI writers and atomically
+    replaces the file; a pin or settings write must not erase the order. Poll-time activity, quiet
+    time, and transcript changes must never move a card within Working. A session that leaves and
+    later re-enters appends as a new entrant.
+34. **Optimistic chat rows remain until canonical confirmation.** Ordinary text and structured-
+    question answers render immediately in the owning session conversation. Direct text keeps its
+    spinner until an equal normalized user row appears in refreshed context; an unrelated revision
+    is not confirmation. Structured answers render their actual labels (never secret free text) and
+    may drop the spinner once the provider accepts the native answer response, but remain until the
+    canonical QA event arrives. HTTP failure or 15 seconds without direct-text confirmation produces
+    a red restore button; restore refills the composer and never retries. A focused composer must not
+    block `#sbody` transcript repaints—preserve the composer below the body update instead.
+35. **Session card peeks are capped at exactly 500 characters including the ellipsis.** The server
+    caps both providers; CSS controls the collapsed line count. When measured content overflows, the
+    final collapsed row is a clickable `...`; expanded state removes the height clamp but does not
+    fetch or imply more than the bounded 500-character payload.
 
 ## Dev workflow
 

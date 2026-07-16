@@ -58,8 +58,12 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 #usage.empty{display:none}
 .uprovider{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%}
 .uprovider+.uprovider{border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
+.uaccount+.uaccount{border-top:1px dashed var(--line);padding-top:7px;margin-top:1px}
+.uaccount{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%}
 .uhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .uname{color:var(--fg);font-weight:700}
+.uactive{color:var(--green);font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.45px}
 .useg{display:inline-flex;align-items:baseline;gap:8px;min-width:0;max-width:100%}
 .usep{color:var(--faint);font-style:normal}
 .umeta{color:var(--faint);font-variant-numeric:tabular-nums}
@@ -308,6 +312,14 @@ td.r,th.r{text-align:right}
 .cmsg .cbody p:last-child,.cmsg .cbody>*:last-child{margin-bottom:2px}
 .cmsg.user .cbody{background:#132030;border:1px solid #1f3a5f}
 .cmsg.assistant .cbody{background:var(--card);border:1px solid var(--line)}
+.cmsg.optimistic .cbody{border-style:dashed}
+.delivery{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+  margin-left:5px;padding:0;border:0;background:none;color:var(--dim);font:700 12px/1 monospace;
+  vertical-align:middle}
+.delivery.sending{animation:sendspin 1s linear infinite;cursor:default}
+.delivery.failed{color:var(--red);cursor:pointer;border:1px solid var(--red);border-radius:50%}
+.delivery.failed:hover,.delivery.failed:focus-visible{background:#32171b;color:#fff}
+@keyframes sendspin{to{transform:rotate(360deg)}}
 /* system events folded into the convo: compaction, model fallback, API errors,
    slash commands, and the full text of questions you answered */
 .cevt{margin:8px 0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);
@@ -736,12 +748,15 @@ function usageBar(legacy,providers){
   // data, but omit the unused model-specific bucket from the account summary.
   const codexBuckets=(codex?.buckets||[]).filter(b=>
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
-  const claudeHtml=claude&&(claude.five_hour_pct!=null||claude.weekly_pct!=null||claude.email||claude.lifetime_tokens!=null)?`<div class="uprovider">
-    <div class="uhead"><span class="uname">Claude Code</span>
-      ${claude.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(claude.email)}</span></span>`:''}
-      ${claude.lifetime_tokens!=null?`<span class="useg" title="Local Claude transcripts on this Mac, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
-    ${ugauge('5-hour',claude.five_hour_pct,usageReset(claude.five_hour_reset))}
-    ${ugauge('weekly',claude.weekly_pct,usageReset(claude.weekly_reset))}</div>`:'';
+  const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
+  const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
+    ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
+      <div class="uhead"><span class="uname">Claude Code</span>
+        ${profile.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(profile.email)}</span></span>`:''}
+        ${claude.show_active!==false&&profile.active?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uactive">active</span></span>`:''}
+        ${index===0&&claude.lifetime_tokens!=null?`<span class="useg" title="All local Claude transcripts on this Mac across profiles, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
+      ${ugauge('5-hour',profile.five_hour_pct,usageReset(profile.five_hour_reset))}
+      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}</div>`).join('')}</div>`:'';
   const codexHtml=codex&&(codexBuckets.length||codex.email||codex.plan_type||codex.lifetime_tokens!=null||codex.reset_credits||codex.error)?`<div class="uprovider">
     <div class="uhead"><span class="uname">Codex CLI</span>
       ${codex.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(codex.email)}</span></span>`:''}
@@ -878,9 +893,70 @@ function eventRow(m,provider='claude'){
     <div class="evline"><span class="evi">${EVT_ICON[m.kind]||'•'}</span> <b>${esc(m.title)}</b>${m.n>1?`<span class="evn">×${m.n}</span>`:''}</div>
     ${m.detail?`<div class="evd">${esc(m.detail)}</div>`:''}</div>`;
 }
-function convoMsgs(c,sid){
+const optimisticMessages=new Map();
+let optimisticSequence=0;
+const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
+function optimisticList(sid){
+  if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
+  return optimisticMessages.get(sid);
+}
+function canonicalCount(messages,item){
+  if(item.kind==='answer')return(messages||[]).filter(message=>
+    message.role==='event'&&message.kind==='qa').length;
+  const wanted=normalizedMessage(item.text);
+  return(messages||[]).filter(message=>message.role==='user'&&
+    normalizedMessage(message.text)===wanted).length;
+}
+function addOptimistic(sid,text,kind='text'){
+  const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
+  const item={id:++optimisticSequence,sid,text:String(text||''),kind,status:'sending',
+    baseCount:canonicalCount(messages,{kind,text}),created:Date.now()};
+  optimisticList(sid).push(item);
+  setTimeout(()=>{
+    const current=optimisticList(sid).find(entry=>entry.id===item.id);
+    if(current&&current.status==='sending'){
+      current.status='failed';current.error='Not confirmed after 15 seconds';uiRefresh();
+    }
+  },15000);
+  uiRefresh();
+  return item.id;
+}
+function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
+  const item=optimisticList(sid).find(entry=>entry.id===id);
+  if(!item)return;
+  if(!ok){item.status='failed';item.error=error||'Send failed';}
+  else if(providerConfirmed)item.status='confirmed';
+  uiRefresh();
+}
+function visibleOptimistic(sid,messages){
+  const list=optimisticList(sid);
+  const keep=list.filter(item=>{
+    if(canonicalCount(messages,item)>item.baseCount)return false;
+    return true;
+  });
+  if(keep.length!==list.length)optimisticMessages.set(sid,keep);
+  return keep;
+}
+function restoreOptimistic(sid,id){
+  const list=optimisticList(sid),item=list.find(entry=>entry.id===id);
+  optimisticMessages.set(sid,list.filter(entry=>entry.id!==id));
+  if(item?.kind==='answer'){delete answered[sid];uiRefresh();return;}
+  uiRefresh();
+  requestAnimationFrame(()=>{
+    const input=document.getElementById('sft-'+sid)||document.getElementById('vft-'+sid)||
+      document.getElementById('ft-'+sid);
+    if(input){input.value=item?.text||'';input.focus();}
+  });
+}
+function optimisticHtml(sid,messages){
+  return visibleOptimistic(sid,messages).map(item=>`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
+    <span class="crole">you</span>${item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
+      item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${sid}',${item.id})">!</button>`:''}
+    <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`).join('');
+}
+function convoMsgs(c,sid,includeOptimistic=true){
   const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
-  return(c.messages||[]).map(m=>{
+  const canonical=(c.messages||[]).map(m=>{
     if(m.role==='event')return eventRow(m,provider);
     if(m.role==='tool'){
       if(m.name==='SendUserFile')
@@ -891,6 +967,7 @@ function convoMsgs(c,sid){
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
+  return canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
 }
 function convoBox(s,short){
   const c=ctxCache[s.session_id];
@@ -1227,7 +1304,10 @@ function renderSession(force){
   const done=['done','ended'];
   $('#stitle2').innerHTML=sessTitleBlock(s);
   $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,'session');
-  if(!force&&(typing||touching()))return;
+  // A focused composer must not freeze transcript confirmation. The composer
+  // itself is preserved below; only defer the body repaint during an active
+  // touch gesture so mobile scrolling is not interrupted.
+  if(!force&&touching())return;
   const body=$('#sbody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
@@ -1314,7 +1394,7 @@ function renderAgent(force){
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
   else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid)}</div>`;
+  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false)}</div>`;
   body.scrollTop=old.atBottom?body.scrollHeight:old.top;
   if(!typing){
     const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
@@ -1742,7 +1822,8 @@ function mqSend(sid,nonce,pre){
     else a.digits=digits;
     answers.push(a);
   }
-  act(sid,{type:'multiq',nonce,answers},pre);
+  const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
+  act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
 }
 function elicitationBlock(s,p,pre){
   const sid=s.session_id;
@@ -1849,13 +1930,15 @@ async function setSessionMode(sid,mode,pre='msg'){
     s.collaboration_mode=d.mode||mode;uiRefresh();
   }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
 }
-async function act(sid,payload,pre='msg'){
+async function act(sid,payload,pre='msg',optimisticId=null){
   const el=document.getElementById(pre+'-'+sid);
   if(el&&payload.type!=='ping')el.textContent='sending…';
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
     const d=await r.json();
+    if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
+      d.ok&&['option','multiq'].includes(payload.type));
     if(el)el.textContent=d.ok?'sent ✓':'✗ '+(d.error||'failed');
     if(!d.ok&&!el)alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
@@ -1865,13 +1948,31 @@ async function act(sid,payload,pre='msg'){
     }
     return d;
   }catch(e){
+    if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
     if(el)el.textContent='✗ '+e;
     else alert('request failed: '+e);
     return {ok:false,error:String(e)};
   }
 }
+function pendingQuestion(sid){
+  const session=((last||{}).sessions||[]).find(item=>item.session_id===sid);
+  return session&&session.pending&&session.pending.kind==='question'?session.pending:null;
+}
+function answerLabel(question,digits,other){
+  if(other)return question?.secret?'(private answer)':other;
+  return(digits||[]).map(d=>question?.options?.[Number(d)-1]?.label||`Option ${d}`).join(', ');
+}
+function answerPreview(sid,answers){
+  const pending=pendingQuestion(sid),questions=(pending&&pending.questions)||[];
+  return answers.map((answer,index)=>{
+    const question=questions[index]||{};
+    const label=answerLabel(question,answer.digits,answer.other)||'(no answer)';
+    return `${question.header||question.question||`Question ${index+1}`}: ${label}`;
+  }).join('\n');
+}
 function sendOption(sid,nonce,digits,pre){
-  act(sid,{type:'option',nonce,digits},pre);
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
+  act(sid,{type:'option',nonce,digits},pre,optimisticId);
 }
 function toggleOpt(sid,d){
   const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);uiRefresh();
@@ -1880,12 +1981,14 @@ function sendMulti(sid,nonce,n,pre){
   const digits=[...(multiSel[sid]||[])].sort();
   const other=(otherDraft[sid]||'').trim();
   if(!digits.length&&!other)return alert('pick at least one option');
-  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre);
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
+  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
 }
 function sendOther(sid,nonce,n,pre){
   const other=(otherDraft[sid]||'').trim();
   if(!other)return alert('type your answer first');
-  act(sid,{type:'option',nonce,n_options:n,other},pre);
+  const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
+  act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
 }
 function sendDismiss(sid,nonce,pre){
   act(sid,{type:'dismiss',nonce},pre);
@@ -1965,7 +2068,8 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
   if(inp)inp.value='';        // clear NOW: the round-trip is the terminal's, not yours
   if(cmd&&cmd.execution==='action')return act(sid,{type:cmd.action},msgPre);
   if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
-  act(sid,{type:'text',text:v},msgPre);
+  const optimisticId=addOptimistic(sid,v,'text');
+  act(sid,{type:'text',text:v},msgPre,optimisticId);
 }
 
 // ---- slash-command autocomplete -------------------------------------------

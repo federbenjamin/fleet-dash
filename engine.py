@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib
 from collections import deque
 from codex_adapter import CodexAdapter
 
@@ -22,6 +22,8 @@ CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
 CLAUDE_USAGE = os.path.join(BASE, "usage.json")
 CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
 CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
+CLAUDE_USAGE_PREFS = os.path.join(
+    HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
 
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
@@ -37,6 +39,7 @@ DEFAULT_CONFIG = {
     "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
     "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
     "pinned_sessions": [],               # shared watchlist, ordered by UI urgency
+    "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
     "velocity_window_points": 30,
@@ -109,6 +112,7 @@ def cwd_to_project_dir(cwd):
 # bookkeeping) stays hidden (user decision 2026-07-13)
 KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+WAITING_CONFIRM_SECONDS = 3.0
 
 # slash commands that destroy conversation state — the page confirms before sending
 DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
@@ -600,7 +604,8 @@ class Tail:
             if e.get("role") in ("user", "assistant") and e.get("text"):
                 txt = str(e["text"]).strip()
                 return {"role": e["role"],
-                        "text": txt[:limit] + ("…" if len(txt) > limit else "")}
+                        "text": (txt[:max(0, limit - 1)] + "…"
+                                 if len(txt) > limit else txt)}
         return None
 
     def latest_prose(self):
@@ -651,9 +656,14 @@ class Engine:
         self.prev_fleet_busy = None
         self.quiet_since = None         # when the fleet last went fully idle
         self.lock = threading.Lock()
+        self.config_lock = threading.Lock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
         self.history_backfilled = False
+        # Claude's registry can flash `waiting` between assistant text and the
+        # next tool call. Keep the transition time so an uncorroborated flash
+        # remains Working instead of manufacturing a "Response needed" card.
+        self.registry_status_since = {}  # session_id -> (status, first_seen)
         try:
             from codex_adapter import (CodexAppServer, codex_command,
                                        codex_control_socket, ensure_shared_codex_runtime,
@@ -691,6 +701,22 @@ class Engine:
         if t is None:
             t = self.tails[path] = Tail(path)
         return t
+
+    def waiting_confirmed(self, sid, status, now, pending=None):
+        """Return whether Claude's registry `waiting` means real user input.
+
+        A hook-captured question or permission is immediate evidence. A bare
+        registry flag must survive the short between-tool transition seen in
+        live Claude sessions before it creates user-facing attention work.
+        """
+        previous = self.registry_status_since.get(sid)
+        if previous is None or previous[0] != status:
+            self.registry_status_since[sid] = (status, now)
+            age = 0
+        else:
+            age = max(0, now - previous[1])
+        return bool(status == "waiting"
+                    and (pending is not None or age >= WAITING_CONFIRM_SECONDS))
 
     @staticmethod
     def _pending_reason(pending):
@@ -810,8 +836,10 @@ class Engine:
         cfg = self.cfg
         now = time.time()
         sessions = []
+        live_claude_ids = set()
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
+            live_claude_ids.add(sid)
             cwd = reg.get("cwd", "")
             proj_dir = cwd_to_project_dir(cwd)
             main_path = os.path.join(proj_dir, f"{sid}.jsonl")
@@ -824,8 +852,14 @@ class Engine:
             quiet = now - mtime
 
             reg_status = reg.get("status")  # 'busy' | 'idle' | 'waiting' | None
+            # Hooks are positive evidence. The bare registry flag is debounced:
+            # Claude briefly reports `waiting` between assistant prose and its
+            # next tool call even though the turn is still progressing.
+            pending = self.hook_pending(sid, reg_status)
+            confirmed_waiting = self.waiting_confirmed(
+                sid, reg_status, now, pending=pending)
             # parent turn over → a frozen agent is canceled, not mid-tool
-            parent_idle = reg_status in ("idle", "waiting")
+            parent_idle = reg_status == "idle" or confirmed_waiting
             agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now,
                                       parent_idle, parent=mt)
             sess_effort = self.effort_for(sid)
@@ -836,7 +870,7 @@ class Engine:
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
 
             turn = mt.turn_state()
-            if reg_status == "waiting":
+            if confirmed_waiting:
                 state = "needs_you"         # blocked mid-turn: question or permission prompt
             elif reg_status == "idle" or (reg_status is None and turn == "awaiting_input"):
                 # at the prompt: only actionable if a work turn finished recently
@@ -861,14 +895,13 @@ class Engine:
 
             # hook-written pending file is the authoritative source: the CLI only
             # flushes AskUserQuestion rows to the transcript AFTER they're answered
-            pending = self.hook_pending(sid, reg_status)
             if pending is None:
                 for tid, p in mt.pending.items():
                     if p["name"] == "AskUserQuestion":
                         qs = (p.get("input") or {}).get("questions", [])
                         pending = {"kind": "question", "nonce": tid, "questions": qs}
                         break
-            if pending is None and reg_status == "waiting" and mt.pending:
+            if pending is None and confirmed_waiting and mt.pending:
                 tid, p = list(mt.pending.items())[-1]
                 pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
                            "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
@@ -903,9 +936,9 @@ class Engine:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
-                # ~140 chars fills one rendered line at the card's width; send enough
-                # for the configured clamp and no more (this rides every 2s poll)
-                "last_msg": (mt.last_message(140 * int(cfg.get("preview_session_lines", 2)))
+                # Collapsed height is CSS-controlled. Keep up to 500 characters so
+                # the explicit expansion reveals a useful bounded preview.
+                "last_msg": (mt.last_message(500)
                              if cfg.get("preview_sessions", True) else None),
                 "_latest_prose": mt.latest_prose(),
                 "state": state,
@@ -934,6 +967,10 @@ class Engine:
                     "decide_approval": True, "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
+        self.registry_status_since = {
+            sid: value for sid, value in self.registry_status_since.items()
+            if sid in live_claude_ids
+        }
         # Codex is a second provider inside the same fleet. A failed/missing Codex
         # installation must not take down the existing Claude dashboard.
         try:
@@ -947,11 +984,16 @@ class Engine:
             session["muted"] = session["session_id"] in muted
             self.organize_session(session, now)
         group_order = {"needs_you": 0, "working": 1, "available": 2, "history": 3}
+        working_rank = self.stable_working_order(sessions)
 
         def session_order(session):
             group = session.get("ui_group") or "working"
-            within = (-float(session.get("quiet_s") or 0) if group == "needs_you"
-                      else -float(session.get("activity_at") or 0))
+            if group == "needs_you":
+                within = -float(session.get("quiet_s") or 0)
+            elif group == "working":
+                within = working_rank.get(session.get("session_id"), len(working_rank))
+            else:
+                within = -float(session.get("activity_at") or 0)
             return (0 if session.get("pinned") else 1,
                     group_order.get(group, 1), within)
 
@@ -1018,21 +1060,156 @@ class Engine:
             self.snapshot_cache = fleet
         return fleet
 
+    def _persist_config_fields(self, changed):
+        """Merge internal/UI state into config.json without dropping secret fields."""
+        path = os.path.join(BASE, "config.json")
+        temp_path = path + ".tmp"
+        with self.config_lock:
+            try:
+                with open(path) as handle:
+                    raw = json.load(handle)
+            except Exception:
+                raw = {}
+            raw.update(changed)
+            with open(temp_path, "w") as handle:
+                json.dump(raw, handle, indent=2)
+            os.replace(temp_path, path)
+
+    def stable_working_order(self, sessions):
+        """Append new Working entries; never reorder incumbents by activity."""
+        working_ids = [str(item.get("session_id") or "") for item in sessions
+                       if item.get("ui_group") == "working" and item.get("session_id")]
+        active = set(working_ids)
+        previous = [str(sid) for sid in (self.cfg.get("working_order") or [])]
+        ordered, seen = [], set()
+        for sid in previous:
+            if sid in active and sid not in seen:
+                ordered.append(sid)
+                seen.add(sid)
+        ordered.extend(sid for sid in working_ids if sid not in seen)
+        ordered = ordered[-1000:]
+        if ordered != previous:
+            self.cfg["working_order"] = ordered
+            self._persist_config_fields({"working_order": ordered})
+        return {sid: index for index, sid in enumerate(ordered)}
+
     def account_email(self):
-        # Logged-in Claude account email (~/.claude.json → oauthAccount.emailAddress).
-        # Cached: that file is large and the login rarely changes within a daemon's life
-        # (a re-login needs a daemon restart to reflect — fine for a personal tool).
-        cached = getattr(self, "_account_email", False)
-        if cached is not False:
-            return cached
+        # Fallback identity when Claude Usage is not installed. Follow file changes
+        # instead of pinning the first account for the daemon's entire lifetime.
+        try:
+            stat = os.stat(CLAUDE_ACCOUNT)
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        cached = getattr(self, "_account_email", None)
+        if cached and cached[0] == signature:
+            return cached[1]
         email = None
         try:
             with open(CLAUDE_ACCOUNT) as f:
                 email = (json.load(f).get("oauthAccount") or {}).get("emailAddress")
         except (OSError, ValueError):
             email = None
-        self._account_email = email
+        self._account_email = (signature, email)
         return email
+
+    @staticmethod
+    def _claude_usage_iso(value):
+        """Convert Apple's 2001 reference-date seconds to an ISO timestamp."""
+        try:
+            epoch = float(value) + 978_307_200
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def claude_usage_profiles(self):
+        """Safe display-only projection of Claude Usage's selected profiles.
+
+        The plist also contains live credentials. Parse only identity, selection,
+        refresh, and quota fields and never return or cache the raw profile objects.
+        """
+        try:
+            stat = os.stat(CLAUDE_USAGE_PREFS)
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+        cached = getattr(self, "_claude_usage_profiles", None)
+        if cached and cached[0] == signature:
+            return cached[1]
+        try:
+            with open(CLAUDE_USAGE_PREFS, "rb") as handle:
+                prefs = plistlib.load(handle)
+            profiles_blob = prefs.get("profiles_v3") or b"[]"
+            if isinstance(profiles_blob, bytes):
+                profiles_blob = profiles_blob.decode("utf-8")
+            profiles = json.loads(profiles_blob)
+            display_blob = prefs.get("multiProfileDisplayConfig") or b"{}"
+            if isinstance(display_blob, bytes):
+                display_blob = display_blob.decode("utf-8")
+            display = json.loads(display_blob)
+            active_id = str(prefs.get("activeProfileId") or "")
+            mode = str(prefs.get("profileDisplayMode") or "single")
+        except (OSError, ValueError, TypeError, UnicodeDecodeError,
+                plistlib.InvalidFileException):
+            self._claude_usage_profiles = (signature, None)
+            return None
+
+        if not isinstance(profiles, list) or not isinstance(display, dict):
+            self._claude_usage_profiles = (signature, None)
+            return None
+        selected = [profile for profile in profiles if isinstance(profile, dict) and
+                    (profile.get("isSelectedForDisplay") if mode == "multi"
+                     else str(profile.get("id") or "") == active_id)]
+        if not selected:
+            selected = [profile for profile in profiles if isinstance(profile, dict) and
+                        str(profile.get("id") or "") == active_id]
+        out = []
+        for profile in selected:
+            try:
+                account = profile.get("oauthAccountJSON") or "{}"
+                if isinstance(account, bytes):
+                    account = account.decode("utf-8")
+                account = json.loads(account) if isinstance(account, str) else account
+            except (ValueError, TypeError, UnicodeDecodeError):
+                account = {}
+            usage = profile.get("claudeUsage") or {}
+            if not isinstance(account, dict) or not isinstance(usage, dict):
+                continue
+
+            def pct(key):
+                try:
+                    return max(0, min(100, round(float(usage.get(key)))))
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
+            out.append({
+                "id": str(profile.get("id") or ""),
+                "name": str(profile.get("name") or "")[:120],
+                "email": str(account.get("emailAddress") or "")[:320] or None,
+                "active": str(profile.get("id") or "") == active_id,
+                "five_hour_pct": pct("sessionPercentage"),
+                "five_hour_reset": self._claude_usage_iso(usage.get("sessionResetTime")),
+                "weekly_pct": pct("weeklyPercentage"),
+                "weekly_reset": self._claude_usage_iso(usage.get("weeklyResetTime")),
+                "updated_at": self._claude_usage_iso(usage.get("lastUpdated")),
+            })
+        def refresh_interval(profile):
+            try:
+                value = int(float(profile.get("refreshInterval") or 30))
+            except (TypeError, ValueError, OverflowError):
+                value = 30
+            return min(max(value, 5), 3600)
+
+        result = None if not out else {
+            "profiles": out,
+            "profile_mode": mode,
+            "refresh_seconds": min(refresh_interval(profile)
+                                   for profile in selected),
+            "show_week": display.get("showWeek") is not False,
+            "show_active": display.get("showActiveProfileIndicator") is not False,
+        }
+        self._claude_usage_profiles = (signature, result)
+        return result
 
     def claude_lifetime_tokens(self):
         """Tokens represented by Claude transcripts retained on this Mac.
@@ -1076,12 +1253,9 @@ class Engine:
         return result
 
     def read_usage(self):
-        # Plan-usage for the LOGGED-IN account: 5-hour + 7-day utilization, written by
-        # the Claude Code statusline into ~/.claude/fleet-dash/usage.json (see the
-        # fleet-dash side-write in statusline-command.sh). This is the ONLY per-login
-        # correct source — the Claude Usage extension's cache is a DIFFERENT account.
-        # Quota fields remain absent until a session gets its first API response;
-        # email and local lifetime tokens can still populate the provider header.
+        # Claude Usage is the primary source because it tracks every selected login
+        # and refreshes them independently. The statusline side-write remains the
+        # single-account fallback when that app is absent or unreadable.
         try:
             with open(CLAUDE_USAGE) as f:
                 d = json.load(f)
@@ -1100,8 +1274,21 @@ class Engine:
             except (TypeError, ValueError):
                 return None
         five, weekly = pct(d.get("five_hour_pct")), pct(d.get("seven_day_pct"))
+        tracked = self.claude_usage_profiles()
         email = self.account_email()
         lifetime_tokens = self.claude_lifetime_tokens()
+        if tracked:
+            active = next((profile for profile in tracked["profiles"]
+                           if profile.get("active")), tracked["profiles"][0])
+            return {**tracked,
+                    "five_hour_pct": active.get("five_hour_pct"),
+                    "five_hour_reset": active.get("five_hour_reset"),
+                    "weekly_pct": active.get("weekly_pct"),
+                    "weekly_reset": active.get("weekly_reset"),
+                    "email": active.get("email"),
+                    "lifetime_tokens": lifetime_tokens,
+                    "lifetime_scope": "local_transcripts",
+                    "source": "claude_usage"}
         if five is None and weekly is None and not email and lifetime_tokens is None:
             return None
         return {
@@ -2534,15 +2721,7 @@ class Engine:
             self.cfg[config_key] = changed[config_key] = values
         if not changed:
             return {"ok": False, "error": "nothing to update"}
-        path = os.path.join(BASE, "config.json")
-        try:
-            with open(path) as handle:
-                raw = json.load(handle)
-        except Exception:
-            raw = {}
-        raw.update(changed)
-        with open(path, "w") as f:
-            json.dump(raw, f, indent=2)
+        self._persist_config_fields(changed)
         return {"ok": True, **changed}
 
     def once(self, key, title, body, tags="robot", priority="default"):

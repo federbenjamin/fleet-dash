@@ -109,14 +109,15 @@ the provider without affecting Claude sessions.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
 - **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
-  use middle-dot separators. Claude shows the logged-in account email and a local lifetime-token
-  total from `~/.claude/stats-cache.json`; that total sums uncached input, cache writes, cache reads,
-  and output represented by main and saved-subagent transcripts on this Mac. It excludes deleted
-  history, other computers, and claude.ai activity. Claude's **5-hour** and **weekly** (7-day)
-  utilization comes from the statusline payload's `rate_limits` (the same data `/usage` shows), which
-  `statusline-command.sh` writes to `~/.claude/fleet-dash/usage.json`; those gauges populate after a
-  session's first API call. Codex uses App Server `account/read` for the signed-in email and plan,
-  plus every rate-limit bucket, reset time, account lifetime tokens, and available reset-credit count.
+  use middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
+  active-account marker, 5-hour/weekly gauges, visibility setting, and live file updates. Fleet reads
+  only display-safe identity/quota fields from the app preferences; its stored credentials never enter
+  the Fleet API. Without that app, the current Claude Code login and statusline `rate_limits`
+  side-write remain the single-account fallback. The local lifetime-token total comes from
+  `~/.claude/stats-cache.json` and is shown once because it aggregates every retained main and saved-
+  subagent transcript on this Mac across profiles. It excludes deleted history, other computers, and
+  claude.ai activity. Codex uses App Server `account/read` for the signed-in email and plan, plus every
+  rate-limit bucket, reset time, account lifetime tokens, and available reset-credit count.
 - **Per card meta line** — two groups on one row: **left** is activity (running-agent count ·
   quiet time, plus the running skill / compaction when active); **right**, right-adjusted, is
   the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working
@@ -127,8 +128,9 @@ the provider without affecting Claude sessions.
   Headings, emphasis, lists, links, and inline code render as compact Markdown; document-scale
   code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
-  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). The line count also caps
-  what the server sends, so a short peek isn't shipping long text every poll. Tapping a
+  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 500
+  characters of the latest session message. Overflow replaces the final collapsed row with a
+  clickable `...`; expanding reveals the full bounded 500-character preview. Tapping a
   subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
   is the context.
 - **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
@@ -219,6 +221,11 @@ the provider without affecting Claude sessions.
 - **Conversation context**: the session's recent turns (your prompts + Claude's replies,
   markdown-rendered, including messages you send mid-turn from the app) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
+  A sent message appears there immediately with a small sending spinner. The placeholder is
+  replaced only when the provider transcript confirms it. A failed request, or one still
+  unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
+  never retries automatically. Structured-question answers use the selected option labels and the
+  same placeholder behavior (secret free text is shown only as “private answer”).
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.
@@ -281,7 +288,9 @@ A launchd daemon (`server.py` + `engine.py`) polls `~/.claude/sessions/*.json` (
 registry — pid, status busy/idle/waiting, claude.ai bridge id) and incrementally tails each
 session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompts come from
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
-only writes AskUserQuestion rows to the transcript *after* they're answered. Answers are injected
+only writes AskUserQuestion rows to the transcript *after* they're answered. Hook evidence is
+immediate; a bare registry `waiting` flag is confirmed for 3 seconds because Claude can flash it
+between progress prose and the next tool call. Answers are injected
 by `FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
 applet types into the iTerm session matched by tty). Finished agent runs and closed sessions are
 recorded in `ledger.db` (sqlite).

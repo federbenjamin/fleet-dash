@@ -52,7 +52,7 @@ question, it moves to Needs you with View-only access instead.
 | Needs you | File approval | A file-change approval is pending. | Review |
 | Needs you | Permission needed | A provider permission request is pending. | Review |
 | Needs you | Form waiting | An MCP elicitation form is pending. | Respond |
-| Needs you | Response needed | The provider reports that the session is waiting, but Fleet has no more specific normalized request. | Respond |
+| Needs you | Response needed | The provider reports that the session is waiting, but Fleet has no more specific normalized request. For Claude, a bare registry flag must persist for 3 seconds; hook-captured questions and permissions are immediate. | Respond |
 | Needs you | Check session | Claude appears frozen on an assistant tool prompt but the exact pending request was not captured. | Open |
 | Needs you | Fix needed | The session has a confirmed provider or protocol error. | Open |
 | Working | Compacting | Context compaction is active. | Open |
@@ -79,7 +79,7 @@ when the user sends a response or explicitly chooses **Mark available**.
 | `needs_you` plus file approval | Needs you / File approval |
 | `needs_you` plus permission approval | Needs you / Permission needed |
 | `needs_you` plus MCP elicitation | Needs you / Form waiting |
-| `needs_you` without normalized details | Needs you / Response needed |
+| `needs_you` without normalized details | Needs you / Response needed; Claude's uncorroborated registry flag must persist for 3 seconds |
 | Completed assistant prose requesting a response | Needs you / Reply requested |
 | `stalled_or_prompt` | Needs you / Check session |
 | `error` or a confirmed session-specific system error | Needs you / Fix needed |
@@ -116,7 +116,9 @@ dismissal.
 
 - Pinned: Needs you, Working, Available, History; newest activity breaks ties.
 - Needs you: longest waiting first.
-- Working: most recently active first.
+- Working: stable entry order. A session appends at the bottom when it enters Working and keeps
+  that position until it leaves Working. The order persists across browser reloads and daemon
+  restarts; re-entering Working creates a new position at the bottom.
 - Available: most recently active first.
 - Session history: most recently active first.
 

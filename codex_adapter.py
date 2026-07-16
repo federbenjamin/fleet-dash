@@ -1767,9 +1767,12 @@ def _last_message(messages, fallback=None):
     for message in reversed(messages):
         if message.get("role") in ("user", "assistant") and message.get("text"):
             text = str(message["text"]).strip()
-            return {"role": message["role"], "text": text[:280]}
+            return {"role": message["role"],
+                    "text": text[:499] + "…" if len(text) > 500 else text}
     if fallback:
-        return {"role": "user", "text": str(fallback).strip()[:280]}
+        text = str(fallback).strip()
+        return {"role": "user",
+                "text": text[:499] + "…" if len(text) > 500 else text}
     return None
 
 

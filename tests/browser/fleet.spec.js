@@ -44,9 +44,12 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(page.locator('#usage')).toContainText('12k lifetime tokens');
   const usageHeads = page.locator('#usage .uhead');
   await expect(usageHeads.nth(0).locator('.useg')).toHaveText([
-    '·claude@example.com', '·59.59B local lifetime tokens']);
+    '·claude@example.com', '·active', '·59.59B local lifetime tokens']);
   await expect(usageHeads.nth(1).locator('.useg')).toHaveText([
+    '·second@example.com']);
+  await expect(usageHeads.nth(2).locator('.useg')).toHaveText([
     '·codex@example.com', '·pro', '·12k lifetime tokens']);
+  await expect(page.locator('#usage .uaccount')).toHaveCount(2);
   await expect(page.locator('#usage')).toContainText('weekly');
   await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
   await expect(codex.locator('select.modesel')).toHaveCount(0);
@@ -103,6 +106,9 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
   const expandedBox = await peek.evaluate(el => el.getBoundingClientRect().height);
   expect(expandedBox).toBeGreaterThan(peekBox.height);
+  const expandedText = await peek.innerText();
+  expect(expandedText.length).toBeLessThanOrEqual(500);
+  expect(expandedText.endsWith('…')).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
   await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
   await expect(peekRow).toHaveClass(/truncated/);
@@ -390,6 +396,75 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
   await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
   await page.locator('#sact .xbtn').click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('dismiss');
+});
+
+test('messages and question answers render optimistically and recover from failure', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const input = page.locator('#sft-codex\\:thread-one');
+  await input.fill('Ship the optimistic message');
+  await input.press('Enter');
+  const sending = page.locator('#sbody .optimistic').filter({ hasText: 'Ship the optimistic message' });
+  await expect(sending).toBeVisible();
+  await expect(sending.getByLabel('sending')).toBeVisible();
+  await page.request.post('/test/confirm', { data: { session_id: 'codex:thread-one',
+    text: 'Ship the optimistic message' } });
+  await refresh(page);
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(page.locator('#sbody .cmsg.user').filter({
+    hasText: 'Ship the optimistic message' })).toBeVisible();
+
+  await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
+  const answer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
+  await expect(answer).toBeVisible();
+  await expect(answer.locator('.delivery')).toHaveCount(0);
+  await page.request.post('/test/confirm', { data: { session_id: 'codex:thread-one',
+    kind: 'answer', answers: [{ header: 'Scope', q: 'How broad?', a: 'Focused' }] } });
+  await refresh(page);
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(page.locator('#sbody')).toContainText('Focused');
+
+  await page.request.post('/test/reset', { data: { scenario: 'answer-failure' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
+  const failedAnswer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
+  const restoreAnswer = failedAnswer.getByRole('button', {
+    name: 'send failed; restore message' });
+  await expect(restoreAnswer).toBeVisible();
+  await restoreAnswer.click();
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
+
+  await page.request.post('/test/reset', { data: { scenario: 'base' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const timeoutInput = page.locator('#sft-codex\\:thread-one');
+  await timeoutInput.fill('Wait for transcript confirmation');
+  await timeoutInput.press('Enter');
+  const timedOut = page.locator('#sbody .optimistic').filter({
+    hasText: 'Wait for transcript confirmation' });
+  const restoreTimedOut = timedOut.getByRole('button', {
+    name: 'send failed; restore message' });
+  await expect(restoreTimedOut).toBeVisible({ timeout: 16_000 });
+  await restoreTimedOut.click();
+  await expect(timeoutInput).toHaveValue('Wait for transcript confirmation');
+
+  await page.request.post('/test/reset', { data: { scenario: 'send-failure' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const failedInput = page.locator('#sft-codex\\:thread-one');
+  await failedInput.fill('Restore this message');
+  await failedInput.press('Enter');
+  const failed = page.locator('#sbody .optimistic').filter({ hasText: 'Restore this message' });
+  const restore = failed.getByRole('button', { name: 'send failed; restore message' });
+  await expect(restore).toBeVisible();
+  await restore.click();
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(failedInput).toHaveValue('Restore this message');
 });
 
 test('every approval decision and MCP single/multi-select elicitation', async ({ page }) => {

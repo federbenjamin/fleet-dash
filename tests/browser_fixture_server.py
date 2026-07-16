@@ -69,7 +69,13 @@ def fresh_state():
         "tokens": {}, "spark": [], "tok_per_s": None, "started": None,
         "last": None, "last_msg": None, "convo_v": 1}]
     codex.update(agents_running=0, agents_total=1)
+    context = [{"role": "user", "text": "Audit parity"},
+               {"role": "assistant", "text": "Working through the matrix."},
+               {"role": "event", "kind": "reasoning", "title": "Reasoning",
+                "detail": "Compared protocol states", "level": "info"}]
     return {"sessions": [claude, codex], "closed": [], "actions": [],
+            "contexts": {"claude-one": copy.deepcopy(context),
+                         "codex:thread-one": copy.deepcopy(context)},
             "scenario": "base", "codex_error": None,
             "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
                 "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
@@ -168,7 +174,12 @@ def fleet():
                       "lifetime_scope": "local_transcripts"},
             "provider_usage": {"claude": {"five_hour_pct": 20, "weekly_pct": 30,
                     "email": "claude@example.com", "lifetime_tokens": 59_591_487_086,
-                    "lifetime_scope": "local_transcripts"},
+                    "lifetime_scope": "local_transcripts", "source": "claude_usage",
+                    "show_week": True, "show_active": True, "refresh_seconds": 30,
+                    "profiles": [{"id": "one", "email": "claude@example.com",
+                        "active": True, "five_hour_pct": 20, "weekly_pct": 30},
+                        {"id": "two", "email": "second@example.com", "active": False,
+                         "five_hour_pct": 4, "weekly_pct": 8}]},
                 "codex": {"provider": "codex", "email": "codex@example.com",
                     "plan_type": "pro",
                     "lifetime_tokens": 12345, "buckets": [{"id": "codex:primary",
@@ -201,12 +212,14 @@ def set_scenario(name):
     STATE = fresh_state()
     STATE["scenario"] = name
     session = codex_session()
-    if name == "single-question":
+    if name in ("single-question", "answer-failure"):
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q1",
             "dismiss_action": "cancel_turn", "questions": [{"header": "Scope",
             "question": "How broad should the change be?", "multiSelect": False,
             "allowOther": True, "options": [{"label": "Focused", "description": "One area"},
                                              {"label": "Full", "description": "All areas"}]}]})
+        if name == "answer-failure":
+            STATE["fail_answers"] = True
     elif name == "multi-question":
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q2",
             "dismiss_action": "cancel_turn", "questions": [
@@ -261,8 +274,13 @@ def set_scenario(name):
             submit=False, interrupt=False, close=False, compact=False, review=False,
             focus_terminal=False)
     elif name == "markdown-peek":
-        session["last_msg"] = {"role": "assistant", "text":
-            "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear"}
+        preview = (
+            "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear\n\n"+
+            ("bounded preview content " * 30))
+        session["last_msg"] = {"role": "assistant",
+                               "text": preview[:499] + "…"}
+    elif name == "send-failure":
+        STATE["fail_text"] = True
     elif name == "reply-requested":
         session.update(state="turn_done", reg_status="idle", reply_requested=True,
                        convo_v="reply:1", quiet_s=12,
@@ -332,11 +350,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/fleet":
                 return self.json_reply(fleet())
             if route == "/api/context":
-                return self.json_reply({"ok": True, "messages": [
-                    {"role": "user", "text": "Audit parity"},
-                    {"role": "assistant", "text": "Working through the matrix."},
-                    {"role": "event", "kind": "reasoning", "title": "Reasoning",
-                     "detail": "Compared protocol states", "level": "info"}],
+                sid = (query.get("sid") or [""])[0]
+                return self.json_reply({"ok": True,
+                    "messages": copy.deepcopy(STATE.get("contexts", {}).get(sid, [])),
                     "files": [{"name": "artifact.md", "path": "/fixture/artifact.md",
                     "kind": "text", "missing": False, "caption": "Codex updated this file",
                     "delivered": False}]})
@@ -383,6 +399,19 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if route == "/test/reset":
                 set_scenario(payload.get("scenario") or "base")
+                return self.json_reply({"ok": True})
+            if route == "/test/confirm":
+                sid = payload.get("session_id")
+                context = STATE.setdefault("contexts", {}).setdefault(sid, [])
+                if payload.get("kind") == "answer":
+                    context.append({"role": "event", "kind": "qa", "title": "You answered",
+                        "level": "info", "detail": "", "qa": payload.get("answers") or []})
+                else:
+                    context.append({"role": "user", "text": payload.get("text") or ""})
+                session = next((item for item in STATE["sessions"]
+                                if item["session_id"] == sid), None)
+                if session:
+                    session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
             if route in ("/api/act", "/api/settings") and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
@@ -436,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")
                 if typ == "text":
+                    if STATE.get("fail_text"):
+                        return self.json_reply({"ok": False, "error": "terminal rejected input"})
                     session.update(state="running", reg_status="running")
                     session["capabilities"].update(
                         interrupt=True, focus_terminal=False,
@@ -470,6 +501,9 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_reply({"ok": False, "error": "stale request"})
                     if typ == "option" and not payload.get("digits") and not payload.get("other"):
                         return self.json_reply({"ok": False, "error": "invalid response"})
+                    if typ in ("option", "multiq") and STATE.get("fail_answers"):
+                        return self.json_reply({"ok": False,
+                                                "error": "provider rejected answer"})
                     session.update(state="turn_done", pending=None)
                 return self.json_reply({"ok": True})
         return self.reply(404, "text/plain", "not found")

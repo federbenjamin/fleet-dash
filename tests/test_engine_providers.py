@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import tempfile
 import time
 import unittest
@@ -7,7 +8,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import DEFAULT_CONFIG, Engine, Tail, requests_reply
+from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail,
+                    requests_reply)
 from server import Handler
 
 
@@ -86,6 +88,7 @@ class EngineProviderTest(unittest.TestCase):
         self.claude_usage = os.path.join(self.base, "usage.json")
         self.claude_stats = os.path.join(self.tmp.name, "stats-cache.json")
         self.claude_history = os.path.join(self.tmp.name, "history.jsonl")
+        self.claude_usage_prefs = os.path.join(self.tmp.name, "claude-usage.plist")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
@@ -98,6 +101,8 @@ class EngineProviderTest(unittest.TestCase):
             mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
             mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
             mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
+            mock.patch.object(engine_module, "CLAUDE_USAGE_PREFS",
+                              self.claude_usage_prefs),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -167,6 +172,80 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(usage["lifetime_tokens"], 103)
         self.assertEqual(usage["lifetime_scope"], "local_transcripts")
         self.assertEqual((usage["five_hour_pct"], usage["weekly_pct"]), (12, 34))
+
+    def test_claude_usage_tracks_selected_profiles_and_live_file_changes(self):
+        def write(active, first_pct):
+            profiles = [
+                {"id": "profile-one", "name": "first", "isSelectedForDisplay": True,
+                 "refreshInterval": 30,
+                 "apiSessionKey": "must-never-leave-the-plist",
+                 "oauthAccountJSON": json.dumps({"emailAddress": "first@example.com"}),
+                 "claudeUsage": {"sessionPercentage": first_pct,
+                                  "weeklyPercentage": 22,
+                                  "sessionResetTime": 800_000_000,
+                                  "weeklyResetTime": 800_100_000}},
+                {"id": "profile-two", "name": "second", "isSelectedForDisplay": True,
+                 "refreshInterval": 30,
+                 "oauthAccountJSON": json.dumps({"emailAddress": "second@example.com"}),
+                 "claudeUsage": {"sessionPercentage": 33,
+                                  "weeklyPercentage": 44,
+                                  "sessionResetTime": 800_200_000,
+                                  "weeklyResetTime": 800_300_000}},
+            ]
+            with open(self.claude_usage_prefs, "wb") as handle:
+                plistlib.dump({"profiles_v3": json.dumps(profiles).encode(),
+                    "multiProfileDisplayConfig": json.dumps({"showWeek": True,
+                        "showActiveProfileIndicator": True}).encode(),
+                    "activeProfileId": active, "profileDisplayMode": "multi"}, handle)
+
+        write("profile-one", 11)
+        usage = self.engine.read_usage()
+        self.assertEqual(usage["source"], "claude_usage")
+        self.assertEqual([item["email"] for item in usage["profiles"]],
+                         ["first@example.com", "second@example.com"])
+        self.assertEqual([item["active"] for item in usage["profiles"]], [True, False])
+        self.assertEqual(usage["five_hour_pct"], 11)
+        self.assertEqual(usage["refresh_seconds"], 30)
+        self.assertNotIn("must-never-leave-the-plist", json.dumps(usage))
+
+        write("profile-two", 55)
+        usage = self.engine.read_usage()
+        self.assertEqual([item["active"] for item in usage["profiles"]], [False, True])
+        self.assertEqual(usage["five_hour_pct"], 33)
+
+    def test_working_order_is_entry_order_and_persists(self):
+        def rows(*ids):
+            return [{"session_id": sid, "ui_group": "working"} for sid in ids]
+
+        first = self.engine.stable_working_order(rows("a", "b"))
+        self.assertEqual(first, {"a": 0, "b": 1})
+        self.engine.cfg["working_order"] = ["a", "a", "b"]
+        self.assertEqual(self.engine.stable_working_order(rows("b", "a")),
+                         {"a": 0, "b": 1})
+        self.assertEqual(self.engine.stable_working_order(rows("c", "b", "a")),
+                         {"a": 0, "b": 1, "c": 2})
+        self.assertEqual(self.engine.stable_working_order(rows("c", "b")),
+                         {"b": 0, "c": 1})
+        self.assertEqual(self.engine.stable_working_order(rows("a", "c", "b")),
+                         {"b": 0, "c": 1, "a": 2})
+        with open(os.path.join(self.base, "config.json")) as handle:
+            stored = json.load(handle)
+        self.assertEqual(stored["working_order"], ["b", "c", "a"])
+        self.assertTrue(self.engine.update_settings({"preview_agents": True})["ok"])
+        with open(os.path.join(self.base, "config.json")) as handle:
+            stored = json.load(handle)
+        self.assertEqual(stored["working_order"], ["b", "c", "a"])
+        self.assertTrue(stored["preview_agents"])
+        restarted_cfg = dict(DEFAULT_CONFIG)
+        restarted_cfg.update(stored)
+        restarted_cfg["codex_enabled"] = False
+        restarted = Engine(restarted_cfg)
+        try:
+            self.assertEqual(restarted.stable_working_order(rows("a", "c", "b")),
+                             {"b": 0, "c": 1, "a": 2})
+        finally:
+            if restarted.db:
+                restarted.db.close()
 
     def test_codex_failure_does_not_remove_claude(self):
         self.codex.fail_sessions = True
@@ -425,6 +504,46 @@ class EngineProviderTest(unittest.TestCase):
         self.assertFalse(requests_reply(
             "> Should this quoted requirement count?\n\nImplementation is complete."))
 
+    def test_transient_claude_waiting_between_tools_remains_working(self):
+        """A progress note followed by another tool is not a request for input."""
+        with open(self.transcript, "a") as handle:
+            handle.write(json.dumps({
+                "type": "user", "timestamp": "2026-07-16T04:54:21Z",
+                "message": {"role": "user", "content": "Add the test."},
+            }) + "\n")
+            handle.write(json.dumps({
+                "type": "assistant", "timestamp": "2026-07-16T04:54:43Z",
+                "message": {"role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "tool_use", "content": [{"type": "text", "text":
+                        "Good call — the current fix lives inline in "
+                        "`classify_one_worktree`. Let me extract it into a pure "
+                        "classifier, then add the test."}]},
+            }) + "\n")
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "waiting", "name": "Claude"}, handle)
+        self.engine.codex = FakeCodex()
+        now = os.path.getmtime(self.transcript) + 1
+        with mock.patch.object(engine_module.time, "time", return_value=now):
+            session = self.engine.scan()["sessions"][0]
+        self.assertEqual((session["state"], session["ui_group"],
+                          session["reason_label"]),
+                         ("running", "working", "Working"))
+        self.assertFalse(session["pending"])
+
+    def test_uncorroborated_claude_waiting_must_persist_but_hook_is_immediate(self):
+        now = 100.0
+        self.assertFalse(self.engine.waiting_confirmed("plain", "waiting", now))
+        self.assertFalse(self.engine.waiting_confirmed(
+            "plain", "waiting", now + WAITING_CONFIRM_SECONDS - 0.01))
+        self.assertTrue(self.engine.waiting_confirmed(
+            "plain", "waiting", now + WAITING_CONFIRM_SECONDS))
+        self.assertTrue(self.engine.waiting_confirmed(
+            "hooked", "waiting", now,
+            pending={"kind": "question", "nonce": "q1"}))
+        self.assertFalse(self.engine.waiting_confirmed("plain", "busy", now + 10))
+
     def test_session_organization_maps_every_user_facing_group(self):
         now = 10_000
 
@@ -504,6 +623,11 @@ class EngineProviderTest(unittest.TestCase):
         text = "### Default width\n\nUse **Fit the screen**."
         tail.convo.append({"role": "assistant", "text": text})
         self.assertEqual(tail.last_message(500), {"role": "assistant", "text": text})
+        long_text = "x" * 600
+        tail.convo.append({"role": "assistant", "text": long_text})
+        preview = tail.last_message(500)["text"]
+        self.assertEqual(len(preview), 500)
+        self.assertTrue(preview.endswith("…"))
 
 
 if __name__ == "__main__":
