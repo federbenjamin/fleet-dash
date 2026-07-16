@@ -26,6 +26,14 @@ const routeNames={now:'Now',search:'Search',workstreams:'Workstreams',history:'H
 const validRoutes=new Set(Object.keys(routeNames));
 let currentRoute=validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now';
 let nowFilter='',nowState='all',workFilter='',workState='all';
+const NAV_SIDE_KEY='fleet.navSide.v1';
+let navSide=localStorage.getItem(NAV_SIDE_KEY)==='right'?'right':'left';
+function applyNavSide(){document.documentElement.dataset.navSide=navSide;}
+function setNavSide(value){
+  navSide=value==='right'?'right':'left';
+  localStorage.setItem(NAV_SIDE_KEY,navSide);applyNavSide();renderSettings();
+}
+applyNavSide();
 let workstreamData={ok:true,workstreams:[]},workstreamsLoading=false,workstreamsLoadedAt=0;
 const SAVED_VIEW_KEY='fleet.savedViews.v1';
 let savedViews=(()=>{try{
@@ -76,7 +84,7 @@ function navigateTo(route,push=true){
 }
 function setNowFilter(value){nowFilter=value;render(last,true);}
 function setNowState(value){
-  nowState=['all','needs_you','working','available'].includes(value)?value:'all';
+  nowState=['all','needs_you','working','available','subagents'].includes(value)?value:'all';
   render(last,true);
 }
 async function loadWorkstreams(force=false){
@@ -127,6 +135,7 @@ function renderSavedViews(destination){
 }
 function matchesNow(session){
   if(!session)return false;
+  if(nowState==='subagents')return false;
   const group=session.ui_group||(session.closed_at!=null?'history':'');
   if(nowState!=='all'&&group!==nowState)return false;
   const query=nowFilter.trim().toLowerCase();
@@ -325,7 +334,18 @@ const stateLabel={running:'Working',needs_you:'Response needed',turn_done:'Avail
   stalled:'Slow',stalled_or_prompt:'Check session',dormant:'Inactive',reopenable:'Reopenable',
   stale:'Unavailable',error:'Fix needed'};
 
-// ---- provider plan-usage header (currently Claude supplies these account gauges) ----
+// ---- on-demand provider plan usage ----------------------------------------
+let usageOpen=false;
+function closeUsage(){
+  usageOpen=false;
+  $('#usagepanel')?.classList.remove('open');
+  $('#usagechip')?.setAttribute('aria-expanded','false');
+}
+function toggleUsage(){
+  usageOpen=!usageOpen;
+  $('#usagepanel')?.classList.toggle('open',usageOpen);
+  $('#usagechip')?.setAttribute('aria-expanded',String(usageOpen));
+}
 function usageReset(iso){
   if(!iso)return'';
   const t=Date.parse(iso);if(isNaN(t))return'';
@@ -344,7 +364,8 @@ function ugauge(label,pct,reset){
     ${reset?`<span class="ureset">${reset}</span>`:''}</div>`;
 }
 function usageBar(legacy,providers){
-  const el=$('#usage');
+  const el=$('#usagebody'),chip=$('#usagechip');
+  if(!el||!chip)return;
   const claude=(providers&&providers.claude)||legacy;
   const codex=providers&&providers.codex;
   // Spark has a separate preview-model allowance. Keep it in the provider/API
@@ -352,6 +373,15 @@ function usageBar(legacy,providers){
   const codexBuckets=(codex?.buckets||[]).filter(b=>
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
   const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
+  const visiblePercentages=[
+    ...claudeProfiles.filter(Boolean).flatMap(profile=>[
+      profile.five_hour_pct,claude?.show_week===false?null:profile.weekly_pct]),
+    ...codexBuckets.map(bucket=>bucket.used_pct),
+  ].filter(value=>Number.isFinite(Number(value))).map(Number);
+  const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
+  chip.classList.remove('usagewarn','usagedanger');
+  if(worst>=90)chip.classList.add('usagedanger');else if(worst>=70)chip.classList.add('usagewarn');
+  chip.textContent=`Usage${worst>=70?` · ${Math.round(worst)}%`:''}`;
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
     ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
       <div class="uhead"><span class="uname">Claude Code</span>
@@ -368,9 +398,8 @@ function usageBar(legacy,providers){
       ${codex.reset_credits?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${codex.reset_credits} reset credit</span></span>`:''}</div>
     ${codex.error?`<span class="umeta">${codex.stale?'stale — ':''}${esc(codex.error)}</span>`:''}
     ${codexBuckets.map(b=>ugauge(b.label,b.used_pct,usageReset(b.reset))).join('')}</div>`:'';
-  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='';return;}
-  el.className='';
-  el.innerHTML=claudeHtml+codexHtml;
+  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='<div class="usageempty">Usage data is unavailable.</div>';return;}
+  el.className='';el.innerHTML=claudeHtml+codexHtml;
 }
 
 function spark(pts,w=64,h=16){
@@ -1257,7 +1286,7 @@ function terminalButton(s,card=false){
     const attach=s.capabilities?.focus_terminal_mode==='attach';
     const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
     return`<button class="${cls}" title="${esc(title)}"
-      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'attach':'open'}</button>`;
+      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'Attach':'Terminal'}</button>`;
   }
   if(s.provider==='codex'){
     const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
@@ -1357,11 +1386,8 @@ function viewFile(sid,ep,en,kind,ecap){
   closeSession();          // the two full-screen surfaces are mutually exclusive
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
-  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
-  // same session heading as the chat view, then a rule, then the file name
-  $('#vtitle').innerHTML=`${sessTitleBlock(s)}
-    <span class="vfsep"></span>
-    <span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
+  // The file viewer is a reading surface: filename and file actions only.
+  $('#vtitle').innerHTML=`<span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
   $('#viewer').style.display='flex';
   viewerSid=sid;viewerPath=path;syncOverlayHistory();renderViewerBar(true);
   const vb=$('#vbody');
@@ -1382,12 +1408,13 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
-let histPushed=false,schedulePushed=false;
+let histPushed=false,schedulePushed=false,settingsPushed=false;
 const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  if(settingsPushed){settingsPushed=false;closeSettings();return;}
   if(schedulePushed){schedulePushed=false;closeSchedule();return;}
   if(repoPushed){repoPushed=false;closeRepository();return;}
   if(handoffPushed){
@@ -1405,8 +1432,10 @@ window.addEventListener('popstate',()=>{
   navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
 });
 function dismissOverlay(){
+  if(usageOpen)return closeUsage();
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(settingsPushed)return history.back();
   if(repoPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
@@ -1415,6 +1444,7 @@ function dismissOverlay(){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
+  if(usageOpen&&!e.target.closest('#usagepanel')&&!e.target.closest('#usagechip'))closeUsage();
   if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();
   if($('#mobilemore').classList.contains('open')&&!e.target.closest('#mobilemore')&&!e.target.closest('[data-route="more"]'))closeMobileMore();
 });
@@ -1796,6 +1826,38 @@ function syncPinnedSessions(f){
 function agentListHtml(agents){
   return agents.map(agentRow).join('');
 }
+function activeSubagents(f,applyQuery=false){
+  const query=applyQuery?nowFilter.trim().toLowerCase():'';
+  return((f&&f.sessions)||[]).flatMap(parent=>(parent.agents||[])
+    .filter(agent=>!['done','ended'].includes(agent.state))
+    .filter(agent=>!query||[
+      parent.title,parent.project,parent.branch,parent.provider,parent.cwd,
+      agent.agent_type,agent.description,agent.model,agent.effort,agent.state,
+      agent.last_msg&&agent.last_msg.text,
+    ].filter(Boolean).join(' ').toLowerCase().includes(query))
+    .map(agent=>({parent,agent})));
+}
+function activeSubagentCard(parent,agent){
+  const signal={running:'Working',stalled:'Slow — check progress'}[agent.state]||String(agent.state||'Active');
+  const latest=agent.last_msg&&agent.last_msg.text?String(agent.last_msg.text):
+    `quiet ${fmtAge(Math.max(0,Number(agent.quiet_s??parent.quiet_s??0)))}`;
+  const breadcrumb=[parent.project,parent.title,parent.branch&&parent.branch!=='HEAD'?parent.branch:null]
+    .filter(Boolean).join(' · ');
+  return`<button class="activeagentcard" onclick="openAgent(decodeURIComponent('${enc(parent.session_id)}'),decodeURIComponent('${enc(agent.agent_id)}'))">
+    <span class="dot ${esc(agent.state||'running')}" aria-hidden="true"></span>
+    <span class="activeagentmain"><b>${esc(agent.description||agent.agent_type||agent.agent_id)}</b>
+      <small>${esc(breadcrumb)}</small><em>${esc(latest)}</em></span>
+    <span class="activeagentmeta"><b>${esc(signal)}</b><small>${esc(agent.agent_type||'subagent')} · ${esc(modelLabel(agent))}</small></span>
+    <span class="aopen">›</span></button>`;
+}
+function renderActiveSubagents(f){
+  const el=$('#subagents');if(!el)return;
+  const items=activeSubagents(f,true);
+  el.className='queue subagentqueue';
+  el.innerHTML=`<div class="queuehead"><b>Active subagents · ${items.length}</b><span>children working across parent sessions</span></div>
+    <div class="activeagentlist">${items.length?items.map(({parent,agent})=>activeSubagentCard(parent,agent)).join(''):
+      '<div class="queueempty">No active subagents match this filter.</div>'}</div>`;
+}
 async function toggleSessionPin(sid){
   const pinned=!pinnedSessions.has(sid);
   pinned?pinnedSessions.add(sid):pinnedSessions.delete(sid);
@@ -1862,6 +1924,7 @@ function cardTop(s){
   const isOpen=open.has(s.session_id);
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const activeSession=s.ui_group==='working';
+  const showPrimary=!(s.provider==='claude'&&(!s.primary_action||['open','continue','view'].includes(s.primary_action)));
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
@@ -1873,7 +1936,7 @@ function cardTop(s){
       <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
       ${s.new_response?`<span class="newbadge">new</span>`:''}
-      <button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>
+      ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
       ${terminalButton(s,true)}
       <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
         aria-label="${pinned?'unpin session':'pin session to top'}"
@@ -2009,23 +2072,36 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
-let settingsOpen=false,budgetSettingsOpen=false;
+let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null;
 function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
   if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
 function openSettings(){
+  if(settingsOpen)return;
+  const stacked=anyOverlay();
+  settingsReturnState=sessionView?{sid:sessionView.sid,closed:sessionView.closed,
+    scrollTop:$('#sbody')?.scrollTop||0,evidenceOpen:sessionEvidenceOpen}:null;
   settingsOpen=true;
   $('#settingsview').style.display='flex';
   $('#settings').scrollTop=0;
   renderSettings();
   loadBudgets();
   loadWorkstreams();
-  syncOverlayHistory();
+  if(stacked){settingsPushed=true;history.pushState({fdSettings:1},'');}
+  else syncOverlayHistory();
 }
 function closeSettings(){
+  const restore=settingsReturnState;settingsReturnState=null;
   settingsOpen=false;
   $('#settingsview').style.display='none';
   $('#settings').innerHTML='';
   applyRouteNav(currentRoute);
+  if(restore&&sessionView&&sessionView.sid===restore.sid&&sessionView.closed===restore.closed){
+    sessionEvidenceOpen=restore.evidenceOpen;
+    const body=$('#sbody');if(body)body.scrollTop=restore.scrollTop;
+    requestAnimationFrame(()=>{if(sessionView&&sessionView.sid===restore.sid){
+      const current=$('#sbody');if(current)current.scrollTop=restore.scrollTop;
+    }});
+  }
 }
 function renderSettings(){
   const el=$('#settings');
@@ -2049,6 +2125,12 @@ function renderSettings(){
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
+    <div class="dhead" style="margin-top:12px">desktop navigation</div>
+    <div class="setchoice" role="group" aria-label="Desktop navigation side">
+      <button aria-pressed="${navSide==='left'}" onclick="setNavSide('left')">Left side</button>
+      <button aria-pressed="${navSide==='right'}" onclick="setNavSide('right')">Right side</button>
+    </div>
+    <div class="sethint">Saved on this browser. Mobile keeps the bottom navigation.</div>
     <div class="dhead" style="margin-top:12px">full-screen reading width</div>
     <div class="setchoice" role="group" aria-label="Full-screen reading width">
       <button aria-pressed="${(st.reader_width||'fit')==='fit'}"
@@ -3076,15 +3158,16 @@ function render(f,force){
   $('#nav-now-count').textContent=navCount||'';
   $('#nav-now-count').title=`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`;
   const outChip=$('#outboxchip');if(outChip)outChip.textContent=`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`;
+  const activeAgentCount=activeSubagents(f).length;
+  const nowCounts={needs_you:t.needs_me||0,working:t.busy||0,available:t.available||0,
+    subagents:activeAgentCount};
+  const nowLabels={all:'All',needs_you:'Needs you',working:'Working',available:'Available',subagents:'Subagents'};
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
     const active=button.dataset.nowFilter===nowState;
     button.classList.toggle('active',active);
     button.setAttribute('aria-pressed',String(active));
+    button.textContent=nowLabels[button.dataset.nowFilter]+(button.dataset.nowFilter==='all'?'':` · ${nowCounts[button.dataset.nowFilter]||0}`);
   });
-  $('#totals').innerHTML=`<span><b${t.needs_me?' style="color:var(--amber)"':''}>${t.needs_me}</b> need you</span>
-    <span><b>${t.busy}</b> working</span>
-    <span><b>${t.available||0}</b> available <i class="sep">·</i>
-      <b>${t.agents_running}</b> subagent${t.agents_running===1?'':'s'}</span>`;
   usageBar(f.usage,f.provider_usage);
   const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
   const ledgerProblem=f.ledger&&f.ledger.ok===false?
@@ -3095,19 +3178,27 @@ function render(f,force){
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')&&$('#newsess').contains(ae);
   if(force||!touching()){
-    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
-    const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
-      .map(action=>action.session_id));
-    renderPinned(f,matchesNow);
-    const visibleInboxSessionIds=renderActionInbox(f);
-    renderQueue($('#needsyou'),unpinned.filter(s=>s.ui_group==='needs_you'&&!visibleInboxSessionIds.has(s.session_id)),
-      'Needs You','sessions waiting for your response','needs');
-    renderBriefing();
-    renderOutboxCompact();
-    renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
-      'Working','turns in progress','working');
-    renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
-      'Available','ready for another message','available',true);
+    if(nowState==='subagents'){
+      ['#briefing','#pinned','#actioninbox','#needsyou','#outboxsummary','#working','#sessions'].forEach(selector=>{
+        const element=$(selector);if(element){element.innerHTML='';element.className=selector==='#pinned'?'empty':'';}
+      });
+      renderActiveSubagents(f);
+    }else{
+      const subagents=$('#subagents');if(subagents){subagents.innerHTML='';subagents.className='';}
+      const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
+      const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
+        .map(action=>action.session_id));
+      renderPinned(f,matchesNow);
+      const visibleInboxSessionIds=renderActionInbox(f);
+      renderQueue($('#needsyou'),unpinned.filter(s=>s.ui_group==='needs_you'&&!visibleInboxSessionIds.has(s.session_id)),
+        'Needs You','sessions waiting for your response','needs');
+      renderBriefing();
+      renderOutboxCompact();
+      renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
+        'Working','turns in progress','working');
+      renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
+        'Available','ready for another message','available',true);
+    }
     if(!typingNew)$('#newsess').innerHTML=newSection();
     if(!typingHistory)$('#history').innerHTML=historySection(f);
     if(currentRoute==='workstreams')renderWorkstreams(workstreamData);

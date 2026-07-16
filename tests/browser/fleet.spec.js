@@ -3,7 +3,8 @@ const { test, expect } = require('@playwright/test');
 async function reset(page, scenario = 'base') {
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
+  await expect(page.locator('#usagechip')).toBeVisible();
 }
 
 async function refresh(page) {
@@ -90,6 +91,83 @@ test('responsive application shell routes, filters, and follows browser back', a
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
+});
+
+test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
+  await reset(page);
+  expect(await page.evaluate(() => Boolean(document.querySelector('#briefing')
+    .compareDocumentPosition(document.querySelector('#pinned')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
+
+  const claude = page.locator('[data-sid="claude-one"]');
+  await expect(claude.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
+  if (testInfo.project.name === 'desktop') {
+    await expect(claude.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+  }
+
+  await reset(page, 'usage-warning');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · 94%');
+  await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('second@example.com');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
+  await expect(page.locator('#usagepanel')).toBeHidden();
+
+  await reset(page, 'subagent');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 1');
+  await page.locator('[data-now-filter="subagents"]').click();
+  const child = page.locator('#subagents .activeagentcard');
+  await expect(child).toHaveCount(1);
+  await expect(child).toContainText('Review protocol mapping');
+  await expect(child).toContainText('fleet-dash · Codex parity work · codex-integration');
+  await expect(page.locator('#pinned > *, #actioninbox > *, #needsyou > *, #working > *, #sessions > *')).toHaveCount(0);
+  await child.click();
+  await expect(page.locator('#aview')).toBeVisible();
+  await expect(page.locator('#atitle')).toContainText('Review protocol mapping');
+});
+
+test('desktop navigation side and nested Settings preserve the full chat state', async ({ page }, testInfo) => {
+  await reset(page);
+  await goTo(page, 'settings');
+  await page.getByRole('button', { name: 'Right side' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-nav-side', 'right');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-nav-side', 'right');
+  if (testInfo.project.name === 'desktop') {
+    const positions = await page.evaluate(() => ({nav: document.querySelector('#sidenav').getBoundingClientRect().x,
+      main: document.querySelector('#appmain').getBoundingClientRect().x}));
+    expect(positions.nav).toBeGreaterThan(positions.main);
+  } else {
+    await expect(page.locator('#sidenav')).toBeHidden();
+    await expect(page.locator('#bottomnav')).toBeVisible();
+  }
+  await page.evaluate(() => setNavSide('left'));
+  await reset(page, 'large-conversation');
+
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sbody')).toContainText('Conversation message 204');
+  await page.getByRole('button', { name: 'Why here?' }).click();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  await page.evaluate(() => { document.querySelector('#sbody').scrollTop = 125; });
+  const before = await page.locator('#sbody').evaluate(element => element.scrollTop);
+  await page.evaluate(() => navigateTo('settings'));
+  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  expect(await page.locator('#sbody').evaluate(element => element.scrollTop)).toBe(before);
+
+  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
+    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
+  await expect(page.locator('#vtitle')).toHaveText('📄 artifact.md — artifact');
+  await expect(page.locator('#vtitle')).not.toContainText('Codex parity work');
+  await expect(page.locator('#vtitle .vfsep')).toHaveCount(0);
 });
 
 test('cross-provider search filters, exact context, live handoff, and rebuild', async ({ page }, testInfo) => {
@@ -218,7 +296,7 @@ test('handoff preview is action-token protected', async ({ page }) => {
   await reset(page);
   await page.context().clearCookies();
   await page.goto('/');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
   await page.evaluate(() => openSession('claude-one'));
   await page.locator('#sctrl .ovbtn').click();
   await page.getByRole('menuitem', { name: /Continue in Codex/ }).click();
@@ -229,7 +307,7 @@ test('handoff preview is action-token protected', async ({ page }) => {
 
 test('transcript search is action-token protected', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
   await goTo(page, 'search');
   await expect(page.locator('#searchstatus')).toContainText('action token');
   await expect(page.locator('#searchresults')).toContainText('Type a search or choose a filter.');
@@ -262,32 +340,34 @@ test('message Outbox records are action-token protected while fleet exposes coun
 
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
-  await expect(page.locator('#totals > span')).toHaveText([
-    '0 need you', '0 working', '2 available · 0 subagents']);
-  await expect(page.locator('#totals .sep')).toHaveCount(1);
-  await expect(page.locator('#totals > span').first().locator('b')).not.toHaveAttribute('style');
-  await expect(page.locator('#totals')).not.toContainText('history');
-  await expect(page.locator('#totals')).not.toContainText('new');
-  await expect(page.locator('#totals')).not.toContainText('running');
+  await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
+  await expect(page.locator('#totals')).toHaveCount(0);
   await expect(page.locator('[data-sid="claude-one"]')).toContainText('Claude parser fix');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(codex).toContainText('Codex parity work');
-  await expect(page.locator('#usage')).toContainText('Claude Code');
-  await expect(page.locator('#usage')).toContainText('Codex CLI');
-  await expect(page.locator('#usage')).toContainText('12k lifetime tokens');
-  const usageHeads = page.locator('#usage .uhead');
+  await expect(page.locator('#usagechip')).toHaveText('Usage');
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('Claude Code');
+  await expect(page.locator('#usagebody')).toContainText('Codex CLI');
+  await expect(page.locator('#usagebody')).toContainText('12k lifetime tokens');
+  const usageHeads = page.locator('#usagebody .uhead');
   await expect(usageHeads.nth(0).locator('.useg')).toHaveText([
     '·claude@example.com', '·active', '·59.59B local lifetime tokens']);
   await expect(usageHeads.nth(1).locator('.useg')).toHaveText([
     '·second@example.com']);
   await expect(usageHeads.nth(2).locator('.useg')).toHaveText([
     '·codex@example.com', '·pro', '·12k lifetime tokens']);
-  await expect(page.locator('#usage .uaccount')).toHaveCount(2);
-  await expect(page.locator('#usage')).toContainText('weekly');
-  await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
+  await expect(page.locator('#usagebody .uaccount')).toHaveCount(2);
+  await expect(page.locator('#usagebody')).toContainText('weekly');
+  await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
   if (testInfo.project.name === 'desktop') {
-    const terminal = codex.getByRole('button', { name: 'attach' });
+    const terminal = codex.getByRole('button', { name: 'Attach' });
     const pin = codex.getByRole('button', { name: 'pin session to top' });
     await expect(terminal).toBeEnabled();
     await expect(pin).toBeVisible();
@@ -563,7 +643,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   const card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
   const attach = page.locator('#sctrl > .termbtn');
-  await expect(attach).toHaveText('attach');
+  await expect(attach).toHaveText('Attach');
   await expect(attach).toBeEnabled();
   expect(await attach.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await attach.click();
@@ -585,7 +665,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
   await expect(card.locator('.chip')).toContainText('Available');
-  await expect(page.locator('#sctrl > .termbtn')).toHaveText('attach');
+  await expect(page.locator('#sctrl > .termbtn')).toHaveText('Attach');
   await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
 });
 
@@ -682,7 +762,7 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   const claude = page.locator('[data-sid="claude-one"]');
   await claude.locator('.shead').click();
   const openTerminal = page.locator('#sctrl > .termbtn');
-  await expect(openTerminal).toHaveText('open');
+  await expect(openTerminal).toHaveText('Terminal');
   await expect(openTerminal).toBeEnabled();
   expect(await openTerminal.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await openTerminal.click();
@@ -1034,7 +1114,7 @@ test('action inbox separates requests, work, availability, and unread responses'
   await expect(question).toContainText('How broad should the change be?');
   await expect(question).toContainText('Question waiting');
   await expect(question.getByRole('button', { name: 'Respond' })).toBeVisible();
-  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('action-inbox.png'), fullPage: true });
 
   await reset(page, 'subagent');
@@ -1042,7 +1122,7 @@ test('action inbox separates requests, work, availability, and unread responses'
   await expect(page.locator('#working')).toContainText('Working · 1');
   await expect(working.locator('.chip')).toHaveText('Working');
   await expect(working.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
-  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('working-queue.png'), fullPage: true });
 
   await reset(page, 'reply-requested');
@@ -1242,7 +1322,7 @@ test('repository outcome center previews and confirms commit push draft PR and r
 
 test('session action menu opens the same repository outcome center', async ({ page }) => {
   await reset(page, 'base');
-  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sctrl .ovbtn').click();
   await page.locator('#sctrl').getByRole('menuitem', { name: /Repository outcome/ }).click();
   await expect(page.locator('#repoview')).toBeVisible();
@@ -1304,7 +1384,7 @@ test('message Outbox schedules exact session delivery and exposes durable centra
 
 test('usage-reset and scheduled-new-session forms keep full target configuration', async ({ page }) => {
   await reset(page, 'base');
-  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sft-claude-one').fill('Continue after my Claude usage resets');
   await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
   await page.getByRole('button', { name: 'When usage resets', exact: true }).click();

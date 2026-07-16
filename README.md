@@ -9,7 +9,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **Now is an operations queue:** **Pinned** sessions stay first, then one deduplicated **Action
+- **Now is an operations queue:** **Fleet Briefing** appears first, then **Pinned** sessions and one deduplicated **Action
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
@@ -20,14 +20,18 @@ the provider's native control path. Built 2026-07-13; still evolving.
   use reasons such as **Reply requested**, **Command
   approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
   The complete classification and action contract is in
-  [`docs/session-organization.md`](docs/session-organization.md). Each card is headed by the
+  [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
+  distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
+  totals line. Its **Subagents** filter opens a flat active-child view with each parent breadcrumb,
+  model, state, and latest activity. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
-- **Responsive application navigation:** desktop uses a persistent left rail for Now, Search,
+- **Responsive application navigation:** desktop uses a persistent rail for Now, Search,
   Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
   fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
-  across refresh and browser/native back gestures. Now and Workstreams have sticky text/state
+  across refresh and browser/native back gestures. Settings places the desktop rail on the left or
+  right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
   filters whose named saved views remain on this device.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
@@ -49,8 +53,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
-  notification opens the dashboard). It also selects **Fit the screen** or **Centered · fixed
-  width** for every full-screen reading surface. Persisted to `config.json`, token required.
+  notification opens the dashboard). It also selects the per-device desktop navigation side and
+  **Fit the screen** or **Centered · fixed width** for every full-screen reading surface. Server
+  settings persist to `config.json`; the navigation side stays in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
   across daemon restarts and auto-expire 30 days after being set.
@@ -110,7 +115,7 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   installed Codex 0.144.4 behavior is covered by live and deterministic tests. Structured questions
   appear whenever Codex actually sends a request, rather than being inferred from the selected mode.
 - Codex account rate-limit windows, reset times, plan type, reset credits, and lifetime token
-  total come directly from App Server account APIs and appear in the top usage header. The unused
+  total come directly from App Server account APIs and appear in the on-demand Usage panel. The unused
   GPT-5.3-Codex-Spark preview-model allowance remains available in the API payload but is omitted
   from the dashboard.
 - Codex subagent conversations and lifecycle events are visible. App Server exposes no public client
@@ -141,8 +146,10 @@ the provider without affecting Claude sessions.
   conversation instead of becoming duplicate history rows.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
-- **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
-  use middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
+- **Usage chip** (inside the Now command box): it normally reads only **Usage**. At 70% it shows the
+  most urgent selected account/window percentage in amber; at 90% it turns red. Tapping opens every
+  provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
+  middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
   active-account marker, 5-hour/weekly gauges, visibility setting, and live file updates. Fleet reads
   only display-safe identity/quota fields from the app preferences; its stored credentials never enter
   the Fleet API. Without that app, the current Claude Code login and statusline `rate_limits`
@@ -174,12 +181,13 @@ the provider without affecting Claude sessions.
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
   the agent definition's frontmatter pin, or the parent session's effort when it pins none.
-- **"open"** on a Claude card header (desktop only) brings that iTerm tab to the front. A managed
-  Codex card shows **attach**, which opens a new Codex TUI connected to the canonical shared runtime.
+- A Claude card's whole header opens Fleet chat; the redundant second chat button is gone. **Terminal**
+  (desktop only) brings that Claude iTerm tab to the front. A managed
+  Codex card shows **Attach**, which opens a new Codex TUI connected to the canonical shared runtime.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below the usage header. Pinned cards sort by action urgency,
+  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards sort by action urgency,
   then newest activity, and are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
   **mobile**, **long-press** the header (a short tap still opens
@@ -277,7 +285,8 @@ the provider without affecting Claude sessions.
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
-- **File viewer** extras: the same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
+- **File viewer** extras: its slim toolbar shows only close, filename, and file/session actions—no
+  duplicate session title/project/model header or separator. The same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
   actions that apply to the owning session. Light mode gives the document a paper theme; the choice
   is persisted per device and shared with the full chat and subagent views. A **📄 files strip**
   (header button) expands a one-line horizontally

@@ -223,7 +223,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     real multi-question ask before shipping.
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
-    command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
+    command. `act` type `focus` powers the Claude card's desktop-only **Terminal** button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
 26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
     `Engine.claude_usage_profiles` watches
@@ -231,7 +231,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     id/name, account email, selected/active state, refresh interval, display flags, quota percentages,
     resets, and last-update time. The same profile objects also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
-    selected account and its active marker. If the app is absent/unreadable, fall back to the Claude
+    selected account and its active marker. The Now command-bar chip normally says `Usage`; at 70% it
+    shows the worst selected account/window percentage in amber and at 90% in red. Its popover/sheet
+    contains the full gauges. If the app is absent/unreadable, fall back to the Claude
     Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
     `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`
@@ -247,7 +249,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 28. **Pinned sessions are server-persisted and live in a GLOBAL block.**
     `pinnedSessions` mirrors `/api/fleet.settings.pinned_sessions`; `toggleSessionPin` writes
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
-    `#usage`) in urgency order, then newest activity. Pinned cards are relocated, never duplicated.
+    Fleet Briefing) in urgency order, then newest activity. Pinned cards are relocated, never duplicated.
     Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
     `sessionTap` swallows the following click so pinning does not also open the chat.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
@@ -282,7 +284,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     interrupt, archive, close, attach, compact, review, or relay capabilities.
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
-    `reply_requested`, and `new_response`. Now order is Pinned → Needs you → Working → Available.
+    `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
+    Pinned → Needs you → Working → Available.
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
     with one chronological list and access/provider filters. `requests_reply` examines the newest
     complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
@@ -316,6 +319,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     caps both providers; CSS controls the collapsed line count. When measured content overflows, the
     final collapsed row is a clickable `...`; expanded state removes the height clamp but does not
     fetch or imply more than the bounded 500-character payload.
+36. **Now counts and subagent filtering are presentation-only.** The standalone totals line is gone;
+    Needs you/Working/Available counts live in their matching command-bar chips. Needs you counts
+    distinct sessions. `Subagents` flattens every child not in `done`/`ended`, including `stalled`,
+    with its parent breadcrumb; selecting it hides the session queues without changing
+    `Engine.organize_session` or turning subagents into session cards.
+37. **Nested Settings preserves chat state.** When Settings opens over full chat it gets a separate
+    history entry and remains above `#sevidence`. Back closes Settings alone, restores the exact
+    `#sbody.scrollTop`, and preserves whether `Why Fleet put this here` was open. A pending sticky-
+    bottom animation must not overwrite that saved position.
+38. **Desktop rail side is per browser; file viewer identity is file-only.** `fleet.navSide.v1`
+    toggles `html[data-nav-side]` between left/right and never affects mobile bottom navigation.
+    `#vtitle` contains only the escaped file name/caption; session metadata and `.vfsep` do not belong
+    in the Markdown viewer. Ordinary Claude cards open chat through `.shead` and keep only the
+    distinct **Terminal** native-focus button; Respond/Review actions remain explicit.
 
 ## Dev workflow
 
@@ -369,7 +386,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
-- `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a left rail;
+- `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a per-device left/right rail;
   mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
   routed, participate in browser/native back, and keep History/Insights out of Now.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-

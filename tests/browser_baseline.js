@@ -26,7 +26,7 @@ const percentile = (values, quantile) => {
       const page = await browser.newPage({ viewport });
       const started = performance.now();
       await page.goto(url, { waitUntil: 'domcontentloaded' });
-      await page.locator('#usage').waitFor({ state: 'visible' });
+      await page.locator('#usagechip').waitFor({ state: 'visible' });
       await page.locator('#pinned, #needs, #working, #sessions, #history').first()
         .waitFor({ state: 'attached' });
       timings.push(performance.now() - started);

@@ -40,14 +40,17 @@ test('running Fleet Dash renders both providers without console or network failu
   page.on('requestfailed', request => failures.push(
     `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
   await page.goto(liveURL, { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('#usage')).toContainText('Claude Code');
-  await expect(page.locator('#usage')).toContainText('Codex CLI');
-  const usageProviders = page.locator('#usage .uprovider');
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('Claude Code');
+  await expect(page.locator('#usagebody')).toContainText('Codex CLI');
+  const usageProviders = page.locator('#usagebody .uprovider');
   await expect(usageProviders.nth(0).locator('.uemail').first()).not.toBeEmpty();
   await expect(usageProviders.nth(0)).toContainText('local lifetime tokens');
   await expect(usageProviders.nth(1).locator('.uemail').first()).not.toBeEmpty();
   await expect(usageProviders.nth(1)).toContainText('lifetime tokens');
-  await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
+  await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await goTo(page, 'settings');
   await expect(page.locator('#settingsview')).toBeVisible();
   await expect(page.locator('#settitle')).toHaveText('Settings');

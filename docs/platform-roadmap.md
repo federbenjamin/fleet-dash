@@ -37,7 +37,7 @@ every existing control, and the current safe-action boundaries.
   ready-for-review action. Fleet never merges a PR.
 - Briefings appear in the app. Immediate blocker pushes and one fleet-quiet completion digest may
   use ntfy. Scheduled push digests default off.
-- Desktop uses a left navigation rail. Mobile uses bottom navigation. The destinations are Now,
+- Desktop uses a per-device left/right navigation rail. Mobile uses bottom navigation. The destinations are Now,
   Search, Workstreams, History, Insights, and Settings.
 - Workstreams are lightweight repository/project groupings, not a new task-management system.
 - Light automations are one-time outgoing messages, not a general recurring automation system. They
@@ -65,7 +65,7 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-004 | Provider handoff always shows an editable preview with a one-action accept-unchanged path and clearly creates an independent session. | M5 |
 | DEC-005 | Git actions stop at commit, push, draft PR, and explicitly confirmed mark-ready. Fleet never merges. | M6 |
 | DEC-006 | Briefings live in Fleet. ntfy is optional for immediate blockers and one fleet-quiet digest; scheduled push digests default off. | M7 |
-| DEC-007 | Desktop navigation is a left rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1 |
+| DEC-007 | Desktop navigation is a per-device left/right rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1/M11 |
 | DEC-008 | Workstreams are lightweight repo/project groupings, not tasks, kanban, ownership, or dependencies. | M3 |
 | DEC-009 | Every new interaction works at 390×844 and desktop size without overloading Now. Split destinations when density warrants it. | All |
 | DEC-010 | External ChatGPT Desktop/VS Code Codex threads remain view-only unless explicitly connected to Fleet's App Server. They are still discoverable and their observed transcript activity is trackable. | M0/M4 |
