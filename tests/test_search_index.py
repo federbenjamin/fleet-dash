@@ -184,6 +184,26 @@ class SearchIndexTest(unittest.TestCase):
         self.assertEqual(self.index.search("needle")["results"], [])
         self.assertTrue(any(item["error"] for item in status["warnings"]))
 
+    def test_missing_artifact_warning_settles_without_permanent_worker_backlog(self):
+        missing = os.path.join(self.tmp.name, "removed-artifact.md")
+        self.write_rows(self.main_path(), [{"type": "assistant",
+            "timestamp": "2026-07-16T00:00:01Z", "message": {"role": "assistant",
+            "content": [{"type": "tool_use", "name": "SendUserFile", "id": "gone",
+                         "input": {"files": [missing]}}]}}])
+        self.drain()
+        first = self.index.status()
+        self.assertEqual(first["pending_sources"], 0)
+        self.assertGreaterEqual(first["errors"], 1)
+        for _ in range(3):
+            self.index.last_discovery = 0
+            self.index.discover()
+            self.assertEqual(self.index.status()["pending_sources"], 0)
+
+    def test_search_prefixes_only_short_typeahead_fragments(self):
+        self.assertEqual(self.index._match_query("fle"), '"fle"*')
+        self.assertEqual(self.index._match_query("fleet session"),
+                         '"fleet" AND "session"')
+
     def test_adjacent_duplicate_provider_records_index_once(self):
         path = os.path.join(self.codex, "2026", "07", "16",
                             "rollout-2026-07-16T00-00-00-" + CODEX_SID + ".jsonl")

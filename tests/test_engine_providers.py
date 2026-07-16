@@ -1164,6 +1164,30 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(all(item["root"] == "Location unavailable" for item in records))
         self.assertNotEqual(records[0]["workstream_id"], records[1]["workstream_id"])
 
+    def test_closed_history_is_filtered_paginated_and_keeps_pins_out_of_listing(self):
+        rows = [
+            {"session_id": "codex:one", "provider": "codex", "title": "Parser audit",
+             "project": "fleet", "primary_action": "view", "pinned": False},
+            {"session_id": "claude-two", "provider": "claude", "title": "Parser fix",
+             "project": "fleet", "primary_action": "reopen", "pinned": False},
+            {"session_id": "claude-pin", "provider": "claude", "title": "Pinned parser",
+             "project": "fleet", "primary_action": "view", "pinned": True},
+        ]
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"closed": rows}
+        first = self.engine.history_snapshot(limit=1, query="parser")
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["total"], 2)
+        self.assertEqual(first["next_cursor"], 1)
+        second = self.engine.history_snapshot(cursor=1, limit=1, query="parser")
+        self.assertEqual(len(second["items"]), 1)
+        self.assertIsNone(second["next_cursor"])
+        codex = self.engine.history_snapshot(provider="codex", access="view")
+        self.assertEqual([item["session_id"] for item in codex["items"]], ["codex:one"])
+        exact = self.engine.history_snapshot(sid="claude-pin")
+        self.assertEqual(exact["item"]["title"], "Pinned parser")
+        self.assertFalse(self.engine.history_snapshot(provider="future")["ok"])
+
     def test_repository_routes_are_confined_to_observed_worktrees_and_audit_actions(self):
         os.makedirs(os.path.join(self.cwd, ".git"))
         fleet = self.engine.scan()

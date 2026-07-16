@@ -11,6 +11,7 @@ import statistics
 import threading
 import time
 import uuid
+from collections import deque
 
 
 EVENT_CATEGORIES = {
@@ -38,20 +39,27 @@ class FleetOperations:
         self.clock = clock
         self.id_factory = id_factory or (lambda: "bud-" + uuid.uuid4().hex)
         self.lock = threading.RLock()
+        self.measurement_signatures = {}
+        self.db_connect_ms = deque(maxlen=240)
+        self.db_begin_ms = deque(maxlen=240)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
 
     def _connect(self):
+        started = time.perf_counter()
         db = sqlite3.connect(self.db_path, timeout=5)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=5000")
+        self.db_connect_ms.append((time.perf_counter() - started) * 1000)
         return db
 
     @contextlib.contextmanager
     def _transaction(self, immediate=False):
         db = self._connect()
         try:
+            started = time.perf_counter()
             db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            self.db_begin_ms.append((time.perf_counter() - started) * 1000)
             yield db
             db.commit()
         except Exception:
@@ -59,6 +67,17 @@ class FleetOperations:
             raise
         finally:
             db.close()
+
+    def diagnostics(self):
+        def percentile(values, quantile):
+            ordered = sorted(values)
+            if not ordered:
+                return 0.0
+            index = min(len(ordered)-1, max(0, round((len(ordered)-1)*quantile)))
+            return round(ordered[index], 3)
+        return {"connect_p95_ms": percentile(self.db_connect_ms, .95),
+                "begin_wait_p95_ms": percentile(self.db_begin_ms, .95),
+                "samples": max(len(self.db_connect_ms), len(self.db_begin_ms))}
 
     def _init_db(self):
         with self._connect() as db:
@@ -190,13 +209,13 @@ class FleetOperations:
         """Persist normalized transitions and current measurements idempotently."""
         now = float(fleet.get("t") or self.clock())
         sessions = list(fleet.get("sessions") or []) + list(fleet.get("closed") or [])
+        seen_ids = set()
         with self.lock, self._transaction(immediate=True) as db:
             for session in sessions:
                 sid = self._text(session.get("session_id"), 320)
                 if not sid:
                     continue
-                previous = db.execute(
-                    "SELECT * FROM session_measurements WHERE session_id=?", (sid,)).fetchone()
+                seen_ids.add(sid)
                 provider = self._text(session.get("provider") or "claude", 30)
                 workstream_id = None
                 if workstream_for and session.get("cwd"):
@@ -217,8 +236,6 @@ class FleetOperations:
                 measured_cost = (float(session_cost) + float(agent_cost or 0)
                                  if cost_known else None)
                 total_tokens = session.get("total_tokens")
-                if isinstance(total_tokens, bool) or not isinstance(total_tokens, (int, float)):
-                    total_tokens = previous["tokens"] if previous else None
                 revision = self._text(session.get("convo_v") or session.get("closed_at"), 320)
                 files_n = int(session.get("files_n") or 0)
                 repo_signature = self._repo_signature(session)
@@ -227,6 +244,20 @@ class FleetOperations:
                 runtime = self._runtime(session, now)
                 concurrency = ((1 if ui_group == "working" else 0) +
                                int(session.get("agents_running") or 0))
+                measurement_signature = (
+                    provider, workstream_id, muted, measured_cost, cost_known, total_tokens,
+                    revision, files_n, repo_signature, state, ui_group,
+                    round(runtime, 3) if isinstance(runtime, (int, float)) else None,
+                    concurrency, self._text(session.get("project"), 320),
+                    self._text(session.get("model"), 160),
+                    self._text(session.get("title") or session.get("name"), 320),
+                    self._text(session.get("reason_label"), 160))
+                if self.measurement_signatures.get(sid) == measurement_signature:
+                    continue
+                previous = db.execute(
+                    "SELECT * FROM session_measurements WHERE session_id=?", (sid,)).fetchone()
+                if isinstance(total_tokens, bool) or not isinstance(total_tokens, (int, float)):
+                    total_tokens = previous["tokens"] if previous else None
 
                 if previous:
                     prior_state = previous["ui_group"]
@@ -279,6 +310,11 @@ class FleetOperations:
                     1 if cost_known else 0, int(total_tokens) if total_tokens is not None else None,
                     runtime, concurrency, state, ui_group, revision, files_n, repo_signature,
                     1 if muted else 0, now))
+                self.measurement_signatures[sid] = measurement_signature
+
+            self.measurement_signatures = {
+                sid: signature for sid, signature in self.measurement_signatures.items()
+                if sid in seen_ids}
 
             self._observe_external_outcomes(db)
             evaluations = self._evaluate_budgets(db, fleet)

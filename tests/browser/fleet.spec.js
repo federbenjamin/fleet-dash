@@ -446,6 +446,26 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await page.screenshot({ path: testInfo.outputPath('centered-reading-width.png'), fullPage: true });
 });
 
+test('large conversations load newest-first in bounded pages without losing older turns', async ({ page }) => {
+  await reset(page, 'large-conversation');
+  const initial = await (await page.request.get('/api/context?sid=codex%3Athread-one&limit=50')).json();
+  expect(initial.messages).toHaveLength(50);
+  expect(initial.message_total).toBe(205);
+  expect(initial.next_cursor).toBe(155);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(page.locator('#sbody')).toContainText('Conversation message 204');
+  await expect(page.locator('#sbody')).not.toContainText('Conversation message 154');
+  for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+    await page.locator('#sbody .oldermsgs').click();
+  }
+  await expect(page.locator('#sbody .oldermsgs')).toHaveCount(0);
+  await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
+  await expect(page.locator('#sbody')).toContainText('Conversation message 000');
+  const invalid = await (await page.request.get(
+    '/api/context?sid=codex%3Athread-one&limit=50&cursor=999')).json();
+  expect(invalid.ok).toBe(false);
+});
+
 test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
   const themeSurfaces = () => page.evaluate(() => {
     const probe = document.createElement('span');
@@ -681,6 +701,8 @@ test('messages and question answers render optimistically and recover from failu
   const sending = page.locator('#sbody .optimistic').filter({ hasText: 'Ship the optimistic message' });
   await expect(sending).toBeVisible();
   await expect(sending.getByLabel('sending')).toBeVisible();
+  await expect.poll(async () => page.evaluate(() =>
+    window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
   await page.request.post('/test/confirm', { data: { session_id: 'codex:thread-one',
     text: 'Ship the optimistic message' } });
   await refresh(page);
@@ -752,6 +774,8 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await expect(feedback).toContainText('Submitting');
   await expect(feedback).toContainText('Scope: Focused');
   await expect(feedback.getByLabel('sending quick response')).toBeVisible();
+  await expect.poll(async () => page.evaluate(() =>
+    window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
   await expect(feedback).toContainText('Submitted', { timeout: 2_000 });
   await expect(feedback.getByLabel('response submitted')).toBeVisible();
 
@@ -895,15 +919,19 @@ test('backfilled Claude history supports both view and reopen', async ({ page })
 
 test('large transcript archives page history without hiding older rows', async ({ page }) => {
   await reset(page, 'large-history');
+  const fleetPayload = await (await page.request.get('/api/fleet')).json();
+  expect(fleetPayload.closed_total).toBe(206);
+  expect(fleetPayload.closed).toHaveLength(0);
+  expect(fleetPayload.closed_ids).toHaveLength(206);
   await goTo(page, 'history');
   const providerFilters = page.locator('.filterline').filter({ hasText: 'Provider' });
   await providerFilters.getByRole('button', { name: 'Claude' }).click();
   await expect(page.locator('[data-history-sid]')).toHaveCount(100);
-  const firstMore = page.getByRole('button', { name: 'show 100 more of 205' });
+  const firstMore = page.getByRole('button', { name: 'show 100 more' });
   await expect(firstMore).toBeVisible();
   await firstMore.click();
   await expect(page.locator('[data-history-sid]')).toHaveCount(200);
-  await page.getByRole('button', { name: 'show 5 more of 205' }).click();
+  await page.getByRole('button', { name: 'show 5 more' }).click();
   await expect(page.locator('[data-history-sid]')).toHaveCount(205);
   await expect(page.getByText('Archived Claude session 204')).toBeVisible();
 });

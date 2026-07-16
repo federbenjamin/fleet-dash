@@ -874,12 +874,44 @@ settings persistence, and push-failure tests pass.
 
 ### M9 — Optimization pass
 
-- Instrument server timing, poll duration, index lag, DB waits, payload sizes, render duration, input
-  latency, and memory.
-- Profile real archives, many live sessions, large conversations, rapid events, and repeated mobile
-  refreshes.
-- Remove redundant scans/renders, batch writes, add bounded caches, tighten payloads, and retest every
-  performance gate.
+- Completed 2026-07-16. Every response now reports server time and payload bytes; authenticated
+  diagnostics retain bounded per-route latency/status/payload samples plus engine phase, DB-wait,
+  search-lag, and process-memory measurements. The browser retains bounded render, poll,
+  poll-payload, and input-to-feedback samples in `window.__fleetPerf`.
+- The live 2.87 GB search corpus and a deterministic 100,000-message/2,000-source corpus were
+  profiled. The deterministic corpus built in 2.022 seconds, cold search measured 14.710/15.441 ms
+  p50/p95, warm search measured 0.004/0.011 ms, and live append-to-result lag measured 0.058 seconds.
+- Closed-session metadata moved out of the two-second fleet poll into a paginated History endpoint.
+  Pinned closed sessions remain in the fleet response, while `closed_ids` preserves direct lookup.
+  Full conversations load newest-first in 50-message pages and preserve scroll position when older
+  pages are prepended. The live fleet payload fell from 1,162,003 bytes immediately before M9 to
+  159,249 bytes; the measured context response fell to 18,256 bytes.
+- Closed-session filesystem checks, project aggregation, and identical search results use bounded,
+  invalidation-aware caches. Search document counts are maintained transactionally instead of
+  scanning the FTS table on every status read. Operations measurement signatures skip unchanged
+  session queries and writes. Missing artifacts settle as visible errors instead of being reindexed
+  forever.
+- No transcript or index scan was added to an HTTP request path. Search ingestion remains in the
+  background worker; fleet requests serialize the current engine snapshot; History and conversation
+  pages are loaded only when opened. Pagination and cache invalidation have deterministic regression
+  coverage.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 159 passed.
+- `npx playwright test tests/browser/fleet.spec.js` — 76 passed across desktop 1440×1000 and mobile
+  390×844, including 205-row History pagination, a 205-message conversation, invalid cursors, and
+  optimistic input/quick-response feedback below 100 ms.
+- `python3 tests/live_api_smoke.py` — passed against 26 live sessions and seven Codex models.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377 FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 12 passed across both viewports with no console or network failures.
+- `python3 tests/search_benchmark.py` — all size, build-time, cold/warm-query, and live-lag gates
+  passed on the deterministic large corpus.
+- `node tests/browser_baseline.js http://127.0.0.1:8377/ 8` — desktop and mobile results recorded
+  below; browser poll payload measured 158,937 bytes.
+- `python3 tests/perf_baseline.py --samples 40 --context-samples 10 --history-samples 20
+  --search-samples 40 --search-query fleet --local-action-auth --skip-corpus` — API, engine, search,
+  database, payload, and memory results recorded below.
 
 Commit: `Optimize fleet indexing and interaction latency`.
 
@@ -925,19 +957,24 @@ content.
 
 | Metric | M0 baseline | M9 result | Gate |
 | --- | ---: | ---: | ---: |
-| Engine scan p50/p95 | 140.184 / 902.369 ms | pending | no regression from indexing |
-| `/api/fleet` p50/p95 | 9.296 / 10.994 ms | pending | baseline + <5 ms p95 |
-| `/api/context` p50/p95 | 2.157 / 2.676 ms | pending | improve or unchanged |
-| Search warm p50/p95 | n/a | pending | <75 ms p95 |
-| Search cold p50/p95 | n/a | pending | <150 ms p95 |
-| Live index lag p95 | n/a | pending | <2 poll intervals |
-| Initial index wall time | n/a | pending | background only |
-| Desktop first useful render p50/p95 | 77.589 / 140.699 ms | pending | improve or unchanged |
-| Mobile first useful render p50/p95 | 73.206 / 75.661 ms | pending | improve or unchanged |
-| Mobile input-to-feedback | <100 ms deterministic gate; real instrumentation pending | pending | <100 ms |
-| Poll payload bytes p50 | 768,834 bytes | pending | bounded with pagination |
-| Context payload bytes | 159,125 bytes | pending | paginate large conversations |
-| Daemon steady-state RSS | 26,032 KiB | pending | measured and justified |
+| Engine scan p50/p95 | 140.184 / 902.369 ms | 127.783 / 293.487 ms | no regression from indexing |
+| `/api/fleet` p50/p95 | 9.296 / 10.994 ms | 2.850 / 4.349 ms | baseline + <5 ms p95 |
+| `/api/context` p50/p95 | 2.157 / 2.676 ms | 1.028 / 1.483 ms | improve or unchanged |
+| Search warm p50/p95 | n/a | 0.004 / 0.011 ms fixture; 1.321 / 2.451 ms live HTTP | <75 ms p95 |
+| Search cold p50/p95 | n/a | 14.710 / 15.441 ms | <150 ms p95 |
+| Live index lag p95 | n/a | 0.058 s measured append | <2 poll intervals |
+| Initial index wall time | n/a | 2.022 s, background worker | background only |
+| Desktop first useful render p50/p95 | 77.589 / 140.699 ms | 54.075 / 97.534 ms | improve or unchanged |
+| Mobile first useful render p50/p95 | 73.206 / 75.661 ms | 55.811 / 90.511 ms | improve or unchanged |
+| Mobile input-to-feedback | <100 ms deterministic gate; real instrumentation pending | <100 ms deterministic gate; runtime instrumentation added | <100 ms |
+| Poll payload bytes p50 | 768,834 bytes | 159,249 API; 158,937 browser | bounded with pagination |
+| Context payload bytes | 159,125 bytes | 18,256 bytes per 50-message page | paginate large conversations |
+| Daemon steady-state RSS | 26,032 KiB | 48,688 KiB current; 194,944 KiB process peak | measured and justified |
+
+The M9 RSS value is a direct process measurement after the full live and browser matrix. The peak is
+the operating-system process high-water mark and includes startup, the one-time search-count schema
+migration, indexing, and browser/live test traffic; it is not the steady-state reading. M10 retains a
+restart/soak check to distinguish a stable larger working set from a leak before final handoff.
 
 Real local corpus baseline:
 
@@ -956,7 +993,8 @@ browse behavior is reintroduced and should reduce read contention during active 
 Repeat with:
 
 ```bash
-python3 tests/perf_baseline.py --samples 40 --context-samples 3 --sid <session-id>
+python3 tests/perf_baseline.py --samples 40 --context-samples 10 --history-samples 20 \
+  --search-samples 40 --search-query fleet --local-action-auth --skip-corpus
 node tests/browser_baseline.js http://127.0.0.1:8377/ 8
 ```
 

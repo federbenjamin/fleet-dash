@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 import uuid
+from collections import deque
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -113,20 +114,26 @@ class OutboxManager:
         self.id_factory = id_factory or (lambda: "out-" + uuid.uuid4().hex)
         self.lease_seconds = max(5, int(lease_seconds))
         self.max_batch = max(1, int(max_batch))
+        self.db_connect_ms = deque(maxlen=240)
+        self.db_begin_ms = deque(maxlen=240)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
 
     def _connect(self):
+        started = time.perf_counter()
         db = sqlite3.connect(self.db_path, timeout=5)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=5000")
+        self.db_connect_ms.append((time.perf_counter() - started) * 1000)
         return db
 
     @contextlib.contextmanager
     def _transaction(self, immediate=False):
         db = self._connect()
         try:
+            started = time.perf_counter()
             db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            self.db_begin_ms.append((time.perf_counter() - started) * 1000)
             yield db
             db.commit()
         except Exception:
@@ -134,6 +141,17 @@ class OutboxManager:
             raise
         finally:
             db.close()
+
+    def diagnostics(self):
+        def percentile(values, quantile):
+            ordered = sorted(values)
+            if not ordered:
+                return 0.0
+            index = min(len(ordered)-1, max(0, round((len(ordered)-1)*quantile)))
+            return round(ordered[index], 3)
+        return {"connect_p95_ms": percentile(self.db_connect_ms, .95),
+                "begin_wait_p95_ms": percentile(self.db_begin_ms, .95),
+                "samples": max(len(self.db_connect_ms), len(self.db_begin_ms))}
 
     def _init_db(self):
         with self._connect() as db:

@@ -624,6 +624,12 @@ def set_scenario(name):
                 "closed_at": now - index, "first_seen": now - 3600 - index,
                 "last_seen": now - index, "bridge_url": None,
                 "can_reopen": False})
+    elif name == "large-conversation":
+        STATE["contexts"]["codex:thread-one"] = [
+            {"role": "user" if index % 2 == 0 else "assistant",
+             "text": f"Conversation message {index:03d}"}
+            for index in range(205)]
+        session["convo_v"] = "large:205"
     elif name in ("workstreams", "repo-action-failure"):
         session.update(cwd="/Users/test/fleet-dash-worktrees/ui",
                        branch="feature/action-inbox", project="fleet-dash")
@@ -777,7 +783,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply({"ok": True, "query": q, "results": rows,
                     "next_cursor": None, "projects": ["fleet-dash"], "elapsed_ms": 1.2})
             if route == "/api/fleet":
-                return self.json_reply(fleet())
+                snapshot = fleet()
+                closed = snapshot["closed"]
+                snapshot["closed_total"] = len(closed)
+                snapshot["closed_ids"] = [item["session_id"] for item in closed]
+                snapshot["closed"] = [item for item in closed if item.get("pinned")]
+                return self.json_reply(snapshot)
+            if route == "/api/history":
+                rows = [item for item in fleet()["closed"] if not item.get("pinned")]
+                sid = (query.get("sid") or [""])[0]
+                if sid:
+                    item = next((item for item in fleet()["closed"]
+                                 if item.get("session_id") == sid), None)
+                    return self.json_reply({"ok": True, "item": item})
+                q = (query.get("q") or [""])[0].strip().lower()
+                provider = (query.get("provider") or [""])[0]
+                access = (query.get("access") or [""])[0]
+                try:
+                    cursor = max(0, int((query.get("cursor") or ["0"])[0]))
+                    limit = max(1, min(200, int((query.get("limit") or ["100"])[0])))
+                except ValueError:
+                    return self.json_reply({"ok": False, "error": "invalid pagination"})
+                if provider:
+                    rows = [item for item in rows if item.get("provider") == provider]
+                if access:
+                    rows = [item for item in rows if item.get("primary_action") == access]
+                if q:
+                    rows = [item for item in rows if q in " ".join(str(item.get(key) or "")
+                        for key in ("title", "name", "project", "branch", "provider",
+                                    "reason_label", "access_label", "state")).lower()]
+                total = len(rows)
+                items = rows[cursor:cursor + limit]
+                next_cursor = cursor + len(items) if cursor + len(items) < total else None
+                return self.json_reply({"ok": True, "items": rows[cursor:cursor + limit],
+                    "cursor": cursor, "next_cursor": next_cursor, "total": total})
             if route == "/api/briefing":
                 return self.json_reply(fixture_briefing((query.get("device") or ["default"])[0]))
             if route == "/api/budgets":
@@ -806,8 +845,20 @@ class Handler(BaseHTTPRequestHandler):
                     "next_cursor": rows[-1]["id"] if more and rows else None})
             if route == "/api/context":
                 sid = (query.get("sid") or [""])[0]
+                messages = copy.deepcopy(STATE.get("contexts", {}).get(sid, []))
+                try:
+                    limit = max(1, min(100, int((query.get("limit") or ["50"])[0])))
+                    cursor = (len(messages) if "cursor" not in query else
+                              int((query.get("cursor") or [str(len(messages))])[0]))
+                    if cursor < 0 or cursor > len(messages):
+                        raise ValueError
+                except ValueError:
+                    return self.json_reply({"ok": False,
+                                            "error": "invalid conversation pagination"})
+                start = max(0, cursor - limit)
                 return self.json_reply({"ok": True,
-                    "messages": copy.deepcopy(STATE.get("contexts", {}).get(sid, [])),
+                    "messages": messages[start:cursor], "message_total": len(messages),
+                    "next_cursor": start if start > 0 else None,
                     "files": [{"name": "artifact.md", "path": "/fixture/artifact.md",
                     "kind": "text", "missing": False, "caption": "Codex updated this file",
                     "delivered": False}]})

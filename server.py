@@ -10,8 +10,11 @@ GET /api/repo authenticated repository outcome/action preview
 GET /api/outbox authenticated scheduled-message list and audit trail
 GET /api/briefing deterministic operational briefing and per-device cursor
 GET /api/budgets measured budget state and forecasts
+GET /api/history paginated closed-session metadata
+GET /api/diagnostics authenticated latency, payload, and memory measurements
 """
-import json, os, sys, time, threading, secrets
+from collections import defaultdict, deque
+import json, os, resource, subprocess, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -51,6 +54,49 @@ def outbox_loop(eng):
 
 class Handler(BaseHTTPRequestHandler):
     eng = None
+    metrics_lock = threading.Lock()
+    route_metrics = defaultdict(lambda: {"elapsed_ms": deque(maxlen=480),
+                                         "payload_bytes": deque(maxlen=480),
+                                         "statuses": deque(maxlen=480)})
+
+    def begin_request(self):
+        self._request_started = time.perf_counter()
+        self._request_route = self.path.split("?", 1)[0]
+
+    @classmethod
+    def diagnostics(cls):
+        def percentile(values, quantile):
+            ordered = sorted(values)
+            if not ordered:
+                return 0.0
+            index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * quantile)))
+            return round(ordered[index], 3)
+
+        with cls.metrics_lock:
+            routes = {
+                route: {
+                    "count": len(metrics["elapsed_ms"]),
+                    "p50_ms": percentile(metrics["elapsed_ms"], .5),
+                    "p95_ms": percentile(metrics["elapsed_ms"], .95),
+                    "payload_p50_bytes": int(percentile(metrics["payload_bytes"], .5)),
+                    "payload_p95_bytes": int(percentile(metrics["payload_bytes"], .95)),
+                    "last_status": (metrics["statuses"][-1]
+                                    if metrics["statuses"] else None),
+                }
+                for route, metrics in cls.route_metrics.items()
+            }
+        current_rss = None
+        try:
+            proc = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                                  check=True, capture_output=True, text=True, timeout=2)
+            current_rss = int(proc.stdout.strip()) * 1024
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform != "darwin":
+            peak_rss *= 1024
+        return {"routes": routes, "memory": {"rss_bytes": current_rss,
+                                               "peak_rss_bytes": int(peak_rss)}}
 
     def token_ok(self):
         want = self.eng.cfg.get("act_token", "")
@@ -66,6 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         return secrets.compare_digest(str(want), str(supplied))
 
     def do_POST(self):
+        self.begin_request()
         route = self.path.split("?", 1)[0]
         if route not in ("/api/act", "/api/settings", "/api/search/rebuild"):
             return self.reply(404, "text/plain", b"not found")
@@ -115,10 +162,26 @@ class Handler(BaseHTTPRequestHandler):
     def query(self, key):
         return (parse_qs(urlparse(self.path).query).get(key) or [""])[0]
 
+    def paginate_context(self, out):
+        if not isinstance(out, dict) or not out.get("ok"):
+            return out
+        messages = list(out.get("messages") or [])
+        try:
+            limit = max(1, min(100, int(self.query("limit") or 50)))
+            cursor = len(messages) if self.query("cursor") == "" else int(self.query("cursor"))
+            if cursor < 0 or cursor > len(messages):
+                raise ValueError
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid conversation pagination"}
+        start = max(0, cursor - limit)
+        return {**out, "messages": messages[start:cursor], "message_total": len(messages),
+                "next_cursor": start if start > 0 else None}
+
     def do_GET(self):
+        self.begin_request()
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff", "/api/repo", "/api/outbox"):
+                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -133,6 +196,18 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/outbox":
                 out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
                                                self.query("limit") or 100)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/diagnostics":
+                out = self.diagnostics()
+                with self.eng.lock:
+                    out["engine"] = dict(
+                        (self.eng.snapshot_cache.get("diagnostics") or {}))
+                search = getattr(self.eng, "search", None)
+                if search:
+                    try:
+                        out["search"] = search.status()
+                    except Exception as exc:
+                        out["search"] = {"ok": False, "error": str(exc)}
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:
@@ -153,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"ok": False, "error": "search index is temporarily unavailable"}
             return self.reply(200, "application/json", json.dumps(out).encode())
         if route == "/api/context":
-            out = self.eng.session_context(self.query("sid"))
+            out = self.paginate_context(self.eng.session_context(self.query("sid")))
             self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/closed_context":
             out = self.eng.closed_context(self.query("sid"))
@@ -200,9 +275,22 @@ class Handler(BaseHTTPRequestHandler):
             out = self.eng.state_history(self.query("sid"), self.query("cursor") or 0,
                                          self.query("limit") or 40)
             self.reply(200, "application/json", json.dumps(out).encode())
+        elif route == "/api/history":
+            out = self.eng.history_snapshot(
+                self.query("cursor") or 0, self.query("limit") or 100,
+                self.query("q"), self.query("provider"), self.query("access"),
+                self.query("sid"))
+            self.reply(200, "application/json", json.dumps(out).encode())
         elif route == "/api/fleet":
             with self.eng.lock:
                 snap = dict(self.eng.snapshot_cache)
+            closed = list(snap.get("closed") or [])
+            snap["closed_total"] = len(closed)
+            snap["closed_ids"] = [item.get("session_id") for item in closed
+                                  if item.get("session_id")]
+            # Pinned history remains on the main fleet surface. Everything else
+            # is fetched only while the History page or a closed overlay needs it.
+            snap["closed"] = [item for item in closed if item.get("pinned")]
             try:  # page version: lets stale tabs self-reload on dashboard.html changes
                 assets = [os.path.join(BASE, "dashboard.html")]
                 assets.extend(os.path.join(BASE, route.removeprefix("/"))
@@ -227,9 +315,19 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, "text/plain", b"not found")
 
     def reply(self, code, ctype, body):
+        elapsed_ms = ((time.perf_counter() - getattr(self, "_request_started",
+                                                     time.perf_counter())) * 1000)
+        route = getattr(self, "_request_route", self.path.split("?", 1)[0])
+        with self.metrics_lock:
+            metrics = self.route_metrics[route]
+            metrics["elapsed_ms"].append(elapsed_ms)
+            metrics["payload_bytes"].append(len(body))
+            metrics["statuses"].append(int(code))
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
+        self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:

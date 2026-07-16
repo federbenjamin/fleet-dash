@@ -896,10 +896,12 @@ class Engine:
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
         self.scan_timings_ms = deque(maxlen=240)
+        self.scan_wait_timings_ms = deque(maxlen=240)
         self.last_state_journal_ms = 0.0
         self.history_backfilled = False
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
+        self._closed_sessions_cache = None
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         self.outbox = OutboxManager(os.path.join(BASE, "ledger.db"))
         self.operations = FleetOperations(os.path.join(BASE, "ledger.db"))
@@ -1290,18 +1292,30 @@ class Engine:
     def scan(self):
         started = time.perf_counter()
         with self.scan_lock:
+            acquired = time.perf_counter()
             fleet = self._scan()
         elapsed = (time.perf_counter() - started) * 1000
+        wait_ms = (acquired - started) * 1000
         self.scan_timings_ms.append(elapsed)
+        self.scan_wait_timings_ms.append(wait_ms)
         ordered = sorted(self.scan_timings_ms)
+        waits = sorted(self.scan_wait_timings_ms)
         percentile = lambda q: ordered[min(len(ordered) - 1,
                                             max(0, round((len(ordered) - 1) * q)))]
+        wait_percentile = lambda q: waits[min(len(waits) - 1,
+                                               max(0, round((len(waits) - 1) * q)))]
+        phases = fleet.pop("_scan_phases_ms", {})
         fleet["diagnostics"] = {
             "scan_ms": round(elapsed, 3),
             "scan_p50_ms": round(percentile(.50), 3),
             "scan_p95_ms": round(percentile(.95), 3),
+            "scan_wait_ms": round(wait_ms, 3),
+            "scan_wait_p95_ms": round(wait_percentile(.95), 3),
             "scan_samples": len(ordered),
             "state_journal_ms": round(self.last_state_journal_ms, 3),
+            "phases_ms": phases,
+            "operations_db": self.operations.diagnostics(),
+            "outbox_db": self.outbox.diagnostics(),
         }
         with self.lock:
             self.snapshot_cache = fleet
@@ -1310,6 +1324,15 @@ class Engine:
     def _scan(self):
         cfg = self.cfg
         now = time.time()
+        phase_started = time.perf_counter()
+        phases = {}
+
+        def phase(name):
+            nonlocal phase_started
+            current = time.perf_counter()
+            phases[name] = round((current - phase_started) * 1000, 3)
+            phase_started = current
+
         sessions = []
         live_claude_ids = set()
         for reg in self.live_sessions():
@@ -1445,6 +1468,7 @@ class Engine:
                     "decide_approval": True, "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
+        phase("claude")
         self.registry_status_since = {
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
@@ -1469,6 +1493,7 @@ class Engine:
                     **(session.get("capabilities") or {}), "submit": False,
                     "interrupt": False, "takeover": False, "close": False}
         sessions.extend(codex_sessions)
+        phase("codex")
         muted = self.cfg.get("muted_sessions") or {}
         for session in sessions:
             session["muted"] = session["session_id"] in muted
@@ -1499,21 +1524,25 @@ class Engine:
             except Exception as exc:
                 print(f"Claude history backfill failed: {exc}", file=sys.stderr,
                       flush=True)
+        phase("live_ledger")
         closed = [self.organize_closed(item) for item in self.closed_sessions()]
         closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
         links = self.handoff_link_map(
             [item.get("session_id") for item in [*sessions, *closed]])
         for item in [*sessions, *closed]:
             item["handoff_links"] = links.get(str(item.get("session_id") or ""), [])
+        phase("closed_history")
         journal_started = time.perf_counter()
         self.record_state_events([*sessions, *closed], now)
         self.last_state_journal_ms = (time.perf_counter() - journal_started) * 1000
+        phase("state_journal")
         actions = self.action_records(sessions)
         claude_usage = self.read_usage()
         try:
             codex_usage = self.codex.account_usage()
         except Exception as exc:
             codex_usage = {"provider": "codex", "stale": True, "error": str(exc)}
+        phase("usage")
         fleet = {
             "t": now,
             "sessions": sessions,
@@ -1574,7 +1603,51 @@ class Engine:
         except Exception as exc:
             fleet["budget_summary"] = {"configured": 0, "stale": True,
                                        "error": str(exc)}
+        phase("operations")
+        fleet["_scan_phases_ms"] = phases
         return fleet
+
+    def history_snapshot(self, cursor=0, limit=100, query="", provider="", access="", sid=""):
+        """Page closed-session metadata outside the two-second fleet payload."""
+        try:
+            cursor = max(0, int(cursor or 0))
+            limit = max(1, min(200, int(limit or 100)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid history pagination"}
+        query = str(query or "").strip().lower()
+        sid = str(sid or "").strip()
+        if len(query) > 300 or len(sid) > 320 or any(ord(char) < 32 for char in sid):
+            return {"ok": False, "error": "invalid history filter"}
+        if provider not in ("", "claude", "codex"):
+            return {"ok": False, "error": "invalid history provider"}
+        if access not in ("", "continue", "view", "reopen"):
+            return {"ok": False, "error": "invalid history access"}
+        with self.lock:
+            rows = list(self.snapshot_cache.get("closed") or [])
+        if sid:
+            item = next((dict(row) for row in rows
+                         if str(row.get("session_id") or "") == sid), None)
+            return {"ok": True, "item": item}
+        filtered = []
+        for item in rows:
+            if item.get("pinned"):
+                continue
+            if provider and (item.get("provider") or "claude") != provider:
+                continue
+            if access and item.get("primary_action") != access:
+                continue
+            if query:
+                haystack = " ".join(str(item.get(key) or "") for key in (
+                    "title", "name", "project", "branch", "provider", "reason_label",
+                    "access_label", "state", "reg_status", "model", "cwd")).lower()
+                if query not in haystack:
+                    continue
+            filtered.append(dict(item))
+        total = len(filtered)
+        items = filtered[cursor:cursor + limit]
+        next_cursor = cursor + len(items) if cursor + len(items) < total else None
+        return {"ok": True, "items": items, "cursor": cursor, "next_cursor": next_cursor,
+                "total": total}
 
     def workstreams_snapshot(self):
         """Build the heavier repository rollup outside the two-second fleet path."""
@@ -2717,7 +2790,14 @@ Treat this as an independent session. Verify the repository state before changin
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
                 "closed_at", "title", "provider", "transcript_path")
         try:
-            rows = self.ensure_db().execute(
+            db = self.ensure_db()
+            signature = db.execute("""SELECT COUNT(*),MAX(closed_at)
+                FROM session_runs WHERE closed_at IS NOT NULL""").fetchone()
+            now_mono = time.monotonic()
+            cached = self._closed_sessions_cache
+            if cached and cached[0] == signature and now_mono < cached[1]:
+                return copy.deepcopy(cached[2])
+            rows = db.execute(
                 f"""SELECT {','.join(cols)} FROM session_runs
                     WHERE closed_at IS NOT NULL ORDER BY closed_at DESC""").fetchall()
             out = [dict(zip(cols, r)) for r in rows]
@@ -2727,6 +2807,7 @@ Treat this as an independent session. Verify the repository state before changin
                     self._safe_claude_transcript(row.get("session_id"),
                                                  row.get("transcript_path")) and
                     self._safe_reopen_cwd(row.get("cwd")))
+            self._closed_sessions_cache = (signature, now_mono + 60, copy.deepcopy(out))
             return out
         except Exception:
             return []

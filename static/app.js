@@ -1,4 +1,20 @@
 const $=q=>document.querySelector(q);
+const fleetPerf=window.__fleetPerf={samples:{render_ms:[],poll_ms:[],poll_payload_bytes:[],
+  input_feedback_ms:[]}};
+function perfRecord(name,value){
+  const list=fleetPerf.samples[name]||(fleetPerf.samples[name]=[]);
+  if(Number.isFinite(value)){list.push(value);if(list.length>240)list.shift();}
+}
+function perfSummary(){
+  const pct=(values,q)=>{const sorted=[...values].sort((a,b)=>a-b);
+    return sorted.length?sorted[Math.min(sorted.length-1,Math.round((sorted.length-1)*q))]:0;};
+  return Object.fromEntries(Object.entries(fleetPerf.samples).map(([name,values])=>[name,
+    {count:values.length,p50:Math.round(pct(values,.5)*1000)/1000,
+      p95:Math.round(pct(values,.95)*1000)/1000,last:values.at(-1)||0}]));
+}
+fleetPerf.summary=perfSummary;
+function recordInputFeedback(started){requestAnimationFrame(()=>
+  perfRecord('input_feedback_ms',performance.now()-started));}
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
         history.replaceState(null,'',location.pathname+location.hash);}})();
@@ -54,6 +70,7 @@ function navigateTo(route,push=true){
   if(route==='insights'){loadInsights();loadBudgets();}
   if(route==='search'){loadSearchStatus(true);runSearch(true);}
   if(route==='workstreams')loadWorkstreams(true);
+  if(route==='history')loadHistory(true);
   window.scrollTo({top:0,behavior:'auto'});
 }
 function setNowFilter(value){nowFilter=value;render(last,true);}
@@ -218,7 +235,7 @@ function searchSourceAction(source){
   if(!source)return'';const sid=source.session_id||'';
   const session=((last&&last.sessions)||[]).find(item=>item.session_id===sid);
   const active=Boolean(session);
-  const closed=((last&&last.closed)||[]).some(item=>item.session_id===sid);
+  const closed=isClosedSession(sid);
   if(source.source_kind==='artifact'&&source.artifact_path&&active)
     return`<button class="headprimary" onclick="switchSearchView('artifact')">Open artifact</button>`;
   if(source.source_kind==='subagent'&&source.agent_id&&
@@ -677,11 +694,30 @@ async function ensureCtx(sid,v){
   if(c&&(c.v===v||c.fetching))return;
   ctxCache[sid]={...(c||{}),fetching:true};
   try{
-    const r=await fetch('/api/context?sid='+encodeURIComponent(sid),{cache:'no-store'});
+    const r=await fetch('/api/context?sid='+encodeURIComponent(sid)+'&limit=50',{cache:'no-store'});
     const d=await r.json();
-    ctxCache[sid]=d.ok?{v,messages:d.messages||[],files:d.files||[]}:{v,messages:[],files:[]};
+    ctxCache[sid]=d.ok?{v,messages:d.messages||[],files:d.files||[],
+      next_cursor:d.next_cursor,message_total:d.message_total}:{v,messages:[],files:[]};
     render(last);
   }catch(e){delete ctxCache[sid];}
+}
+async function loadOlderCtx(sid){
+  const c=ctxCache[sid];if(!c||c.loadingOlder||c.next_cursor==null)return;
+  const body=sessionView&&sessionView.sid===sid&&!sessionView.closed?$('#sbody'):null;
+  const old=body?{height:body.scrollHeight,top:body.scrollTop}:null;
+  c.loadingOlder=true;uiRefresh();
+  try{
+    const response=await fetch('/api/context?sid='+encodeURIComponent(sid)+
+      '&limit=50&cursor='+encodeURIComponent(c.next_cursor),{cache:'no-store'});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Older messages unavailable');
+    c.messages=[...(data.messages||[]),...(c.messages||[])];
+    c.next_cursor=data.next_cursor;c.message_total=data.message_total;c.olderError='';
+  }catch(error){c.olderError=String(error.message||error);}
+  finally{c.loadingOlder=false;uiRefresh();}
+  if(body&&old)requestAnimationFrame(()=>{
+    body.scrollTop=old.top+Math.max(0,body.scrollHeight-old.height);
+  });
 }
 // "opus · high". Effort comes from the statusline side-write, so a session whose
 // statusline hasn't rendered yet (or isn't installed) shows the model alone.
@@ -730,6 +766,7 @@ function canonicalCount(messages,item){
     normalizedMessage(message.text)===wanted).length;
 }
 function addOptimistic(sid,text,kind='text'){
+  const feedbackStarted=performance.now();
   const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
   const item={id:++optimisticSequence,sid,text:String(text||''),kind,status:'sending',
     baseCount:canonicalCount(messages,{kind,text}),created:Date.now()};
@@ -741,6 +778,7 @@ function addOptimistic(sid,text,kind='text'){
     }
   },15000);
   uiRefresh();
+  recordInputFeedback(feedbackStarted);
   return item.id;
 }
 function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
@@ -785,9 +823,10 @@ function quickResponseLabel(payload){
   return'Submit response';
 }
 function beginQuickResponse(sid,payload){
+  const feedbackStarted=performance.now();
   const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
     status:'sending',created:Date.now()};
-  quickResponses.set(sid,item);uiRefresh();return item.id;
+  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted);return item.id;
 }
 function finishQuickResponse(sid,id,ok,error){
   const item=quickResponses.get(sid);
@@ -832,7 +871,10 @@ function convoMsgs(c,sid,includeOptimistic=true){
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
-  return canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
+  const older=c.next_cursor!=null?`<button class="historyaction oldermsgs" onclick="loadOlderCtx(decodeURIComponent('${enc(sid)}'))"
+    ${c.loadingOlder?'disabled':''}>${c.loadingOlder?'loading older messages…':'load older messages'}</button>`:'';
+  const error=c.olderError?`<div class="ctxload">✗ ${esc(c.olderError)}</div>`:'';
+  return older+error+canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
 }
 function convoBox(s,short){
   const c=ctxCache[s.session_id];
@@ -1046,7 +1088,7 @@ async function openHandoffDestination(automatic=false){
   const sid=handoffView.destination;
   await tick();
   const exists=((last||{}).sessions||[]).some(item=>item.session_id===sid)||
-    ((last||{}).closed||[]).some(item=>item.session_id===sid);
+    isClosedSession(sid);
   if(!exists){
     handoffView.status=automatic?'Sent ✓ — destination is still starting; use Open exact destination in a moment':'Destination is still starting.';
     renderHandoff();return;
@@ -1409,7 +1451,7 @@ async function loadSessionEvidence(encodedSid,more=false){
   if(cache.loading||(!more&&cache.loaded))return;
   cache.loading=true;cache.error=null;
   const current=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
-    ((last&&last.closed)||[]).find(item=>item.session_id===sid)||{};
+    closedSession(sid)||{};
   renderEvidenceRail(current);
   try{
     const cursor=more&&cache.next_cursor?'&cursor='+encodeURIComponent(cache.next_cursor):'';
@@ -1422,7 +1464,7 @@ async function loadSessionEvidence(encodedSid,more=false){
   finally{cache.loading=false;}
   if(sessionView&&sessionView.sid===sid&&sessionEvidenceOpen){
     const fresh=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
-      ((last&&last.closed)||[]).find(item=>item.session_id===sid)||current;
+      closedSession(sid)||current;
     renderEvidenceRail(fresh);
   }
 }
@@ -1430,7 +1472,7 @@ function toggleSessionEvidence(encodedSid){
   const sid=decodeURIComponent(encodedSid);
   sessionEvidenceOpen=!sessionEvidenceOpen;
   const s=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
-    ((last&&last.closed)||[]).find(item=>item.session_id===sid)||{};
+    closedSession(sid)||{};
   renderEvidenceRail(s);
   if(sessionEvidenceOpen)loadSessionEvidence(encodedSid);
   if(sessionView&&!sessionView.closed)renderSession(true);else if(sessionView)renderClosed(true);
@@ -1438,7 +1480,7 @@ function toggleSessionEvidence(encodedSid){
 function primarySessionAction(sid){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(s){openSession(sid);return;}
-  if(((last&&last.closed)||[]).some(x=>x.session_id===sid))openClosed(sid);
+  if(isClosedSession(sid))openClosed(sid);
 }
 async function markSessionRevision(payload){
   const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1485,6 +1527,15 @@ function openClosed(sid){
   $('#sview').style.display='flex';
   syncOverlayHistory();
   renderClosed(true);
+  if(!closedSession(sid))loadClosedMeta(sid);
+}
+async function loadClosedMeta(sid){
+  try{
+    const response=await fetch('/api/history?sid='+encodeURIComponent(sid),{cache:'no-store'});
+    const data=await response.json();
+    if(response.ok&&data.ok&&data.item)closedMeta.set(sid,data.item);
+  }catch(_){/* the transcript endpoint still provides a read-only fallback */}
+  if(sessionView&&sessionView.closed&&sessionView.sid===sid)renderClosed(true);
 }
 function closeSession(){
   closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
@@ -1494,7 +1545,7 @@ async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
   const sid=sessionView.sid;
   const body=$('#sbody');
-  const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
+  const meta=closedSession(sid)||{};
   $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',meta,'closed');
   renderEvidenceRail(meta);
   $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
@@ -2387,7 +2438,11 @@ function slashPick(sid,pre,name){
   slashClose();
   inp.focus();
 }
-let historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
+let historyFilter='',historyAccess='all',historyProvider='all';
+let historyData={ok:true,items:[],next_cursor:0,total:0};
+let historyLoading=false,historyLoadedAt=0,historyAbort=null,historyFilterTimer=null;
+let closedIds=new Set();
+const closedMeta=new Map();
 const historyInfoOpen=new Set();
 const actionSelected=new Set(),workstreamOpen=new Set();
 let actionKind='all',actionBulkBusy=false;
@@ -2551,23 +2606,70 @@ function toggleHistory(encoded){
 }
 function setHistoryFilter(kind,value){
   if(kind==='access')historyAccess=value;else historyProvider=value;
-  historyVisible=100;
-  render(last,true);
+  loadHistory(true);
+}
+function closedSession(sid){
+  return ((last&&last.closed)||[]).find(item=>item.session_id===sid)||
+    (historyData.items||[]).find(item=>item.session_id===sid)||closedMeta.get(sid)||null;
+}
+function isClosedSession(sid){return Boolean(closedSession(sid)||closedIds.has(sid));}
+function historyParams(cursor){
+  const params=new URLSearchParams({cursor:String(cursor||0),limit:'100'});
+  if(historyFilter.trim())params.set('q',historyFilter.trim());
+  if(historyAccess!=='all')params.set('access',historyAccess);
+  if(historyProvider!=='all')params.set('provider',historyProvider);
+  return params.toString();
+}
+function renderHistoryDestination(){
+  const el=$('#history');if(!el||!last)return;
+  const focused=document.activeElement;
+  if(focused&&focused.tagName==='INPUT'&&el.contains(focused)){
+    updateHistoryRows();
+    const count=el.querySelector('.historycount');if(count)count.textContent=historyCount(last);
+  }else el.innerHTML=historySection(last);
+}
+async function loadHistory(reset=false){
+  if(reset&&historyAbort)historyAbort.abort();
+  if(historyLoading&&!reset)return;
+  const cursor=reset?0:historyData.next_cursor;
+  if(cursor==null)return;
+  const controller=new AbortController();historyAbort=controller;historyLoading=true;
+  renderHistoryDestination();
+  try{
+    const response=await fetch('/api/history?'+historyParams(cursor),
+      {cache:'no-store',signal:controller.signal});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'History unavailable');
+    const items=data.items||[];items.forEach(item=>closedMeta.set(item.session_id,item));
+    historyData={ok:true,items:reset?items:[...(historyData.items||[]),...items],
+      next_cursor:data.next_cursor,total:Number(data.total||0)};
+    historyLoadedAt=Date.now();
+  }catch(error){
+    if(error.name==='AbortError')return;
+    historyData={...historyData,ok:false,error:String(error.message||error)};
+  }finally{
+    if(historyAbort===controller){historyAbort=null;historyLoading=false;renderHistoryDestination();}
+  }
+}
+function queueHistoryFilter(value){
+  historyFilter=value;clearTimeout(historyFilterTimer);
+  historyFilterTimer=setTimeout(()=>loadHistory(true),180);
 }
 function historyItems(f){
   const live=(f.sessions||[]).filter(s=>s.ui_group==='history'&&!pinnedSessions.has(s.session_id));
-  const closed=(f.closed||[]).filter(s=>!pinnedSessions.has(s.session_id));
+  const closed=(historyData.items||[]).filter(s=>!pinnedSessions.has(s.session_id));
   return [...live,...closed].sort((a,b)=>(b.activity_at||0)-(a.activity_at||0));
 }
-function filteredHistory(f){
+function matchesHistoryFilter(item){
   const query=historyFilter.trim().toLowerCase();
-  return historyItems(f).filter(item=>{
-    const accessOk=historyAccess==='all'||item.primary_action===historyAccess;
-    const providerOk=historyProvider==='all'||(item.provider||'claude')===historyProvider;
-    const hay=[item.title,item.name,item.project,item.branch,item.provider,item.reason_label,
-      item.access_label,item.state,item.reg_status].filter(Boolean).join(' ').toLowerCase();
-    return accessOk&&providerOk&&(!query||hay.includes(query));
-  });
+  const accessOk=historyAccess==='all'||item.primary_action===historyAccess;
+  const providerOk=historyProvider==='all'||(item.provider||'claude')===historyProvider;
+  const hay=[item.title,item.name,item.project,item.branch,item.provider,item.reason_label,
+    item.access_label,item.state,item.reg_status].filter(Boolean).join(' ').toLowerCase();
+  return accessOk&&providerOk&&(!query||hay.includes(query));
+}
+function filteredHistory(f){
+  return historyItems(f).filter(matchesHistoryFilter);
 }
 function updateHistoryRows(){
   const el=document.getElementById('historyrows');
@@ -2686,24 +2788,31 @@ async function checkSpawn(f){
 }
 function historySection(f){
   const items=historyItems(f);
-  if(!items.length)return'<div class="destinationempty"><span>↺</span><b>No session history</b><p>Inactive and closed sessions will appear here.</p></div>';
+  if(!items.length&&!historyLoading&&historyData.ok&&historyData.next_cursor==null)
+    return'<div class="destinationempty"><span>↺</span><b>No session history</b><p>Inactive and closed sessions will appear here.</p></div>';
   return`<div class="historybox">
-    <div class="historycount">${items.length} session${items.length===1?'':'s'}</div>
+    <div class="historycount">${historyCount(f)}</div>
     <div class="historytools">
       <div class="freetext"><input placeholder="Filter by title, project, branch, provider, or state"
-        value="${esc(historyFilter)}" oninput="historyFilter=this.value;historyVisible=100;updateHistoryRows()"></div>
+        value="${esc(historyFilter)}" oninput="queueHistoryFilter(this.value)"></div>
       ${filterChips('Access',historyAccess,[['all','All'],['continue','Continue'],['view','View only'],['reopen','Reopen']])}
       ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
     </div>
     <div id="historyrows">${historyRows(filteredHistory(f))}</div>
   </div>`;
 }
+function historyCount(f){
+  const live=(f.sessions||[]).filter(item=>item.ui_group==='history'&&
+    !pinnedSessions.has(item.session_id)&&matchesHistoryFilter(item)).length;
+  const total=live+Number(historyData.total||0);
+  return`${total} session${total===1?'':'s'}`;
+}
 function historyRows(items){
-  if(!items.length)return'<div class="empty">no matches</div>';
-  const shown=items.slice(0,historyVisible);
-  return shown.map(item=>historyRow(item)).join('')+
-    (shown.length<items.length?`<button class="newbtn" onclick="historyVisible+=100;updateHistoryRows()">
-      show ${Math.min(100,items.length-shown.length)} more of ${items.length}</button>`:'');
+  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':esc(historyData.error||'history unavailable')}</div>`;
+  return items.map(item=>historyRow(item)).join('')+
+    (historyLoading?'<div class="ctxload">loading history…</div>':'')+
+    (!historyLoading&&historyData.next_cursor!=null?`<button class="newbtn" onclick="loadHistory(false)">
+      show ${Math.min(100,Math.max(0,historyData.total-(historyData.items||[]).length))} more</button>`:'');
 }
 function historyRow(item,pinnedView=false){
   const sid=String(item.session_id||''),encoded=enc(sid);
@@ -2905,6 +3014,8 @@ function insightsSection(){
 let last=null;
 function render(f,force){
   if(!f||!f.sessions)return;
+  const renderStarted=performance.now();
+  closedIds=new Set(f.closed_ids||[]);
   reconcileQuickResponses(f);
   applyReaderWidth();
   syncPinnedSessions(f);
@@ -2956,11 +3067,15 @@ function render(f,force){
   schedulePeekOverflow();
   applyRouteNav(settingsOpen?'settings':currentRoute);
   document.title=(t.needs_me?`(${t.needs_me}) `:'')+'Fleet View';
+  perfRecord('render_ms',performance.now()-renderStarted);
 }
 
 async function tick(){
+  const pollStarted=performance.now();
   try{
     const r=await fetch('/api/fleet',{cache:'no-store'});
+    const payload=Number(r.headers.get('X-Fleet-Payload-Bytes')||r.headers.get('Content-Length'));
+    if(Number.isFinite(payload))perfRecord('poll_payload_bytes',payload);
     last=await r.json();
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
     $('#stale').style.display='none';
@@ -2968,7 +3083,9 @@ async function tick(){
     if(currentRoute==='now'||$('#outboxview').style.display==='flex')loadOutbox();
     if(currentRoute==='now')loadBriefing();
     if(currentRoute==='insights')loadBudgets();
+    if(currentRoute==='history'&&Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
   }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
+  finally{perfRecord('poll_ms',performance.now()-pollStarted);}
 }
 navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);

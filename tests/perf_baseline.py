@@ -26,8 +26,21 @@ def request_json(url, timeout=60, headers=None):
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
+        response_headers = {key.lower(): value for key, value in response.headers.items()}
     elapsed = (time.perf_counter() - started) * 1000
-    return json.loads(raw), elapsed, len(raw)
+    return json.loads(raw), elapsed, len(raw), response_headers
+
+
+def server_duration(headers):
+    value = str((headers or {}).get("server-timing") or "")
+    for part in value.split(","):
+        if "dur=" not in part:
+            continue
+        try:
+            return float(part.split("dur=", 1)[1].split(";", 1)[0])
+        except ValueError:
+            pass
+    return 0.0
 
 
 def corpus(roots):
@@ -72,6 +85,7 @@ def main():
     parser.add_argument("--samples", type=int, default=40)
     parser.add_argument("--context-samples", type=int, default=3)
     parser.add_argument("--search-samples", type=int, default=0)
+    parser.add_argument("--history-samples", type=int, default=10)
     parser.add_argument("--search-query", default="parity")
     parser.add_argument("--local-action-auth", action="store_true",
                         help="read Fleet's local action token without printing it")
@@ -79,10 +93,11 @@ def main():
     args = parser.parse_args()
     base = args.url.rstrip("/")
 
-    fleet_times, fleet_sizes, fleet = [], [], None
+    fleet_times, fleet_server_times, fleet_sizes, fleet = [], [], [], None
     for _ in range(max(1, args.samples)):
-        fleet, elapsed, size = request_json(base + "/api/fleet")
+        fleet, elapsed, size, response_headers = request_json(base + "/api/fleet")
         fleet_times.append(elapsed)
+        fleet_server_times.append(server_duration(response_headers))
         fleet_sizes.append(size)
     sid = args.sid
     if not sid:
@@ -93,9 +108,16 @@ def main():
     if sid:
         url = base + "/api/context?" + urllib.parse.urlencode({"sid": sid})
         for _ in range(max(1, args.context_samples)):
-            _, elapsed, size = request_json(url)
+            _, elapsed, size, _ = request_json(url)
             context_times.append(elapsed)
             context_sizes.append(size)
+
+    history_times, history_server_times, history_sizes = [], [], []
+    for _ in range(max(0, args.history_samples)):
+        _, elapsed, size, response_headers = request_json(base + "/api/history?limit=100")
+        history_times.append(elapsed)
+        history_server_times.append(server_duration(response_headers))
+        history_sizes.append(size)
 
     search_times, search_server_times, search_sizes, search_status = [], [], [], None
     headers = {}
@@ -108,17 +130,25 @@ def main():
         search_url = base + "/api/search?" + urllib.parse.urlencode(
             {"q": args.search_query, "limit": 30})
         for _ in range(max(1, args.search_samples)):
-            result, elapsed, size = request_json(search_url, headers=headers)
+            result, elapsed, size, _ = request_json(search_url, headers=headers)
             search_times.append(elapsed)
             search_server_times.append(float(result.get("elapsed_ms") or 0))
             search_sizes.append(size)
-        search_status, _, _ = request_json(base + "/api/search/status", headers=headers)
+        search_status, _, _, _ = request_json(base + "/api/search/status", headers=headers)
+
+    diagnostics = None
+    if headers:
+        try:
+            diagnostics, _, _, _ = request_json(base + "/api/diagnostics", headers=headers)
+        except Exception as exc:
+            diagnostics = {"ok": False, "error": str(exc)}
 
     out = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "url": base,
         "fleet": {"samples": len(fleet_times), "p50_ms": percentile(fleet_times, .50),
                   "p95_ms": percentile(fleet_times, .95),
+                  "server_p95_ms": percentile(fleet_server_times, .95),
                   "response_bytes_p50": percentile(fleet_sizes, .50)},
         "context": {"session_id": sid, "samples": len(context_times),
                     "p50_ms": percentile(context_times, .50),
@@ -126,6 +156,14 @@ def main():
                     "response_bytes_p50": percentile(context_sizes, .50)},
         "engine": (fleet or {}).get("diagnostics") or {},
     }
+    if history_times:
+        out["history"] = {"samples": len(history_times),
+                          "p50_ms": percentile(history_times, .50),
+                          "p95_ms": percentile(history_times, .95),
+                          "server_p95_ms": percentile(history_server_times, .95),
+                          "response_bytes_p50": percentile(history_sizes, .50)}
+    if diagnostics is not None:
+        out["diagnostics"] = diagnostics
     if search_times:
         out["search"] = {"query": args.search_query, "samples": len(search_times),
                          "p50_ms": percentile(search_times, .50),

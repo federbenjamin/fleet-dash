@@ -5,6 +5,7 @@ Discovery and parsing run on a background thread in short batches; API reads use
 the same WAL database behind a small lock and never touch transcript files.
 """
 import argparse
+from collections import deque, OrderedDict
 import fcntl
 import json
 import hashlib
@@ -317,6 +318,18 @@ class SearchIndex:
         self.last_error = None
         self.indexing = False
         self.last_reader_signal = 0.0
+        self.reader_wait_ms = deque(maxlen=240)
+        self.projects_cache = []
+        self.projects_cached_at = 0.0
+        self.cache_lock = threading.RLock()
+        self.search_cache = OrderedDict()
+
+    def _read_wait(self, started):
+        self.reader_wait_ms.append((time.perf_counter() - started) * 1000)
+
+    def _invalidate_search_cache(self):
+        with self.cache_lock:
+            self.search_cache.clear()
 
     def _signal_reader(self):
         now = time.monotonic()
@@ -396,6 +409,26 @@ class SearchIndex:
                     VALUES(new.id,new.title,new.text);
                 END;
                 CREATE TABLE IF NOT EXISTS search_meta(key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS search_stats(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    documents INTEGER NOT NULL DEFAULT 0);
+                INSERT OR IGNORE INTO search_stats(singleton,documents)
+                    SELECT 1,COUNT(*) FROM documents WHERE kind!='metadata';
+                CREATE TRIGGER IF NOT EXISTS documents_stats_ai
+                    AFTER INSERT ON documents WHEN new.kind!='metadata' BEGIN
+                    UPDATE search_stats SET documents=documents+1 WHERE singleton=1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_stats_ad
+                    AFTER DELETE ON documents WHEN old.kind!='metadata' BEGIN
+                    UPDATE search_stats SET documents=MAX(0,documents-1) WHERE singleton=1;
+                END;
+                CREATE TRIGGER IF NOT EXISTS documents_stats_au
+                    AFTER UPDATE OF kind ON documents BEGIN
+                    UPDATE search_stats SET documents=documents+
+                        CASE WHEN new.kind!='metadata' THEN 1 ELSE 0 END-
+                        CASE WHEN old.kind!='metadata' THEN 1 ELSE 0 END
+                        WHERE singleton=1;
+                END;
             """)
             db.execute("INSERT OR REPLACE INTO search_meta(key,value) VALUES('parser_version',?)",
                        (str(PARSER_VERSION),))
@@ -587,13 +620,18 @@ class SearchIndex:
                         db.execute("UPDATE sources SET size=?,mtime_ns=?,complete=0,error=NULL "
                                    "WHERE id=?", (stat.st_size, stat.st_mtime_ns, row["id"]))
                 except OSError as exc:
-                    db.execute("UPDATE sources SET complete=0,error=?,deferred_until=? WHERE id=?",
-                               (str(exc), now + 5, row["id"]))
+                    # A referenced artifact may be temporary or deleted after delivery.
+                    # Keep the warning visible, but do not make the worker retry a
+                    # permanently missing file on every pass. Discovery will mark it
+                    # pending again if the path reappears or changes.
+                    db.execute("UPDATE sources SET complete=1,error=?,deferred_until=0 WHERE id=?",
+                               (str(exc), row["id"]))
             db.execute("INSERT OR REPLACE INTO search_meta(key,value) VALUES"
                        "('discovery_generation',?)", (str(generation),))
             db.execute("INSERT OR REPLACE INTO search_meta(key,value) VALUES"
                        "('last_discovery_at',?)", (str(now),))
             db.commit()
+        self._invalidate_search_cache()
         self.last_discovery = now
         return len(files)
 
@@ -618,6 +656,7 @@ class SearchIndex:
             self._index_artifact(source)
         else:
             self._index_transcript(source)
+        self._invalidate_search_cache()
         return True
 
     def _read_batch(self, source):
@@ -806,8 +845,14 @@ class SearchIndex:
         tokens = QUERY_TOKEN_RE.findall(str(query or ""))[:12]
         if not tokens:
             return ""
-        return " AND ".join('"%s"*' % token.replace('"', '""')[:64]
-                            for token in tokens)
+        clauses = []
+        for token in tokens:
+            escaped = token.replace('"', '""')[:64]
+            # Prefix matching helps while typing short fragments. For complete
+            # words it expands the FTS candidate set dramatically with little UX
+            # value, especially for common terms such as "fleet" or "session".
+            clauses.append('"%s"%s' % (escaped, "*" if len(escaped) < 5 else ""))
+        return " AND ".join(clauses)
 
     def search(self, query="", provider="", kind="", project="", cursor=0, limit=30):
         started = time.perf_counter()
@@ -824,6 +869,22 @@ class SearchIndex:
             limit = max(1, min(50, int(limit or 30)))
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid pagination"}
+        cache_key = (str(query or ""), provider, kind, project, cursor, limit)
+        now_mono = time.monotonic()
+        version_started = time.perf_counter()
+        with self.read_lock:
+            self._read_wait(version_started)
+            data_version = self._read_db().execute("PRAGMA data_version").fetchone()[0]
+        with self.cache_lock:
+            cached = self.search_cache.get(cache_key)
+            if cached and now_mono - cached[0] < 2 and cached[1] == data_version:
+                self.search_cache.move_to_end(cache_key)
+                response = dict(cached[2])
+                response["results"] = [dict(item) for item in cached[2]["results"]]
+                response["projects"] = list(cached[2]["projects"])
+                response["cache_hit"] = True
+                response["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 3)
+                return response
         where, params = [], []
         if provider:
             where.append("s.provider=?"); params.append(provider)
@@ -832,7 +893,9 @@ class SearchIndex:
         if project:
             where.append("s.project=?"); params.append(project)
         match = self._match_query(query)
+        wait_started = time.perf_counter()
         with self.read_lock:
+            self._read_wait(wait_started)
             db = self._read_db()
             if match:
                 where.insert(0, "documents_fts MATCH ?")
@@ -872,9 +935,13 @@ class SearchIndex:
                     LIMIT ? OFFSET ?""" % (" AND ".join(where))
                 params.extend([limit + 1, cursor])
             rows = db.execute(sql, params).fetchall()
-            projects = [row[0] for row in db.execute("""SELECT project FROM sources
-                WHERE project IS NOT NULL AND project!='' GROUP BY project
-                ORDER BY COUNT(*) DESC,project LIMIT 100""").fetchall()]
+            now_mono = time.monotonic()
+            if now_mono - self.projects_cached_at >= 5 or not self.projects_cache:
+                self.projects_cache = [row[0] for row in db.execute("""SELECT project FROM sources
+                    WHERE project IS NOT NULL AND project!='' GROUP BY project
+                    ORDER BY COUNT(*) DESC,project LIMIT 100""").fetchall()]
+                self.projects_cached_at = now_mono
+            projects = list(self.projects_cache)
         more = len(rows) > limit
         rows = rows[:limit]
         results = []
@@ -882,9 +949,16 @@ class SearchIndex:
             item = dict(row)
             item["snippet"] = str(item.get("snippet") or "")[:500]
             results.append(item)
-        return {"ok": True, "query": str(query or "")[:500], "results": results,
-                "next_cursor": cursor + limit if more else None, "projects": projects,
-                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        response = {"ok": True, "query": str(query or "")[:500], "results": results,
+                    "next_cursor": cursor + limit if more else None, "projects": projects,
+                    "cache_hit": False,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        with self.cache_lock:
+            self.search_cache[cache_key] = (now_mono, data_version, response)
+            self.search_cache.move_to_end(cache_key)
+            while len(self.search_cache) > 128:
+                self.search_cache.popitem(last=False)
+        return response
 
     def context(self, document_id, radius=12):
         self._signal_reader()
@@ -893,7 +967,9 @@ class SearchIndex:
             radius = max(1, min(30, int(radius)))
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid search result"}
+        wait_started = time.perf_counter()
         with self.read_lock:
+            self._read_wait(wait_started)
             db = self._read_db()
             hit = db.execute("""SELECT d.*,s.provider,s.source_kind,s.session_id,s.agent_id,
                 s.project,s.cwd,s.branch,s.model,s.title source_title,s.error source_error
@@ -930,7 +1006,9 @@ class SearchIndex:
             recent_limit = max(2, min(16, int(recent_limit)))
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid handoff context limit"}
+        wait_started = time.perf_counter()
         with self.read_lock:
+            self._read_wait(wait_started)
             db = self._read_db()
             source = db.execute("""SELECT id,provider,session_id,project,cwd,branch,model,title
                 FROM sources WHERE session_id=? AND source_kind='session'
@@ -984,7 +1062,9 @@ class SearchIndex:
                 "recent": recent_items, "todos": todo_lines, "artifacts": artifacts}
 
     def status(self):
+        wait_started = time.perf_counter()
         with self.read_lock:
+            self._read_wait(wait_started)
             db = self._read_db()
             totals = db.execute("""SELECT COUNT(*) sources,
                 SUM(CASE WHEN complete=1 THEN 1 ELSE 0 END) complete,
@@ -994,7 +1074,8 @@ class SearchIndex:
                 SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) errors,
                 SUM(malformed_rows) malformed,SUM(unknown_rows) unknown,
                 SUM(oversized_docs) oversized,MAX(indexed_at) last_indexed FROM sources""").fetchone()
-            documents = db.execute("SELECT COUNT(*) FROM documents WHERE kind!='metadata'").fetchone()[0]
+            documents = db.execute(
+                "SELECT documents FROM search_stats WHERE singleton=1").fetchone()[0]
             warnings = [dict(row) for row in db.execute("""SELECT provider,source_kind,
                 session_id,title,error,malformed_rows,unknown_rows,oversized_docs
                 FROM sources WHERE error IS NOT NULL OR malformed_rows>0 OR unknown_rows>0 OR
@@ -1006,6 +1087,8 @@ class SearchIndex:
         done = int(totals["bytes_done"] or 0)
         pending = int(totals["pending"] or 0)
         last_indexed = totals["last_indexed"]
+        waits = sorted(self.reader_wait_ms)
+        wait_p95 = waits[min(len(waits) - 1, int(len(waits) * .95))] if waits else 0
         return {"ok": True, "state": "indexing" if pending else "idle",
                 "sources": int(totals["sources"] or 0),
                 "complete_sources": int(totals["complete"] or 0),
@@ -1023,9 +1106,12 @@ class SearchIndex:
                 "last_indexed_at": last_indexed,
                 "worker_lag_seconds": (round(max(0, self.clock() - last_indexed), 3)
                                        if pending and last_indexed else None),
+                "reader_wait_p95_ms": round(wait_p95, 3),
                 "parser_version": PARSER_VERSION}
 
     def rebuild(self):
+        with self.cache_lock:
+            self.search_cache.clear()
         with self.lock:
             db = self._db()
             db.execute("DELETE FROM sources")
@@ -1064,7 +1150,7 @@ def _worker(args):
             while _parent_alive(args.parent_pid):
                 try:
                     reader_active = time.time() - os.path.getmtime(
-                        index.reader_signal_path) < .10
+                        index.reader_signal_path) < .25
                 except OSError:
                     reader_active = False
                 if reader_active:
