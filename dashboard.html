@@ -1177,9 +1177,13 @@ async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
   const sid=sessionView.sid;
   const body=$('#sbody');
+  const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
   $('#sctrl').innerHTML=overflowMenu('session',null,'closed');
   $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
-    so there is nothing to send to. The conversation is read-only.</div>`;
+    so there is nothing to send to. The conversation is read-only.</div>
+    ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
+      onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
+      <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
   if(!closedCtx[sid]){
     body.innerHTML='<div class="ctxload">loading conversation…</div>';
     try{
@@ -1191,7 +1195,6 @@ async function renderClosed(){
     if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
   }
   const c=closedCtx[sid],info=c.info||{};
-  const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
   $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>
     <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
   if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
@@ -1200,6 +1203,17 @@ async function renderClosed(){
   body.scrollTop=body.scrollHeight;
   if(sessionOpened){sessionOpened=false;
     requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
+}
+async function reopenClosed(sid,button){
+  const original=button&&button.textContent;
+  if(button){button.disabled=true;button.textContent='opening…';}
+  const result=await act(sid,{type:'reopen'},'reopenmsg');
+  if(button){
+    button.textContent=result.ok?'opened ✓':original;
+    if(!result.ok)button.disabled=false;
+  }
+  if(result.ok)setTimeout(()=>tick(),500);
+  return result;
 }
 function renderSession(force){
   if(!sessionView||!last)return;
@@ -2000,7 +2014,7 @@ function slashPick(sid,pre,name){
   slashClose();
   inp.focus();
 }
-let historyOpen=false,historyFilter='',historyAccess='all',historyProvider='all';
+let historyOpen=false,historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
 const historyInfoOpen=new Set();
 function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
   if(!list.length&&!keepEmpty){el.innerHTML='';el.className='';return;}
@@ -2018,6 +2032,7 @@ function toggleHistory(encoded){
 }
 function setHistoryFilter(kind,value){
   if(kind==='access')historyAccess=value;else historyProvider=value;
+  historyVisible=100;
   render(last,true);
 }
 function historyItems(f){
@@ -2142,7 +2157,7 @@ function historySection(f){
     <summary>Session history (${items.length}) <small>— inactive, external, reopenable, and closed</small></summary>
     <div class="historytools">
       <div class="freetext"><input placeholder="Filter by title, project, branch, provider, or state"
-        value="${esc(historyFilter)}" oninput="historyFilter=this.value;updateHistoryRows()"></div>
+        value="${esc(historyFilter)}" oninput="historyFilter=this.value;historyVisible=100;updateHistoryRows()"></div>
       ${filterChips('Access',historyAccess,[['all','All'],['continue','Continue'],['view','View only'],['reopen','Reopen']])}
       ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
     </div>
@@ -2151,7 +2166,10 @@ function historySection(f){
 }
 function historyRows(items){
   if(!items.length)return'<div class="empty">no matches</div>';
-  return items.map(item=>historyRow(item)).join('');
+  const shown=items.slice(0,historyVisible);
+  return shown.map(item=>historyRow(item)).join('')+
+    (shown.length<items.length?`<button class="newbtn" onclick="historyVisible+=100;updateHistoryRows()">
+      show ${Math.min(100,items.length-shown.length)} more of ${items.length}</button>`:'');
 }
 function historyRow(item,pinnedView=false){
   const sid=String(item.session_id||''),encoded=enc(sid);
@@ -2162,12 +2180,15 @@ function historyRow(item,pinnedView=false){
   const action=item.primary_action_label||'View';
   const provider=item.provider||'claude';
   const raw=item.state||'closed';
+  const canReopen=isClosed&&item.can_reopen;
   return`<div class="historyrow" data-history-sid="${esc(sid)}">
     <div class="historymain" onclick="toggleHistory('${encoded}')">
       <span class="historyreason">${esc(item.reason_label||'Inactive')}</span>
       <span class="historyname"><b>${esc(title)}</b><small>${esc(item.project||'')}${item.branch&&item.branch!=='HEAD'?` · ${esc(item.branch)}`:''} · ${esc(provider)}</small></span>
       <span class="historyage">${fmtAge(Math.max(0,Math.round(((last&&last.t)||Date.now()/1000)-activity)))} ago</span>
-      <button class="historyaction" onclick="event.stopPropagation();${isClosed?`openClosed(decodeURIComponent('${encoded}'))`:`primarySessionAction(decodeURIComponent('${encoded}'))`}">${esc(action)}</button>
+      ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
+        ${canReopen?`<button class="historyaction" onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">Reopen</button>`:''}`
+        :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(action)}</button>`}
       <button class="spin${pinnedSessions.has(sid)?' on':''}" aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
         title="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
         onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${encoded}'))">📌</button>

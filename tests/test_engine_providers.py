@@ -85,16 +85,19 @@ class EngineProviderTest(unittest.TestCase):
         self.claude_account = os.path.join(self.tmp.name, ".claude.json")
         self.claude_usage = os.path.join(self.base, "usage.json")
         self.claude_stats = os.path.join(self.tmp.name, "stats-cache.json")
+        self.claude_history = os.path.join(self.tmp.name, "history.jsonl")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
         self.patchers = [
+            mock.patch.object(engine_module, "HOME", self.tmp.name),
             mock.patch.object(engine_module, "BASE", self.base),
             mock.patch.object(engine_module, "SESSIONS", self.sessions),
             mock.patch.object(engine_module, "PROJECTS", self.projects),
             mock.patch.object(engine_module, "CLAUDE_ACCOUNT", self.claude_account),
             mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
             mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
+            mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -171,6 +174,66 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual([item["provider"] for item in fleet["sessions"]], ["claude"])
         self.assertFalse(fleet["providers"]["codex"]["ok"])
         self.assertIn("Codex crashed", fleet["providers"]["codex"]["error"])
+
+    def test_claude_history_backfill_is_viewable_reopenable_and_idempotent(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        path = os.path.join(os.path.dirname(self.transcript), sid + ".jsonl")
+        rows = [
+            {"type": "user", "sessionId": sid, "cwd": self.cwd,
+             "gitBranch": "archive", "timestamp": "2026-07-14T00:00:00Z",
+             "message": {"role": "user", "content": "Review the old parser"}},
+            {"type": "ai-title", "sessionId": sid,
+             "aiTitle": "Historical parser review"},
+            {"type": "assistant", "sessionId": sid, "cwd": self.cwd,
+             "gitBranch": "archive", "timestamp": "2026-07-14T00:00:01Z",
+             "message": {"role": "assistant", "model": "claude-sonnet",
+                         "stop_reason": "end_turn", "usage": {"input_tokens": 2,
+                         "output_tokens": 1}, "content": [{"type": "text",
+                                                             "text": "Review complete"}]}},
+        ]
+        with open(path, "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        subdir = os.path.join(os.path.dirname(self.transcript), sid, "subagents")
+        os.makedirs(subdir)
+        with open(os.path.join(subdir, "agent-child.jsonl"), "w") as handle:
+            handle.write(json.dumps(rows[-1]) + "\n")
+
+        fleet = self.engine.scan()
+
+        archived = next(item for item in fleet["closed"] if item["session_id"] == sid)
+        self.assertEqual(archived["title"], "Historical parser review")
+        self.assertTrue(archived["can_reopen"])
+        self.assertEqual((archived["primary_action"], archived["access"]),
+                         ("reopen", "reopen"))
+        stored = self.engine.ensure_db().execute(
+            "SELECT cost, agent_cost, agents_total FROM session_runs WHERE session_id=?",
+            (sid,)).fetchone()
+        self.assertEqual(stored, (None, None, None))
+        context = self.engine.closed_context(sid)
+        self.assertTrue(context["ok"])
+        self.assertEqual(context["messages"][-1]["text"], "Review complete")
+        self.assertEqual(self.engine.backfill_claude_history(), 0)
+        ids = {row[0] for row in self.engine.ensure_db().execute(
+            "SELECT session_id FROM session_runs")}
+        self.assertNotIn("agent-child", ids)
+
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps)) or {"ok": True})
+        reopened = self.engine.act({"type": "reopen", "session_id": sid})
+        self.assertTrue(reopened["ok"])
+        self.assertTrue(reopened["reopened"])
+        self.assertEqual(writes[0][0], "SPAWN")
+        self.assertIn(f"claude --resume {sid}", writes[0][1][0][0])
+
+    def test_claude_reopen_rejects_unindexed_and_unsafe_transcripts(self):
+        unknown = self.engine.act({"type": "reopen",
+                                   "session_id": "11111111-2222-3333-4444-555555555555"})
+        self.assertFalse(unknown["ok"])
+        self.assertIn("closed Claude", unknown["error"])
+        self.assertIsNone(self.engine._safe_claude_transcript(
+            "11111111-2222-3333-4444-555555555555", self.transcript))
 
     def test_actions_context_commands_and_files_route_by_provider(self):
         action = {"type": "text", "session_id": "codex:same", "text": "go"}
@@ -326,7 +389,7 @@ class EngineProviderTest(unittest.TestCase):
         writes = []
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps)) or {"ok": True})
-        self.engine.is_trusted = lambda cwd: True
+        self.engine.is_trusted = lambda cwd, trusted=None: True
         with mock.patch.object(engine_module, "HOME", self.tmp.name):
             spawned = self.engine.spawn_session({"cwd": self.cwd, "model": "sonnet",
                 "effort": "high", "worktree": True, "worktree_name": "live-e2e"})

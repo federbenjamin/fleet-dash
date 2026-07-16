@@ -195,8 +195,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
     types (`plugin:agent`) have no local file: fall back to the parent.
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
-    finds its transcript through the LEDGER's `cwd`. Its overlay is read-only — no send box, no
-    stop, no mute (there is no tty to write to).
+    reads the ledger's validated `transcript_path` (falling back to the legacy cwd mapping only for
+    old rows). Its overlay is read-only — no send box, no stop, no mute. A closed Claude session may
+    expose **Reopen**: that creates a new iTerm tab with `claude --resume <exact UUID>`. Never accept
+    a client-supplied path or cwd. `_safe_claude_transcript` must continue to require an exact UUID
+    filename directly beneath one `~/.claude/projects` directory, and `_safe_reopen_cwd` must keep
+    the working directory inside HOME.
 24. **Click latency is the injection path — keep these four fixes.** Measured 2026-07-14: a
     one-keystroke `focus` cost 850ms while a ping cost 2ms. (a) The applet delays only BETWEEN
     steps, never after the last; (b) the delay is per-request (flag 4) — 0.4s ONLY for ask-TUI
@@ -272,6 +276,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
     response badge. Provider-wide stale state preserves the last placement and renders one banner.
     Keep [`docs/session-organization.md`](docs/session-organization.md) synchronized with any mapping.
+32. **Claude history backfill indexes main transcripts, not subagents.** On the first scan after each
+    daemon start, `backfill_claude_history` discovers `~/.claude/projects/*/*.jsonl`, extracts bounded
+    head/tail metadata, and upserts by session id/path. Nested `subagents/*.jsonl` files remain part of
+    their parent conversation and must not become session cards. Unknown historical cost and agent
+    counts stay SQL `NULL`/unavailable rather than becoming fabricated zero measurements. History is
+    paged in the browser 100 rows at a time.
 
 ## Dev workflow
 
@@ -394,6 +404,5 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
 - Tailscale serve + phone onboarding (user-side), ntfy topic subscribe.
 - Fable pricing placeholder in `config.json` rates.
-- Ledger backfill from surviving transcripts (pre-2026-07-13 history).
 - Claude VS Code sessions: no tty → view-only by design. ChatGPT Desktop/Codex VS Code transcripts
   are also view-only because their App Server is separate from Fleet's canonical Codex daemon.

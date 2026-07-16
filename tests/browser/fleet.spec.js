@@ -481,6 +481,41 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   page.__failures = [];
 });
 
+test('backfilled Claude history supports both view and reopen', async ({ page }) => {
+  await reset(page, 'claude-archive');
+  await page.locator('#history summary').click();
+  const row = page.locator('[data-history-sid="11111111-2222-3333-4444-555555555555"]');
+  await expect(row).toContainText('Historical Claude review');
+  await expect(row.getByRole('button', { name: 'View' })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Reopen' })).toBeVisible();
+
+  await row.getByRole('button', { name: 'View' }).click();
+  await expect(page.locator('#sbody')).toContainText('Durable closed conversation');
+  await expect(page.getByRole('button', { name: 'reopen in terminal' })).toBeVisible();
+  await page.locator('#sclose').click();
+
+  await row.getByRole('button', { name: 'Reopen' }).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1))
+    .toMatchObject({ type: 'reopen',
+      session_id: '11111111-2222-3333-4444-555555555555' });
+  await expect(row.getByRole('button', { name: 'opened ✓' })).toBeVisible();
+});
+
+test('large transcript archives page history without hiding older rows', async ({ page }) => {
+  await reset(page, 'large-history');
+  await page.locator('#history summary').click();
+  const providerFilters = page.locator('.filterline').filter({ hasText: 'Provider' });
+  await providerFilters.getByRole('button', { name: 'Claude' }).click();
+  await expect(page.locator('[data-history-sid]')).toHaveCount(100);
+  const firstMore = page.getByRole('button', { name: 'show 100 more of 205' });
+  await expect(firstMore).toBeVisible();
+  await firstMore.click();
+  await expect(page.locator('[data-history-sid]')).toHaveCount(200);
+  await page.getByRole('button', { name: 'show 5 more of 205' }).click();
+  await expect(page.locator('[data-history-sid]')).toHaveCount(205);
+  await expect(page.getByText('Archived Claude session 204')).toBeVisible();
+});
+
 test('available stays visible while every inactive lifecycle shares one collapsed history', async ({ page }, testInfo) => {
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');

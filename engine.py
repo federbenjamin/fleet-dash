@@ -21,6 +21,7 @@ SESSIONS = os.path.join(HOME, ".claude", "sessions")
 CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
 CLAUDE_USAGE = os.path.join(BASE, "usage.json")
 CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
+CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
 
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
@@ -652,6 +653,7 @@ class Engine:
         self.lock = threading.Lock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
+        self.history_backfilled = False
         try:
             from codex_adapter import (CodexAppServer, codex_command,
                                        codex_control_socket, ensure_shared_codex_runtime,
@@ -788,9 +790,12 @@ class Engine:
 
     def organize_closed(self, session):
         sid = str(session.get("session_id") or "")
+        can_reopen = bool(session.get("can_reopen"))
         session.update(ui_group="history", reason_label="Closed",
-                       primary_action="view", primary_action_label="View",
-                       access="view_only", access_label="View only",
+                       primary_action="reopen" if can_reopen else "view",
+                       primary_action_label="Reopen" if can_reopen else "View",
+                       access="reopen" if can_reopen else "view_only",
+                       access_label="Reopen" if can_reopen else "View only",
                        external=False, provider_stale=False,
                        reply_requested=False, new_response=False,
                        activity_at=session.get("last_seen") or session.get("closed_at") or 0,
@@ -952,6 +957,16 @@ class Engine:
 
         sessions.sort(key=session_order)
         self.record_sessions(sessions, now)
+        if not self.history_backfilled:
+            try:
+                imported = self.backfill_claude_history()
+                self.history_backfilled = True
+                if imported:
+                    print(f"Claude history backfill: indexed {imported} transcripts",
+                          file=sys.stderr, flush=True)
+            except Exception as exc:
+                print(f"Claude history backfill failed: {exc}", file=sys.stderr,
+                      flush=True)
         closed = [self.organize_closed(item) for item in self.closed_sessions()]
         closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
         claude_usage = self.read_usage()
@@ -1199,12 +1214,191 @@ class Engine:
                 self.db.execute("ALTER TABLE session_runs ADD COLUMN provider TEXT DEFAULT 'claude'")
             except sqlite3.OperationalError:
                 pass
+            try:
+                self.db.execute("ALTER TABLE session_runs ADD COLUMN transcript_path TEXT")
+            except sqlite3.OperationalError:
+                pass
             # rows are CUMULATIVE per transcript (path) — see Tail.stats
             self.db.execute("""CREATE TABLE IF NOT EXISTS usage_stats(
                 path TEXT, day TEXT, kind TEXT, name TEXT,
                 uses INT, chars INT, t_in INT, t_cw INT, t_cr INT, t_out INT, fam TEXT,
                 PRIMARY KEY(path, day, kind, name))""")
         return self.db
+
+    @staticmethod
+    def _safe_claude_transcript(sid, path):
+        """Return a canonical top-level Claude transcript path or None.
+
+        Session IDs and paths ultimately reach both a file reader and a terminal
+        command. Require the exact UUID filename directly beneath one project
+        directory; subagent files and symlinks escaping ~/.claude/projects fail.
+        """
+        if not re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", str(sid or "")):
+            return None
+        if not path:
+            return None
+        real = os.path.realpath(os.path.expanduser(str(path)))
+        root = os.path.realpath(PROJECTS)
+        if os.path.dirname(os.path.dirname(real)) != root:
+            return None
+        if os.path.basename(real) != f"{sid}.jsonl" or not os.path.isfile(real):
+            return None
+        return real
+
+    @staticmethod
+    def _safe_reopen_cwd(cwd):
+        if not cwd:
+            return None
+        real = os.path.realpath(os.path.expanduser(str(cwd)))
+        home = os.path.realpath(HOME)
+        if not os.path.isdir(real):
+            return None
+        if real != home and not real.startswith(home + os.sep):
+            return None
+        return real
+
+    @staticmethod
+    def _edge_json_objects(path, head_bytes=131_072, tail_bytes=262_144):
+        """Decode bounded head/tail records without loading a large transcript."""
+        size = os.path.getsize(path)
+        chunks = []
+        with open(path, "rb") as handle:
+            if size <= head_bytes + tail_bytes:
+                chunks.append(handle.read())
+            else:
+                head = handle.read(head_bytes)
+                if b"\n" in head:
+                    head = head[:head.rfind(b"\n") + 1]
+                chunks.append(head)
+                handle.seek(size - tail_bytes)
+                tail = handle.read()
+                if b"\n" in tail:
+                    tail = tail[tail.find(b"\n") + 1:]
+                chunks.append(tail)
+        out = []
+        for chunk in chunks:
+            for raw in chunk.splitlines():
+                if not raw or len(raw) > 4_000_000:
+                    continue
+                try:
+                    value = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(value, dict):
+                    out.append(value)
+        return out
+
+    @staticmethod
+    def _history_titles():
+        """Latest prompt-history label/cwd per Claude session, without prompt bodies."""
+        out = {}
+        try:
+            handle = open(CLAUDE_HISTORY, errors="replace")
+        except OSError:
+            return out
+        with handle:
+            for raw in handle:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                sid = str(row.get("sessionId") or "")
+                if not re.fullmatch(
+                        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", sid):
+                    continue
+                out[sid] = {"title": str(row.get("display") or "").strip()[:160],
+                            "cwd": str(row.get("project") or ""),
+                            "timestamp": float(row.get("timestamp") or 0) / 1000}
+        return out
+
+    def _claude_transcript_metadata(self, path, history=None):
+        sid = os.path.splitext(os.path.basename(path))[0]
+        history = history or {}
+        objects = self._edge_json_objects(path)
+        cwd = str(history.get("cwd") or "")
+        branch = model = ai_title = custom_title = first_prompt = ""
+        first_epoch = None
+        for row in objects:
+            cwd = str(row.get("cwd") or cwd)
+            branch = str(row.get("gitBranch") or branch)
+            typ = row.get("type")
+            if typ == "ai-title":
+                ai_title = str(row.get("aiTitle") or ai_title).strip()
+            elif typ == "custom-title":
+                custom_title = str(row.get("customTitle") or custom_title).strip()
+            ts = iso_epoch(row.get("timestamp"))
+            if ts is not None and first_epoch is None:
+                first_epoch = ts
+            message = row.get("message")
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "assistant":
+                model = str(message.get("model") or model)
+            elif message.get("role") == "user" and not row.get("isMeta") \
+                    and not first_prompt:
+                content = message.get("content")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        str(block.get("text") or "") for block in content
+                        if isinstance(block, dict) and block.get("type") == "text")
+                text = re.sub(r"<system-reminder>.*?</system-reminder>", " ",
+                              str(content or ""), flags=re.S).strip()
+                if text and not text.startswith(("<command-", "<local-command")):
+                    first_prompt = re.sub(r"\s+", " ", text)[:160]
+        stat = os.stat(path)
+        created = first_epoch or getattr(stat, "st_birthtime", stat.st_ctime)
+        last = max(stat.st_mtime, float(history.get("timestamp") or 0))
+        title = (custom_title or ai_title or history.get("title") or first_prompt or
+                 os.path.basename(cwd) or "Claude session")
+        return {"session_id": sid, "name": title[:160], "title": title[:160],
+                "cwd": cwd, "project": os.path.basename(cwd) or
+                os.path.basename(os.path.dirname(path)), "branch": branch,
+                "model": model, "first_seen": int(created), "last_seen": int(last),
+                "closed_at": int(last), "transcript_path": path}
+
+    def backfill_claude_history(self):
+        """Index every resumable top-level Claude transcript exactly once per path."""
+        db = self.ensure_db()
+        known = dict(db.execute(
+            "SELECT session_id, transcript_path FROM session_runs WHERE provider='claude'"
+        ).fetchall())
+        history = self._history_titles()
+        imported = 0
+        for candidate in sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))):
+            sid = os.path.splitext(os.path.basename(candidate))[0]
+            path = self._safe_claude_transcript(sid, candidate)
+            if not path or known.get(sid) == path:
+                continue
+            meta = self._claude_transcript_metadata(path, history.get(sid))
+            db.execute("""INSERT INTO session_runs(session_id,name,project,cwd,branch,
+                model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,
+                closed_at,title,provider,transcript_path)
+                VALUES(?,?,?,?,?,?,NULL,NULL,NULL,NULL,?,?,?,?, 'claude',?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                transcript_path=excluded.transcript_path,
+                cwd=CASE WHEN session_runs.cwd IS NULL OR session_runs.cwd=''
+                         THEN excluded.cwd ELSE session_runs.cwd END,
+                project=CASE WHEN session_runs.project IS NULL OR session_runs.project=''
+                             THEN excluded.project ELSE session_runs.project END,
+                branch=CASE WHEN session_runs.branch IS NULL OR session_runs.branch=''
+                            THEN excluded.branch ELSE session_runs.branch END,
+                model=CASE WHEN session_runs.model IS NULL OR session_runs.model=''
+                           THEN excluded.model ELSE session_runs.model END,
+                title=CASE WHEN session_runs.title IS NULL OR session_runs.title=''
+                           THEN excluded.title ELSE session_runs.title END,
+                name=CASE WHEN session_runs.name IS NULL OR session_runs.name=''
+                          THEN excluded.name ELSE session_runs.name END,
+                provider='claude'""",
+                (sid, meta["name"], meta["project"], meta["cwd"], meta["branch"],
+                 meta["model"], meta["first_seen"], meta["last_seen"],
+                 meta["closed_at"], meta["title"], path))
+            known[sid] = path
+            imported += 1
+        db.commit()
+        return imported
 
     def drain_stats(self, t):
         """Flush a tail's dirty usage stats. INSERT OR REPLACE of cumulative
@@ -1242,17 +1436,24 @@ class Engine:
             db = self.ensure_db()
             for s in sessions:
                 db.execute("""INSERT INTO session_runs(session_id,name,project,cwd,branch,
-                    model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,closed_at,title,provider)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)
+                    model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,
+                    closed_at,title,provider,transcript_path)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)
                     ON CONFLICT(session_id) DO UPDATE SET
                     name=excluded.name, project=excluded.project, branch=excluded.branch,
                     model=excluded.model, cost=excluded.cost, agent_cost=excluded.agent_cost,
                     agents_total=excluded.agents_total, bridge_url=excluded.bridge_url,
                     last_seen=excluded.last_seen, closed_at=NULL, title=excluded.title,
-                    provider=excluded.provider""",
+                    provider=excluded.provider,
+                    transcript_path=COALESCE(excluded.transcript_path,
+                                             session_runs.transcript_path)""",
                     (s["session_id"], s["name"], s["project"], s["cwd"], s["branch"],
                      s["model"], s["cost"], s["agent_cost"], s["agents_total"],
-                     s["bridge_url"], int(now), int(now), s["title"], s.get("provider", "claude")))
+                     s["bridge_url"], int(now), int(now), s["title"],
+                     s.get("provider", "claude"),
+                     (os.path.join(cwd_to_project_dir(s.get("cwd") or ""),
+                                   f"{s['session_id']}.jsonl")
+                      if s.get("provider", "claude") == "claude" else None)))
             live = [s["session_id"] for s in sessions]
             marks = ",".join("?" * len(live)) or "''"
             db.execute(f"""UPDATE session_runs SET closed_at=?
@@ -1265,12 +1466,19 @@ class Engine:
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
-                "closed_at", "title", "provider")
+                "closed_at", "title", "provider", "transcript_path")
         try:
             rows = self.ensure_db().execute(
                 f"""SELECT {','.join(cols)} FROM session_runs
                     WHERE closed_at IS NOT NULL ORDER BY closed_at DESC""").fetchall()
-            return [dict(zip(cols, r)) for r in rows]
+            out = [dict(zip(cols, r)) for r in rows]
+            for row in out:
+                row["can_reopen"] = bool(
+                    row.get("provider") == "claude" and
+                    self._safe_claude_transcript(row.get("session_id"),
+                                                 row.get("transcript_path")) and
+                    self._safe_reopen_cwd(row.get("cwd")))
+            return out
         except Exception:
             return []
 
@@ -1282,14 +1490,16 @@ class Engine:
         row = None
         try:
             row = self.ensure_db().execute(
-                "SELECT cwd, model, cost, title, project, branch FROM session_runs "
+                "SELECT cwd, model, cost, title, project, branch, transcript_path "
+                "FROM session_runs "
                 "WHERE session_id = ?", (sid,)).fetchone()
         except Exception:
             pass
         if not row:
             return {"ok": False, "error": "unknown session"}
-        path = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
-        if not os.path.isfile(path):
+        fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
+        path = self._safe_claude_transcript(sid, row[6] or fallback)
+        if not path:
             return {"ok": False, "error": "transcript is gone"}
         with self.scan_lock:
             t = self.tail_for(path)
@@ -1303,7 +1513,8 @@ class Engine:
         return {"ok": True, "messages": msgs, "closed": True,
                 "info": {"session_id": sid, "cwd": row[0], "model": row[1],
                          "cost": row[2], "title": row[3], "project": row[4],
-                         "branch": row[5]}}
+                         "branch": row[5],
+                         "can_reopen": bool(self._safe_reopen_cwd(row[0]))}}
 
     @staticmethod
     def trusted_dirs():
@@ -1804,6 +2015,35 @@ class Engine:
             result["warning"] = interrupt_error
         return result
 
+    def reopen_claude_session(self, sid):
+        """Open a saved Claude transcript in a new iTerm tab.
+
+        Both the UUID and transcript path come from the ledger, but are validated
+        again here because this action crosses the local file/terminal boundary.
+        """
+        if any(row.get("sessionId") == sid for row in self.live_sessions()):
+            return {"ok": False, "error": "session is already live"}
+        try:
+            row = self.ensure_db().execute(
+                "SELECT cwd, provider, transcript_path, closed_at FROM session_runs "
+                "WHERE session_id=?", (sid,)).fetchone()
+        except Exception as exc:
+            return {"ok": False, "error": f"session lookup failed: {exc}"}
+        if not row or row[1] != "claude" or row[3] is None:
+            return {"ok": False, "error": "session is not a closed Claude conversation"}
+        if not self._safe_claude_transcript(sid, row[2]):
+            return {"ok": False, "error": "saved Claude transcript is unavailable"}
+        cwd = self._safe_reopen_cwd(row[0])
+        if not cwd:
+            return {"ok": False,
+                    "error": "the session working directory no longer exists or is outside home"}
+        command = (f"cd {shlex.quote(cwd)} && claude --resume "
+                   f"{shlex.quote(str(sid))}")
+        result = self._iterm_write("SPAWN", [(command, False)])
+        if result.get("ok"):
+            result.update(reopened=True, session_id=sid, cwd=cwd, command=command)
+        return result
+
     def act(self, action):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
@@ -1813,6 +2053,7 @@ class Engine:
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
         {type:'close', session_id}            (stop if active, then SIGTERM Claude) |
+        {type:'reopen', session_id}           (new terminal: claude --resume ID) |
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
@@ -1829,6 +2070,8 @@ class Engine:
                 return self.spawn_codex_session(action)
             return self.spawn_session(action)
         sid = action.get("session_id")
+        if action.get("type") == "reopen":
+            return self.reopen_claude_session(sid)
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live"}

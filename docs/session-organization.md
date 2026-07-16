@@ -63,8 +63,8 @@ question, it moves to Needs you with View-only access instead.
 | Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. This is a secondary badge; the placement remains Available. | Continue |
 | Session history | Inactive | A managed, interactive session is dormant. | Continue |
 | Session history | External | The external/view-only session has no active turn. | View |
-| Session history | Reopenable | The provider explicitly supports reopening the inactive session. | Reopen |
-| Session history | Closed | Only a durable read-only transcript remains. | View |
+| Session history | Reopenable | The provider explicitly supports reopening the inactive session, or a closed Claude session still has its exact main transcript and original working directory. | Reopen; closed rows also retain View |
+| Session history | Closed | A durable transcript remains but no safe reopen target is available. | View |
 
 Opening a completed non-question response clears New response. Opening a
 Reply-requested session does not clear the request. Reply requested clears only
@@ -92,7 +92,8 @@ when the user sends a response or explicitly chooses **Mark available**.
 | Managed `dormant` | Session history / Inactive / Continue |
 | Inactive `headless` or other read-only external thread | Session history / External / View |
 | `reopenable` | Session history / Reopenable / Reopen |
-| Explicitly closed ledger entry | Session history / Closed / View |
+| Closed Claude ledger entry with a validated main transcript and cwd | Session history / Reopenable / View or Reopen |
+| Explicitly closed ledger entry without a safe reopen target | Session history / Closed / View |
 | `stale` caused by a provider-wide outage | Preserve the last known card placement and show one provider-level banner |
 
 Provider-wide failures are page-level banners. Fleet must not duplicate the same
@@ -129,7 +130,14 @@ filter rows:
 - Provider: All, Claude, Codex
 
 The access and provider filters combine. Each filter row is horizontally scrollable
-on narrow screens.
+on narrow screens. Results render 100 rows at a time so a full local transcript
+archive does not overwhelm the page.
+
+At daemon startup, Fleet indexes all surviving top-level Claude transcripts at
+`~/.claude/projects/*/*.jsonl`. These imports include conversations that predate
+Fleet. Nested saved-subagent transcripts are not separate sessions. Imported rows
+always support View. They support Reopen only when the exact UUID transcript and
+original working directory still exist and pass the server's containment checks.
 
 ## Visible versus diagnostic vocabulary
 

@@ -138,8 +138,11 @@ def organize_session(session):
 def fleet():
     sessions = [organize_session(item) for item in copy.deepcopy(STATE["sessions"])]
     closed = [{**item, "ui_group": "history", "reason_label": "Closed",
-        "primary_action": "view", "primary_action_label": "View", "access": "view_only",
-        "access_label": "View only", "external": False, "provider_stale": False,
+        "primary_action": "reopen" if item.get("can_reopen") else "view",
+        "primary_action_label": "Reopen" if item.get("can_reopen") else "View",
+        "access": "reopen" if item.get("can_reopen") else "view_only",
+        "access_label": "Reopen" if item.get("can_reopen") else "View only",
+        "external": False, "provider_stale": False,
         "reply_requested": False, "new_response": False,
         "activity_at": item.get("last_seen") or item.get("closed_at") or time.time(),
         "pinned": item["session_id"] in STATE["settings"]["pinned_sessions"]}
@@ -276,6 +279,27 @@ def set_scenario(name):
     elif name == "provider-unavailable":
         STATE["sessions"] = [item for item in STATE["sessions"] if item["provider"] == "claude"]
         STATE["codex_error"] = "codex executable not found"
+    elif name == "claude-archive":
+        STATE["closed"].append({"session_id": "11111111-2222-3333-4444-555555555555",
+            "provider": "claude", "title": "Historical Claude review",
+            "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
+            "branch": "codex-integration", "model": "claude-sonnet",
+            "cost": 0.42, "agent_cost": 0.03, "agents_total": 1,
+            "closed_at": int(time.time()) - 120, "first_seen": int(time.time()) - 3600,
+            "last_seen": int(time.time()) - 120, "bridge_url": None,
+            "can_reopen": True})
+    elif name == "large-history":
+        now = int(time.time())
+        for index in range(205):
+            STATE["closed"].append({
+                "session_id": f"22222222-2222-2222-2222-{index:012d}",
+                "provider": "claude", "title": f"Archived Claude session {index:03d}",
+                "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
+                "branch": "codex-integration", "model": "claude-sonnet",
+                "cost": None, "agent_cost": None, "agents_total": None,
+                "closed_at": now - index, "first_seen": now - 3600 - index,
+                "last_seen": now - index, "bridge_url": None,
+                "can_reopen": False})
 
 
 def authorized(handler):
@@ -401,6 +425,13 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("type") == "spawn":
                     return self.json_reply({"ok": True, "session_id": "codex:new",
                                             "cwd": payload.get("cwd")})
+                if payload.get("type") == "reopen":
+                    closed = next((item for item in STATE["closed"]
+                                   if item["session_id"] == payload.get("session_id")), None)
+                    if not closed or not closed.get("can_reopen"):
+                        return self.json_reply({"ok": False,
+                                                "error": "session is not reopenable"})
+                    return self.json_reply({"ok": True, "reopened": True})
                 if not session:
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")

@@ -102,7 +102,10 @@ the provider without affecting Claude sessions.
 - **Session history** is one flat chronological list for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
   View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no
-  recent activity; it is a diagnostic raw state, not a separate page section.
+  recent activity; it is a diagnostic raw state, not a separate page section. Fleet indexes every
+  surviving top-level Claude transcript under `~/.claude/projects` on startup, including sessions
+  from before Fleet was installed. Saved subagent transcripts remain inside their parent
+  conversation instead of becoming duplicate history rows.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
 - **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
@@ -236,10 +239,12 @@ the provider without affecting Claude sessions.
   ✕ dismiss), and the always-visible free-text send box.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
-- **Session history** dropdown: every closed session the daemon ever saw (title, final spend,
-  agents, closed-ago), with a filter box (title / project / branch); tap a row for its info
-  block (full id, cwd, branch, model, lifetime, spend split). Session ids, cwds and agent ids
-  in any info block are **tap-to-copy**.
+- **Session history** dropdown: inactive sessions plus every surviving top-level Claude transcript
+  (title, provider, project, state, and age), loaded 100 rows at a time. Search and combine Access
+  and Provider filters. A closed row always has **View**. It also has **Reopen** when its exact
+  transcript and original working directory still exist; Reopen starts `claude --resume <id>` in a
+  new iTerm tab. Tap the row itself for its info block. Session ids, cwds and agent ids in any info
+  block are **tap-to-copy**.
 - **cost insights** dropdown (7/30/90-day window; each subsection its own dropdown): where
   the tokens and money actually go —
   - **cache invalidations**: every API call whose cache_read fell short of the previous
@@ -402,11 +407,12 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 - Codex Plan/Default mutation currently uses an experimental App Server method. It is verified
   against the installed CLI and isolated in the adapter, but may require an adapter update if Codex
   changes that experimental protocol.
-- "Recently closed" only records sessions the daemon saw alive (fills from 2026-07-13 onward).
 - The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
   links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.
-- Closed sessions are read-only: the ⤢ button opens their conversation (recovered from the
-  transcript via the ledger's cwd), but there's no terminal left to send to. Subagent chats are reachable only while their parent session is live.
+- A closed conversation is read-only until it is reopened. Every surviving Claude main transcript
+  can be viewed; Reopen is offered only when the exact UUID transcript and original working
+  directory pass Fleet's local safety checks. Deleted transcripts and missing working directories
+  remain View-only or unavailable. Subagent chats are reachable only while their parent session is live.
 - Messaging a subagent is a **relay through the parent**, never a direct channel — there is no
   such thing as typing into a subagent (no tty; `SendMessage` from the parent is the only path).
 - Screen-peek ("show me what this stalled session's terminal displays") is proven as a technique
