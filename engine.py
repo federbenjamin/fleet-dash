@@ -660,6 +660,7 @@ class Engine:
         self.config_lock = threading.Lock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
+        self.scan_timings_ms = deque(maxlen=240)
         self.history_backfilled = False
         # Claude's registry can flash `waiting` between assistant text and the
         # next tool call. Keep the transition time so an uncorroborated flash
@@ -833,8 +834,23 @@ class Engine:
         return session
 
     def scan(self):
+        started = time.perf_counter()
         with self.scan_lock:
-            return self._scan()
+            fleet = self._scan()
+        elapsed = (time.perf_counter() - started) * 1000
+        self.scan_timings_ms.append(elapsed)
+        ordered = sorted(self.scan_timings_ms)
+        percentile = lambda q: ordered[min(len(ordered) - 1,
+                                            max(0, round((len(ordered) - 1) * q)))]
+        fleet["diagnostics"] = {
+            "scan_ms": round(elapsed, 3),
+            "scan_p50_ms": round(percentile(.50), 3),
+            "scan_p95_ms": round(percentile(.95), 3),
+            "scan_samples": len(ordered),
+        }
+        with self.lock:
+            self.snapshot_cache = fleet
+        return fleet
 
     def _scan(self):
         cfg = self.cfg
@@ -1062,8 +1078,6 @@ class Engine:
                           "preview_agents", "preview_agent_lines", "reader_width",
                           "pinned_sessions")},
         }
-        with self.lock:
-            self.snapshot_cache = fleet
         return fleet
 
     def _persist_config_fields(self, changed):

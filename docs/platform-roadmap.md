@@ -752,18 +752,43 @@ Each milestone runs the relevant subset; M9 and M10 run all of it.
 
 Populate in M0 and M9. Measurements use the same real corpus and deterministic benchmark fixtures.
 
+M0 was recorded on 2026-07-16 against the launchd daemon on this machine. API results use 40 fleet
+requests and three complete context requests for the pinned 159 KB desktop Codex thread. Engine
+timing uses 22 real two-second polls after restart. Browser results use eight new Chromium pages per
+viewport and stop at the first visible usage/session surface. RSS is the launchd Python process after
+one minute. Corpus counting reads every local Claude/Codex JSONL source but does not parse message
+content.
+
 | Metric | M0 baseline | M9 result | Gate |
 | --- | ---: | ---: | ---: |
-| Engine scan p50/p95 | pending | pending | no regression from indexing |
-| `/api/fleet` p50/p95 | pending | pending | baseline + <5 ms p95 |
+| Engine scan p50/p95 | 140.184 / 902.369 ms | pending | no regression from indexing |
+| `/api/fleet` p50/p95 | 9.296 / 10.994 ms | pending | baseline + <5 ms p95 |
+| `/api/context` p50/p95 | 2.157 / 2.676 ms | pending | improve or unchanged |
 | Search warm p50/p95 | n/a | pending | <75 ms p95 |
 | Search cold p50/p95 | n/a | pending | <150 ms p95 |
 | Live index lag p95 | n/a | pending | <2 poll intervals |
 | Initial index wall time | n/a | pending | background only |
-| Desktop first useful render | pending | pending | improve or unchanged |
-| Mobile input-to-feedback | pending | pending | <100 ms |
-| Poll payload bytes | pending | pending | bounded with pagination |
-| Daemon steady-state RSS | pending | pending | measured and justified |
+| Desktop first useful render p50/p95 | 77.589 / 140.699 ms | pending | improve or unchanged |
+| Mobile first useful render p50/p95 | 73.206 / 75.661 ms | pending | improve or unchanged |
+| Mobile input-to-feedback | <100 ms deterministic gate; real instrumentation pending | pending | <100 ms |
+| Poll payload bytes p50 | 768,834 bytes | pending | bounded with pagination |
+| Context payload bytes | 159,125 bytes | pending | paginate large conversations |
+| Daemon steady-state RSS | 26,032 KiB | pending | measured and justified |
+
+Real local corpus baseline:
+
+| Source | JSONL files | Rows | Bytes |
+| --- | ---: | ---: | ---: |
+| Claude projects | 3,212 | 536,706 | 2,639,704,900 |
+| Codex sessions | 47 | 25,894 | 87,897,067 |
+| Total | 3,259 | 562,600 | 2,727,601,967 |
+
+Repeat with:
+
+```bash
+python3 tests/perf_baseline.py --samples 40 --context-samples 3 --sid <session-id>
+node tests/browser_baseline.js http://127.0.0.1:8377/ 8
+```
 
 ## Explicit non-goals
 

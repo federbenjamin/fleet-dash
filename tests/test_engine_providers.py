@@ -153,6 +153,11 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(codex["capabilities"]["close"])
         self.assertTrue(fleet["totals"]["cost_partial"])
         self.assertGreaterEqual(fleet["totals"]["session_cost"], 0)
+        self.assertGreaterEqual(fleet["diagnostics"]["scan_ms"], 0)
+        self.assertEqual(fleet["diagnostics"]["scan_samples"], 1)
+        second = self.engine.scan()
+        self.assertEqual(second["diagnostics"]["scan_samples"], 2)
+        self.assertGreaterEqual(second["diagnostics"]["scan_p95_ms"], 0)
 
     def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
         with open(self.claude_account, "w") as handle:
