@@ -3,7 +3,8 @@ const { test, expect } = require('@playwright/test');
 async function reset(page, scenario = 'base') {
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
+  await expect(page.locator('#usagechip')).toBeVisible();
 }
 
 async function refresh(page) {
@@ -12,6 +13,11 @@ async function refresh(page) {
 
 async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
+}
+
+async function sendModifiedReturn(page, locator) {
+  const mac = await page.evaluate(() => /Mac|iPhone|iPad|iPod/.test(navigator.platform || ''));
+  await locator.press(mac ? 'Meta+Enter' : 'Control+Enter');
 }
 
 async function goTo(page, route) {
@@ -90,6 +96,279 @@ test('responsive application shell routes, filters, and follows browser back', a
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
+});
+
+test('out-of-order fleet and Insights responses cannot overwrite newer state', async ({ page }) => {
+  await reset(page);
+  const baseFleet = await (await page.request.get('/api/fleet')).json();
+  let fleetCalls = 0;
+  await page.route('**/api/fleet', async route => {
+    fleetCalls += 1;
+    const snapshot = JSON.parse(JSON.stringify(baseFleet));
+    snapshot.sessions[0].title = fleetCalls === 1 ? 'stale poll result' : 'fresh poll result';
+    if (fleetCalls === 1) await new Promise(resolve => setTimeout(resolve, 350));
+    try {
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify(snapshot) });
+    } catch (_) { /* the stale request is intentionally aborted */ }
+  });
+  await page.evaluate(() => {
+    tick();
+    setTimeout(() => tick(), 20);
+  });
+  await expect.poll(() => page.evaluate(() =>
+    last.sessions.find(item => item.session_id === 'claude-one')?.title)).toBe('fresh poll result');
+  expect(fleetCalls).toBeGreaterThanOrEqual(2);
+  await page.unroute('**/api/fleet');
+
+  const insightsPayload = days => ({ ok: true,
+    totals: { agent_cost: days, session_cost: 0, bust_cost: 0 },
+    token_mix: [], cache_busts: [], agents: [], skills: [], tools: [], models: [],
+    projects: [], by_day: [], top_sessions: [] });
+  let failNinety = true;
+  await page.route('**/api/insights?*', async route => {
+    const days = Number(new URL(route.request().url()).searchParams.get('days'));
+    if (days === 7) await new Promise(resolve => setTimeout(resolve, 350));
+    if (days === 90 && failNinety) {
+      failNinety = false;
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: false, error: 'fixture insights failure' }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify(insightsPayload(days)) });
+  });
+  await goTo(page, 'insights');
+  await page.evaluate(() => {
+    delete insightsCache[7]; delete insightsCache[30];
+    insightsDays = 7; loadInsights(true); setInsightsDays(30);
+  });
+  await expect.poll(() => page.evaluate(() => insightsCache[30]?.data?.totals?.agent_cost)).toBe(30);
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => insightsCache[7]?.data?.totals?.agent_cost)).toBe(7);
+  expect(await page.evaluate(() => insightsCache[30]?.data?.totals?.agent_cost)).toBe(30);
+
+  await page.evaluate(() => setInsightsDays(90));
+  await expect(page.locator('#rollup [role="alert"]')).toContainText('fixture insights failure');
+  await page.locator('#rollup').getByRole('button', { name: 'retry' }).click();
+  await expect.poll(() => page.evaluate(() => insightsCache[90]?.data?.totals?.agent_cost)).toBe(90);
+});
+
+test('native decisions lock double taps and relay/Outbox failures keep recovery', async ({ page }) => {
+  await reset(page, 'claude-question-slow');
+  await page.evaluate(() => openSession('claude-one'));
+  await expect(page.locator('#sact .optbtn').first()).toBeVisible();
+  await page.locator('#sact .optbtn').first().evaluate(button => { button.click(); button.click(); });
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(1);
+  await expect(page.locator('#sact .optbtn').first()).toBeDisabled();
+  await page.waitForTimeout(850);
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'option')).toHaveLength(1);
+
+  await reset(page, 'subagent');
+  await page.evaluate(() => openAgent('codex:thread-one', 'child-one'));
+  await expect(page.locator('#aft')).toBeVisible();
+  await page.route('**/api/act', async route => {
+    const payload = route.request().postDataJSON();
+    if (payload.type !== 'relay') return route.continue();
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'relay path unavailable' }) });
+  });
+  await page.locator('#aft').fill('Preserve this exact relay');
+  await page.locator('#aact').getByRole('button', { name: 'relay' }).click();
+  await expect(page.locator('#aact .quickfeedback')).toContainText('Relaying');
+  await expect(page.locator('#aact .quickfeedback')).toContainText('relay path unavailable');
+  await page.locator('#aact .quickfeedback').getByRole('button', { name: 'restore' }).click();
+  await expect(page.locator('#aft')).toHaveValue('Preserve this exact relay');
+  await page.unroute('**/api/act');
+
+  const created = await page.request.post('/api/act', { data: { type: 'outbox_create',
+    kind: 'when_available', target_provider: 'codex', target_session_id: 'codex:thread-one',
+    message: 'Queued failure recovery', created_zone: 'UTC' } });
+  expect((await created.json()).ok).toBe(true);
+  await page.evaluate(() => { closeAgent(); openOutbox(); });
+  await expect(page.locator('.outboxrow')).toBeVisible();
+  await page.route('**/api/act', async route => {
+    const payload = route.request().postDataJSON();
+    if (payload.type !== 'outbox_send_now') return route.continue();
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ ok: false, error: 'provider did not accept message' }) });
+  });
+  const row = page.locator('.outboxrow').first();
+  await row.getByRole('button', { name: 'Send now' }).click();
+  await expect(row).toContainText('working…');
+  await expect(row).toContainText('provider did not accept message');
+  await expect(row.getByRole('button', { name: 'Send now' })).toBeEnabled();
+});
+
+test('unchanged and focused conversations repaint only when their content revision changes', async ({ page }) => {
+  await reset(page, 'large-conversation');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sbody .cmsg')).toHaveCount(50);
+  await page.evaluate(() => { window.__stableConversation = document.querySelector('#sbody .aconvo'); });
+  await refresh(page);
+  expect(await page.evaluate(() => document.querySelector('#sbody .aconvo') === window.__stableConversation)).toBe(true);
+
+  await reset(page, 'subagent');
+  await page.evaluate(() => openAgent('codex:thread-one', 'child-one'));
+  const relay = page.locator('#aft');
+  await relay.fill('draft survives transcript repaint');
+  await page.evaluate(() => {
+    const key = agentCacheKey('codex:thread-one', 'child-one');
+    agentCache[key].messages.push({ role: 'assistant', text: 'New row while typing' });
+    renderAgent();
+  });
+  await expect(page.locator('#abody')).toContainText('New row while typing');
+  await expect(relay).toHaveValue('draft survives transcript repaint');
+
+  await reset(page, 'large-conversation');
+  let closedRequests = 0;
+  await page.route('**/api/closed_context?*', async route => {
+    closedRequests += 1;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return route.continue();
+  });
+  await page.evaluate(() => openClosed('codex:closed'));
+  await page.evaluate(() => { renderClosed(); renderClosed(); });
+  await expect(page.locator('#sbody .cmsg')).toHaveCount(50);
+  expect(closedRequests).toBe(1);
+  await page.locator('#sbody').evaluate(element => { element.scrollTop = 0; });
+  await page.evaluate(() => { window.__closedConversation = document.querySelector('#sbody .aconvo'); });
+  await refresh(page);
+  expect(await page.locator('#sbody').evaluate(element => element.scrollTop)).toBe(0);
+  expect(await page.evaluate(() => document.querySelector('#sbody .aconvo') === window.__closedConversation)).toBe(true);
+});
+
+test('full chat status strips are adaptive, provider-honest, and frozen for history', async ({ page }, testInfo) => {
+  await reset(page);
+  const mobile = testInfo.project.name.startsWith('mobile');
+  await page.evaluate(() => openSession('claude-one'));
+  const strip = page.locator('#sact .statusstrip');
+  await expect(strip).toBeVisible();
+  await expect(strip.locator('.status-primary')).toContainText('⎇ status-strip ↑3 ↓10');
+  await expect(strip.locator('.status-primary')).toContainText('fleet-dash');
+  await expect(strip.locator('.status-secondary')).toContainText('Opus 4.8 · high');
+  await expect(strip.locator('.status-secondary')).toContainText('Ctx: 47%  →174k');
+  await expect(page.locator('#stitle2')).not.toContainText('fleet-dash');
+  expect(await page.evaluate(() => Boolean(document.querySelector('#sact .statusstrip')
+    .compareDocumentPosition(document.querySelector('#sact .composer')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(strip.locator('.status-graph i')).toHaveCount(50);
+  expect(await page.evaluate(() => [1000,1001,2500,2501,5000,5001,7500,7501,
+    10000,10001,15000,15001,20000,20001].map(value => statusGraphPoint(value)[0]).join('')))
+    .toBe('▁▂▂▃▃▄▄▅▅▆▆▇▇█');
+  if(mobile){
+    await expect(strip.locator('.status-details')).toBeHidden();
+    await strip.getByRole('button', { name: 'expand status details' }).click();
+    await expect(strip.locator('.status-details')).toBeVisible();
+  }else{
+    await expect(strip.locator('.status-details')).toBeVisible();
+    await expect(strip.locator('.status-expand')).toBeHidden();
+  }
+  await expect(strip.locator('.status-cache')).toContainText('♻ 99%');
+  await expect(strip.locator('.status-cache')).toContainText('✎ 855 · spikes 9 · peak 278k');
+  await strip.locator('.status-cost summary').click();
+  await expect(strip.locator('.status-cost-breakdown')).toContainText('Main session');
+  await expect(strip.locator('.status-cost-breakdown')).toContainText('Review protocol mapping');
+  await page.locator('#sclose').click();
+
+  const codexCard=page.locator('[data-sid="codex:thread-one"]');
+  await codexCard.getByRole('button', { name: /more/ }).click();
+  await codexCard.getByText(/completed agents/).click();
+  await codexCard.getByText('reviewer', { exact: true }).click();
+  const agentStrip=page.locator('#aact .statusstrip');
+  await expect(agentStrip).toBeVisible();
+  await expect(agentStrip).toHaveClass(/frozen/);
+  await expect(agentStrip).toContainText('GPT-5.4 · high');
+  await expect(agentStrip).not.toContainText('$0.00');
+  await expect(agentStrip.locator('.status-cache')).toHaveCount(0);
+  await page.locator('#aclose').click();
+
+  await goTo(page,'history');
+  await page.locator('[data-history-sid="codex:closed"]').getByRole('button',{name:'View'}).click();
+  const closedStrip=page.locator('#sact .statusstrip');
+  await expect(closedStrip).toBeVisible();
+  await expect(closedStrip).toHaveClass(/frozen/);
+  await expect(page.locator('#sact textarea')).toHaveCount(0);
+});
+
+test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
+  await reset(page);
+  expect(await page.evaluate(() => Boolean(document.querySelector('#briefing')
+    .compareDocumentPosition(document.querySelector('#pinned')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
+
+  const claude = page.locator('[data-sid="claude-one"]');
+  await expect(claude.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
+  if (testInfo.project.name === 'desktop') {
+    await expect(claude.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
+  }
+
+  await reset(page, 'usage-warning');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · 96%');
+  await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('Fable weekly');
+  await expect(page.locator('#usagebody')).toContainText('96%');
+  await expect(page.locator('#usagebody')).toContainText('second@example.com');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
+  await expect(page.locator('#usagepanel')).toBeHidden();
+
+  await reset(page, 'subagent');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 1');
+  await page.locator('[data-now-filter="subagents"]').click();
+  const child = page.locator('#subagents .activeagentcard');
+  await expect(child).toHaveCount(1);
+  await expect(child).toContainText('Review protocol mapping');
+  await expect(child).toContainText('fleet-dash · Codex parity work · codex-integration');
+  await expect(page.locator('#pinned > *, #actioninbox > *, #needsyou > *, #working > *, #sessions > *')).toHaveCount(0);
+  await child.click();
+  await expect(page.locator('#aview')).toBeVisible();
+  await expect(page.locator('#atitle')).toContainText('Review protocol mapping');
+});
+
+test('desktop navigation side and nested Settings preserve the full chat state', async ({ page }, testInfo) => {
+  await reset(page);
+  await goTo(page, 'settings');
+  await page.getByRole('button', { name: 'Right side' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-nav-side', 'right');
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-nav-side', 'right');
+  if (testInfo.project.name === 'desktop') {
+    const positions = await page.evaluate(() => ({nav: document.querySelector('#sidenav').getBoundingClientRect().x,
+      main: document.querySelector('#appmain').getBoundingClientRect().x}));
+    expect(positions.nav).toBeGreaterThan(positions.main);
+  } else {
+    await expect(page.locator('#sidenav')).toBeHidden();
+    await expect(page.locator('#bottomnav')).toBeVisible();
+  }
+  await page.evaluate(() => setNavSide('left'));
+  await reset(page, 'large-conversation');
+
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sbody')).toContainText('Conversation message 204');
+  await page.getByRole('button', { name: 'Why here?' }).click();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  await page.evaluate(() => { document.querySelector('#sbody').scrollTop = 125; });
+  const before = await page.locator('#sbody').evaluate(element => element.scrollTop);
+  await page.evaluate(() => navigateTo('settings'));
+  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sevidence')).toBeVisible();
+  expect(await page.locator('#sbody').evaluate(element => element.scrollTop)).toBe(before);
+
+  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
+    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
+  await expect(page.locator('#vtitle')).toHaveText('📄 artifact.md — artifact');
+  await expect(page.locator('#vtitle')).not.toContainText('Codex parity work');
+  await expect(page.locator('#vtitle .vfsep')).toHaveCount(0);
 });
 
 test('cross-provider search filters, exact context, live handoff, and rebuild', async ({ page }, testInfo) => {
@@ -218,7 +497,7 @@ test('handoff preview is action-token protected', async ({ page }) => {
   await reset(page);
   await page.context().clearCookies();
   await page.goto('/');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
   await page.evaluate(() => openSession('claude-one'));
   await page.locator('#sctrl .ovbtn').click();
   await page.getByRole('menuitem', { name: /Continue in Codex/ }).click();
@@ -229,7 +508,7 @@ test('handoff preview is action-token protected', async ({ page }) => {
 
 test('transcript search is action-token protected', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#totals')).toBeVisible();
+  await expect(page.locator('#route-now')).toBeVisible();
   await goTo(page, 'search');
   await expect(page.locator('#searchstatus')).toContainText('action token');
   await expect(page.locator('#searchresults')).toContainText('Type a search or choose a filter.');
@@ -262,33 +541,37 @@ test('message Outbox records are action-token protected while fleet exposes coun
 
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
-  await expect(page.locator('#totals > span')).toHaveText([
-    '0 need you', '0 working', '2 available · 0 subagents']);
-  await expect(page.locator('#totals .sep')).toHaveCount(1);
-  await expect(page.locator('#totals > span').first().locator('b')).not.toHaveAttribute('style');
-  await expect(page.locator('#totals')).not.toContainText('history');
-  await expect(page.locator('#totals')).not.toContainText('new');
-  await expect(page.locator('#totals')).not.toContainText('running');
+  await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
+  await expect(page.locator('#totals')).toHaveCount(0);
   await expect(page.locator('[data-sid="claude-one"]')).toContainText('Claude parser fix');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(codex).toContainText('Codex parity work');
-  await expect(page.locator('#usage')).toContainText('Claude Code');
-  await expect(page.locator('#usage')).toContainText('Codex CLI');
-  await expect(page.locator('#usage')).toContainText('12k lifetime tokens');
-  const usageHeads = page.locator('#usage .uhead');
+  await expect(page.locator('#usagechip')).toHaveText('Usage');
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('Claude Code');
+  await expect(page.locator('#usagebody')).toContainText('Codex CLI');
+  await expect(page.locator('#usagebody')).toContainText('12k lifetime tokens');
+  const usageHeads = page.locator('#usagebody .uhead');
   await expect(usageHeads.nth(0).locator('.useg')).toHaveText([
     '·claude@example.com', '·active', '·59.59B local lifetime tokens']);
   await expect(usageHeads.nth(1).locator('.useg')).toHaveText([
     '·second@example.com']);
   await expect(usageHeads.nth(2).locator('.useg')).toHaveText([
     '·codex@example.com', '·pro', '·12k lifetime tokens']);
-  await expect(page.locator('#usage .uaccount')).toHaveCount(2);
-  await expect(page.locator('#usage')).toContainText('weekly');
-  await expect(page.locator('#usage')).not.toContainText('GPT-5.3-Codex-Spark');
+  await expect(page.locator('#usagebody .uaccount')).toHaveCount(2);
+  await expect(page.locator('#usagebody')).toContainText('weekly');
+  await expect(page.locator('#usagebody')).toContainText('Fable weekly');
+  await expect(page.locator('#usagebody .uaccount').nth(0)).toContainText('41%');
+  await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
   if (testInfo.project.name === 'desktop') {
-    const terminal = codex.getByRole('button', { name: 'attach' });
-    const pin = codex.getByRole('button', { name: 'pin session to top' });
+    const terminal = codex.getByRole('button', { name: 'Attach' });
+    const pin = codex.getByRole('button', { name: 'pin session', exact: true });
     await expect(terminal).toBeEnabled();
     await expect(pin).toBeVisible();
     expect(await terminal.evaluate((el) => el.nextElementSibling === document.querySelector(
@@ -563,7 +846,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   const card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
   const attach = page.locator('#sctrl > .termbtn');
-  await expect(attach).toHaveText('attach');
+  await expect(attach).toHaveText('Attach');
   await expect(attach).toBeEnabled();
   expect(await attach.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await attach.click();
@@ -585,8 +868,42 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
   await expect(card.locator('.chip')).toContainText('Available');
-  await expect(page.locator('#sctrl > .termbtn')).toHaveText('attach');
+  await expect(page.locator('#sctrl > .termbtn')).toHaveText('Attach');
   await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
+});
+
+test('Claude permission modes are capability-gated and bypass always warns', async ({ page }) => {
+  await reset(page);
+  const card = page.locator('[data-sid="claude-one"]');
+  await card.locator('.shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByRole('button', { name: 'Auto', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /Don't ask/ })).toBeDisabled();
+  await page.getByRole('button', { name: 'Accept edits', exact: true }).click();
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('acceptEdits');
+
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('button', { name: 'Bypass permissions', exact: true }).click();
+  await expect(page.locator('#confirm')).toContainText('Use Bypass permissions?');
+  await expect(page.locator('#confirm')).toContainText('isolated, disposable environment');
+  await page.locator('#confirm').getByRole('button', { name: 'cancel' }).click();
+  expect((await fixtureState(page)).sessions[0].permission_mode).toBe('acceptEdits');
+
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('button', { name: 'Bypass permissions', exact: true }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'use bypass permissions' }).click();
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('bypassPermissions');
+
+  await page.locator('#sclose').click();
+  await card.getByRole('button', { name: /more/ }).click();
+  await card.getByText('session info', { exact: true }).click();
+  const selector = card.locator('select.permissionselect');
+  await expect(selector).toHaveValue('bypassPermissions');
+  await selector.selectOption('plan');
+  await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
+    .toBe('plan');
 });
 
 test('brand-new Claude sessions are interactive before the first transcript exists', async ({ page }) => {
@@ -598,7 +915,12 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
-  await expect(page.locator('#sact input[placeholder^="send a message"]')).toBeVisible();
+  await expect(page.locator('#sact textarea[placeholder^="send a message"]')).toBeVisible();
+  const strip=page.locator('#sact .statusstrip');
+  await expect(strip).toContainText('claude · high');
+  await expect(strip).not.toContainText('Ctx:');
+  await expect(strip).not.toContainText('→0');
+  await expect(strip.locator('.status-cache,.status-graph,.status-cost')).toHaveCount(0);
 });
 
 test('desktop-owned Codex work is active without unsafe controls', async ({ page }) => {
@@ -682,13 +1004,13 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   const claude = page.locator('[data-sid="claude-one"]');
   await claude.locator('.shead').click();
   const openTerminal = page.locator('#sctrl > .termbtn');
-  await expect(openTerminal).toHaveText('open');
+  await expect(openTerminal).toHaveText('Terminal');
   await expect(openTerminal).toBeEnabled();
   expect(await openTerminal.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await openTerminal.click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
-  await expect(page.getByRole('button', { name: 'Plan', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Plan', exact: true })).toBeVisible();
   await page.getByRole('menuitem', { name: /Close session/ }).click();
   await expect(page.locator('#confirm')).toContainText('iTerm tab stays open');
   await page.locator('#confirm').getByRole('button', { name: 'cancel' }).click();
@@ -710,6 +1032,52 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await goTo(page, 'history');
   await expect(page.locator('#history')).toContainText('2 sessions');
   await expect(page.locator('#history')).toContainText('Codex parity work');
+});
+
+test('secondary-worktree close preserves by default and force removal lists every risk', async ({ page }) => {
+  await reset(page, 'close-worktree-dirty');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  const modal = page.locator('#confirm');
+  await expect(modal).toContainText('Secondary worktree');
+  await expect(modal).toContainText('engine.py');
+  await expect(modal).toContainText('static/app.js');
+  await expect(modal).toContainText('notes.txt');
+  await expect(modal).toContainText('build/cache.bin');
+  await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();
+  await modal.getByRole('button', { name: 'force remove dirty worktree' }).click();
+  await expect(modal).toContainText('permanently deletes every listed worktree file');
+  await modal.getByRole('button', { name: 'close and force remove' }).click();
+  await expect(page.locator('#sview')).toBeHidden();
+  const state = await fixtureState(page);
+  expect(state.worktree_removed).toBe(true);
+  expect(state.actions.slice(-3).map(item => item.type)).toEqual([
+    'close_preview', 'close', 'worktree_cleanup']);
+  expect(state.actions.at(-1).force).toBe(true);
+
+  await reset(page, 'close-worktree-shared');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  await expect(modal).toContainText('Codex parity work');
+  await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();
+  await expect(modal.getByRole('button', { name: 'force remove dirty worktree' })).toHaveCount(0);
+  await modal.getByRole('button', { name: 'cancel' }).click();
+});
+
+test('cleanup failure closes the session but reports the preserved worktree', async ({ page }) => {
+  await reset(page, 'close-worktree-cleanup-failure');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Close session/ }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'force remove dirty worktree' }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'close and force remove' }).click();
+  await expect(page.locator('#confirm')).toContainText('Session closed · worktree preserved');
+  await expect(page.locator('#confirm')).toContainText('fixture Git removal failed');
+  await expect(page.locator('#sview')).toBeHidden();
+  await page.locator('#confirm').getByRole('button', { name: 'close' }).click();
+  expect((await fixtureState(page)).worktree_removed).not.toBe(true);
 });
 
 test('single, multi, free-text, dismiss, invalid, and stale questions', async ({ page }) => {
@@ -755,7 +1123,7 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const input = page.locator('#sft-codex\\:thread-one');
   await input.fill('Ship the optimistic message');
-  await input.press('Enter');
+  await sendModifiedReturn(page, input);
   const sending = page.locator('#sbody .optimistic').filter({ hasText: 'Ship the optimistic message' });
   await expect(sending).toBeVisible();
   await expect(sending.getByLabel('sending')).toBeVisible();
@@ -798,7 +1166,7 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const timeoutInput = page.locator('#sft-codex\\:thread-one');
   await timeoutInput.fill('Wait for transcript confirmation');
-  await timeoutInput.press('Enter');
+  await sendModifiedReturn(page, timeoutInput);
   const timedOut = page.locator('#sbody .optimistic').filter({
     hasText: 'Wait for transcript confirmation' });
   const restoreTimedOut = timedOut.getByRole('button', {
@@ -812,13 +1180,91 @@ test('messages and question answers render optimistically and recover from failu
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const failedInput = page.locator('#sft-codex\\:thread-one');
   await failedInput.fill('Restore this message');
-  await failedInput.press('Enter');
+  await sendModifiedReturn(page, failedInput);
   const failed = page.locator('#sbody .optimistic').filter({ hasText: 'Restore this message' });
   const restore = failed.getByRole('button', { name: 'send failed; restore message' });
   await expect(restore).toBeVisible();
   await restore.click();
   await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
   await expect(failedInput).toHaveValue('Restore this message');
+});
+
+test('message composers use Return for newlines and an explicit modified Return to send', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const composer = page.locator('#sft-codex\\:thread-one');
+  await composer.fill('First line');
+  await composer.press('Enter');
+  await expect(composer).toHaveValue('First line\n');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'text')).toHaveLength(0);
+  await composer.fill('First line\nSecond line');
+  await sendModifiedReturn(page, composer);
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)).toMatchObject({
+    type: 'text', text: 'First line\nSecond line' });
+
+  await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"]').getByText('reviewer', { exact: true }).click();
+  const relay = page.locator('#aft');
+  await relay.fill('Relay line');
+  await relay.press('Enter');
+  await expect(relay).toHaveValue('Relay line\n');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'relay')).toHaveLength(0);
+  await relay.fill('Relay line\nMore detail');
+  await sendModifiedReturn(page, relay);
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)).toMatchObject({
+    type: 'relay', text: 'Relay line\nMore detail' });
+});
+
+test('new sessions open a provisional card and chat before native startup returns', async ({ page }) => {
+  await reset(page, 'spawn-slow');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  const form = page.locator('.newform');
+  const permission = form.locator('select').filter({ has: page.locator('option[value="dontAsk"]') });
+  await expect(permission).toHaveValue('default');
+  await expect(permission.locator('option[value="auto"]')).toHaveCount(1);
+  await expect(permission.locator('option[value="dontAsk"]')).toHaveText("Don't ask");
+  await form.locator('select').first().selectOption('codex');
+  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
+  await form.locator('textarea.nfmessage').fill('Start with immediate feedback');
+  await form.getByRole('button', { name: /start session/ }).click();
+
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
+  await expect(page.locator('#sbody')).toContainText('Starting session');
+  await expect(page.locator('[data-sid^="spawn-"]')).toBeVisible();
+  await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 1');
+  await expect.poll(async () => page.evaluate(() =>
+    window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
+
+  await expect(page.locator('[data-sid="codex:new"]')).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
+  expect((await fixtureState(page)).actions.filter(item => item.type === 'spawn')).toHaveLength(1);
+});
+
+test('new-session forecast ignores stale model results and rejected startup restores exact input', async ({ page }) => {
+  await reset(page, 'forecast-race');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  let form = page.locator('.newform');
+  await form.locator('select').first().selectOption('codex');
+  const model = form.locator('select').filter({ has: page.locator('option[value="gpt-5.4"]') });
+  await model.selectOption('gpt-5.4');
+  await expect(form.locator('.spawnforecast')).toContainText('Updating forecast');
+  await model.selectOption('gpt-5.3-codex');
+  await expect(form.locator('.spawnforecast')).toContainText('53k tokens');
+  await expect(form.locator('.spawnforecast')).not.toContainText('54k tokens');
+
+  await page.request.post('/test/reset', { data: { scenario: 'spawn-failure' } });
+  await page.reload();
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  form = page.locator('.newform');
+  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
+  await form.locator('textarea.nfmessage').fill('Keep this exact startup message');
+  await form.getByRole('button', { name: /start session/ }).click();
+  await expect(page.locator('#sbody')).toContainText('fixture startup rejected');
+  await page.locator('#sact').getByRole('button', { name: 'restore setup' }).click();
+  await expect(page.locator('.newform textarea.nfmessage')).toHaveValue('Keep this exact startup message');
 });
 
 test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
@@ -905,7 +1351,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
   await input.fill('$rev');
   await expect(page.locator('.slashmenu')).toContainText('$reviewer');
   await page.getByRole('button', { name: /\$reviewer/ }).click();
-  await input.press('Enter');
+  await sendModifiedReturn(page, input);
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('skill');
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
@@ -1034,7 +1480,7 @@ test('action inbox separates requests, work, availability, and unread responses'
   await expect(question).toContainText('How broad should the change be?');
   await expect(question).toContainText('Question waiting');
   await expect(question.getByRole('button', { name: 'Respond' })).toBeVisible();
-  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('action-inbox.png'), fullPage: true });
 
   await reset(page, 'subagent');
@@ -1042,7 +1488,7 @@ test('action inbox separates requests, work, availability, and unread responses'
   await expect(page.locator('#working')).toContainText('Working · 1');
   await expect(working.locator('.chip')).toHaveText('Working');
   await expect(working.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
-  await expect(page.locator('#usage .uprovider')).toHaveCount(2);
+  await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('working-queue.png'), fullPage: true });
 
   await reset(page, 'reply-requested');
@@ -1242,7 +1688,7 @@ test('repository outcome center previews and confirms commit push draft PR and r
 
 test('session action menu opens the same repository outcome center', async ({ page }) => {
   await reset(page, 'base');
-  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sctrl .ovbtn').click();
   await page.locator('#sctrl').getByRole('menuitem', { name: /Repository outcome/ }).click();
   await expect(page.locator('#repoview')).toBeVisible();
@@ -1304,7 +1750,7 @@ test('message Outbox schedules exact session delivery and exposes durable centra
 
 test('usage-reset and scheduled-new-session forms keep full target configuration', async ({ page }) => {
   await reset(page, 'base');
-  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sft-claude-one').fill('Continue after my Claude usage resets');
   await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
   await page.getByRole('button', { name: 'When usage resets', exact: true }).click();
@@ -1403,9 +1849,22 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
   await reset(page, 'single-question');
-  await page.evaluate(() => toggleSessionPin('codex:thread-one'));
+  const heldHeader=page.locator('[data-sid="claude-one"] .shead');
+  await heldHeader.dispatchEvent('touchstart');
+  await expect(heldHeader).toHaveClass(/pinpress/);
+  await heldHeader.dispatchEvent('touchend');
+  await expect(heldHeader).not.toHaveClass(/pinpress/);
+  await page.evaluate(async () => {
+    await toggleSessionPin('codex:thread-one');
+    await toggleSessionPin('claude-one');
+  });
   await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
-    .toContain('codex:thread-one');
+    .toEqual(['codex:thread-one','claude-one']);
+  await expect(page.locator('#pinned .pinslot')).toHaveCount(2);
+  await expect(page.locator('#pinned .pinslot').nth(0))
+    .toHaveAttribute('data-pin-sid','codex:thread-one');
+  await expect(page.locator('#pinned .pinslot').nth(1))
+    .toHaveAttribute('data-pin-sid','claude-one');
   await expect(page.locator('#pinned [data-sid="codex:thread-one"]')).toBeVisible();
   await expect(page.locator('#actioninbox [data-action-sid="codex:thread-one"]')).toHaveCount(0);
   expect(await page.evaluate(() => Boolean(document.querySelector('#pinned')
@@ -1413,10 +1872,42 @@ test('pins persist and relocate sessions above the needs-you queue', async ({ pa
     .toBe(true);
 
   await page.reload();
-  await expect(page.locator('#pinned [data-sid="codex:thread-one"]')).toBeVisible();
-  await page.evaluate(() => toggleSessionPin('codex:thread-one'));
+  await expect(page.locator('#pinned .pinslot').nth(0))
+    .toHaveAttribute('data-pin-sid','codex:thread-one');
+  await expect(page.locator('#pinned .pinslot').nth(1))
+    .toHaveAttribute('data-pin-sid','claude-one');
+  await page.evaluate(async () => {
+    await toggleSessionPin('codex:thread-one');
+    await toggleSessionPin('codex:thread-one');
+  });
   await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
-    .not.toContain('codex:thread-one');
+    .toEqual(['claude-one','codex:thread-one']);
+  await expect(page.locator('#pinned .pinslot').nth(0))
+    .toHaveAttribute('data-pin-sid','claude-one');
+  await expect(page.locator('#pinned .pinslot').nth(1))
+    .toHaveAttribute('data-pin-sid','codex:thread-one');
+
+  let pinRequests=0;
+  await page.route('**/api/settings', async route => {
+    const payload=route.request().postDataJSON();
+    if(payload.pin_session==='codex:thread-one'){
+      pinRequests+=1;
+      await new Promise(resolve=>setTimeout(resolve,100));
+      await route.fulfill({json:{ok:false,error:'pin storage unavailable'}});
+    }else await route.continue();
+  });
+  await page.evaluate(() => {
+    toggleSessionPin('codex:thread-one');
+    toggleSessionPin('codex:thread-one');
+  });
+  await expect(page.locator('#pinned [data-sid="codex:thread-one"] .quickfeedback.failed'))
+    .toContainText('pin storage unavailable');
+  expect(pinRequests).toBe(1);
+  await expect(page.locator('#pinned .pinslot').nth(0))
+    .toHaveAttribute('data-pin-sid','claude-one');
+  await expect(page.locator('#pinned .pinslot').nth(1))
+    .toHaveAttribute('data-pin-sid','codex:thread-one');
+  await page.unroute('**/api/settings');
 });
 
 test('session history text and access/provider chips filter one flat list', async ({ page }) => {

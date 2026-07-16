@@ -9,7 +9,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **Now is an operations queue:** **Pinned** sessions stay first, then one deduplicated **Action
+- **Now is an operations queue:** **Fleet Briefing** appears first, then **Pinned** sessions and one deduplicated **Action
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
@@ -20,14 +20,18 @@ the provider's native control path. Built 2026-07-13; still evolving.
   use reasons such as **Reply requested**, **Command
   approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
   The complete classification and action contract is in
-  [`docs/session-organization.md`](docs/session-organization.md). Each card is headed by the
+  [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
+  distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
+  totals line. Its **Subagents** filter opens a flat active-child view with each parent breadcrumb,
+  model, state, and latest activity. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
-- **Responsive application navigation:** desktop uses a persistent left rail for Now, Search,
+- **Responsive application navigation:** desktop uses a persistent rail for Now, Search,
   Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
   fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
-  across refresh and browser/native back gestures. Now and Workstreams have sticky text/state
+  across refresh and browser/native back gestures. Settings places the desktop rail on the left or
+  right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
   filters whose named saved views remain on this device.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
@@ -49,8 +53,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
-  notification opens the dashboard). It also selects **Fit the screen** or **Centered · fixed
-  width** for every full-screen reading surface. Persisted to `config.json`, token required.
+  notification opens the dashboard). It also selects the per-device desktop navigation side and
+  **Fit the screen** or **Centered · fixed width** for every full-screen reading surface. Server
+  settings persist to `config.json`; the navigation side stays in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
   across daemon restarts and auto-expire 30 days after being set.
@@ -60,10 +65,14 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
   effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
-  by default. Claude sessions can request a **new git worktree** — it opens
-  a fresh iTerm tab running `claude` with those
-  flags, then auto-opens that session's full chat view here once it appears, so you can send
-  the first prompt from your phone. Untrusted folders are flagged: Claude Code asks "do you
+  by default. Claude sessions choose Manual, Auto, Accept Edits, Plan, or the advanced Don't Ask
+  permission mode; Auto remains subject to Claude's account/model eligibility. Claude sessions can
+  request a **new git worktree** — it opens
+  a fresh iTerm tab running `claude` with those flags. Fleet immediately opens a provisional
+  card and full chat with the initial message and a startup spinner, then replaces it in place with
+  the exact native session. A rejected start keeps the exact setup available to retry or restore.
+  Model changes paint immediately while stale forecast requests are cancelled or ignored.
+  Untrusted folders are flagged: Claude Code asks "do you
   trust the files in this folder?" at startup and **only your Mac can answer that** — trust is
   inherited from a parent dir, so worktrees under a trusted repo start clean.
 
@@ -110,7 +119,7 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   installed Codex 0.144.4 behavior is covered by live and deterministic tests. Structured questions
   appear whenever Codex actually sends a request, rather than being inferred from the selected mode.
 - Codex account rate-limit windows, reset times, plan type, reset credits, and lifetime token
-  total come directly from App Server account APIs and appear in the top usage header. The unused
+  total come directly from App Server account APIs and appear in the on-demand Usage panel. The unused
   GPT-5.3-Codex-Spark preview-model allowance remains available in the API payload but is omitted
   from the dashboard.
 - Codex subagent conversations and lifecycle events are visible. App Server exposes no public client
@@ -141,9 +150,11 @@ the provider without affecting Claude sessions.
   conversation instead of becoming duplicate history rows.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
-- **Provider-usage header** (top of the page, under the totals): provider, email, and plan details
-  use middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
-  active-account marker, 5-hour/weekly gauges, visibility setting, and live file updates. Fleet reads
+- **Usage chip** (inside the Now command box): it normally reads only **Usage**. At 70% it shows the
+  most urgent selected account/window percentage in amber; at 90% it turns red. Tapping opens every
+  provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
+  middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
+  active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads
   only display-safe identity/quota fields from the app preferences; its stored credentials never enter
   the Fleet API. Without that app, the current Claude Code login and statusline `rate_limits`
   side-write remain the single-account fallback. The local lifetime-token total comes from
@@ -170,20 +181,30 @@ the provider without affecting Claude sessions.
   `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
   included** — so it is a liveness signal (is it moving?), not output speed; a big context makes
   it large.
+- **Full-chat status strip** directly above the main or subagent composer. Desktop shows branch
+  versus the last-fetched `origin/main`, worktree, model/effort, context and explicit compaction
+  headroom, cache-read hit rate, CacheWrite/spikes/peak, session-tree or child cost, turn cost, and
+  the last 50 changed CacheWrite values. Mobile starts with the two identity/context rows and
+  expands usage details on tap. Missing provider data is omitted; completed agents and closed
+  sessions keep their last known values. Tapping a main tree total opens the main-plus-children
+  breakdown. No Git fetch or transcript rescan occurs when the strip opens.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
   the agent definition's frontmatter pin, or the parent session's effort when it pins none.
-- **"open"** on a Claude card header (desktop only) brings that iTerm tab to the front. A managed
-  Codex card shows **attach**, which opens a new Codex TUI connected to the canonical shared runtime.
+- A Claude card's whole header opens Fleet chat; the redundant second chat button is gone. **Terminal**
+  (desktop only) brings that Claude iTerm tab to the front. A managed
+  Codex card shows **Attach**, which opens a new Codex TUI connected to the canonical shared runtime.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below the usage header. Pinned cards sort by action urgency,
-  then newest activity, and are relocated rather than duplicated. On **desktop**, use the
+  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards keep the order in which
+  they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
+  Cards are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
-  **mobile**, **long-press** the header (a short tap still opens
-  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. Pinning an
+  **mobile**, **long-press** the header (it highlights immediately; a short tap still opens
+  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. A failed
+  pin restores the prior order and stays visible with Retry. Pinning an
   external Codex thread also opts it into read-only local lifecycle/message observation; it does not
   make the thread interactive.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
@@ -219,10 +240,13 @@ the provider without affecting Claude sessions.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
   autocomplete), the amber question block when it's blocked on you, and a delivered-file strip.
-  Its top-right **⋮ menu** contains Codex Plan/Default (when applicable), light/dark mode, Stop turn,
-  and Close session. Stop and close both confirm first. Closing an active session stops its current
+  Its top-right **⋮ menu** contains Codex Plan/Default or Claude permission mode (when applicable),
+  light/dark mode, Stop turn, and Close session. Stop and close both confirm first. Closing an active session stops its current
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
-  Claude's iTerm tab remains open. The conversation moves to **History**. The card's bounded Markdown
+  Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
+  the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
+  that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
+  session uses that worktree. The conversation moves to **History**. The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
@@ -264,7 +288,9 @@ the provider without affecting Claude sessions.
   A sent message appears there immediately with a small sending spinner. The placeholder is
   replaced only when the provider transcript confirms it. A failed request, or one still
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
-  never retries automatically. Structured-question answers use the selected option labels and the
+  never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
+  newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
+  Send/Relay button remains available. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.
@@ -277,7 +303,8 @@ the provider without affecting Claude sessions.
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
   opt-in); files since deleted show "(gone)".
-- **File viewer** extras: the same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
+- **File viewer** extras: its slim toolbar shows only close, filename, and file/session actions—no
+  duplicate session title/project/model header or separator. The same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
   actions that apply to the owning session. Light mode gives the document a paper theme; the choice
   is persisted per device and shared with the full chat and subagent views. A **📄 files strip**
   (header button) expands a one-line horizontally
@@ -383,7 +410,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
-| `pinned_sessions` | [] | persisted session ids relocated into the Pinned section |
+| `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
 | `reply_available` | {} | session id → conversation revision explicitly marked available |
 | `read_sessions` | {} | session id → opened conversation revision for the New response badge |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
@@ -432,7 +459,9 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
   stop_reason-less text row. So "done" is judged by whether anything is in flight (a tool call
   awaiting its result), not by `stop_reason`; "stalled" means frozen mid-tool. A background
   agent's `tool_result` in the parent arrives at *spawn* ("Async agent launched successfully"),
-  so it can't be used as a completion signal either.
+  so it can't be used as a completion signal either. Explicit task notifications with terminal
+  `completed`/`killed`/`failed` status are used when present, but only until newer child output
+  proves that task id resumed.
 - The input-needed Notification (~6s after a question) must not clobber the question capture.
 - launchd-context osascript **hangs forever** on the TCC check (can't show the dialog) → applet.
 - TUI keys: digits toggle; **Enter toggles the focused row in multi-select** (does NOT submit);

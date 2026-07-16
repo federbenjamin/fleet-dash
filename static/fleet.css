@@ -14,7 +14,7 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
   min-height:100vh}
 #appshell{min-height:100vh;display:grid;grid-template-columns:218px minmax(0,1fr)}
 #sidenav{height:100vh;position:sticky;top:0;border-right:1px solid var(--line);background:#0a0e14;
-  padding:18px 12px 14px;display:flex;flex-direction:column;z-index:20}
+  padding:18px 12px 14px;display:flex;flex-direction:column;z-index:20;grid-column:1}
 .brand{display:flex;align-items:center;gap:10px;padding:2px 8px 22px;color:var(--fg)}
 .brandmark{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;
   border:1px solid #365d87;border-radius:7px;background:#101c2c;color:var(--blue);font-weight:800;
@@ -33,7 +33,10 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
 .railstatus{margin-top:auto;display:flex;align-items:center;gap:7px;color:var(--faint);font-size:10.5px;
   padding:10px 12px;border-top:1px solid var(--line)}
 .statuslamp{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(63,185,80,.09)}
-#appmain{min-width:0;padding:22px 28px 48px}
+#appmain{min-width:0;padding:22px 28px 48px;grid-column:2}
+html[data-nav-side="right"] #appshell{grid-template-columns:minmax(0,1fr) 218px}
+html[data-nav-side="right"] #sidenav{grid-column:2;grid-row:1;border-right:0;border-left:1px solid var(--line)}
+html[data-nav-side="right"] #appmain{grid-column:1;grid-row:1}
 .destination{width:min(100%,960px);margin-inline:auto}
 .destination[hidden]{display:none!important}
 .desthead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:0 0 16px;padding:0 2px}
@@ -54,6 +57,9 @@ body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacS
   color:var(--faint);font:inherit;font-size:10.5px;padding:4px 9px;cursor:pointer}
 .commandchips button:hover{color:var(--fg);background:var(--card)}
 .commandchips button.active{border-color:#365d87;background:#101c2c;color:var(--blue)}
+#usagechip.usagewarn{border-color:rgba(210,153,34,.55);color:var(--amber);background:rgba(210,153,34,.08)}
+#usagechip.usagedanger{border-color:rgba(248,81,73,.58);color:var(--red);background:rgba(248,81,73,.08)}
+#usagechip b{font-variant-numeric:tabular-nums}
 .savedviews{display:contents}.savedchip{flex:0 0 auto;display:inline-flex;border:1px solid #365d87;
   border-radius:14px;overflow:hidden;background:#101c2c}
 .savedchip button{border:0!important;border-radius:0!important;background:transparent!important;color:var(--blue)!important;
@@ -155,15 +161,18 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 #settings>.setpanel{width:min(100%,760px);margin-inline:auto}
 .bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
 .bell.muted{opacity:.4}
-header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px 12px}
-#totals{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
-#totals b{color:var(--fg);font-variant-numeric:tabular-nums}
-#totals .sep{color:var(--faint);font-style:normal;margin:0 7px}
-/* Provider account usage: Claude and Codex share the same compact quota gauges. */
-#usage{display:flex;flex-direction:column;align-items:flex-start;gap:6px;
-  background:var(--card);border:1px solid var(--line);border-radius:9px;
-  padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--dim)}
-#usage.empty{display:none}
+/* Provider account usage lives on demand in a popover/sheet instead of occupying Now. */
+#usagepanel{display:none;position:fixed;top:96px;right:28px;z-index:68;width:min(520px,calc(100vw - 40px));
+  max-height:min(72vh,680px);overflow:auto;background:#11161d;border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 24px 70px rgba(0,0,0,.62);padding:12px;font-size:12px;color:var(--dim)}
+#usagepanel.open{display:block}
+.usagepanelhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 10px;
+  margin-bottom:10px;border-bottom:1px solid var(--line)}
+.usagepanelhead>span{display:flex;flex-direction:column}.usagepanelhead b{color:var(--fg);font-size:13px}
+.usagepanelhead small{color:var(--faint);font-size:10px}.usagepanelhead button{background:var(--card);border:1px solid var(--line);
+  border-radius:7px;color:var(--fg);font:inherit;padding:4px 8px;cursor:pointer}
+#usagebody{display:flex;flex-direction:column;align-items:flex-start;gap:8px;width:100%}
+#usagebody.empty{min-height:80px;align-items:center;justify-content:center}.usageempty{color:var(--faint)}
 .uprovider{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:100%}
 .uprovider+.uprovider{border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
 .uaccount+.uaccount{border-top:1px dashed var(--line);padding-top:7px;margin-top:1px}
@@ -185,6 +194,8 @@ header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:2px 2px
 .modesel{background:var(--card2);border:1px solid var(--line);border-radius:6px;color:var(--fg);
   padding:2px 5px;font:inherit;font-size:11px;cursor:pointer}
 .modesel:disabled{opacity:.5;cursor:not-allowed}
+.permissiondetail{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
+.permissiondetail .permissionselect{max-width:190px}
 /* last-message peek — compact Markdown, never a tool call */
 .lastmsg{display:flex;align-items:flex-start;gap:7px;padding:6px 12px;font-size:12px;
   color:var(--dim);border-top:1px solid var(--line);background:#0f1319;overflow:hidden}
@@ -332,6 +343,18 @@ details.insfold>summary:hover{color:var(--fg)}
 .queuehead span{font-size:10.5px;color:var(--faint)}
 .queue.needs .queuehead b{color:var(--amber)}
 .queue.working .queuehead b{color:var(--green)}
+.queue.subagentqueue .queuehead b{color:var(--purple)}
+.activeagentlist{display:flex;flex-direction:column;gap:7px}
+.activeagentcard{width:100%;display:grid;grid-template-columns:12px minmax(0,1fr) auto 14px;align-items:center;
+  gap:10px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);padding:10px 12px;
+  font:inherit;text-align:left;cursor:pointer}
+.activeagentcard:hover,.activeagentcard:focus-visible{border-color:#4f3f79;background:var(--card2);outline:0}
+.activeagentmain,.activeagentmeta{display:flex;min-width:0;flex-direction:column;gap:2px}
+.activeagentmain b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.activeagentmain small,.activeagentmeta small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint);font-size:10px}
+.activeagentmain em{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:10.5px;font-style:normal}
+.activeagentmeta{align-items:flex-end}.activeagentmeta b{color:var(--green);font-size:10px;font-weight:650}
+.activeagentcard .aopen{color:var(--faint);font-size:16px}
 .queueempty{background:var(--card);border:1px dashed var(--line);border-radius:9px;
   color:var(--faint);padding:13px;text-align:center;font-size:12px}
 .actioninbox{margin:16px 0 18px;border:1px solid #4a3916;border-radius:11px;background:#13130f;overflow:hidden}
@@ -439,8 +462,10 @@ details.insfold>summary:hover{color:var(--fg)}
 .pbtn.send{background:var(--blue);color:#03121f}
 .pbtn.sendoption{background:var(--card2);border:1px solid var(--line);color:var(--dim);padding-inline:10px}
 .freetext{display:flex;gap:8px;margin-top:10px}
-.freetext input{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
+.freetext input,.freetext textarea{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
+.freetext.composer{align-items:flex-end}
+.freetext.composer textarea{min-height:42px;max-height:140px;line-height:1.4;resize:vertical}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .sendpair{display:flex;gap:6px;flex:0 0 auto}.sendpair .pbtn{white-space:nowrap}
 .arow{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #20262e;font-size:12px}
@@ -500,6 +525,15 @@ td.r,th.r{text-align:right}
 .quickfeedback .qftext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .quickfeedback .delivery{flex:0 0 auto;margin-left:auto}
 @keyframes sendspin{to{transform:rotate(360deg)}}
+.spawncardstate{display:flex;align-items:center;gap:7px;padding:8px 12px;color:var(--dim);font-size:11px}
+.spawncardstate.failed{color:var(--red)}
+.spawncardactions{display:flex;gap:7px;padding:0 12px 10px}.spawncardactions .pbtn{padding:6px 10px}
+.spawnstage{display:flex;align-items:flex-start;gap:10px;margin:14px 0;padding:12px;border:1px solid var(--line);
+  border-radius:10px;color:var(--dim)}
+.spawnstage.failed{border-color:rgba(248,81,73,.45);color:var(--red)}
+.spawnstage>div{display:flex;flex-direction:column;gap:3px}.spawnstage span{font-size:11px;color:var(--faint)}
+.spawnrecovery{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.spawnrecovery>span{color:var(--faint);font-size:11px}
+.spawnforecast.loading{display:flex;align-items:center;gap:7px}
 /* system events folded into the convo: compaction, model fallback, API errors,
    slash commands, and the full text of questions you answered */
 .cevt{margin:8px 0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);
@@ -609,11 +643,8 @@ td.r,th.r{text-align:right}
 #viewer{display:none;position:fixed;inset:0;background:#0a0e14;z-index:50;flex-direction:column}
 #vhead{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
        padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}
-/* session heading (title / project·branch·model), a tight rule, then the file name */
-#vtitle{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-#vtitle b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#vtitle small{color:var(--dim);font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.vfsep{align-self:stretch;border-top:1px solid var(--line);margin:5px 0}
+/* The Markdown viewer toolbar identifies the file only; session metadata belongs in chat. */
+#vtitle{flex:1;min-width:0;display:flex;align-items:center}
 .vfname{font-size:12.5px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #vclose{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
         color:var(--fg);font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
@@ -622,7 +653,7 @@ td.r,th.r{text-align:right}
    with room to actually read (same overlay shape as the subagent view) */
 #sview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:52;flex-direction:column}
 #shead2{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
-        padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}
+        padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:30}
 /* title on its own line, project · branch · model beneath */
 #stitle2{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 #stitle2 b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -687,6 +718,29 @@ td.r,th.r{text-align:right}
    two full-screen surfaces stop looking like the same screen */
 #sact .stripbox,#vact .stripbox{margin:0 0 8px}
 #sact .freetext,#vact .freetext{margin-top:8px}
+.statusstrip{margin:8px 0 0;padding:7px 9px;border:1px solid var(--line);border-radius:9px;
+  background:#0c1117;color:var(--dim);font:10.5px/1.45 "SF Mono",Menlo,monospace}
+.statusstrip.frozen{border-style:dashed}.statusstrip>div,.status-details>div{min-width:0}
+.status-primary,.status-secondary,.status-cache{display:flex;align-items:center;gap:7px;min-height:18px;
+  overflow:hidden;white-space:nowrap}
+.status-primary{color:var(--fg)}.status-secondary{color:var(--dim)}
+.status-primary span,.status-secondary span,.status-cache>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.statusstrip em{color:var(--line2);font-style:normal;flex:0 0 auto}
+.status-details{display:block}.status-cache{color:var(--faint)}
+.status-cache .good,.status-graph .cool{color:var(--green)}
+.status-cache .warn,.status-graph .warn{color:var(--amber)}
+.status-cache .warm,.status-graph .warm{color:#e88337}.status-cache .hot,.status-graph .hot{color:var(--red)}
+.status-graph{display:flex;align-items:center;gap:0;min-height:18px;overflow:hidden;white-space:nowrap;
+  color:var(--green)}
+.status-graph b{flex:0 0 auto;width:25px;color:var(--faint);font-weight:500}
+.status-graph i{font-style:normal;flex:0 1 auto;min-width:3px}
+.status-expand{display:none}.status-cost{min-width:0}.status-cost summary{cursor:pointer;list-style:none;
+  color:var(--dim);overflow:hidden;text-overflow:ellipsis}.status-cost summary::-webkit-details-marker{display:none}
+.status-cost summary::before{content:'▸ ';color:var(--faint)}.status-cost[open] summary::before{content:'▾ '}
+.status-cost-breakdown{display:grid;gap:3px;margin:5px 0 2px;padding:6px 7px;border-left:2px solid var(--line)}
+.status-cost-breakdown span{display:flex;justify-content:space-between;gap:12px;min-width:0}
+.status-cost-breakdown span:not(b){overflow:hidden;text-overflow:ellipsis}.status-cost-breakdown b{color:var(--fg);font-weight:500}
+.status-cost-breakdown small{color:var(--faint)}
 /* Editable cross-provider handoff. It stacks over the source conversation so
    one back-swipe returns to the exact place the user came from. */
 #handoffview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:61;flex-direction:column}
@@ -869,6 +923,8 @@ td.r,th.r{text-align:right}
   color:var(--dim);font:inherit;font-size:12.5px;cursor:pointer}
 .ovseg button[aria-pressed="true"]{background:var(--card2);color:var(--fg);font-weight:600}
 .ovseg button:disabled,.ovitem:disabled{opacity:.38;cursor:not-allowed}
+.permissionseg{margin-bottom:6px}
+.ovhint{display:block;color:var(--faint);font-size:10px;line-height:1.35;padding:1px 2px 0}
 .ovsep{height:1px;background:var(--line);margin:4px 6px}
 .ovitem{display:flex;width:100%;align-items:center;justify-content:space-between;text-align:left;
   padding:0 10px;color:var(--fg)}
@@ -888,12 +944,30 @@ td.r,th.r{text-align:right}
 .cfbtns .pbtn{flex:1;padding:10px;font-size:13px}
 .cfbtns .cfgo{background:#2a1517;border-color:var(--red);color:var(--red);font-weight:600}
 .cfbtns .cfgo:hover{background:var(--red);color:#0a0e14}
+.cfbox.cfhigh{background:linear-gradient(180deg,#261518,var(--card) 46%);box-shadow:0 0 0 2px rgba(248,81,73,.18),0 20px 60px rgba(0,0,0,.7)}
+.cfbtns .cfgo.danger{background:var(--red);color:white}
+.cfbox.closechoice{max-width:620px}
+.closepath{display:grid;gap:3px;margin:12px 0;padding:9px 10px;border:1px solid var(--line);
+  border-radius:8px;background:var(--card2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;overflow-wrap:anywhere}
+.closepath b{font-family:inherit;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--faint)}
+.closeblock{margin:10px 0;padding:8px 10px;border:1px solid var(--amber);border-radius:8px;
+  background:#2b2111;color:var(--amber)}
+.closefiles{max-height:230px;overflow:auto;margin:10px 0 0;padding:7px 8px 7px 27px;
+  border:1px solid var(--line);border-radius:8px;background:#0b0f14;font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+.closefiles span{color:var(--amber);margin-right:5px}
+.closechoices{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}
+.closechoices .pbtn{min-height:42px}
+.closechoices .cfgo{border-color:var(--blue);color:var(--blue)}
+.closechoices .remover{border-color:var(--amber);color:var(--amber)}
+.closechoices .force{border-color:var(--red);background:#2a1517;color:var(--red);font-weight:700}
+.closechoices button:disabled{opacity:.35;cursor:not-allowed}
 #atitle small{color:var(--dim);font-weight:400;margin-left:8px}
 #aclose{background:var(--card);border:1px solid var(--line);border-radius:8px;color:var(--fg);
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
 #abody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
 #aact{border-top:1px solid var(--line);background:var(--card);
-      padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+      padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
 #aact .dfold{margin-top:10px}
 .aconvo{width:100%;max-width:none;margin-inline:auto}
 .relaynote{font-size:11px;color:var(--dim);background:#12161c;border:1px solid var(--line);
@@ -906,12 +980,13 @@ td.r,th.r{text-align:right}
   opacity:.55;filter:grayscale(1);flex:0 0 auto}
 .shead .spin:hover,.historymain .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
 .shead .spin.on,.historymain .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
+.shead.pinpress{box-shadow:inset 3px 0 0 var(--blue);background:rgba(88,166,255,.09)}
 .card.pinned{box-shadow:0 0 0 1px rgba(88,166,255,.35);opacity:1}
-/* global pinned-sessions block, directly below the usage header */
+/* global pinned-sessions block, directly below Fleet Briefing */
 #pinned{margin-bottom:18px}
 #pinned.empty{display:none}
 .pinhdr{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);padding:5px 8px 4px}
-#pinned .card:last-child{margin-bottom:0}
+#pinned .pinslot:last-child .card{margin-bottom:0}
 /* min-height:0 + a CAPPED bar: without the cap an open question grows #vact
    without limit and squeezes the document to a few px, leaving a scrollbar with
    nowhere to scroll (the "third scrollbar") */
@@ -1061,6 +1136,15 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .workhead{grid-template-columns:32px minmax(0,1fr) 18px}.workcounts{grid-column:2;justify-content:flex-start;margin-top:4px}
   .workhead .chev{grid-column:3;grid-row:1/3}.worksummary{padding-left:12px;gap:7px}
   .workoutcome{grid-template-columns:44px}.worksignals{gap:8px}.worksignals span{flex:1 1 42%}
+  #usagepanel{inset:auto 0 0;z-index:68;width:100%;max-height:72dvh;border-width:1px 0 0;border-radius:14px 14px 0 0;
+    padding:13px 13px calc(18px + env(safe-area-inset-bottom))}
+  .activeagentcard{grid-template-columns:12px minmax(0,1fr) 14px;padding:10px;gap:8px}
+  .activeagentmeta{grid-column:2;align-items:flex-start}.activeagentcard>.aopen{grid-column:3;grid-row:1/3}
+  .statusstrip{padding:7px 8px}.status-details{display:none}.statusstrip.expanded .status-details{display:block}
+  .status-expand{display:flex;width:100%;align-items:center;justify-content:flex-start;border:0;
+    border-top:1px solid var(--line);margin:4px 0 0;padding:5px 0 1px;background:transparent;
+    color:var(--faint);font:9.5px/1.2 "SF Mono",Menlo,monospace;cursor:pointer}
+  .status-primary,.status-secondary,.status-cache{gap:5px}.status-graph{max-width:100%}
   #sevidence{position:absolute;inset:0;z-index:24;width:100%;max-width:none;border-left:0;padding-bottom:24px}
   .evidencebtn span{display:none}.evidencebtn{width:38px;justify-content:center;padding:0;font-size:15px}
   #handoffbody{padding:10px 10px calc(16px + env(safe-area-inset-bottom))}

@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, datetime as dt
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, datetime as dt
 from collections import deque
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
@@ -27,6 +27,7 @@ CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
 CLAUDE_USAGE = os.path.join(BASE, "usage.json")
 CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
 CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
+CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 CLAUDE_USAGE_PREFS = os.path.join(
     HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
 
@@ -46,7 +47,7 @@ DEFAULT_CONFIG = {
     "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
     "digest_schedule_zone": "UTC",
     "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
-    "pinned_sessions": [],               # shared watchlist, ordered by UI urgency
+    "pinned_sessions": [],               # shared watchlist, stable insertion order
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
@@ -421,6 +422,10 @@ class Tail:
         self.offset = 0
         self.ti = self.tw = self.tr = self.to = 0
         self.model = ""
+        # Claude writes mode changes as top-level `permission-mode` records and
+        # also stamps the effective mode onto human prompt rows. Keep the newest
+        # observed value; the live registry does not expose it.
+        self.permission_mode = None
         self.last_usage = None          # usage dict of last assistant row
         self.last_shape = None          # ('assistant', stop_reason, [content types]) or ('user', kind)
         self.first_ts = None
@@ -440,6 +445,16 @@ class Tail:
         self.active_skill = None        # skill turn-cost attribution (most recent wins)
         self.active_command = None       # slash command running this turn (/implement, …)
         self.prev_usage = None          # (epoch, model, cache_read+cache_write) of last API call
+        # Bounded operational-status state. CacheWrite is recorded only when the
+        # value changes, matching Claude's statusline approximation of one point
+        # per turn while avoiding duplicate renders of the same usage payload.
+        self.cache_write_history = deque(maxlen=50)
+        self.cache_write_previous = None
+        self.cache_write_spikes = 0
+        self.cache_write_peak = 0
+        self.cache_write_last_spike_at = None
+        self.cache_write_last_spike_value = None
+        self.turn_usage = [0, 0, 0, 0]  # input, cache write, cache read, output
         self.saw_compaction = False     # compaction marker since last API call
         self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
         self.last_compact_ep = 0        # epoch of the newest compact_boundary seen
@@ -448,6 +463,11 @@ class Tail:
         # the CANCELLATION record ("The user doesn't want to proceed with this tool
         # use"), and the only place a killed subagent is unambiguously marked
         self.errored_tools = set()
+        # Newer Claude builds also emit a task-notification when a background
+        # agent completes or is killed. Keep only the newest terminal notice per
+        # agent. scan_agents compares its timestamp with the child transcript so
+        # a later SendMessage/resume is never hidden by a stale notification.
+        self.agent_terminals = {}
 
     def poll(self):
         try:
@@ -481,14 +501,28 @@ class Tail:
             self.last_ts = ts
         if o.get("isCompactSummary"):
             self.saw_compaction = True
+        permission_mode = o.get("permissionMode")
+        if o.get("type") == "permission-mode":
+            permission_mode = o.get("permissionMode")
+        if permission_mode in ("default", "acceptEdits", "plan", "auto",
+                               "dontAsk", "bypassPermissions"):
+            self.permission_mode = permission_mode
+        if o.get("type") == "permission-mode":
+            return
         if o.get("type") == "system":
             self._system_event(o, ts)
+            return
+        if o.get("type") == "queue-operation":
+            self._agent_terminal_event(o.get("content"), ts)
             return
         if o.get("type") == "attachment":
             # mid-turn user messages never become user rows — they arrive as
             # queued_command attachments (plus transient queue-operation rows,
             # which we ignore so each message folds exactly once)
             a = o.get("attachment") or {}
+            if a.get("commandMode") == "task-notification":
+                self._agent_terminal_event(a.get("prompt"), ts)
+                return
             txt = ""
             if a.get("type") == "queued_command" \
                and (a.get("origin") or {}).get("kind") == "human":
@@ -525,6 +559,11 @@ class Tail:
                 self.to += u.get("output_tokens", 0)
                 self.last_usage = u
                 self.model = m.get("model") or self.model
+                self.turn_usage[0] += u.get("input_tokens", 0)
+                self.turn_usage[1] += u.get("cache_creation_input_tokens", 0)
+                self.turn_usage[2] += u.get("cache_read_input_tokens", 0)
+                self.turn_usage[3] += u.get("output_tokens", 0)
+                self._status_cache_track(u, ts)
                 self._cache_track(u, ts, m.get("model") or self.model)
                 if self.active_skill:   # attribute this turn's spend to the running skill
                     st = self._stat((self._day(ts), "skill", self.active_skill))
@@ -583,6 +622,7 @@ class Tail:
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
                 self.active_skill = self.active_command = None
+                self.turn_usage = [0, 0, 0, 0]
                 if not o.get("isMeta"):
                     if isinstance(content, str):
                         utxt = content
@@ -599,6 +639,26 @@ class Tail:
                                                      "[SYSTEM NOTIFICATION", "<task-notification")):
                         self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
+
+    def _agent_terminal_event(self, raw, ts):
+        """Fold Claude's bounded task-notification XML into terminal agent state."""
+        if not isinstance(raw, str) or len(raw) > 100_000 \
+           or "<task-notification>" not in raw:
+            return
+        task = re.search(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>", raw)
+        status = re.search(r"<status>(completed|killed|failed)</status>", raw,
+                           flags=re.I)
+        if not task or not status:
+            return
+        agent_id = task.group(1)
+        if not agent_id.startswith("agent-"):
+            agent_id = "agent-" + agent_id
+        current = self.agent_terminals.get(agent_id)
+        if current and (iso_epoch(current.get("ts")) or 0) > (iso_epoch(ts) or 0):
+            return
+        self.agent_terminals[agent_id] = {
+            "status": status.group(1).lower(), "ts": ts,
+        }
 
     def _tool_add(self, b, ts):
         name, inp = b.get("name"), b.get("input") or {}
@@ -809,6 +869,51 @@ class Tail:
         self.saw_compaction = False
         self.skill_since_usage = None
 
+    def _status_cache_track(self, usage, ts):
+        """Keep the bounded CacheWrite graph/spike ledger used by full chat."""
+        try:
+            value = max(0, int(usage.get("cache_creation_input_tokens", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            value = 0
+        if value == self.cache_write_previous:
+            return
+        self.cache_write_previous = value
+        self.cache_write_history.append(value)
+        self.cache_write_peak = max(self.cache_write_peak, value)
+        if value > 20_000:
+            self.cache_write_spikes += 1
+            self.cache_write_last_spike_at = iso_epoch(ts)
+            self.cache_write_last_spike_value = value
+
+    def status_metrics(self, cfg):
+        """Bounded provider telemetry for a session or subagent status strip."""
+        usage = self.last_usage or {}
+
+        def token(name):
+            try:
+                return max(0, int(usage.get(name, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        uncached = token("input_tokens")
+        cache_write = token("cache_creation_input_tokens")
+        cache_read = token("cache_read_input_tokens")
+        denominator = uncached + cache_write + cache_read
+        turn_cost = (usd(cfg, model_family(self.model), *self.turn_usage)
+                     if any(self.turn_usage) else None)
+        return {
+            "cache_read_pct": (round(100 * cache_read / denominator)
+                               if denominator else None),
+            "cache_write": cache_write if self.last_usage is not None else None,
+            "cache_write_history": list(self.cache_write_history),
+            "cache_write_spikes": self.cache_write_spikes,
+            "cache_write_peak": (self.cache_write_peak
+                                 if self.cache_write_history else None),
+            "cache_write_last_spike_at": self.cache_write_last_spike_at,
+            "cache_write_last_spike_value": self.cache_write_last_spike_value,
+            "turn_cost": round(turn_cost, 4) if turn_cost is not None else None,
+        }
+
     def _day(self, ts):
         return str(ts)[:10] if ts else time.strftime("%Y-%m-%d")
 
@@ -886,6 +991,9 @@ class Engine:
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
+        self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
+        self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
+        self._cleanup_lock = threading.Lock()
         self.db = None
         self.notified = {}              # dedupe keys -> t
         self.seeded = False             # first pass registers pre-existing states silently
@@ -896,6 +1004,15 @@ class Engine:
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
+        # Read-only HTTP context/file requests consume immutable bounded
+        # projections from the last completed scan. They must not wait behind
+        # unrelated ledger/history/status work under scan_lock.
+        self._claude_context_snapshots = {}
+        self._claude_agent_context_snapshots = {}
+        self._finalized_agent_revisions = {}
+        self._session_ledger_signatures = {}
+        self._session_ledger_written_at = {}
+        self._session_ledger_live_ids = None
         self.scan_timings_ms = deque(maxlen=240)
         self.scan_wait_timings_ms = deque(maxlen=240)
         self.last_state_journal_ms = 0.0
@@ -903,6 +1020,12 @@ class Engine:
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
         self._closed_sessions_cache = None
+        self._compact_settings_cache = {}
+        self._operational_git_cache = {}
+        self._operational_git_pending = set()
+        self._operational_git_lock = threading.Lock()
+        self._operational_git_queue = queue.Queue(maxsize=300)
+        self._operational_git_workers_started = False
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         ledger_path = os.path.join(BASE, "ledger.db")
         self.ledger_status = self._prepare_ledger(ledger_path)
@@ -1233,8 +1356,236 @@ class Engine:
             key.encode("utf-8")).hexdigest()[:20]
         self._workstream_cache[canonical] = (now + 30, dict(identity))
         if len(self._workstream_cache) > 2000:
-            self._workstream_cache = {canonical: self._workstream_cache[canonical]}
+            while len(self._workstream_cache) > 2000:
+                self._workstream_cache.pop(next(iter(self._workstream_cache)))
         return identity
+
+    @staticmethod
+    def _settings_signature(paths):
+        out = []
+        for path in paths:
+            try:
+                stat = os.stat(path)
+                out.append((path, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                out.append((path, None, None))
+        return tuple(out)
+
+    def claude_compact_headroom(self, cwd, context_tokens, context_window, identity=None):
+        """Return explicit Claude auto-compact headroom, or None when unknown.
+
+        Project/user settings may contain credentials. Read and cache only the
+        two compact env values plus the enable flag; never retain or return the
+        raw settings object.
+        """
+        try:
+            context_tokens = max(0, int(context_tokens))
+            context_window = max(1, int(context_window))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not str(cwd or "").strip():
+            return None
+        cwd = os.path.realpath(str(cwd))
+        identity = identity or self.workstream_identity(cwd)
+        root = identity.get("root") if identity.get("kind") == "git" else cwd
+        dirs = []
+        for path in (root, cwd):
+            if path and path not in dirs:
+                dirs.append(path)
+        paths = [CLAUDE_SETTINGS]
+        for directory in dirs:
+            paths.extend((os.path.join(directory, ".claude", "settings.json"),
+                          os.path.join(directory, ".claude", "settings.local.json")))
+        signature = self._settings_signature(paths)
+        key = (cwd, signature)
+        if key in self._compact_settings_cache:
+            threshold = self._compact_settings_cache[key]
+        else:
+            enabled = True
+            raw_window = raw_pct = None
+            explicit = False
+            for path in paths:
+                try:
+                    with open(path) as handle:
+                        settings = json.load(handle)
+                except (OSError, ValueError, TypeError):
+                    continue
+                if not isinstance(settings, dict):
+                    continue
+                if settings.get("autoCompactEnabled") is False:
+                    enabled = False
+                env = settings.get("env") or {}
+                if not isinstance(env, dict):
+                    continue
+                if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in env:
+                    raw_window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+                    explicit = True
+                if "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" in env:
+                    raw_pct = env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+                    explicit = True
+            threshold = None
+            if enabled and explicit:
+                try:
+                    window = int(raw_window) if raw_window is not None else context_window
+                    pct = float(raw_pct) if raw_pct is not None else 100.0
+                    if window > 0 and 0 < pct <= 100:
+                        threshold = round(min(window, context_window) * pct / 100)
+                except (TypeError, ValueError, OverflowError):
+                    threshold = None
+            self._compact_settings_cache[key] = threshold
+            if len(self._compact_settings_cache) > 300:
+                while len(self._compact_settings_cache) > 300:
+                    self._compact_settings_cache.pop(next(iter(self._compact_settings_cache)))
+        return max(0, threshold - context_tokens) if threshold is not None else None
+
+    def _operational_git_worker(self):
+        while True:
+            root, worktree = self._operational_git_queue.get()
+            try:
+                self._operational_git_probe(root, worktree)
+            finally:
+                self._operational_git_queue.task_done()
+
+    def _operational_git_probe(self, root, worktree):
+        data = {"root": root, "worktree": worktree, "ahead": None,
+                "behind": None, "observed_at": time.time()}
+        try:
+            result = self._bounded_process(
+                ["git", "-C", worktree, "rev-list", "--left-right", "--count",
+                 "refs/remotes/origin/main...HEAD"], timeout=4, max_output=4096)
+            if result.get("ok"):
+                values = result.get("stdout", "").strip().split()
+                if len(values) >= 2 and all(value.isdigit() for value in values[:2]):
+                    data["behind"], data["ahead"] = map(int, values[:2])
+        except Exception:
+            pass
+        finally:
+            with self._operational_git_lock:
+                self._operational_git_cache[worktree] = (
+                    time.monotonic() + 8, data)
+                self._operational_git_pending.discard(worktree)
+                if len(self._operational_git_cache) > 300:
+                    while len(self._operational_git_cache) > 300:
+                        self._operational_git_cache.pop(
+                            next(iter(self._operational_git_cache)))
+
+    def operational_git(self, cwd, identity=None):
+        """Return cached Git identity and refresh it off the scan/request path."""
+        if not str(cwd or "").strip():
+            return {"worktree": None, "worktree_label": None, "ahead": None,
+                    "behind": None, "git_observed_at": None}
+        identity = identity or self.workstream_identity(cwd)
+        worktree = identity.get("worktree") or os.path.realpath(str(cwd or ""))
+        out = {"worktree": worktree,
+               "worktree_label": os.path.basename(worktree.rstrip(os.sep)) or worktree,
+               "ahead": None, "behind": None, "git_observed_at": None}
+        if identity.get("kind") != "git" or identity.get("missing"):
+            return {"worktree": None, "worktree_label": None, "ahead": None,
+                    "behind": None, "git_observed_at": None}
+        now = time.monotonic()
+        with self._operational_git_lock:
+            cached = self._operational_git_cache.get(worktree)
+            if cached:
+                data = cached[1]
+                out.update(ahead=data.get("ahead"), behind=data.get("behind"),
+                           git_observed_at=data.get("observed_at"))
+            if (not cached or cached[0] <= now) and worktree not in self._operational_git_pending:
+                if not self._operational_git_workers_started:
+                    self._operational_git_workers_started = True
+                    for index in range(2):
+                        threading.Thread(target=self._operational_git_worker, daemon=True,
+                            name=f"fleet-git-status-{index + 1}").start()
+                self._operational_git_pending.add(worktree)
+                try:
+                    self._operational_git_queue.put_nowait(
+                        (identity.get("root"), worktree))
+                except queue.Full:
+                    self._operational_git_pending.discard(worktree)
+        return out
+
+    def session_status_line(self, session, tail=None):
+        context_tokens = session.get("ctx_tokens")
+        context_window = session.get("ctx_window")
+        cwd = session.get("cwd")
+        identity = self.workstream_identity(cwd) if str(cwd or "").strip() else None
+        compact_remaining = None
+        if session.get("provider", "claude") == "claude":
+            compact_remaining = self.claude_compact_headroom(
+                cwd, context_tokens, context_window, identity=identity)
+        metrics = tail.status_metrics(self.cfg) if tail else {}
+        session_cost = session.get("cost")
+        agent_cost = session.get("agent_cost")
+        tree_cost = (round(float(session_cost) + float(agent_cost), 4)
+                     if isinstance(session_cost, (int, float)) and
+                        isinstance(agent_cost, (int, float)) else None)
+        cost_breakdown = []
+        if isinstance(session_cost, (int, float)):
+            cost_breakdown.append({"kind": "main", "label": "Main session",
+                                   "cost": round(float(session_cost), 4)})
+            for agent in (session.get("agents") or [])[:100]:
+                if not isinstance(agent, dict) or not isinstance(agent.get("cost"),
+                                                                  (int, float)):
+                    continue
+                cost_breakdown.append({
+                    "kind": "agent",
+                    "label": str(agent.get("description") or
+                                 agent.get("agent_type") or "Subagent")[:160],
+                    "cost": round(float(agent["cost"]), 4),
+                })
+        return {
+            **self.operational_git(cwd, identity=identity),
+            "branch": session.get("branch"),
+            "model": session.get("model"), "effort": session.get("effort"),
+            "context_tokens": context_tokens, "context_window": context_window,
+            "context_pct": session.get("ctx_pct"),
+            "compact_remaining": compact_remaining,
+            **metrics,
+            "session_cost": session_cost, "agent_cost": agent_cost,
+            "tree_cost": tree_cost,
+            "cost_breakdown": cost_breakdown,
+            "cost_breakdown_omitted": max(0, len(session.get("agents") or []) - 100),
+            "cost_scope": ("estimated" if tree_cost is not None else "unavailable"),
+            "cost_label": "tree",
+            "frozen": False,
+        }
+
+    def agent_status_line(self, parent, info, tail=None, metrics=None):
+        context_tokens = (tail.context_tokens() if tail else info.get("ctx_tokens"))
+        if parent.get("provider", "claude") == "claude":
+            family = model_family(info.get("model"))
+            context_window = self.cfg["context_windows"].get(
+                family, self.cfg["context_windows"]["default"])
+        else:
+            context_window = info.get("ctx_window")
+        context_pct = info.get("ctx_pct")
+        if context_pct is None and context_tokens is not None and context_window:
+            context_pct = round(100 * context_tokens / context_window, 1)
+        compact_remaining = None
+        cwd = parent.get("cwd")
+        identity = self.workstream_identity(cwd) if str(cwd or "").strip() else None
+        if parent.get("provider", "claude") == "claude":
+            compact_remaining = self.claude_compact_headroom(
+                cwd, context_tokens, context_window, identity=identity)
+        cost = info.get("cost")
+        return {
+            **self.operational_git(cwd, identity=identity),
+            "branch": parent.get("branch"), "model": info.get("model"),
+            "effort": info.get("effort"), "context_tokens": context_tokens,
+            "context_window": context_window, "context_pct": context_pct,
+            "compact_remaining": compact_remaining,
+            **(tail.status_metrics(self.cfg) if tail else (metrics or {})),
+            "session_cost": cost, "agent_cost": None, "tree_cost": cost,
+            "cost_scope": ("estimated" if isinstance(cost, (int, float))
+                           else "unavailable"),
+            "cost_label": "agent",
+            "cost_breakdown": ([{"kind": "agent",
+                                  "label": str(info.get("description") or
+                                               info.get("agent_type") or "Subagent")[:160],
+                                  "cost": round(float(cost), 4)}]
+                               if isinstance(cost, (int, float)) else []),
+            "cost_breakdown_omitted": 0,
+            "frozen": info.get("state") in ("done", "ended", "closed"),
+        }
 
     def workstream_records(self, sessions, closed):
         """Group live and historical sessions by canonical repository/project."""
@@ -1373,6 +1724,7 @@ class Engine:
             phase_started = current
 
         sessions = []
+        claude_tails = {}
         live_claude_ids = set()
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
@@ -1390,9 +1742,12 @@ class Engine:
                     "project": os.path.basename(cwd) or cwd, "cwd": cwd,
                     "branch": None, "model": "", "family": "other",
                     "effort": self.effort_for(sid), "running": None,
+                    "permission_mode": None,
+                    "permission_modes": ["default", "acceptEdits", "plan"],
                     "last_msg": None, "_latest_prose": None, "repo_outcome": None,
                     "state": state, "reg_status": reg_status, "quiet_s": 0,
-                    "ctx_tokens": None, "ctx_pct": None, "total_tokens": None,
+                    "ctx_tokens": None, "ctx_window": None, "ctx_pct": None,
+                    "total_tokens": None,
                     "cost": None, "cost_source": "unavailable",
                     "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
                                    if reg.get("bridgeSessionId") else None),
@@ -1404,6 +1759,7 @@ class Engine:
                     "agents_total": 0, "agent_cost": None,
                     "capabilities": {"submit": True, "interrupt": state == "running",
                         "close": True, "focus_terminal": True,
+                        "change_permission_mode": False,
                         "answer_structured": True, "decide_approval": True,
                         "spawn_agent": True, "relay_agent": True,
                         "account_usage": True, "exact_cost": True},
@@ -1411,6 +1767,12 @@ class Engine:
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
+            claude_tails[sid] = mt
+            self._claude_context_snapshots[sid] = {
+                "revision": mt.convo_rev,
+                "messages": copy.deepcopy(list(mt.convo)),
+                "files": copy.deepcopy(list(mt.files)),
+            }
             self.drain_stats(mt)
             mtime = os.path.getmtime(main_path)
             quiet = now - mtime
@@ -1483,6 +1845,7 @@ class Engine:
             ctx = mt.context_tokens()
             fam = model_family(mt.model)
             cw = cfg["context_windows"].get(fam, cfg["context_windows"]["default"])
+            permission_modes = self._claude_permission_modes(reg, mt)
             sessions.append({
                 "session_id": sid,
                 "native_session_id": sid,
@@ -1495,6 +1858,8 @@ class Engine:
                 "branch": mt.git_branch,
                 "model": mt.model, "family": fam,
                 "effort": self.effort_for(sid),
+                "permission_mode": mt.permission_mode,
+                "permission_modes": permission_modes,
                 # what this turn is running: a Skill beats the slash command that
                 # launched it (a /command whose body invokes a skill shows the skill)
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
@@ -1510,7 +1875,8 @@ class Engine:
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
-                "ctx_tokens": ctx, "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
+                "ctx_tokens": ctx, "ctx_window": cw,
+                "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
                 "total_tokens": mt.total_tokens,
                 "cost": round(mt.cost(cfg), 4),
                 "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
@@ -1530,6 +1896,8 @@ class Engine:
                 "cost_source": "calculated",
                 "capabilities": {"submit": True, "interrupt": state == "running",
                     "close": True,
+                    "change_permission_mode": (reg_status == "idle" and
+                        mt.permission_mode in permission_modes),
                     "focus_terminal": True, "answer_structured": True,
                     "decide_approval": True, "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
@@ -1538,6 +1906,25 @@ class Engine:
         self.registry_status_since = {
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
+        }
+        self._claude_context_snapshots = {
+            sid: value for sid, value in self._claude_context_snapshots.items()
+            if sid in live_claude_ids
+        }
+        live_agent_keys = {
+            (str(session.get("session_id") or ""), str(agent.get("agent_id") or ""))
+            for session in sessions if session.get("provider") == "claude"
+            for agent in (session.get("agents") or [])
+        }
+        self._claude_agent_context_snapshots = {
+            key: value for key, value in self._claude_agent_context_snapshots.items()
+            if key in live_agent_keys
+        }
+        live_pids = {int(session.get("pid") or 0) for session in sessions
+                     if session.get("provider") == "claude"}
+        self._claude_command_cache = {
+            pid: command for pid, command in self._claude_command_cache.items()
+            if pid in live_pids
         }
         # Codex is a second provider inside the same fleet. A failed/missing Codex
         # installation must not take down the existing Claude dashboard.
@@ -1562,6 +1949,8 @@ class Engine:
         phase("codex")
         muted = self.cfg.get("muted_sessions") or {}
         for session in sessions:
+            session["status_line"] = self.session_status_line(
+                session, claude_tails.get(session.get("session_id")))
             session["muted"] = session["session_id"] in muted
             self.organize_session(session, now)
         group_order = {"needs_you": 0, "working": 1, "available": 2, "history": 3}
@@ -2035,6 +2424,9 @@ class Engine:
                 "five_hour_reset": self._claude_usage_iso(usage.get("sessionResetTime")),
                 "weekly_pct": pct("weeklyPercentage"),
                 "weekly_reset": self._claude_usage_iso(usage.get("weeklyResetTime")),
+                "fable_weekly_pct": pct("fableWeeklyPercentage"),
+                "fable_weekly_reset": self._claude_usage_iso(
+                    usage.get("fableWeeklyResetTime")),
                 "updated_at": self._claude_usage_iso(usage.get("lastUpdated")),
             })
         def refresh_interval(profile):
@@ -2148,18 +2540,27 @@ class Engine:
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):
         out = []
         cfg = self.cfg
+        parent_sid = os.path.basename(os.path.dirname(subdir))
         killed = parent.errored_tools if parent else set()
+        terminal = parent.agent_terminals if parent else {}
         for meta_path in glob.glob(os.path.join(subdir, "*.meta.json")):
             agent_id = os.path.basename(meta_path)[:-len(".meta.json")]
             jl = os.path.join(subdir, agent_id + ".jsonl")
             if not os.path.isfile(jl):
                 continue
             try:
-                meta = json.load(open(meta_path))
+                with open(meta_path) as handle:
+                    meta = json.load(handle)
             except Exception:
                 meta = {}
             t = self.tail_for(jl)
             grew = t.poll()
+            self._claude_agent_context_snapshots[(parent_sid, agent_id)] = {
+                "revision": t.convo_rev,
+                "messages": copy.deepcopy(list(t.convo)),
+                "context_tokens": t.context_tokens(),
+                "status_metrics": copy.deepcopy(t.status_metrics(cfg)),
+            }
             self.drain_stats(t)
             mtime = os.path.getmtime(jl)
             quiet = now - mtime
@@ -2186,6 +2587,15 @@ class Engine:
             # 2026-07-14 on session b5996cb1: two agents rejected mid-flight.)
             if meta.get("toolUseId") in killed:
                 state, done = "ended", True
+            elif agent_id in terminal:
+                notice = terminal[agent_id]
+                notice_ep = iso_epoch(notice.get("ts"))
+                child_ep = iso_epoch(t.last_ts)
+                # A task id can be resumed. Only a notice at or after the newest
+                # child row is terminal; later child output supersedes it.
+                if notice_ep is not None and (child_ep is None or notice_ep >= child_ep):
+                    state = "done" if notice.get("status") == "completed" else "ended"
+                    done = True
             elif not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
                 state = "ended"         # canceled/interrupted: no end_turn will ever come
                 done = True             # finalize its spend in the ledger
@@ -2219,7 +2629,14 @@ class Engine:
                              if cfg.get("preview_agents") and not done else None),
             })
             if done:
-                self.ledger_finalize(subdir, agent_id, meta, t)
+                final_revision = (t.convo_rev, t.last_ts, state)
+                final_key = (subdir, agent_id)
+                if self._finalized_agent_revisions.get(final_key) != final_revision:
+                    self.ledger_finalize(subdir, agent_id, meta, t)
+                    self._finalized_agent_revisions[final_key] = final_revision
+                    if len(self._finalized_agent_revisions) > 5000:
+                        self._finalized_agent_revisions.pop(
+                            next(iter(self._finalized_agent_revisions)))
         out.sort(key=lambda a: (a["state"] in ("done", "ended"), a["started"] or ""))
         return out
 
@@ -2250,6 +2667,10 @@ class Engine:
                 pass
             try:
                 self.db.execute("ALTER TABLE session_runs ADD COLUMN transcript_path TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.db.execute("ALTER TABLE session_runs ADD COLUMN status_line_json TEXT")
             except sqlite3.OperationalError:
                 pass
             # rows are CUMULATIVE per transcript (path) — see Tail.stats
@@ -2507,11 +2928,28 @@ class Engine:
     def record_sessions(self, sessions, now):
         try:
             db = self.ensure_db()
+            dirty = False
             for s in sessions:
+                status_line_json = json.dumps(
+                    s.get("status_line") or {}, separators=(",", ":"))
+                if len(status_line_json) > 100_000:
+                    status_line_json = None
+                status_signature = dict(s.get("status_line") or {})
+                status_signature.pop("git_observed_at", None)
+                signature = (
+                    s.get("name"), s.get("project"), s.get("cwd"), s.get("branch"),
+                    s.get("model"), s.get("cost"), s.get("agent_cost"),
+                    s.get("agents_total"), s.get("bridge_url"), s.get("title"),
+                    s.get("provider", "claude"), json.dumps(
+                        status_signature, separators=(",", ":")))
+                sid = s["session_id"]
+                due = now - self._session_ledger_written_at.get(sid, 0) >= 30
+                if self._session_ledger_signatures.get(sid) == signature and not due:
+                    continue
                 db.execute("""INSERT INTO session_runs(session_id,name,project,cwd,branch,
                     model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,
-                    closed_at,title,provider,transcript_path)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)
+                    closed_at,title,provider,transcript_path,status_line_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)
                     ON CONFLICT(session_id) DO UPDATE SET
                     name=excluded.name, project=excluded.project, branch=excluded.branch,
                     model=excluded.model, cost=excluded.cost, agent_cost=excluded.agent_cost,
@@ -2519,20 +2957,34 @@ class Engine:
                     last_seen=excluded.last_seen, closed_at=NULL, title=excluded.title,
                     provider=excluded.provider,
                     transcript_path=COALESCE(excluded.transcript_path,
-                                             session_runs.transcript_path)""",
+                                             session_runs.transcript_path),
+                    status_line_json=COALESCE(excluded.status_line_json,
+                                              session_runs.status_line_json)""",
                     (s["session_id"], s["name"], s["project"], s["cwd"], s["branch"],
                      s["model"], s["cost"], s["agent_cost"], s["agents_total"],
                      s["bridge_url"], int(now), int(now), s["title"],
                      s.get("provider", "claude"),
                      (os.path.join(cwd_to_project_dir(s.get("cwd") or ""),
                                    f"{s['session_id']}.jsonl")
-                      if s.get("provider", "claude") == "claude" else None)))
-            live = [s["session_id"] for s in sessions]
-            marks = ",".join("?" * len(live)) or "''"
-            db.execute(f"""UPDATE session_runs SET closed_at=?
-                           WHERE closed_at IS NULL AND session_id NOT IN ({marks})""",
-                       [int(now)] + live)
-            db.commit()
+                     if s.get("provider", "claude") == "claude" else None),
+                     status_line_json))
+                self._session_ledger_signatures[sid] = signature
+                self._session_ledger_written_at[sid] = now
+                dirty = True
+            live = {s["session_id"] for s in sessions}
+            if self._session_ledger_live_ids is None or live != self._session_ledger_live_ids:
+                ordered = sorted(live)
+                marks = ",".join("?" * len(ordered)) or "''"
+                db.execute(f"""UPDATE session_runs SET closed_at=?
+                               WHERE closed_at IS NULL AND session_id NOT IN ({marks})""",
+                           [int(now)] + ordered)
+                self._session_ledger_live_ids = live
+                dirty = True
+            for sid in set(self._session_ledger_signatures) - live:
+                self._session_ledger_signatures.pop(sid, None)
+                self._session_ledger_written_at.pop(sid, None)
+            if dirty:
+                db.commit()
         except Exception as e:
             print(f"session ledger error: {e}", file=sys.stderr, flush=True)
 
@@ -2593,6 +3045,7 @@ class Engine:
                 self._state_event_signatures = {
                     sid: (signature, normalized_state)
                     for sid, signature, normalized_state in rows}
+            dirty = False
             for session in sessions:
                 sid = str(session.get("session_id") or "")
                 previous = self._state_event_signatures.get(sid)
@@ -2623,7 +3076,9 @@ class Engine:
                     record["signature"]))
                 self._state_event_signatures[record["session_id"]] = (
                     record["signature"], record["normalized_state"])
-            db.commit()
+                dirty = True
+            if dirty:
+                db.commit()
         except Exception as exc:
             print(f"state journal error: {exc}", file=sys.stderr, flush=True)
 
@@ -2885,7 +3340,7 @@ Treat this as an independent session. Verify the repository state before changin
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
-                "closed_at", "title", "provider", "transcript_path")
+                "closed_at", "title", "provider", "transcript_path", "status_line_json")
         db = None
         try:
             db = self.ledger_reader()
@@ -2900,6 +3355,13 @@ Treat this as an independent session. Verify the repository state before changin
                     WHERE closed_at IS NOT NULL ORDER BY closed_at DESC""").fetchall()
             out = [dict(zip(cols, r)) for r in rows]
             for row in out:
+                try:
+                    status_line = json.loads(row.pop("status_line_json") or "{}")
+                except (TypeError, ValueError):
+                    status_line = {}
+                if isinstance(status_line, dict) and status_line:
+                    status_line["frozen"] = True
+                    row["status_line"] = status_line
                 row["can_reopen"] = bool(
                     row.get("provider") == "claude" and
                     self._safe_claude_transcript(row.get("session_id"),
@@ -2916,14 +3378,13 @@ Treat this as an independent session. Verify the repository state before changin
     def closed_context(self, sid):
         """Conversation of a CLOSED session: its process is gone, so the registry
         can't resolve it — the ledger's cwd is the only path back to the file."""
-        if str(sid).startswith("codex:"):
-            return self.codex.context(sid)
         row = None
         db = None
         try:
             db = self.ledger_reader()
             row = db.execute(
-                "SELECT cwd, model, cost, title, project, branch, transcript_path "
+                "SELECT cwd, model, cost, title, project, branch, transcript_path, "
+                "status_line_json "
                 "FROM session_runs "
                 "WHERE session_id = ?", (sid,)).fetchone()
         except Exception:
@@ -2931,8 +3392,23 @@ Treat this as an independent session. Verify the repository state before changin
         finally:
             if db is not None:
                 db.close()
+        if not row and str(sid).startswith("codex:"):
+            return self.codex.context(sid)
         if not row:
             return {"ok": False, "error": "unknown session"}
+        try:
+            status_line = json.loads(row[7] or "{}")
+        except (TypeError, ValueError):
+            status_line = {}
+        if isinstance(status_line, dict) and status_line:
+            status_line["frozen"] = True
+        else:
+            status_line = None
+        if str(sid).startswith("codex:"):
+            result = self.codex.context(sid)
+            if result.get("ok"):
+                result.setdefault("info", {})["status_line"] = status_line
+            return result
         fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
         path = self._safe_claude_transcript(sid, row[6] or fallback)
         if not path:
@@ -2950,6 +3426,7 @@ Treat this as an independent session. Verify the repository state before changin
                 "info": {"session_id": sid, "cwd": row[0], "model": row[1],
                          "cost": row[2], "title": row[3], "project": row[4],
                          "branch": row[5],
+                         "status_line": status_line,
                          "can_reopen": bool(self._safe_reopen_cwd(row[0]))}}
 
     @staticmethod
@@ -3313,11 +3790,18 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "session not live"}
         if not os.path.isfile(path):
             return {"ok": True, "messages": [], "files": [], "starting": True}
-        with self.scan_lock:
-            mt = self.tail_for(path)
-            mt.poll()
-            msgs = [dict(m) for m in mt.convo]
-            files = [dict(f) for f in mt.files]
+        snapshot = self._claude_context_snapshots.get(sid)
+        if snapshot is not None:
+            msgs = copy.deepcopy(snapshot.get("messages") or [])
+            files = copy.deepcopy(snapshot.get("files") or [])
+        else:
+            # Startup/test fallback before the first completed scan publishes
+            # this session. Stateful folding remains serialized.
+            with self.scan_lock:
+                mt = self.tail_for(path)
+                mt.poll()
+                msgs = [dict(m) for m in mt.convo]
+                files = [dict(f) for f in mt.files]
         def fmeta(p):
             return {"name": os.path.basename(p), "path": p,
                     "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
@@ -3346,15 +3830,48 @@ Treat this as an independent session. Verify the repository state before changin
 
     def agent_context(self, sid, aid):
         """Conversation + info for ONE subagent (same fold as a session)."""
+        with self.lock:
+            parent = next((dict(item) for item in
+                           self.snapshot_cache.get("sessions") or []
+                           if item.get("session_id") == sid), None)
         if str(sid).startswith("codex:"):
-            return self.codex.agent_context(sid, aid)
+            result = self.codex.agent_context(sid, aid)
+            if result.get("ok") and parent:
+                agent = next((dict(item) for item in parent.get("agents") or []
+                              if item.get("agent_id") == aid), {})
+                info = result.setdefault("info", {})
+                for key in ("agent_type", "description", "model", "family", "effort",
+                            "state", "cost", "cost_source"):
+                    if agent.get(key) is not None and not info.get(key):
+                        info[key] = agent[key]
+                info["state"] = agent.get("state") or info.get("state")
+                info["status_line"] = self.agent_status_line(parent, info)
+            return result
         jl, meta_path = self._agent_paths(sid, aid)
         if not jl:
             return {"ok": False, "error": "no such subagent"}
         try:
-            meta = json.load(open(meta_path))
+            with open(meta_path) as handle:
+                meta = json.load(handle)
         except Exception:
             meta = {}
+        agent = next((dict(item) for item in (parent or {}).get("agents") or []
+                      if item.get("agent_id") == aid), {})
+        snapshot = self._claude_agent_context_snapshots.get((sid, aid))
+        if snapshot is not None:
+            info = {**agent,
+                    "agent_id": aid,
+                    "agent_type": agent.get("agent_type") or meta.get("agentType", "?"),
+                    "description": (agent.get("description") or
+                                    meta.get("description", "")),
+                    "depth": agent.get("depth", meta.get("spawnDepth", 0)),
+                    "ctx_tokens": snapshot.get("context_tokens")}
+            if parent:
+                info["status_line"] = self.agent_status_line(
+                    parent, info, metrics=snapshot.get("status_metrics") or {})
+            return {"ok": True,
+                    "messages": copy.deepcopy(snapshot.get("messages") or []),
+                    "info": info}
         with self.scan_lock:
             t = self.tail_for(jl)
             t.poll()
@@ -3372,6 +3889,9 @@ Treat this as an independent session. Verify the repository state before changin
                                "cache_read": t.tr, "out": t.to},
                     "total_tokens": t.total_tokens, "cost": round(t.cost(self.cfg), 4),
                     "started": t.first_ts, "last": t.last_ts}
+            info["state"] = agent.get("state")
+            if parent:
+                info["status_line"] = self.agent_status_line(parent, info, t)
         return {"ok": True, "messages": msgs, "info": info}
 
     def file_content(self, sid, fpath):
@@ -3382,13 +3902,20 @@ Treat this as an independent session. Verify the repository state before changin
         reg, path = self._reg_main_path(sid)
         if not reg:
             return None, None, "session not live"
-        with self.scan_lock:
-            mt = self.tail_for(path)
-            mt.poll()
-            allowed = {f["path"] for f in mt.files}
-            for m in mt.convo:          # inline chips can outlive the files deque
-                if m.get("role") == "tool":
-                    allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
+        snapshot = self._claude_context_snapshots.get(sid)
+        if snapshot is not None:
+            files = snapshot.get("files") or []
+            messages = snapshot.get("messages") or []
+        else:
+            with self.scan_lock:
+                mt = self.tail_for(path)
+                mt.poll()
+                files = list(mt.files)
+                messages = list(mt.convo)
+        allowed = {f["path"] for f in files}
+        for m in messages:              # inline chips can outlive the files deque
+            if m.get("role") == "tool":
+                allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
         if fpath not in allowed:
             return None, None, "not a file this session delivered"
         try:
@@ -3405,6 +3932,356 @@ Treat this as an independent session. Verify the repository state before changin
         return ctype, data, None
 
     # ------------------------------------------------------------ injection
+    @staticmethod
+    def _bounded_process(argv, timeout=8, max_output=524_288):
+        """Run fixed argv while bounding combined stdout/stderr in memory."""
+        try:
+            process = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        except (FileNotFoundError, OSError) as exc:
+            return {"ok": False, "code": None, "stdout": "", "stderr": str(exc),
+                    "truncated": False}
+        selector = selectors.DefaultSelector()
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + timeout
+        total = 0
+        truncated = timed_out = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    process.kill()
+                    break
+                events = selector.select(min(0.1, remaining))
+                if not events and process.poll() is not None:
+                    events = [(key, selectors.EVENT_READ)
+                              for key in list(selector.get_map().values())]
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 65_536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    available = max_output - total
+                    if len(chunk) > available:
+                        buffers[key.data].extend(chunk[:max(0, available)])
+                        total = max_output
+                        truncated = True
+                        process.kill()
+                        break
+                    buffers[key.data].extend(chunk)
+                    total += len(chunk)
+                if truncated:
+                    break
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        stderr = buffers["stderr"].decode("utf-8", "replace")
+        if timed_out:
+            stderr = (stderr + "\nGit probe timed out").strip()
+        if truncated:
+            stderr = (stderr + "\nGit probe exceeded its output limit").strip()
+        return {"ok": process.returncode == 0 and not timed_out and not truncated,
+                "code": process.returncode,
+                "stdout": buffers["stdout"].decode("utf-8", "replace"),
+                "stderr": stderr, "truncated": truncated, "timeout": timed_out}
+
+    @staticmethod
+    def _parse_worktree_list(raw):
+        entries = []
+        current = None
+        for record in raw.split("\0"):
+            if not record:
+                if current:
+                    entries.append(current)
+                    current = None
+                continue
+            if record.startswith("worktree "):
+                if current:
+                    entries.append(current)
+                current = {"path": os.path.realpath(record[9:]), "locked": False,
+                           "prunable": False}
+                continue
+            if current is None:
+                continue
+            if record.startswith("HEAD "):
+                current["head"] = record[5:]
+            elif record.startswith("branch "):
+                current["branch"] = record[7:]
+            elif record == "detached":
+                current["detached"] = True
+            elif record.startswith("locked"):
+                current["locked"] = True
+                current["lock_reason"] = record[6:].strip()
+            elif record.startswith("prunable"):
+                current["prunable"] = True
+                current["prune_reason"] = record[8:].strip()
+        if current:
+            entries.append(current)
+        return entries
+
+    def _sessions_using_worktree(self, worktree, exclude=()):
+        target = os.path.realpath(worktree)
+        excluded = {str(value) for value in exclude}
+        with self.lock:
+            records = copy.deepcopy(self.snapshot_cache.get("sessions") or [])
+        seen = {str(item.get("session_id") or "") for item in records}
+        for reg in self.live_sessions():
+            sid = str(reg.get("sessionId") or "")
+            if sid not in seen:
+                records.append({"session_id": sid, "provider": "claude",
+                                "title": reg.get("name"), "cwd": reg.get("cwd")})
+        users = []
+        for item in records:
+            sid = str(item.get("session_id") or item.get("sessionId") or "")
+            if not sid or sid in excluded or not item.get("cwd"):
+                continue
+            identity = self.workstream_identity(item["cwd"])
+            if identity.get("kind") == "git" and \
+               os.path.realpath(identity.get("worktree") or "") == target:
+                users.append({"session_id": sid, "provider": item.get("provider") or "claude",
+                              "title": item.get("title") or item.get("name") or sid})
+        return users
+
+    def close_worktree_preview(self, session, issue_ticket=True):
+        """Describe optional cleanup without trusting a client path."""
+        sid = str(session.get("session_id") or session.get("sessionId") or "")
+        provider = str(session.get("provider") or "claude")
+        identity = self.workstream_identity(session.get("cwd"))
+        base = {"ok": True, "session_id": sid, "provider": provider,
+                "secondary_worktree": False, "remove_allowed": False,
+                "force_remove_allowed": False, "dirty": False,
+                "dirty_counts": {}, "dirty_files": [], "ignored_count": 0,
+                "ignored_files": [], "shared_sessions": []}
+        if identity.get("kind") != "git":
+            return {**base, "reason": "This session is not in a Git worktree."}
+        root = os.path.realpath(identity.get("root") or "")
+        worktree = os.path.realpath(identity.get("worktree") or "")
+        if not root or not worktree or root == worktree:
+            return {**base, "root": root, "worktree": worktree,
+                    "reason": "The primary worktree is never removable from Fleet."}
+        base.update(secondary_worktree=True, root=root, worktree=worktree)
+        listing = self._bounded_process(
+            ["git", "-C", root, "worktree", "list", "--porcelain", "-z"],
+            timeout=5, max_output=262_144)
+        if not listing["ok"]:
+            return {**base, "inspect_ok": False,
+                    "reason": (listing["stderr"] or "Git worktree registration is unavailable")[:500]}
+        entries = self._parse_worktree_list(listing["stdout"])
+        registered = next((item for item in entries if item["path"] == worktree), None)
+        primary = entries[0]["path"] if entries else None
+        if not registered or primary == worktree or registered.get("prunable"):
+            return {**base, "inspect_ok": False, "registered": bool(registered),
+                    "reason": "The linked worktree registration is stale or unsafe."}
+        if registered.get("locked"):
+            return {**base, "inspect_ok": False, "registered": True, "locked": True,
+                    "reason": "This worktree is locked by Git and cannot be removed from Fleet."}
+
+        status_result = self._bounded_process(
+            ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
+             "--untracked-files=all"], timeout=8, max_output=1_048_576)
+        ignored_result = self._bounded_process(
+            ["git", "-C", worktree, "ls-files", "--others", "--ignored",
+             "--exclude-standard", "-z"], timeout=8, max_output=524_288)
+        if not status_result["ok"] or not ignored_result["ok"]:
+            detail = status_result["stderr"] or ignored_result["stderr"] or \
+                "Git could not completely inspect the worktree"
+            return {**base, "inspect_ok": False, "registered": True,
+                    "reason": detail[:500]}
+
+        status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
+        files = status.get("files") or []
+        ignored = [path for path in ignored_result["stdout"].split("\0") if path]
+        categories = {
+            "staged": [item for item in files if item.get("staged")],
+            "unstaged": [item for item in files if item.get("unstaged") and
+                          not item.get("untracked")],
+            "untracked": [item for item in files if item.get("untracked")],
+            "conflicts": [item for item in files if item.get("conflict")],
+        }
+        dirty_counts = {key: len(value) for key, value in categories.items()}
+        dirty_files = []
+        seen_paths = set()
+        for category in ("conflicts", "staged", "unstaged", "untracked"):
+            for item in categories[category]:
+                path = item.get("path")
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                dirty_files.append({**item, "category": category})
+        shared = self._sessions_using_worktree(worktree, exclude=(sid,))
+        dirty = bool(files)
+        destructive_contents = dirty or bool(ignored)
+        material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
+                    status_result["stdout"] + "\0" + ignored_result["stdout"] + "\0" +
+                    json.dumps(shared, sort_keys=True, separators=(",", ":")))
+        revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+        result = {**base, "inspect_ok": True, "registered": True,
+                  "branch": status.get("branch"), "head_oid": status.get("head_oid"),
+                  "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
+                  "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
+                  "dirty_files_truncated": len(dirty_files) > 100,
+                  "ignored_count": len(ignored), "ignored_files": ignored[:40],
+                  "ignored_files_truncated": len(ignored) > 40,
+                  "shared_sessions": shared,
+                  "remove_allowed": not destructive_contents and not shared,
+                  "force_remove_allowed": destructive_contents and not shared}
+        if shared:
+            result["reason"] = "Another live Fleet session is using this worktree."
+        elif destructive_contents:
+            result["reason"] = "The worktree contains files that removal would erase."
+        if issue_ticket:
+            token = secrets.token_urlsafe(24)
+            ticket = {"session_id": sid, "provider": provider, "root": root,
+                      "worktree": worktree, "revision": revision,
+                      "pid": session.get("pid"), "expires": time.time() + 300,
+                      "closed_at": None}
+            with self._cleanup_lock:
+                now = time.time()
+                self._cleanup_tickets = {key: value for key, value in
+                    self._cleanup_tickets.items() if value.get("expires", 0) > now}
+                self._cleanup_tickets[token] = ticket
+            result["cleanup_ticket"] = token
+        return result
+
+    def _mark_cleanup_ticket_closed(self, token, sid):
+        if not token:
+            return
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.get(str(token))
+            if ticket and ticket.get("session_id") == str(sid) and \
+               ticket.get("expires", 0) > time.time():
+                ticket["closed_at"] = time.time()
+
+    def _cleanup_ticket_matches(self, token, sid):
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.get(str(token or ""))
+            return bool(ticket and ticket.get("session_id") == str(sid) and
+                        ticket.get("expires", 0) > time.time())
+
+    def cleanup_closed_worktree(self, action):
+        token = str(action.get("cleanup_ticket") or "")
+        with self._cleanup_lock:
+            ticket = self._cleanup_tickets.pop(token, None)
+        if not ticket or ticket.get("expires", 0) <= time.time():
+            return {"ok": False, "error": "cleanup preview expired — the worktree was preserved"}
+        if not ticket.get("closed_at"):
+            return {"ok": False, "error": "the session did not close — the worktree was preserved"}
+        if str(action.get("session_id") or "") != ticket["session_id"]:
+            return {"ok": False, "error": "cleanup ticket does not match this session"}
+        if ticket.get("provider") == "claude" and ticket.get("pid"):
+            command = ""
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                try:
+                    command = subprocess.run(
+                        ["ps", "-p", str(ticket["pid"]), "-o", "command="],
+                        capture_output=True, text=True, timeout=2).stdout.strip()
+                except Exception:
+                    command = "unknown"
+                if not command:
+                    break
+                time.sleep(0.05)
+            if command:
+                return {"ok": False, "error": "the Claude process is still closing — "
+                        "the worktree was preserved", "worktree": ticket["worktree"],
+                        "preserved": True}
+        force = action.get("force") is True
+        session = {"session_id": ticket["session_id"], "provider": ticket["provider"],
+                   "cwd": ticket["worktree"]}
+        preview = self.close_worktree_preview(session, issue_ticket=False)
+        if not preview.get("inspect_ok") or preview.get("revision") != ticket["revision"]:
+            return {"ok": False, "error": "the worktree changed after preview — it was preserved",
+                    "worktree": ticket["worktree"], "preserved": True}
+        if preview.get("root") != ticket["root"] or preview.get("worktree") != ticket["worktree"]:
+            return {"ok": False, "error": "worktree identity changed — it was preserved",
+                    "worktree": ticket["worktree"], "preserved": True}
+        allowed = preview.get("force_remove_allowed") if force else preview.get("remove_allowed")
+        if not allowed:
+            return {"ok": False, "error": preview.get("reason") or
+                    "worktree removal is no longer safe", "worktree": ticket["worktree"],
+                    "preserved": True}
+        argv = ["git", "-C", ticket["root"], "worktree", "remove"]
+        if force:
+            argv.append("--force")
+        argv.append(ticket["worktree"])
+        removed = self._bounded_process(argv, timeout=30, max_output=262_144)
+        if not removed["ok"]:
+            return {"ok": False, "error": (removed["stderr"] or removed["stdout"] or
+                    "Git worktree removal failed")[:500], "worktree": ticket["worktree"],
+                    "preserved": os.path.exists(ticket["worktree"])}
+        self._workstream_cache.clear()
+        self._workstreams_snapshot_cache = None
+        return {"ok": True, "removed": True, "forced": force,
+                "worktree": ticket["worktree"], "branch_preserved": True}
+
+    def _claude_process_command(self, reg):
+        """Return one verified process command per live Claude PID.
+
+        This is used only to discover whether Claude was started with a bypass-
+        enabling flag. Cache it so the two-second fleet scan never gains a `ps`
+        subprocess per session.
+        """
+        try:
+            pid = int(reg.get("pid") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if pid <= 1:
+            return ""
+        if pid in self._claude_command_cache:
+            return self._claude_command_cache[pid]
+        try:
+            command = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="], capture_output=True,
+                text=True, timeout=5).stdout.strip()
+        except Exception:
+            command = ""
+        self._claude_command_cache[pid] = command
+        return command
+
+    @staticmethod
+    def _claude_auto_model(model):
+        """Whether the observed concrete model can expose Claude Auto mode."""
+        value = str(model or "").lower().replace(".", "-")
+        return bool(re.search(
+            r"(?:sonnet-(?:4-6|5)|opus-(?:4-[678]|[5-9])|fable-5)", value))
+
+    def _claude_permission_modes(self, reg, tail):
+        """Native Shift-Tab cycle for this process, in its documented order."""
+        modes = ["default", "acceptEdits", "plan"]
+        command = self._claude_process_command(reg)
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = command.split()
+        bypass = any(item in ("--allow-dangerously-skip-permissions",
+                              "--dangerously-skip-permissions") for item in argv)
+        for index, item in enumerate(argv[:-1]):
+            if item == "--permission-mode" and argv[index + 1] == "bypassPermissions":
+                bypass = True
+        bypass = bypass or "--permission-mode=bypassPermissions" in argv \
+            or tail.permission_mode == "bypassPermissions"
+        if bypass:
+            modes.append("bypassPermissions")
+        if self._claude_auto_model(tail.model) or tail.permission_mode == "auto":
+            modes.append("auto")
+        return modes
+
     def _close_claude_session(self, reg):
         """Terminate only the registered Claude process; never close its terminal tab."""
         try:
@@ -3457,6 +4334,7 @@ Treat this as an independent session. Verify the repository state before changin
         except (PermissionError, OSError) as exc:
             return {"ok": False, "error": f"could not terminate Claude: {exc}"}
         self._tty_cache.pop(pid, None)
+        self._claude_command_cache.pop(pid, None)
         result = {"ok": True, "closed": True, "interrupted": interrupted}
         if interrupt_error:
             result["warning"] = interrupt_error
@@ -3601,7 +4479,11 @@ Treat this as an independent session. Verify the repository state before changin
                 raise OutboxError("unknown Claude model")
             if effort and effort not in self.EFFORTS:
                 raise OutboxError("unknown effort level")
+            permission_mode = str(spec.get("permission_mode") or "default")
+            if permission_mode not in self.CLAUDE_START_PERMISSION_MODES:
+                raise OutboxError("unknown Claude permission mode")
         else:
+            permission_mode = ""
             catalog = {item.get("id"): item for item in self.codex.models}
             if model and model not in catalog:
                 raise OutboxError("unknown Codex model")
@@ -3617,6 +4499,7 @@ Treat this as an independent session. Verify the repository state before changin
             raise OutboxError("new worktree requires a Git repository")
         return {"provider": provider, "cwd": cwd, "model": model, "effort": effort,
                 "mode": str(spec.get("mode") or "plan"),
+                "permission_mode": permission_mode,
                 "worktree": bool(spec.get("worktree")), "worktree_name": name}
 
     def _prepare_outbox_payload(self, payload):
@@ -3711,6 +4594,8 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'permission', session_id, nonce, choice:'allow'|'always'|'deny'} |
         {type:'interrupt', session_id}        (Esc into a BUSY session: stop the turn) |
         {type:'close', session_id}            (stop if active, then SIGTERM Claude) |
+        {type:'close_preview', session_id}    (read-only secondary-worktree safety probe) |
+        {type:'worktree_cleanup', session_id, cleanup_ticket, force} |
         {type:'reopen', session_id}           (new terminal: claude --resume ID) |
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
@@ -3727,11 +4612,27 @@ Treat this as an independent session. Verify the repository state before changin
         if action.get("type") in ("git_commit", "git_push", "pr_create_draft",
                                   "pr_mark_ready"):
             return self.repository_action(action)
+        if action.get("type") == "worktree_cleanup":
+            return self.cleanup_closed_worktree(action)
         if str(action.get("session_id") or "").startswith("codex:") \
            and action.get("type") == "focus":
             return self.attach_codex_terminal(action)
         if str(action.get("session_id") or "").startswith("codex:"):
-            return self.codex.act(action)
+            sid = action.get("session_id")
+            with self.lock:
+                session = next((copy.deepcopy(item) for item in
+                    self.snapshot_cache.get("sessions") or []
+                    if item.get("session_id") == sid), None)
+            if action.get("type") == "close_preview":
+                return (self.close_worktree_preview(session) if session else
+                        {"ok": False, "error": "session not live"})
+            if action.get("type") == "close" and action.get("cleanup_ticket") and \
+               not self._cleanup_ticket_matches(action.get("cleanup_ticket"), sid):
+                return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            result = self.codex.act(action)
+            if action.get("type") == "close" and result.get("ok"):
+                self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
+            return result
         if action.get("type") == "spawn":    # no session yet — it makes one
             if action.get("provider") == "codex":
                 return self.spawn_codex_session(action)
@@ -3742,8 +4643,18 @@ Treat this as an independent session. Verify the repository state before changin
         reg = next((r for r in self.live_sessions() if r.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live"}
+        if action.get("type") == "close_preview":
+            return self.close_worktree_preview({**reg, "provider": "claude"})
         if action.get("type") == "close":
-            return self._close_claude_session(reg)
+            if action.get("cleanup_ticket") and not self._cleanup_ticket_matches(
+                    action.get("cleanup_ticket"), sid):
+                return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            result = self._close_claude_session(reg)
+            if result.get("ok"):
+                self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
+            return result
+        if action.get("type") == "permission_mode" and reg.get("status") != "idle":
+            return {"ok": False, "error": "permission mode can change only while Claude is idle"}
         # a prompt answer may only go to a session actually blocked on a prompt —
         # a hook-blocked ask leaves a ghost pending file but the session stays
         # 'busy', and injected digits would land in its main input box
@@ -3764,7 +4675,8 @@ Treat this as an independent session. Verify the repository state before changin
         # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it
         # validates the nonce against the live tail); typing, focusing, interrupting
         # and relaying don't touch the tail at all — build those with no lock.
-        needs_tail = action.get("type") in ("option", "multiq", "permission", "dismiss")
+        needs_tail = action.get("type") in (
+            "option", "multiq", "permission", "dismiss", "permission_mode")
         lock = self.scan_lock if needs_tail else contextlib.nullcontext()
         with lock:
             mt = self.tail_for(path)
@@ -3776,7 +4688,35 @@ Treat this as an independent session. Verify the repository state before changin
             # free text typed into a TUI row must never smuggle keys: strip control
             # chars (a \r would fire as Enter, \x1b starts an escape sequence)
             clean = lambda t: re.sub(r"[\x00-\x1f\x7f]+", " ", str(t or "")).strip()[:300]
-            if typ in ("option", "permission", "multiq", "dismiss"):
+            if typ == "permission_mode":
+                target = str(action.get("mode") or "")
+                allowed = self._claude_permission_modes(reg, mt)
+                current = mt.permission_mode
+                if target not in ("default", "acceptEdits", "plan", "auto",
+                                  "bypassPermissions"):
+                    return {"ok": False, "error": "unknown Claude permission mode"}
+                if current == "dontAsk":
+                    return {"ok": False, "error": "Don't ask is startup-only in Claude Code; "
+                            "start a new session to choose another mode"}
+                if current not in allowed:
+                    return {"ok": False, "error": "Claude has not reported a live permission "
+                            "mode yet — send one message from the terminal first"}
+                if target not in allowed:
+                    if target == "auto":
+                        return {"ok": False, "error": "Auto is unavailable for this running "
+                                "session's model or account"}
+                    if target == "bypassPermissions":
+                        return {"ok": False, "error": "Bypass was not enabled when this Claude "
+                                "process started"}
+                    return {"ok": False, "error": "mode is unavailable for this session"}
+                count = (allowed.index(target) - allowed.index(current)) % len(allowed)
+                if count == 0:
+                    return {"ok": True, "mode": current}
+                # Shift+Tab is Claude's own documented mid-session control. The
+                # cycle is server-derived; the client supplies only an allowlisted
+                # target, never arbitrary keys.
+                steps = [("\x1b[Z", False)] * count
+            elif typ in ("option", "permission", "multiq", "dismiss"):
                 nonce = action.get("nonce")
                 hp = self.hook_pending(sid, reg.get("status"))
                 if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
@@ -3924,10 +4864,18 @@ Treat this as an independent session. Verify the repository state before changin
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
         fast = typ in ("text", "handoff_text", "relay", "focus", "interrupt", "noop")
-        return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
+        result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
+        if typ == "permission_mode" and result.get("ok"):
+            # Claude may defer its transcript marker until the next prompt. Keep
+            # Fleet's state responsive; the next native row remains authoritative.
+            with self.scan_lock:
+                self.tail_for(path).permission_mode = target
+            result["mode"] = target
+        return result
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
+    CLAUDE_START_PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk")
 
     def _create_codex_worktree(self, cwd, requested_name=""):
         identity = self.workstream_identity(cwd)
@@ -4136,8 +5084,8 @@ Treat this as an independent session. Verify the repository state before changin
         """Start a NEW Claude Code session in a fresh iTerm tab.
 
         Every value that reaches the shell is allowlisted or quoted: the model and
-        effort must be members of the fixed sets above, the worktree name is regex-
-        bounded, and the directory must be an existing dir under $HOME. Nothing the
+        effort and permission mode must be members of fixed sets above, the worktree
+        name is regex-bounded, and the directory must be an existing dir under $HOME. Nothing the
         client sends is interpolated raw — the act token opens a terminal here, so a
         free-form command string would be a remote shell."""
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
@@ -4156,6 +5104,9 @@ Treat this as an independent session. Verify the repository state before changin
         effort = str(action.get("effort") or "").strip()
         if effort and effort not in self.EFFORTS:
             return {"ok": False, "error": "unknown effort level"}
+        permission_mode = str(action.get("permission_mode") or "default").strip()
+        if permission_mode not in self.CLAUDE_START_PERMISSION_MODES:
+            return {"ok": False, "error": "unknown Claude permission mode"}
         name = str(action.get("worktree_name") or "").strip()
         if name and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
             return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
@@ -4177,6 +5128,8 @@ Treat this as an independent session. Verify the repository state before changin
             cmd += f" --model {model}"
         if effort:
             cmd += f" --effort {effort}"
+        if permission_mode != "default":
+            cmd += f" --permission-mode {permission_mode}"
         if worktree:
             cmd += " --worktree" + (f" {name}" if name else "")
         r = self._iterm_write("SPAWN", [(cmd, False)])

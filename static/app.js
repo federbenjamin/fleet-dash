@@ -13,8 +13,10 @@ function perfSummary(){
       p95:Math.round(pct(values,.95)*1000)/1000,last:values.at(-1)||0}]));
 }
 fleetPerf.summary=perfSummary;
-function recordInputFeedback(started){
-  perfRecord('input_feedback_ms',performance.now()-started);
+function recordInputFeedback(started,flow='input'){
+  const elapsed=performance.now()-started;
+  perfRecord('input_feedback_ms',elapsed);
+  perfRecord(`feedback_${String(flow).replace(/[^a-z0-9_]+/gi,'_').toLowerCase()}_ms`,elapsed);
 }
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
@@ -26,6 +28,14 @@ const routeNames={now:'Now',search:'Search',workstreams:'Workstreams',history:'H
 const validRoutes=new Set(Object.keys(routeNames));
 let currentRoute=validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now';
 let nowFilter='',nowState='all',workFilter='',workState='all';
+const NAV_SIDE_KEY='fleet.navSide.v1';
+let navSide=localStorage.getItem(NAV_SIDE_KEY)==='right'?'right':'left';
+function applyNavSide(){document.documentElement.dataset.navSide=navSide;}
+function setNavSide(value){
+  navSide=value==='right'?'right':'left';
+  localStorage.setItem(NAV_SIDE_KEY,navSide);applyNavSide();renderSettings();
+}
+applyNavSide();
 let workstreamData={ok:true,workstreams:[]},workstreamsLoading=false,workstreamsLoadedAt=0;
 const SAVED_VIEW_KEY='fleet.savedViews.v1';
 let savedViews=(()=>{try{
@@ -69,14 +79,14 @@ function navigateTo(route,push=true){
   applyRouteNav(route);
   if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
   if(route==='insights'){loadInsights();loadBudgets();}
-  if(route==='search'){loadSearchStatus(true);runSearch(true);}
-  if(route==='workstreams')loadWorkstreams(true);
-  if(route==='history')loadHistory(true);
+  if(route==='search'){loadSearchStatus();runSearch(true);}
+  if(route==='workstreams')loadWorkstreams();
+  if(route==='history')loadHistory(!(historyData.items||[]).length);
   window.scrollTo({top:0,behavior:'auto'});
 }
 function setNowFilter(value){nowFilter=value;render(last,true);}
 function setNowState(value){
-  nowState=['all','needs_you','working','available'].includes(value)?value:'all';
+  nowState=['all','needs_you','working','available','subagents'].includes(value)?value:'all';
   render(last,true);
 }
 async function loadWorkstreams(force=false){
@@ -127,6 +137,7 @@ function renderSavedViews(destination){
 }
 function matchesNow(session){
   if(!session)return false;
+  if(nowState==='subagents')return false;
   const group=session.ui_group||(session.closed_at!=null?'history':'');
   if(nowState!=='all'&&group!==nowState)return false;
   const query=nowFilter.trim().toLowerCase();
@@ -182,18 +193,20 @@ function searchWhen(value){
 }
 function renderSearchResults(){
   const el=$('#searchresults'),more=$('#searchmore');if(!el||!more)return;
-  if(searchError){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)}</div>`;more.hidden=true;return;}
+  if(searchError&&!searchItems.length){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)} <button onclick="runSearch(true)">retry</button></div>`;more.hidden=true;return;}
   if(searchBusy&&!searchItems.length){el.innerHTML='<div class="searchempty">Searching…</div>';more.hidden=true;return;}
   if(!searchItems.length){el.innerHTML=`<div class="searchempty">${searchHasCriteria()?
     'No indexed conversation matches these filters.':'Type a search or choose a filter.'}</div>`;more.hidden=true;return;}
-  el.innerHTML=searchItems.map(item=>`<button class="searchresult" onclick="openSearchContext(${Number(item.id)})">
+  el.innerHTML=(searchError?`<div class="searchempty searcherror">${esc(searchError)} <button onclick="runSearch(false)">retry page</button></div>`:'')+searchItems.map(item=>`<button class="searchresult" onclick="openSearchContext(${Number(item.id)})">
     <span class="searchprovider ${item.provider==='claude'?'claude':'codex'}">${item.provider==='claude'?'C':'X'}</span>
     <span class="searchcopy"><span class="searchtitle"><b>${esc(item.title||item.project||'Conversation')}</b>
       <span class="searchbadge">${esc(item.source_kind==='subagent'?'subagent':item.kind||'message')}</span></span>
       <span class="searchmeta">${esc([item.provider,item.project,item.branch,item.agent_id].filter(Boolean).join(' · '))}</span>
       <span class="searchsnippet">${esc(item.snippet||'')}</span></span>
     <span class="searchtime">${esc(searchWhen(item.timestamp||item.timestamp_epoch*1000))}</span></button>`).join('');
-  more.hidden=searchCursor==null;
+  more.hidden=searchCursor==null&&!searchBusy;
+  more.disabled=searchBusy;
+  more.textContent=searchBusy?'Loading more…':'Load more';
 }
 function updateSearchProjects(projects){
   searchProjects=projects||searchProjects;const select=$('#searchproject');if(!select)return;
@@ -221,7 +234,8 @@ async function runSearch(reset=true){
     searchCursor=d.next_cursor;updateSearchProjects(d.projects||[]);
   }catch(e){
     if(e.name==='AbortError')return;
-    searchItems=[];searchCursor=null;searchError=String(e.message||e);
+    if(reset)searchItems=[];
+    searchCursor=cursor;searchError=String(e.message||e);
   }finally{if(searchAbort===controller){searchBusy=false;searchAbort=null;renderSearchResults();}}
 }
 function searchContextMessage(item,provider){
@@ -325,7 +339,18 @@ const stateLabel={running:'Working',needs_you:'Response needed',turn_done:'Avail
   stalled:'Slow',stalled_or_prompt:'Check session',dormant:'Inactive',reopenable:'Reopenable',
   stale:'Unavailable',error:'Fix needed'};
 
-// ---- provider plan-usage header (currently Claude supplies these account gauges) ----
+// ---- on-demand provider plan usage ----------------------------------------
+let usageOpen=false;
+function closeUsage(){
+  usageOpen=false;
+  $('#usagepanel')?.classList.remove('open');
+  $('#usagechip')?.setAttribute('aria-expanded','false');
+}
+function toggleUsage(){
+  usageOpen=!usageOpen;
+  $('#usagepanel')?.classList.toggle('open',usageOpen);
+  $('#usagechip')?.setAttribute('aria-expanded',String(usageOpen));
+}
 function usageReset(iso){
   if(!iso)return'';
   const t=Date.parse(iso);if(isNaN(t))return'';
@@ -344,7 +369,8 @@ function ugauge(label,pct,reset){
     ${reset?`<span class="ureset">${reset}</span>`:''}</div>`;
 }
 function usageBar(legacy,providers){
-  const el=$('#usage');
+  const el=$('#usagebody'),chip=$('#usagechip');
+  if(!el||!chip)return;
   const claude=(providers&&providers.claude)||legacy;
   const codex=providers&&providers.codex;
   // Spark has a separate preview-model allowance. Keep it in the provider/API
@@ -352,6 +378,16 @@ function usageBar(legacy,providers){
   const codexBuckets=(codex?.buckets||[]).filter(b=>
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
   const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
+  const visiblePercentages=[
+    ...claudeProfiles.filter(Boolean).flatMap(profile=>[
+      profile.five_hour_pct,claude?.show_week===false?null:profile.weekly_pct,
+      claude?.show_week===false?null:profile.fable_weekly_pct]),
+    ...codexBuckets.map(bucket=>bucket.used_pct),
+  ].filter(value=>Number.isFinite(Number(value))).map(Number);
+  const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
+  chip.classList.remove('usagewarn','usagedanger');
+  if(worst>=90)chip.classList.add('usagedanger');else if(worst>=70)chip.classList.add('usagewarn');
+  chip.textContent=`Usage${worst>=70?` · ${Math.round(worst)}%`:''}`;
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
     ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
       <div class="uhead"><span class="uname">Claude Code</span>
@@ -359,7 +395,8 @@ function usageBar(legacy,providers){
         ${claude.show_active!==false&&profile.active?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uactive">active</span></span>`:''}
         ${index===0&&claude.lifetime_tokens!=null?`<span class="useg" title="All local Claude transcripts on this Mac across profiles, including saved subagents; excludes deleted history, claude.ai, and other computers"><i class="usep" aria-hidden="true">·</i><span class="umeta">${fmtTok(claude.lifetime_tokens)} local lifetime tokens</span></span>`:''}</div>
       ${ugauge('5-hour',profile.five_hour_pct,usageReset(profile.five_hour_reset))}
-      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}</div>`).join('')}</div>`:'';
+      ${claude.show_week===false?'':ugauge('weekly',profile.weekly_pct,usageReset(profile.weekly_reset))}
+      ${claude.show_week===false?'':ugauge('Fable weekly',profile.fable_weekly_pct,usageReset(profile.fable_weekly_reset))}</div>`).join('')}</div>`:'';
   const codexHtml=codex&&(codexBuckets.length||codex.email||codex.plan_type||codex.lifetime_tokens!=null||codex.reset_credits||codex.error)?`<div class="uprovider">
     <div class="uhead"><span class="uname">Codex CLI</span>
       ${codex.email?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="uemail">${esc(codex.email)}</span></span>`:''}
@@ -368,9 +405,8 @@ function usageBar(legacy,providers){
       ${codex.reset_credits?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${codex.reset_credits} reset credit</span></span>`:''}</div>
     ${codex.error?`<span class="umeta">${codex.stale?'stale — ':''}${esc(codex.error)}</span>`:''}
     ${codexBuckets.map(b=>ugauge(b.label,b.used_pct,usageReset(b.reset))).join('')}</div>`:'';
-  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='';return;}
-  el.className='';
-  el.innerHTML=claudeHtml+codexHtml;
+  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='<div class="usageempty">Usage data is unavailable.</div>';return;}
+  el.className='';el.innerHTML=claudeHtml+codexHtml;
 }
 
 function spark(pts,w=64,h=16){
@@ -437,6 +473,7 @@ function md(src){
 // ---- durable message Outbox -----------------------------------------------
 let outboxData={ok:true,items:[],summary:{pending:0,attention:0},usage_options:[]};
 let outboxLoading=false,outboxLoadPromise=null,outboxLoadedAt=0,outboxAccess='unknown',outboxFilter='current',scheduleView=null;
+const outboxActions=new Map();
 const outboxPending=new Set(['scheduled','waiting_availability','waiting_usage_reset','spawning','sending']);
 const outboxAttention=new Set(['blocked','failed','confirmation_unknown']);
 function outboxWhen(item){
@@ -472,7 +509,9 @@ function renderOutboxCompact(){
     <span><b>Message Outbox</b><small>${summary.attention?`${summary.attention} need review · `:''}${summary.pending||0} waiting to send</small></span><b class="outboxcount">Open →</b></button>${rows}</section>`;
 }
 function openOutbox(){
+  const feedbackStarted=performance.now();
   $('#outboxview').style.display='flex';syncOverlayHistory();renderOutboxFull();loadOutbox(true);
+  recordInputFeedback(feedbackStarted,'outbox_open');
 }
 function closeOutbox(){$('#outboxview').style.display='none';$('#outboxbody').innerHTML='';}
 function setOutboxFilter(value){outboxFilter=value;renderOutboxFull();}
@@ -485,14 +524,16 @@ function visibleOutboxItems(){
   return items.filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
 }
 function outboxRow(item){
-  const error=item.error||item.blocked_reason;
+  const action=outboxActions.get(item.id)||{};
+  const error=action.error||item.error||item.blocked_reason;
   const canEdit=item.editable,canRetry=item.retryable;
   return`<article class="outboxrow ${esc(item.state)}"><div class="outboxtop"><span class="outboxstate">${esc(item.state_label||item.state)}</span>
     <span class="outboxtime">${esc(outboxWhen(item))}</span></div><div class="outboxmessage">${esc(item.message||'')}</div>
     <div class="outboxmeta">${esc(outboxTarget(item))} · ${esc(String(item.kind||'').replaceAll('_',' '))}${item.created_zone?` · ${esc(item.created_zone)}`:''}</div>
-    ${error?`<div class="outboxerror">${esc(error)}</div>`:''}<div class="outboxactions">
-      ${canEdit?`<button onclick="editOutbox('${item.id}')">Edit</button><button class="primary" onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
-      ${canRetry?`<button class="primary" onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
+    ${error?`<div class="outboxerror" role="alert">${esc(error)}</div>`:''}<div class="outboxactions">
+      ${action.busy?'<span class="outboxworking" role="status"><span class="delivery sending" aria-hidden="true">◌</span> working…</span>':''}
+      ${canEdit?`<button ${action.busy?'disabled':''} onclick="editOutbox('${item.id}')">Edit</button><button class="primary" ${action.busy?'disabled':''} onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button ${action.busy?'disabled':''} onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
+      ${canRetry?`<button class="primary" ${action.busy?'disabled':''} onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
     </div></article>`;
 }
 function renderOutboxFull(){
@@ -512,11 +553,23 @@ function mergeOutboxResult(result){
   renderOutboxCompact();renderOutboxFull();
 }
 async function outboxAction(id,type,payload={}){
-  const result=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type,outbox_id:id,...payload})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
-  if(!result.ok){alert(result.error||'Outbox action failed');return result;}
-  mergeOutboxResult(result);
-  await loadOutbox(true);return result;
+  if(outboxActions.get(id)?.busy)return{ok:false,error:'Outbox action already running'};
+  const feedbackStarted=performance.now();
+  outboxActions.set(id,{busy:true,error:''});renderOutboxFull();
+  recordInputFeedback(feedbackStarted,'outbox_action');
+  try{
+    const response=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type,outbox_id:id,...payload})});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Outbox action failed');
+    mergeOutboxResult(result);
+    await loadOutbox(true);
+    outboxActions.delete(id);renderOutboxFull();return result;
+  }catch(error){
+    const message=String(error.message||error);
+    outboxActions.set(id,{busy:false,error:message});renderOutboxFull();
+    return{ok:false,error:message};
+  }
 }
 function confirmCancelOutbox(id){askConfirm('Cancel this scheduled message?',
   'It will remain in the Outbox audit trail and will never be sent.','cancel message',()=>outboxAction(id,'outbox_cancel'));}
@@ -533,7 +586,8 @@ function scheduleButton(sid,inputId,agentId=''){
   return`<button class="pbtn sendoption" title="schedule or wait to send" aria-label="delivery options" onclick="openSchedule('${sid}','${inputId}','${agentId}')">⌄</button>`;
 }
 async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,message=''){
-  await loadOutbox();
+  const feedbackStarted=performance.now();
+  const loading=loadOutbox();
   const input=inputId?document.getElementById(inputId):null;
   const source=existing||{};
   const zone=source.created_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
@@ -549,6 +603,10 @@ async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,
     scheduleView.kind==='new_session'?'Schedule new coding session':'Schedule message';
   if(stacked){schedulePushed=true;history.pushState({fdSchedule:1},'');}else syncOverlayHistory();
   renderSchedule();
+  recordInputFeedback(feedbackStarted,'schedule_open');
+  const view=scheduleView;
+  await loading;
+  if(scheduleView===view)renderSchedule();
 }
 function editOutbox(id,operation=null){
   const item=(outboxData.items||[]).find(row=>row.id===id);if(!item)return;
@@ -613,11 +671,11 @@ const briefingDevice=(()=>{let value=localStorage.getItem(BRIEF_DEVICE_KEY);
   if(!value){value=(crypto.randomUUID?crypto.randomUUID():`device-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     localStorage.setItem(BRIEF_DEVICE_KEY,value);}return value;})();
 let briefingData={ok:true,sections:{attention:[],completed:[],slow:[],outcomes:[],budgets:[],measurements:[],reviewed:[]},unread:0};
-let briefingLoading=false,briefingLoadPromise=null,briefingLoadedAt=0,briefingOpen=false,briefingReviewing=false;
+let briefingLoading=false,briefingLoadPromise=null,briefingLoadedAt=0,briefingOpen=false,briefingReviewing=false,briefingReviewError='';
 async function loadBriefing(force=false){
   if(briefingLoading)return briefingLoadPromise;
   if(!force&&Date.now()-briefingLoadedAt<4000)return;
-  briefingLoading=true;briefingLoadPromise=(async()=>{try{
+  briefingLoading=true;renderBriefing();briefingLoadPromise=(async()=>{try{
     const r=await fetch(`/api/briefing?device=${encodeURIComponent(briefingDevice)}&limit=120`,{cache:'no-store'}),data=await r.json();
     if(!r.ok||!data.ok)throw new Error(data.error||'Briefing unavailable');
     briefingData=data;briefingLoadedAt=Date.now();
@@ -649,10 +707,11 @@ function openBriefingSource(kind,id){
 }
 async function markBriefingReviewed(){
   const cursor=briefingData.next_cursor;if(!cursor||cursor<=briefingData.review_cursor||briefingReviewing)return;
-  briefingReviewing=true;try{const data=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+  briefingReviewing=true;briefingReviewError='';try{const data=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({type:'briefing_review',device_id:briefingDevice,cursor})}).then(r=>r.json());
-    if(data.ok)briefingData.review_cursor=data.cursor;
-  }catch(_){}finally{briefingReviewing=false;}
+    if(!data.ok)throw new Error(data.error||'Review marker failed');briefingData.review_cursor=data.cursor;
+  }catch(error){briefingReviewError=String(error.message||error);renderBriefing();}
+  finally{briefingReviewing=false;}
 }
 async function toggleBriefing(){briefingOpen=!briefingOpen;renderBriefing();if(briefingOpen){await loadBriefing(true);setTimeout(markBriefingReviewed,600);}}
 function renderBriefing(){
@@ -660,14 +719,15 @@ function renderBriefing(){
   const current=(s.attention?.length||0)+(s.slow?.length||0)+(s.budgets||[]).filter(x=>['warning','exceeded','unavailable'].includes(x.status)).length;
   const unread=(s.completed?.length||0)+(s.outcomes?.length||0)+(s.measurements?.length||0);
   const reviewed=s.reviewed?.length||0;
-  if(!current&&!unread&&!reviewed&&!d.error){el.innerHTML='';return;}
-  const status=d.error?'Briefing unavailable':`${current} current · ${unread} since review${reviewed?` · ${reviewed} recently reviewed`:''}${d.muted_omitted?` · ${d.muted_omitted} muted from push`:''}`;
+  const empty=!current&&!unread&&!reviewed&&!d.error;
+  const status=d.error?'Briefing unavailable':empty?`Nothing to review${briefingLoading?' · refreshing…':''}`:
+    `${current} current · ${unread} since review${reviewed?` · ${reviewed} recently reviewed`:''}${d.muted_omitted?` · ${d.muted_omitted} muted from push`:''}${briefingLoading?' · refreshing…':''}`;
   el.innerHTML=`<section class="briefingpanel"><button class="briefhead" onclick="toggleBriefing()"><span><b>Fleet briefing</b><small>${esc(status)}</small></span><b>${briefingOpen?'Hide':'Review'} ${briefingOpen?'↑':'→'}</b></button>
-    ${briefingOpen?`<div class="briefbody">${d.error?`<div class="provideralert">${esc(d.error)}</div>`:''}
+    ${briefingOpen?`<div class="briefbody">${briefingLoading?'<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> Refreshing briefing…</div>':''}${d.error?`<div class="provideralert">${esc(d.error)} <button onclick="loadBriefing(true)">retry</button></div>`:''}${briefingReviewError?`<div class="provideralert">${esc(briefingReviewError)} <button onclick="markBriefingReviewed()">retry review</button></div>`:''}
       ${briefingGroup('Needs attention now',s.attention)}${briefingGroup('Completed since last review',s.completed)}
       ${briefingGroup('Still working unusually slowly',s.slow)}${briefingGroup('Outcomes and artifacts',s.outcomes)}
       ${briefingGroup('Budgets and measurement',(s.budgets||[]).filter(x=>x.status!=='ok'),briefingBudget)}
-      ${briefingGroup('Unavailable measurements',s.measurements)}${briefingGroup('Recently reviewed',s.reviewed)}</div>`:''}</section>`;
+      ${briefingGroup('Unavailable measurements',s.measurements)}${briefingGroup('Recently reviewed',s.reviewed)}${empty&&!briefingLoading?'<div class="destinationempty"><b>Nothing needs review</b><p>New completions and attention items will appear here.</p></div>':''}</div>`:''}</section>`;
 }
 
 // Compact Markdown for card peeks. Preserve headings/emphasis/lists while
@@ -736,10 +796,32 @@ async function loadOlderConversation(scope,sid,aid=''){
 // "opus · high". Effort comes from the statusline side-write, so a session whose
 // statusline hasn't rendered yet (or isn't installed) shows the model alone.
 const modelLabel=s=>esc(s.model||s.family||'?')+(s.effort?` · ${esc(s.effort)}`:'');
+const CLAUDE_PERMISSION_LABELS={default:'Manual',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto',
+  dontAsk:"Don't ask",bypassPermissions:'Bypass permissions'};
+const claudePermissionLabel=mode=>CLAUDE_PERMISSION_LABELS[mode]||'Detecting…';
+const providerModeActions=new Map();
+function claudePermissionLocked(s){return !s?.capabilities?.change_permission_mode||providerModeActions.has(s?.session_id);}
+function claudePermissionSelect(s,pre='msg'){
+  if(!s||s.provider!=='claude')return'';
+  const current=s.permission_mode||'';const available=new Set(s.permission_modes||[]);
+  const locked=claudePermissionLocked(s);
+  const option=(mode,label,extra='')=>`<option value="${mode}" ${current===mode?'selected':''}
+    ${!available.has(mode)||locked?'disabled':''}>${label}${extra}</option>`;
+  return`<select class="modesel permissionselect" title="Claude permission mode"
+    onclick="event.stopPropagation()" onchange="setClaudePermissionMode('${s.session_id}',this.value,'${pre}')"
+    ${locked?'disabled':''}>
+    ${current?'':`<option selected disabled>Detecting…</option>`}
+    ${option('default','Manual')}${option('auto','Auto',available.has('auto')?'':' — unavailable')}
+    ${option('acceptEdits','Accept edits')}${option('plan','Plan')}
+    <optgroup label="Advanced"><option value="dontAsk" disabled>Don't ask — new sessions only</option>
+      ${available.has('bypassPermissions')?option('bypassPermissions','Bypass permissions'):''}</optgroup>
+    ${current==='dontAsk'?`<option value="dontAsk" selected disabled>Don't ask — startup mode</option>`:''}
+    </select>`;
+}
 function modeSelect(s,pre='msg'){
   if(!s||s.provider!=='codex')return'';
   const mode=s.collaboration_mode||'default';
-  const locked=!s.capabilities?.submit||['running','needs_you','stalled'].includes(s.state);
+  const locked=!s.capabilities?.submit||['running','needs_you','stalled'].includes(s.state)||providerModeActions.has(s.session_id);
   return`<select class="modesel" title="Codex collaboration mode — Plan enables structured questions; Default executes work"
     onclick="event.stopPropagation()" onchange="setSessionMode('${s.session_id}',this.value,'${pre}')" ${locked?'disabled':''}>
     <option value="plan" ${mode==='plan'?'selected':''}>Plan</option>
@@ -767,6 +849,15 @@ function eventRow(m,provider='claude'){
 const optimisticMessages=new Map();
 let optimisticSequence=0;
 const quickResponses=new Map();
+const nativeRequestLocks=new Set();
+const nativeRequestKey=(sid,nonce)=>String(sid)+'\0'+String(nonce||'');
+function nativeRequestLocked(sid,nonce){return nativeRequestLocks.has(nativeRequestKey(sid,nonce));}
+async function withNativeRequestLock(sid,nonce,work){
+  const key=nativeRequestKey(sid,nonce);if(nativeRequestLocks.has(key))return{ok:false,duplicate:true};
+  nativeRequestLocks.add(key);uiRefresh();
+  try{return await work();}
+  finally{nativeRequestLocks.delete(key);uiRefresh();}
+}
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
 function optimisticList(sid){
   if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
@@ -795,13 +886,19 @@ function addOptimistic(sid,text,kind='text'){
   if(openConvo){
     openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
     $('#sbody').scrollTop=$('#sbody').scrollHeight;
-    recordInputFeedback(feedbackStarted);
+    recordInputFeedback(feedbackStarted,'send');
     requestAnimationFrame(()=>render(last,true));
   }else{
     uiRefresh();
-    recordInputFeedback(feedbackStarted);
+    recordInputFeedback(feedbackStarted,'send');
   }
   return item.id;
+}
+function composerKey(event,send){
+  const mac=/Mac|iPhone|iPad|iPod/.test(navigator.platform||'');
+  if(event.key!=='Enter'||(mac?!event.metaKey:!event.ctrlKey))return;
+  event.preventDefault();
+  send();
 }
 function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
   const item=optimisticList(sid).find(entry=>entry.id===id);
@@ -851,7 +948,7 @@ function beginQuickResponse(sid,payload){
   const feedbackStarted=performance.now();
   const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
     status:'sending',created:Date.now()};
-  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted);return item.id;
+  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted,'quick_response');return item.id;
 }
 function finishQuickResponse(sid,id,ok,error){
   const item=quickResponses.get(sid);
@@ -948,8 +1045,14 @@ function overflowMenu(key,s,kind='session',done=false){
   const label=kind==='viewer'?'viewer actions':kind==='subagent'?'subagent actions':'session actions';
   const lifecycle=kind==='session'||kind==='viewer';
   const canMode=lifecycle&&s&&s.provider==='codex';
+  const canClaudeMode=lifecycle&&s&&s.provider==='claude'&&!s.provisional;
   const mode=s?.collaboration_mode||'default';
-  const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state);
+  const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state)||providerModeActions.has(s?.session_id);
+  const permissionModes=new Set(s?.permission_modes||[]);
+  const permissionLocked=claudePermissionLocked(s);
+  const permissionButton=(value,label,shown=true)=>shown?`<button aria-pressed="${s?.permission_mode===value}"
+    ${permissionLocked||!permissionModes.has(value)?'disabled':''}
+    onclick="closeOverflow();setClaudePermissionMode('${s?.session_id||''}','${value}','${kind==='viewer'?'vmsg':'smsg'}')">${label}</button>`:'';
   const canStop=kind==='subagent'
     ? Boolean(!done&&s?.capabilities?.interrupt)
     : Boolean(s?.capabilities?.interrupt);
@@ -966,6 +1069,14 @@ function overflowMenu(key,s,kind='session',done=false){
         <button aria-pressed="${mode==='default'}" ${modeLocked?'disabled':''}
           onclick="closeOverflow();setSessionMode('${s.session_id}','default','${kind==='viewer'?'vmsg':'smsg'}')">Default</button>
       </span></span><span class="ovsep"></span>`:''}
+      ${canClaudeMode?`<span class="ovgroup"><span class="ovlabel">Claude permissions · ${esc(claudePermissionLabel(s.permission_mode))}</span>
+        <span class="ovseg permissionseg">${permissionButton('default','Manual')}${permissionButton('auto','Auto')}
+          ${permissionButton('acceptEdits','Accept edits')}${permissionButton('plan','Plan')}</span>
+        <span class="ovlabel">Advanced</span><span class="ovseg permissionseg">
+          <button disabled title="Claude Code exposes this only at startup">Don't ask · new session</button>
+          ${permissionButton('bypassPermissions','Bypass permissions',permissionModes.has('bypassPermissions'))}</span>
+        ${permissionLocked?`<small class="ovhint">${s?.permission_mode?"Available only while Claude is idle":"Waiting for Claude to report its mode"}</small>`:''}
+      </span><span class="ovsep"></span>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
       ${canRepo?`<button class="ovitem" role="menuitem" onclick="closeOverflow();openRepository('',decodeURIComponent('${enc(s.cwd)}'))">
@@ -1250,14 +1361,16 @@ function confirmRepoDraftPr(){
 function confirmRepoReady(){const pr=repoView?.data?.pr;if(!pr)return;askConfirm('Mark pull request ready?',
   `PR <b>#${esc(String(pr.number))}</b> will leave draft state and request review. Fleet will not merge it.`,
   'mark ready',()=>runRepoAction('pr_mark_ready',{number:pr.number}));}
+const terminalActions=new Map();
 function terminalButton(s,card=false){
   if(!s)return'';
   const cls=`expandbtn termbtn${card?' deskonly':''}`;
   if(s.capabilities?.focus_terminal){
     const attach=s.capabilities?.focus_terminal_mode==='attach';
     const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
+    const action=terminalActions.get(s.session_id)||{};
     return`<button class="${cls}" title="${esc(title)}"
-      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'attach':'open'}</button>`;
+      ${action.busy?'disabled':''} onclick="event.stopPropagation();focusSession('${s.session_id}',this)">${action.busy?'Opening…':action.ok?'Opened ✓':attach?'Attach':'Terminal'}</button>`;
   }
   if(s.provider==='codex'){
     const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
@@ -1273,18 +1386,19 @@ function singleQBlock(s,p,pre){
   const sid=s.session_id;
   const q=p.questions[0],ms=q.multiSelect,n=(q.options||[]).length;
   const sel=multiSel[sid]=multiSel[sid]||new Set();
+  const locked=nativeRequestLocked(sid,p.nonce);
   return`<div class="ptool"><span class="ptlabel">${esc(q.header||'question')} — waiting on you</span>
-      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+      <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
     <div class="qtext">${esc(q.question)}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
         ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
+    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
       value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
       ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
-      ${ms?'':`<button class="pbtn send" onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
-    ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
+      ${ms?'':`<button class="pbtn send" ${locked?'disabled':''} onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
+    ${ms?`<div class="pbtns"><button class="pbtn send" ${locked?'disabled':''} onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
 }
 // The delivered-file strip: identical markup and position (docked bar, directly
 // above the send box) in BOTH full-screen surfaces, so they read as one screen.
@@ -1310,7 +1424,7 @@ function renderViewerBar(force){
   const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
   $('#vctrl').innerHTML=overflowMenu('viewer',s,'viewer');
   const ae=document.activeElement;
-  if(ae&&ae.tagName==='INPUT'&&bar.contains(ae))return;   // don't clobber typing
+  if(ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&bar.contains(ae))return; // don't clobber typing
   if(!force&&touching())return;                           // or a swipe/tap in flight
   const old=bar.querySelector&&bar.querySelector('.vconvo');
   const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
@@ -1336,9 +1450,9 @@ function renderViewerBar(force){
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
-      onkeydown="if(event.key==='Enter')sendText('${viewerSid}','vft','vmsg');if(event.key==='Escape')slashClose()">
+      onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()"></textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
@@ -1346,26 +1460,25 @@ function renderViewerBar(force){
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
   if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
 }
-// the chat view's title/subtitle block for a session (title on its own line,
-// project · branch · model beneath) — shared by the full chat view and the md viewer
+// Full chat headers identify the conversation. Operational metadata lives in
+// the status strip above the composer, where it can update independently.
 function sessTitleBlock(s){
   if(!s)return '<b>session</b>';
-  return `<b>${esc(s.title||s.project)}</b>
-    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}${s.family?` · ${modelLabel(s)}`:''}</small>`;
+  return `<b>${esc(s.title||s.project||'session')}</b>`;
 }
 function viewFile(sid,ep,en,kind,ecap){
   closeSession();          // the two full-screen surfaces are mutually exclusive
   const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
   const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
-  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
-  // same session heading as the chat view, then a rule, then the file name
-  $('#vtitle').innerHTML=`${sessTitleBlock(s)}
-    <span class="vfsep"></span>
-    <span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
+  // The file viewer is a reading surface: filename and file actions only.
+  $('#vtitle').innerHTML=`<span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
   $('#viewer').style.display='flex';
-  viewerSid=sid;viewerPath=path;syncOverlayHistory();renderViewerBar(true);
+  viewerSid=sid;viewerPath=path;syncOverlayHistory();
   const vb=$('#vbody');
-  if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
+  requestAnimationFrame(()=>{if(viewerSid===sid&&viewerPath===path)renderViewerBar(true);});
+  if(kind==='image'){vb.innerHTML=`<div class="ctxload">loading image…</div><img hidden src="${url}" alt="${esc(name)}"
+    onload="this.hidden=false;this.previousElementSibling?.remove()"
+    onerror="this.previousElementSibling.textContent='✗ image unavailable';this.remove()">`;return;}
   vb.textContent='loading…';
   fetch(url,{cache:'no-store'}).then(async r=>{
     if(!r.ok){vb.textContent=(r.status===403?'read-only device — open the ?token= URL once to view files. ':'')+await r.text();return;}
@@ -1382,12 +1495,13 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
-let histPushed=false,schedulePushed=false;
+let histPushed=false,schedulePushed=false,settingsPushed=false;
 const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  if(settingsPushed){settingsPushed=false;closeSettings();return;}
   if(schedulePushed){schedulePushed=false;closeSchedule();return;}
   if(repoPushed){repoPushed=false;closeRepository();return;}
   if(handoffPushed){
@@ -1405,8 +1519,10 @@ window.addEventListener('popstate',()=>{
   navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
 });
 function dismissOverlay(){
+  if(usageOpen)return closeUsage();
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(settingsPushed)return history.back();
   if(repoPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
@@ -1415,6 +1531,7 @@ function dismissOverlay(){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
+  if(usageOpen&&!e.target.closest('#usagepanel')&&!e.target.closest('#usagechip'))closeUsage();
   if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();
   if($('#mobilemore').classList.contains('open')&&!e.target.closest('#mobilemore')&&!e.target.closest('[data-route="more"]'))closeMobileMore();
 });
@@ -1423,6 +1540,82 @@ document.addEventListener('click',e=>{
 // Same overlay shape as the subagent view, but this one is a real terminal
 // channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
 // prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
+const statusExpanded=new Set(),statusCostsOpen=new Set();
+function statusGraphPoint(value){
+  const n=Number(value)||0;
+  if(n>20000)return['█','hot'];if(n>15000)return['▇','warm'];if(n>10000)return['▆','warm'];
+  if(n>7500)return['▅','warn'];if(n>5000)return['▄','warn'];if(n>2500)return['▃','cool'];
+  if(n>1000)return['▂','cool'];return['▁','cool'];
+}
+function statusLineHtml(status,key){
+  if(!status||typeof status!=='object')return'';
+  const id=String(key||'status'),expanded=statusExpanded.has(id),costOpen=statusCostsOpen.has(id);
+  const branch=status.branch&&status.branch!=='HEAD'?String(status.branch):'';
+  const git=[];
+  if(branch){
+    let label='⎇ '+branch;
+    if(Number.isFinite(status.ahead)&&status.ahead>0)label+=` ↑${status.ahead}`;
+    if(Number.isFinite(status.behind)&&status.behind>0)label+=` ↓${status.behind}`;
+    git.push(`<span>${esc(label)}</span>`);
+  }
+  if(status.worktree_label)git.push(`<span title="${esc(status.worktree||'')}">${esc(status.worktree_label)}</span>`);
+  const model=[];
+  if(status.model)model.push(`<span>${esc(status.model)}${status.effort?` · ${esc(status.effort)}`:''}</span>`);
+  const context=[];
+  if(Number.isFinite(status.context_pct))context.push(`Ctx: ${status.context_pct}%`);
+  if(Number.isFinite(status.compact_remaining))context.push(`→${fmtTok(status.compact_remaining)}`);
+  if(context.length)model.push(`<span>${esc(context.join('  '))}</span>`);
+  const cache=[];
+  if(Number.isFinite(status.cache_read_pct)){
+    const tier=status.cache_read_pct>=90?'good':status.cache_read_pct>=75?'warn':status.cache_read_pct>=50?'warm':'hot';
+    cache.push(`<span class="${tier}">♻ ${status.cache_read_pct}%</span>`);
+  }
+  if(Number.isFinite(status.cache_write)){
+    let cw=`✎ ${fmtTok(status.cache_write)}`;
+    if(Number(status.cache_write_spikes)>0)cw+=` · spikes ${status.cache_write_spikes}`;
+    if(Number(status.cache_write_peak)>0)cw+=` · peak ${fmtTok(status.cache_write_peak)}`;
+    cache.push(`<span>${esc(cw)}</span>`);
+  }
+  const breakdown=Array.isArray(status.cost_breakdown)?status.cost_breakdown:[];
+  let cost='';
+  if(Number.isFinite(status.tree_cost)){
+    const prefix=status.cost_scope==='estimated'?'~':'';
+    const label=status.cost_label==='agent'?'agent':'tree';
+    const delta=Number.isFinite(status.turn_cost)?` · +${fmt$(status.turn_cost)}`:'';
+    const summary=`${label} ${prefix}${fmt$(status.tree_cost)}${delta}`;
+    cost=breakdown.length>1?`<details class="status-cost" ${costOpen?'open':''}
+      ontoggle="statusCostToggle('${enc(id)}',this.open)"><summary>${esc(summary)}</summary>
+      <div class="status-cost-breakdown">${breakdown.map(item=>`<span>${esc(item.label||item.kind||'Usage')}<b>${esc(prefix+fmt$(item.cost))}</b></span>`).join('')}
+      ${status.cost_breakdown_omitted?`<small>+${status.cost_breakdown_omitted} more</small>`:''}</div></details>`:
+      `<span class="status-tree-cost">${esc(summary)}</span>`;
+    cache.push(cost);
+  }
+  const history=(status.cache_write_history||[]).filter(Number.isFinite).slice(-50);
+  const graph=history.map(value=>{const [glyph,tier]=statusGraphPoint(value);return`<i class="${tier}">${glyph}</i>`;}).join('');
+  const primary=git.length?`<div class="status-primary">${git.join('<em>│</em>')}</div>`:'';
+  const secondary=model.length?`<div class="status-secondary">${model.join('<em>│</em>')}</div>`:'';
+  const details=(cache.length||graph)?`<div class="status-details">
+    ${cache.length?`<div class="status-cache">${cache.join('<em>│</em>')}</div>`:''}
+    ${graph?`<div class="status-graph" aria-label="Cache write history: ${esc(history.join(', '))}"><b>CW</b>${graph}</div>`:''}
+  </div>`:'';
+  if(!primary&&!secondary&&!details)return'';
+  return`<section class="statusstrip${expanded?' expanded':''}${status.frozen?' frozen':''}" data-status-key="${esc(id)}">
+    ${primary}${secondary}
+    ${details?`<button class="status-expand" aria-label="${expanded?'collapse':'expand'} status details" aria-expanded="${expanded}"
+      onclick="toggleStatusDetails('${enc(id)}')">${expanded?'hide usage details':'usage details'}</button>${details}`:''}
+  </section>`;
+}
+function statusCostToggle(encodedKey,isOpen){
+  const key=decodeURIComponent(encodedKey);if(isOpen)statusCostsOpen.add(key);else statusCostsOpen.delete(key);
+}
+function toggleStatusDetails(encodedKey){
+  const key=decodeURIComponent(encodedKey);if(statusExpanded.has(key))statusExpanded.delete(key);else statusExpanded.add(key);
+  if(key.startsWith('agent:'))renderAgent(true);else if(sessionView?.closed)renderClosed(true);else renderSession(true);
+}
+function refreshStatusStrip(hostSelector,status,key){
+  const current=document.querySelector(hostSelector+' .statusstrip');
+  if(current)current.outerHTML=statusLineHtml(status,key);
+}
 let sessionView=null;            // {sid, closed} of the open overlay
 let sessQOpen=true;              // the question block inside the chat view
 let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
@@ -1509,6 +1702,7 @@ function toggleSessionEvidence(encodedSid){
   if(sessionView&&!sessionView.closed)renderSession(true);else if(sessionView)renderClosed(true);
 }
 function primarySessionAction(sid){
+  if(spawnProvisional&&spawnProvisional.id===sid){openSession(sid);return;}
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(s){openSession(sid);return;}
   if(isClosedSession(sid))openClosed(sid);
@@ -1544,20 +1738,26 @@ async function markAvailable(sid,encodedRevision){
 }
 function openSession(sid){
   closeViewer();           // never stack the file viewer and the chat view
-  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid)||
+    (spawnProvisional&&spawnProvisional.id===sid?provisionalSessionObject():null);
   if(session?.new_response)markRead(session);
   sessionView={sid,closed:false};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  $('#stitle2').innerHTML=sessTitleBlock(session);
+  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderSession(true);
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&!sessionView.closed)renderSession(true);});
 }
 // a closed session has no process: read its transcript, offer no controls
 function openClosed(sid){
   closeViewer();
   sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderClosed(true);
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&sessionView.closed)renderClosed(true);});
   if(!closedSession(sid))loadClosedMeta(sid);
 }
 async function loadClosedMeta(sid){
@@ -1570,7 +1770,8 @@ async function loadClosedMeta(sid){
 }
 function closeSession(){
   closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
-  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
+  $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
+  $('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
 }
 async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
@@ -1579,13 +1780,16 @@ async function renderClosed(){
   const meta=closedSession(sid)||{};
   $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',meta,'closed');
   renderEvidenceRail(meta);
-  $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
-    so there is nothing to send to. The conversation is read-only.</div>
-    ${handoffLinksHtml(meta)}
-    ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
-      onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
-      <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  const closedActions=status=>`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
+      so there is nothing to send to. The conversation is read-only.</div>
+      ${statusLineHtml(status,'closed:'+sid)}
+      ${handoffLinksHtml(meta)}
+      ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
+        onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
+        <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  $('#sact').innerHTML=closedActions(meta.status_line);
   if(!closedCtx[sid]){
+    closedCtx[sid]={fetching:true,messages:[],info:{}};
     body.innerHTML='<div class="ctxload">loading conversation…</div>';
     try{
       const r=await fetch(conversationEndpoint('closed',sid),{cache:'no-store'});
@@ -1597,14 +1801,21 @@ async function renderClosed(){
     if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
   }
   const c=closedCtx[sid],info=c.info||{};
-  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>
-    <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
-  if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
-  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid,true,'closed')}</div>`;
-  body.scrollTop=body.scrollHeight;
-  if(sessionOpened){sessionOpened=false;
-    requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
+  $('#sact').innerHTML=closedActions(info.status_line||meta.status_line);
+  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>`;
+  if(c.fetching){body.innerHTML='<div class="ctxload">loading conversation…</div>';return;}
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  const wantBottom=sessionOpened||old.atBottom;sessionOpened=false;
+  const optimistic=visibleOptimistic(sid,c.messages||[]).map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
+  const bodyKey=`closed:${c.messages?.length??-1}:${c.next_cursor??''}:${c.olderError||''}:${c.error||''}:${optimistic}`;
+  if(body.dataset.renderKey!==bodyKey){
+    if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
+    else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid,true,'closed')}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=wantBottom?body.scrollHeight:old.top;
+  }else if(wantBottom)body.scrollTop=body.scrollHeight;
+  if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
 async function reopenClosed(sid,button){
   const original=button&&button.textContent;
@@ -1620,12 +1831,14 @@ async function reopenClosed(sid,button){
 function renderSession(force){
   if(!sessionView||!last)return;
   if(sessionView.closed)return renderClosed(force);
-  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid);
+  const s=(last.sessions||[]).find(x=>x.session_id===sessionView.sid)||
+    (spawnProvisional&&spawnProvisional.id===sessionView.sid?provisionalSessionObject():null);
   if(!s){closeSession();return;}          // session died while open
+  if(s.provisional)return renderProvisionalSession(s);
   ensureCtx(s.session_id,ctxVersion(s));
   const c=ctxCache[s.session_id];
   const ae=document.activeElement;
-  const typing=ae&&(ae.tagName==='INPUT')&&$('#sview').contains(ae);
+  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#sview').contains(ae);
   const done=['done','ended'];
   $('#stitle2').innerHTML=sessTitleBlock(s);
   $('#sctrl').innerHTML=evidenceButton(s)+terminalButton(s)+overflowMenu('session',s,'session');
@@ -1639,11 +1852,23 @@ function renderSession(force){
   // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
   const wantBottom=sessionOpened||old.atBottom;
   sessionOpened=false;
-  if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
-  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
-  body.scrollTop=wantBottom?body.scrollHeight:old.top;
-  if(typing)return;                        // never replace the input being typed into
+  const optimisticItems=visibleOptimistic(s.session_id,(c&&c.messages)||[]);
+  const optimisticRevision=optimisticItems.map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
+  const bodyKey=`session:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${optimisticRevision}`;
+  if(body.dataset.renderKey!==bodyKey){
+    const optimisticOnly=optimisticItems.map(item=>optimisticItemHtml(item)).join('');
+    if((!c||!c.messages)&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
+    else if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+    else if(!c.messages.length&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
+    else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=wantBottom?body.scrollHeight:old.top;
+  }else if(wantBottom)body.scrollTop=body.scrollHeight;
+  if(typing){
+    refreshStatusStrip('#sact',s.status_line,'session:'+s.session_id);
+    return;                                // never replace the input being typed into
+  }
   const p=s.pending;
   const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
   const qHtml=hasQ?`<div class="togbox waiting">
@@ -1657,9 +1882,10 @@ function renderSession(force){
     ${fileStrip(s.session_id,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
+    ${statusLineHtml(s.status_line,'session:'+s.session_id)}
+    ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
-      onkeydown="if(event.key==='Enter')sendText('${s.session_id}','sft','smsg');if(event.key==='Escape')slashClose()">
+      onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()"></textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div>`:''}
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
     <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
@@ -1678,12 +1904,16 @@ function openAgent(sid,aid){
   agentView={sid,aid};
   agentInfoOpen2=false;
   $('#aview').style.display='flex';
+  $('#atitle').innerHTML='<b>subagent</b>';
+  const body=$('#abody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderAgent(true);
+  requestAnimationFrame(()=>{if(agentView?.sid===sid&&agentView?.aid===aid)renderAgent(true);});
 }
 function closeAgent(){
   closeOverflow();agentView=null;agentInfoOpen2=false;
-  $('#aview').style.display='none';$('#abody').innerHTML='';$('#aact').innerHTML='';$('#actrl').innerHTML='';
+  $('#aview').style.display='none';$('#abody').innerHTML='';delete $('#abody').dataset.renderKey;
+  $('#aact').innerHTML='';$('#actrl').innerHTML='';
 }
 function agentMeta(){
   if(!agentView||!last)return null;
@@ -1718,15 +1948,19 @@ function renderAgent(force){
   const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
   $('#actrl').innerHTML=overflowMenu('subagent',par,'subagent',done);
   const ae=document.activeElement;
-  const typing=ae&&ae.tagName==='INPUT'&&$('#aview').contains(ae);
-  if(!force&&(typing||touching()))return;
+  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#aview').contains(ae);
+  if(!force&&touching())return;
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
-  if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
-  else if(c.error){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}
-  else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false,'agent',agentView.aid)}</div>`;
-  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  const bodyKey=`agent:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${c?.error||''}`;
+  if(body.dataset.renderKey!==bodyKey){
+    if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
+    else if(c.error){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}
+    else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false,'agent',agentView.aid)}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  }
   if(!typing){
     const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
     const tk=info.tokens||{};
@@ -1735,9 +1969,11 @@ function renderAgent(force){
       <div class="relaynote">${done?'this agent has finished — ':''}${codex
         ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
-      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext"><input id="aft" placeholder="relay a message via the parent session" autocomplete="off"
-        onkeydown="if(event.key==='Enter')sendRelay()">
+      ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}
+      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
+        onkeydown="composerKey(event,sendRelay)"></textarea>
         <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
+      ${agentRelayHtml(agentView.sid,agentView.aid)}
       <div class="actmsg" id="amsg"></div>
       <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
         <summary>agent info</summary>
@@ -1754,14 +1990,32 @@ function renderAgent(force){
           <span>cost</span><b>${info.cost==null?'unavailable':fmt$(info.cost)}</b>
         </div>
       </details>`;
-  }
+  }else refreshStatusStrip('#aact',info.status_line,'agent:'+agentView.sid+':'+agentView.aid);
 }
-function sendRelay(){
+const agentRelays=new Map();
+function agentRelayKey(sid,aid){return agentCacheKey(sid,aid);}
+function agentRelayHtml(sid,aid){
+  const item=agentRelays.get(agentRelayKey(sid,aid));if(!item)return'';
+  if(item.status==='failed')return`<div class="quickfeedback failed" role="alert"><span class="qfstate">Relay failed</span><span class="qftext">${esc(item.error||'Request failed')}</span><button onclick="restoreRelay()">restore</button></div>`;
+  return`<div class="quickfeedback ${item.status}" role="status"><span class="qfstate">${item.status==='sending'?'Relaying':'Relayed'}</span><span class="qftext">${esc(item.text)}</span>${item.status==='sending'?'<span class="delivery sending" aria-hidden="true">◌</span>':'<span class="delivery sent">✓</span>'}</div>`;
+}
+function restoreRelay(){
+  if(!agentView)return;const key=agentRelayKey(agentView.sid,agentView.aid),item=agentRelays.get(key);
+  agentRelays.delete(key);renderAgent(true);requestAnimationFrame(()=>{const input=$('#aft');if(input){input.value=item?.text||'';input.focus();}});
+}
+async function sendRelay(){
   if(!agentView)return;
   const inp=$('#aft'),v=(inp&&inp.value||'').trim();
   if(!v)return;
-  act(agentView.sid,{type:'relay',agent_id:agentView.aid,text:v},'amsg');
-  if(inp)inp.value='';
+  const sid=agentView.sid,aid=agentView.aid,key=agentRelayKey(sid,aid);
+  if(agentRelays.get(key)?.status==='sending')return;
+  const feedbackStarted=performance.now();
+  if(inp)inp.value='';agentRelays.set(key,{text:v,status:'sending',error:''});renderAgent(true);
+  recordInputFeedback(feedbackStarted,'relay');
+  const result=await act(sid,{type:'relay',agent_id:aid,text:v},'amsg');
+  const current=agentRelays.get(key);if(!current)return;
+  current.status=result.ok?'sent':'failed';current.error=result.error||'';renderAgent(true);
+  if(result.ok)setTimeout(()=>{if(agentRelays.get(key)===current){agentRelays.delete(key);renderAgent(true);}},5000);
 }
 function agentRow(a){
   const done=['done','ended'].includes(a.state);
@@ -1789,6 +2043,7 @@ function agentRow(a){
 // Pins are one shared server-side watchlist. Cards relocate to the top; they are
 // never duplicated in their normal action group.
 const pinnedSessions=new Set();
+const pinActions=new Map();
 function syncPinnedSessions(f){
   pinnedSessions.clear();
   (((f||{}).settings||{}).pinned_sessions||[]).forEach(sid=>pinnedSessions.add(sid));
@@ -1796,8 +2051,43 @@ function syncPinnedSessions(f){
 function agentListHtml(agents){
   return agents.map(agentRow).join('');
 }
+function activeSubagents(f,applyQuery=false){
+  const query=applyQuery?nowFilter.trim().toLowerCase():'';
+  return((f&&f.sessions)||[]).flatMap(parent=>(parent.agents||[])
+    .filter(agent=>!['done','ended'].includes(agent.state))
+    .filter(agent=>!query||[
+      parent.title,parent.project,parent.branch,parent.provider,parent.cwd,
+      agent.agent_type,agent.description,agent.model,agent.effort,agent.state,
+      agent.last_msg&&agent.last_msg.text,
+    ].filter(Boolean).join(' ').toLowerCase().includes(query))
+    .map(agent=>({parent,agent})));
+}
+function activeSubagentCard(parent,agent){
+  const signal={running:'Working',stalled:'Slow — check progress'}[agent.state]||String(agent.state||'Active');
+  const latest=agent.last_msg&&agent.last_msg.text?String(agent.last_msg.text):
+    `quiet ${fmtAge(Math.max(0,Number(agent.quiet_s??parent.quiet_s??0)))}`;
+  const breadcrumb=[parent.project,parent.title,parent.branch&&parent.branch!=='HEAD'?parent.branch:null]
+    .filter(Boolean).join(' · ');
+  return`<button class="activeagentcard" onclick="openAgent(decodeURIComponent('${enc(parent.session_id)}'),decodeURIComponent('${enc(agent.agent_id)}'))">
+    <span class="dot ${esc(agent.state||'running')}" aria-hidden="true"></span>
+    <span class="activeagentmain"><b>${esc(agent.description||agent.agent_type||agent.agent_id)}</b>
+      <small>${esc(breadcrumb)}</small><em>${esc(latest)}</em></span>
+    <span class="activeagentmeta"><b>${esc(signal)}</b><small>${esc(agent.agent_type||'subagent')} · ${esc(modelLabel(agent))}</small></span>
+    <span class="aopen">›</span></button>`;
+}
+function renderActiveSubagents(f){
+  const el=$('#subagents');if(!el)return;
+  const items=activeSubagents(f,true);
+  el.className='queue subagentqueue';
+  el.innerHTML=`<div class="queuehead"><b>Active subagents · ${items.length}</b><span>children working across parent sessions</span></div>
+    <div class="activeagentlist">${items.length?items.map(({parent,agent})=>activeSubagentCard(parent,agent)).join(''):
+      '<div class="queueempty">No active subagents match this filter.</div>'}</div>`;
+}
 async function toggleSessionPin(sid){
+  if(pinActions.get(sid)?.busy)return;
+  const previous=[...pinnedSessions];
   const pinned=!pinnedSessions.has(sid);
+  pinActions.set(sid,{busy:true,pinned,error:''});
   pinned?pinnedSessions.add(sid):pinnedSessions.delete(sid);
   if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
   render(last,true);
@@ -1807,21 +2097,32 @@ async function toggleSessionPin(sid){
     const d=await r.json();
     if(!d.ok)throw new Error(d.error||'failed');
     if(last?.settings)last.settings.pinned_sessions=d.pinned_sessions||[];
-    syncPinnedSessions(last);render(last,true);
+    syncPinnedSessions(last);pinActions.delete(sid);render(last,true);
   }catch(e){
-    pinned?pinnedSessions.delete(sid):pinnedSessions.add(sid);
+    pinnedSessions.clear();previous.forEach(item=>pinnedSessions.add(item));
+    pinActions.set(sid,{busy:false,pinned,error:String(e.message||e)});
     if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
-    render(last,true);alert('pin failed: '+e);
+    render(last,true);
   }
 }
+function pinFeedbackHtml(sid){
+  const item=pinActions.get(sid);if(!item)return'';
+  if(item.busy)return`<div class="quickfeedback" role="status"><span class="qfstate">${item.pinned?'Pinning':'Unpinning'}</span><span class="delivery sending" aria-hidden="true">◌</span></div>`;
+  return`<div class="quickfeedback failed" role="alert"><span class="qfstate">Pin failed</span><span class="qftext">${esc(item.error||'Could not save pin')}</span><button onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${enc(sid)}'))">retry</button></div>`;
+}
 // mobile: long-press a session header to pin; a short tap still opens its chat
-let sessionPressTimer=null,sessionLongFired=false;
-function sessionPressStart(sid){
+let sessionPressTimer=null,sessionPressTarget=null,sessionLongFired=false;
+function sessionPressStart(sid,target){
+  sessionPressEnd();sessionPressTarget=target||null;
+  if(sessionPressTarget)sessionPressTarget.classList.add('pinpress');
   sessionLongFired=false;
   sessionPressTimer=setTimeout(()=>{sessionLongFired=true;toggleSessionPin(sid);
-    if(navigator.vibrate)navigator.vibrate(15);},500);
+    if(navigator.vibrate)navigator.vibrate(15);sessionPressEnd();},500);
 }
-function sessionPressEnd(){if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}}
+function sessionPressEnd(){
+  if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}
+  if(sessionPressTarget){sessionPressTarget.classList.remove('pinpress');sessionPressTarget=null;}
+}
 function sessionTap(e,sid){
   if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
   openSession(sid);
@@ -1833,13 +2134,28 @@ function agentTap(e,sid,aid){
 function renderPinned(f,predicate=()=>true){
   const el=$('#pinned');
   const sessions=(f&&f.sessions)||[],closed=(f&&f.closed)||[];
-  const items=sessions.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
-  const archived=closed.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
-  if(!items.length&&!archived.length){el.className='empty';el.innerHTML='';return;}
+  const liveById=new Map(sessions.map(item=>[item.session_id,item]));
+  const closedById=new Map(closed.map(item=>[item.session_id,item]));
+  const items=[...pinnedSessions].map(sid=>liveById.get(sid)||closedById.get(sid))
+    .filter(item=>item&&predicate(item));
+  if(!items.length){el.className='empty';el.innerHTML='';return;}
   el.className='';
-  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div><div class="pinarchived"></div>';
-  reconcileCards(el.querySelector('.pinlist'),items,'');
-  el.querySelector('.pinarchived').innerHTML=archived.map(c=>historyRow(c,true)).join('');
+  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div>';
+  const list=el.querySelector('.pinlist'),seen=new Set();
+  items.forEach(item=>{
+    const sid=String(item.session_id||'');seen.add(sid);
+    let slot=[...list.children].find(child=>child.dataset.pinSid===sid);
+    if(!slot){slot=document.createElement('div');slot.className='pinslot';slot.dataset.pinSid=sid;list.appendChild(slot);}
+    const kind=liveById.has(sid)?'live':'closed';
+    if(slot.dataset.pinKind!==kind){slot.innerHTML='';slot.dataset.pinKind=kind;}
+    if(kind==='live')reconcileCards(slot,[item],'');
+    else slot.innerHTML=historyRow(item,true);
+  });
+  [...list.children].forEach(slot=>{if(!seen.has(slot.dataset.pinSid))slot.remove();});
+  items.forEach((item,index)=>{
+    const slot=[...list.children].find(child=>child.dataset.pinSid===String(item.session_id||''));
+    if(slot&&list.children[index]!==slot)list.insertBefore(slot,list.children[index]||null);
+  });
 }
 const setg=()=>((last&&last.settings)||{});
 const previewAgents=()=>!!setg().preview_agents;
@@ -1859,24 +2175,26 @@ function cardCls(s){
 // running agents, the more/less toggle). No native <details> here, so replacing it
 // each tick doesn't flash.
 function cardTop(s){
+  if(s.provisional)return provisionalCardTop(s);
   const isOpen=open.has(s.session_id);
   const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
   const activeSession=s.ui_group==='working';
+  const showPrimary=!(s.provider==='claude'&&(!s.primary_action||['open','continue','view'].includes(s.primary_action)));
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
   return`<div class="shead" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
-      ontouchstart="sessionPressStart('${s.session_id}')" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
+      ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
       ${s.new_response?`<span class="newbadge">new</span>`:''}
-      <button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>
+      ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
       ${terminalButton(s,true)}
-      <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
-        aria-label="${pinned?'unpin session':'pin session to top'}"
+      <button class="spin${pinned?' on':''}" ${pinActions.get(s.session_id)?.busy?'disabled':''} title="${pinned?'unpin session':'pin session'}"
+        aria-label="${pinned?'unpin session':'pin session'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
     </div>
     <div class="smeta">
@@ -1894,6 +2212,7 @@ function cardTop(s){
     ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
+    ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
@@ -1929,6 +2248,8 @@ function cardDetail(s){
           <span>cwd</span>${cpb(s.cwd)}
           <span>model</span><b>${esc(s.model||'?')}${s.effort?` · ${esc(s.effort)}`:''}</b>
           ${s.provider==='codex'?`<span>mode</span><b>${esc(s.collaboration_mode||'default')}</b>`:''}
+          ${s.provider==='claude'?`<span>permission mode</span><span class="permissiondetail">
+            <b>${esc(claudePermissionLabel(s.permission_mode))}</b>${claudePermissionSelect(s,'msg')}</span>`:''}
           <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
           <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
           <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
@@ -1958,7 +2279,8 @@ function cardDetail(s){
 function detailSig(s){
   const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
-  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.reg_status,s.ctx_tokens,
+  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.permission_mode,
+    (s.permission_modes||[]).join(','),Boolean(s.capabilities?.change_permission_mode),s.reg_status,s.ctx_tokens,
     s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files,
     s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh',
     (s.handoff_links||[]).map(link=>[link.direction,link.session_id,link.status].join(':')).join(',')].join('|');
@@ -2009,23 +2331,35 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
-let settingsOpen=false,budgetSettingsOpen=false;
-function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
-  if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
+let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null;
+function uiRefresh(){render(last,true);if(settingsOpen)renderSettings();}
 function openSettings(){
+  if(settingsOpen)return;
+  const stacked=anyOverlay();
+  settingsReturnState=sessionView?{sid:sessionView.sid,closed:sessionView.closed,
+    scrollTop:$('#sbody')?.scrollTop||0,evidenceOpen:sessionEvidenceOpen}:null;
   settingsOpen=true;
   $('#settingsview').style.display='flex';
   $('#settings').scrollTop=0;
   renderSettings();
   loadBudgets();
   loadWorkstreams();
-  syncOverlayHistory();
+  if(stacked){settingsPushed=true;history.pushState({fdSettings:1},'');}
+  else syncOverlayHistory();
 }
 function closeSettings(){
+  const restore=settingsReturnState;settingsReturnState=null;
   settingsOpen=false;
   $('#settingsview').style.display='none';
   $('#settings').innerHTML='';
   applyRouteNav(currentRoute);
+  if(restore&&sessionView&&sessionView.sid===restore.sid&&sessionView.closed===restore.closed){
+    sessionEvidenceOpen=restore.evidenceOpen;
+    const body=$('#sbody');if(body)body.scrollTop=restore.scrollTop;
+    requestAnimationFrame(()=>{if(sessionView&&sessionView.sid===restore.sid){
+      const current=$('#sbody');if(current)current.scrollTop=restore.scrollTop;
+    }});
+  }
 }
 function renderSettings(){
   const el=$('#settings');
@@ -2049,6 +2383,12 @@ function renderSettings(){
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
+    <div class="dhead" style="margin-top:12px">desktop navigation</div>
+    <div class="setchoice" role="group" aria-label="Desktop navigation side">
+      <button aria-pressed="${navSide==='left'}" onclick="setNavSide('left')">Left side</button>
+      <button aria-pressed="${navSide==='right'}" onclick="setNavSide('right')">Right side</button>
+    </div>
+    <div class="sethint">Saved on this browser. Mobile keeps the bottom navigation.</div>
     <div class="dhead" style="margin-top:12px">full-screen reading width</div>
     <div class="setchoice" role="group" aria-label="Full-screen reading width">
       <button aria-pressed="${(st.reader_width||'fit')==='fit'}"
@@ -2067,57 +2407,61 @@ function renderSettings(){
     <details class="budgetsettingsfold" ${budgetSettingsOpen?'open':''} ontoggle="budgetSettingsOpen=this.open"><summary>Budgets and spawn limits</summary>${budgetSettingsHtml()}</details>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
+const settingQueues=new Map(),settingIntents=new Map();
+function settingMessage(id,text){const element=document.getElementById(id);if(element)element.textContent=text;}
+function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg'){
+  const intent=(settingIntents.get(key)||0)+1;settingIntents.set(key,intent);
+  settingMessage(messageId,'saving…');
+  const prior=settingQueues.get(key)||Promise.resolve();
+  const request=prior.catch(()=>{}).then(async()=>{
+    const response=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'save failed');
+    return data;
+  });
+  settingQueues.set(key,request);
+  return request.then(data=>{
+    if(settingIntents.get(key)!==intent)return data;
+    onSuccess(data);uiRefresh();settingMessage(messageId,'saved ✓');return data;
+  }).catch(error=>{
+    if(settingIntents.get(key)===intent){onFailure();uiRefresh();settingMessage(messageId,'✗ '+String(error.message||error));}
+    return{ok:false,error:String(error.message||error)};
+  }).finally(()=>{if(settingQueues.get(key)===request)settingQueues.delete(key);});
+}
 async function setNotify(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({notify:{[k]:v}})});
-    const d=await r.json();
-    if(d.ok){if(last)last.notify=d.notify;if(msg)msg.textContent='saved ✓';}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.notify?.[k];
+  if(last){last.notify=last.notify||{};last.notify[k]=v;}uiRefresh();
+  return queueSetting('notify:'+k,{notify:{[k]:v}},d=>{if(last)last.notify=d.notify;},()=>{
+    if(last){last.notify=last.notify||{};last.notify[k]=previous;}
+  });
 }
 async function setNum(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:parseFloat(v)})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';
-      uiRefresh();}   // a peek-line change must repaint the cards, not wait for the poll
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const value=parseFloat(v),previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=value;uiRefresh();
+  return queueSetting(k,{[k]:value},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function setBool(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:v})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=v;uiRefresh();
+  return queueSetting(k,{[k]:v},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function setStr(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:v})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=v;uiRefresh();
+  return queueSetting(k,{[k]:v},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function toggleMute(sid,mute){
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mute_session:sid,muted:mute})});
-    const d=await r.json();
-    if(!d.ok)return alert(d.error||'failed');
-    const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
-    if(s)s.muted=mute;
-    uiRefresh();
-  }catch(e){alert(e);}
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);if(!s)return;
+  const previous=s.muted;s.muted=mute;uiRefresh();
+  return queueSetting('mute:'+sid,{mute_session:sid,muted:mute},()=>{},()=>{s.muted=previous;},
+    'msg-'+sid);
 }
 // multi-question asks: ONE question on screen at a time, ‹ › to move between them
 // (keeps a 3-question ask from swallowing the whole screen)
@@ -2134,19 +2478,20 @@ function mqBlock(s,p,pre){
   const oth=(st.other[qi]||'').trim();
   const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label)
     .concat(oth?['“'+oth+'”']:[]).join(', ');
+  const locked=nativeRequestLocked(sid,p.nonce);
   return`<div class="ptool"><span class="ptlabel">multi-part question (${qs.length}) — waiting on you</span>
-      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+      <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
-    <div class="mqnav"><button class="mqarr" ${qi===0?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
+    <div class="mqnav"><button class="mqarr" ${qi===0||locked?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
       <span class="mqpos"><b>${qi+1}</b> of ${qs.length} · ${donecnt}/${qs.length} answered</span>
-      <button class="mqarr" ${qi===qs.length-1?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
+      <button class="mqarr" ${qi===qs.length-1||locked?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
     <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
+    ${q.allowOther!==false?`<div class="freetext"><input ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
       oninput="mqOther('${sid}',${qi},this.value)"></div>`:''}
     <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
-    <div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
+    <div class="pbtns"><button class="pbtn send" ${locked?'disabled':''} onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
 }
 function mqToggle(sid,qi,d,multi,total){
   const st=mqSel[sid];if(!st)return;
@@ -2173,11 +2518,14 @@ function mqSend(sid,nonce,pre){
     else a.digits=digits;
     answers.push(a);
   }
-  const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
-  act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
+    return act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
+  });
 }
 function elicitationBlock(s,p,pre){
   const sid=s.session_id;
+  const locked=nativeRequestLocked(sid,p.nonce);
   const draft=elicitDraft[sid]=elicitDraft[sid]||{};
   const fields=(p.fields||[]).map((f,i)=>{
     const key=enc(f.name),value=draft[f.name];
@@ -2197,9 +2545,9 @@ function elicitationBlock(s,p,pre){
     <div class="qtext">${esc(p.message||'')}</div>${fields}
     ${safeUrl?`<a class="jump" href="${esc(p.url)}" target="_blank" rel="noopener">open request ↗</a>`:''}
     <div class="pbtns">
-      <button class="pbtn allow" onclick="sendElicitation('${sid}','${p.nonce}','accept','${pre}')">accept</button>
-      <button class="pbtn deny" onclick="sendElicitation('${sid}','${p.nonce}','decline','${pre}')">decline</button>
-      <button class="pbtn" onclick="sendElicitation('${sid}','${p.nonce}','cancel','${pre}')">cancel</button>
+      <button class="pbtn allow" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','accept','${pre}')">accept</button>
+      <button class="pbtn deny" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','decline','${pre}')">decline</button>
+      <button class="pbtn" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','cancel','${pre}')">cancel</button>
     </div><div class="actmsg" id="${pre}-${sid}"></div></div>`;
 }
 function elicitText(sid,key,value){(elicitDraft[sid]||(elicitDraft[sid]={}))[decodeURIComponent(key)]=value;}
@@ -2222,7 +2570,8 @@ function sendElicitation(sid,nonce,choice,pre){
     if(f.required&&(content[f.name]==null||content[f.name]===''||(Array.isArray(content[f.name])&&!content[f.name].length)))
       return alert(`${f.label||f.name} is required`);
   }
-  act(sid,{type:'elicitation',nonce,choice,content:choice==='accept'?content:undefined},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,
+    {type:'elicitation',nonce,choice,content:choice==='accept'?content:undefined},pre));
 }
 // On the CARD a question is only a SIGNAL — the option buttons, Other input and
 // per-question nav ate the fleet list. Tapping it opens the full view with the
@@ -2253,14 +2602,15 @@ function pendingBox(s,pre='msg'){
       <div class="actmsg" id="${pre}-${s.session_id}"></div></div>`;
   }
   if(p.kind==='permission'){
+    const locked=nativeRequestLocked(s.session_id,p.nonce);
     return`<div class="pend">
       <div class="ptool">permission: ${esc(p.tool)} — waiting on you</div>
       <pre>${esc(p.input_summary||'')}</pre>
       <div class="pbtns">
-        <button class="pbtn allow" onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
-        <button class="pbtn always" onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
-        <button class="pbtn deny" onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
-        ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
+        <button class="pbtn allow" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
+        <button class="pbtn always" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
+        <button class="pbtn deny" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
+        ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
       </div>
       <div class="actmsg" id="${pre}-${s.session_id}"></div>
     </div>`;
@@ -2270,32 +2620,68 @@ function pendingBox(s,pre='msg'){
 }
 async function setSessionMode(sid,mode,pre='msg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
-  if(!s||s.provider!=='codex')return;
+  if(!s||s.provider!=='codex'||providerModeActions.has(sid))return;
   const previous=s.collaboration_mode||'default';
-  s.collaboration_mode=mode;uiRefresh();
+  providerModeActions.set(sid,{kind:'mode'});s.collaboration_mode=mode;uiRefresh();
+  const message=()=>document.getElementById(pre+'-'+sid)||document.getElementById(pre);
+  if(message())message().textContent='changing mode…';
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,type:'mode',mode})});
     const d=await r.json();
-    if(!d.ok){s.collaboration_mode=previous;uiRefresh();alert(d.error||'mode change failed');return;}
-    s.collaboration_mode=d.mode||mode;uiRefresh();
-  }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
+    if(!r.ok||!d.ok)throw new Error(d.error||'mode change failed');
+    s.collaboration_mode=d.mode||mode;providerModeActions.delete(sid);uiRefresh();
+    if(message())message().textContent='mode changed ✓';
+  }catch(e){s.collaboration_mode=previous;providerModeActions.delete(sid);uiRefresh();
+    if(message())message().textContent='✗ '+String(e.message||e);}
+}
+function setClaudePermissionMode(sid,mode,pre='msg'){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
+  if(!s||s.provider!=='claude'||claudePermissionLocked(s))return;
+  if(mode==='bypassPermissions'){
+    askConfirm('Use Bypass permissions?',
+      '<b>Claude will stop asking before dangerous commands.</b> This removes almost all permission checks for this session. '
+      +'Use it only in an isolated, disposable environment whose files and network access cannot cause harm.',
+      'use bypass permissions',()=>applyClaudePermissionMode(s,mode,pre),true);
+    return;
+  }
+  applyClaudePermissionMode(s,mode,pre);
+}
+async function applyClaudePermissionMode(s,mode,pre){
+  if(providerModeActions.has(s.session_id))return;
+  const previous=s.permission_mode;
+  if(previous===mode)return;
+  providerModeActions.set(s.session_id,{kind:'permission'});s.permission_mode=mode;uiRefresh();
+  const message=()=>document.getElementById(pre+'-'+s.session_id)||document.getElementById(pre);
+  if(message())message().textContent='changing permissions…';
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:s.session_id,type:'permission_mode',mode})});
+    const d=await r.json();
+    if(!r.ok||!d.ok)throw new Error(d.error||'permission mode change failed');
+    s.permission_mode=d.mode||mode;providerModeActions.delete(s.session_id);uiRefresh();
+    if(message())message().textContent='permissions changed ✓';
+  }catch(e){s.permission_mode=previous;providerModeActions.delete(s.session_id);uiRefresh();
+    if(message())message().textContent='✗ '+String(e.message||e);}
 }
 async function act(sid,payload,pre='msg',optimisticId=null){
+  const requestStarted=performance.now();
   const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
   const quickId=isQuick?beginQuickResponse(sid,payload):null;
-  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid);
+  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid)||document.getElementById(pre);
     if(el)el.textContent=text;return el;};
   if(payload.type!=='ping')setMessage('sending…');
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
     const d=await r.json();
+    if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
+      performance.now()-requestStarted);
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
       d.ok&&['option','multiq'].includes(payload.type));
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
     const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
-    if(!d.ok&&!el&&quickId==null)alert(d.error||'failed');
+    if(!d.ok&&!el&&quickId==null&&payload.type!=='focus')alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
       answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
@@ -2303,10 +2689,12 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     }
     return d;
   }catch(e){
+    if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
+      performance.now()-requestStarted);
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
     if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
     const el=setMessage('✗ '+e);
-    if(!el&&quickId==null)alert('request failed: '+e);
+    if(!el&&quickId==null&&payload.type!=='focus')alert('request failed: '+e);
     return {ok:false,error:String(e)};
   }
 }
@@ -2327,8 +2715,10 @@ function answerPreview(sid,answers){
   }).join('\n');
 }
 function sendOption(sid,nonce,digits,pre){
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
-  act(sid,{type:'option',nonce,digits},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
+    return act(sid,{type:'option',nonce,digits},pre,optimisticId);
+  });
 }
 function toggleOpt(sid,d){
   const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);uiRefresh();
@@ -2337,33 +2727,49 @@ function sendMulti(sid,nonce,n,pre){
   const digits=[...(multiSel[sid]||[])].sort();
   const other=(otherDraft[sid]||'').trim();
   if(!digits.length&&!other)return alert('pick at least one option');
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
-  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
+    return act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
+  });
 }
 function sendOther(sid,nonce,n,pre){
   const other=(otherDraft[sid]||'').trim();
   if(!other)return alert('type your answer first');
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
-  act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
+    return act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
+  });
 }
 function sendDismiss(sid,nonce,pre){
-  act(sid,{type:'dismiss',nonce},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'dismiss',nonce},pre));
 }
 // desktop only: pointless from the phone — it focuses a tab on the Mac
-function focusSession(sid){act(sid,{type:'focus'});}
+async function focusSession(sid,button=null){
+  if(terminalActions.get(sid)?.busy)return;
+  const feedbackStarted=performance.now(),original=button?.textContent||'Terminal';
+  terminalActions.set(sid,{busy:true,ok:false,error:''});
+  if(button){button.disabled=true;button.textContent='Opening…';}
+  recordInputFeedback(feedbackStarted,'terminal');
+  const result=await act(sid,{type:'focus'});
+  terminalActions.set(sid,{busy:false,ok:!!result.ok,error:result.error||''});
+  if(button&&button.isConnected){button.disabled=false;button.textContent=result.ok?'Opened ✓':'Retry';
+    if(!result.ok)button.title=result.error||'Could not open terminal';}
+  setTimeout(()=>{const item=terminalActions.get(sid);if(item&&!item.busy){terminalActions.delete(sid);if(last)render(last,true);}},3000);
+  return result;
+}
 
 // in-app interstitial — a native confirm() is easy to dismiss by reflex on a phone,
 // and stopping a turn is destructive (the work in flight is lost)
 let confirmYes=null;
-function askConfirm(title,body,confirmLabel,onYes){
+function askConfirm(title,body,confirmLabel,onYes,danger=false){
   closeOverflow();
   confirmYes=onYes;
-  $('#confirm').innerHTML=`<div class="cfbox">
+  $('#confirm').innerHTML=`<div class="cfbox${danger?' cfhigh':''}">
     <div class="cftitle">${esc(title)}</div>
     <div class="cfbody">${body}</div>
     <div class="cfbtns">
       <button class="pbtn" onclick="closeConfirm()">cancel</button>
-      <button class="pbtn cfgo" onclick="const f=confirmYes;closeConfirm();f&&f()">${esc(confirmLabel)}</button>
+      <button class="pbtn cfgo${danger?' danger':''}" onclick="const f=confirmYes;closeConfirm();f&&f()">${esc(confirmLabel)}</button>
     </div></div>`;
   $('#confirm').style.display='flex';
 }
@@ -2375,23 +2781,112 @@ function sendInterrupt(sid,pre='msg'){
     'stop the turn',
     ()=>act(sid,{type:'interrupt'},pre));
 }
-function sendCloseSession(sid,pre='smsg'){
+function closeWorktreeFiles(preview){
+  const dirty=(preview.dirty_files||[]).map(item=>`<li><span>${esc(item.category||'changed')}</span> ${esc(item.path||'')}</li>`).join('');
+  const ignored=(preview.ignored_files||[]).map(path=>`<li><span>ignored</span> ${esc(path)}</li>`).join('');
+  const dirtyMore=preview.dirty_files_truncated?`<li>…and more changed paths (${preview.dirty_total} total)</li>`:'';
+  const ignoredMore=preview.ignored_files_truncated?`<li>…and more ignored paths (${preview.ignored_count} total)</li>`:'';
+  return dirty||ignored?`<ul class="closefiles">${dirty}${dirtyMore}${ignored}${ignoredMore}</ul>`:'';
+}
+function closeProviderCopy(s,active){
+  const provider=s.provider==='codex'?'The Codex thread will be archived.':
+    'The registered Claude process will end. Its iTerm tab stays open.';
+  return provider+(active?' The current turn and every subagent under it will stop first.':'')+
+    ' The conversation remains available in <b>Session history</b>.';
+}
+function renderCloseWorktree(s,pre,preview,active){
+  const shared=(preview.shared_sessions||[]).map(item=>esc(item.title||item.session_id)).join(', ');
+  const reason=shared?`<div class="closeblock">Removal is blocked while this worktree is also used by: <b>${shared}</b>.</div>`:
+    preview.reason?`<div class="closeblock">${esc(preview.reason)}</div>`:'';
+  const path=esc(preview.worktree||s.cwd||'');
+  $('#confirm').innerHTML=`<div class="cfbox closechoice">
+    <div class="cftitle">Close this session?</div>
+    <div class="cfbody">${closeProviderCopy(s,active)}<div class="closepath"><b>Secondary worktree</b>${path}</div>
+      ${reason}${closeWorktreeFiles(preview)}</div>
+    <div class="closechoices">
+      <button class="pbtn" onclick="closeConfirm()">cancel</button>
+      <button class="pbtn cfgo" onclick="executeCloseSession('${s.session_id}','${pre}','preserve')">close · preserve worktree</button>
+      <button class="pbtn remover" ${preview.remove_allowed?'':'disabled'}
+        onclick="executeCloseSession('${s.session_id}','${pre}','remove')">close · remove clean worktree</button>
+      ${preview.force_remove_allowed?`<button class="pbtn force" onclick="confirmForceClose('${s.session_id}','${pre}')">force remove dirty worktree</button>`:''}
+    </div></div>`;
+  $('#confirm').style.display='flex';
+}
+function confirmForceClose(sid,pre){
+  const preview=closePreviewCache.get(sid);if(!preview)return;
+  askConfirm('Force remove dirty worktree?',
+    '<b>This permanently deletes every listed worktree file, including ignored files.</b> The Git branch survives.'+
+    closeWorktreeFiles(preview),
+    'close and force remove',()=>executeCloseSession(sid,pre,'force_remove'),true);
+}
+const closePreviewCache=new Map();
+async function closeSessionSurfaceAfterClose(){
+  closeConfirm();
+  if(histPushed){
+    await new Promise(resolve=>{
+      window.addEventListener('popstate',()=>resolve(),{once:true});
+      history.back();
+    });
+  }else{closeViewer();closeSession();}
+}
+async function executeCloseSession(sid,pre,cleanup){
+  const preview=closePreviewCache.get(sid);const destructive=cleanup!=='preserve';
+  let providerClosed=false;
+  $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">Closing session…</div>
+    <div class="cfbody"><span class="delivery sending" aria-hidden="true">◌</span> ${destructive?'Closing the provider before removing the worktree.':'Preserving the worktree.'}</div></div>`;
+  try{
+    const closeResponse=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'close',cleanup_ticket:destructive?preview?.cleanup_ticket:undefined})});
+    const closed=await closeResponse.json();
+    if(!closeResponse.ok||!closed.ok)throw new Error(closed.error||'session close failed');
+    providerClosed=true;
+    if(!destructive){closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);return;}
+    $('#confirm .cfbody').innerHTML='<span class="delivery sending" aria-hidden="true">◌</span> Session closed. Rechecking the worktree before removal…';
+    const cleanupResponse=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'worktree_cleanup',cleanup_ticket:preview.cleanup_ticket,
+                           force:cleanup==='force_remove'})});
+    const result=await cleanupResponse.json();
+    closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);
+    if(!cleanupResponse.ok||!result.ok){
+      $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">Session closed · worktree preserved</div>
+        <div class="cfbody">${esc(result.error||'Cleanup failed')}<div class="closepath">${esc(result.worktree||preview.worktree||'')}</div></div>
+        <div class="cfbtns"><button class="pbtn" onclick="closeConfirm()">close</button></div></div>`;
+      $('#confirm').style.display='flex';
+      return;
+    }
+    closeConfirm();
+  }catch(error){
+    if(providerClosed){
+      closePreviewCache.delete(sid);await closeSessionSurfaceAfterClose();setTimeout(()=>tick(),0);
+    }
+    $('#confirm').innerHTML=`<div class="cfbox"><div class="cftitle">${providerClosed?'Session closed · worktree preserved':'Could not close session'}</div>
+      <div class="cfbody">${esc(String(error.message||error))}${providerClosed?`<div class="closepath">${esc(preview?.worktree||'')}</div>`:''}</div><div class="cfbtns">
+      <button class="pbtn" onclick="closeConfirm()">close</button></div></div>`;
+    $('#confirm').style.display='flex';
+  }
+}
+async function sendCloseSession(sid,pre='smsg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(!s||!s.capabilities?.close)return alert('This session cannot be closed here.');
   const active=['running','stalled','needs_you','stalled_or_prompt'].includes(s.state);
-  const provider=s.provider==='codex'
-    ?'The Codex thread will be archived.'
-    :'The registered Claude process will end. Its iTerm tab stays open.';
-  const activeBody=active
-    ?' The current turn and every subagent under it will stop first.'
-    :'';
-  askConfirm('Close this session?',
-    provider+activeBody+' The conversation remains available in <b>Session history</b>.',
-    active?'stop and close':'close session',
-    async()=>{
-      const result=await act(sid,{type:'close'},pre);
-      if(result?.ok){dismissOverlay();setTimeout(()=>tick(),0);}
-    });
+  closeOverflow();
+  $('#confirm').innerHTML='<div class="cfbox"><div class="cftitle">Checking worktree…</div><div class="cfbody"><span class="delivery sending" aria-hidden="true">◌</span> Looking for files that closing could remove.</div></div>';
+  $('#confirm').style.display='flex';
+  try{
+    const response=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sid,type:'close_preview'})});
+    const preview=await response.json();
+    if(!response.ok||!preview.ok)throw new Error(preview.error||'worktree check failed');
+    if(preview.secondary_worktree){closePreviewCache.set(sid,preview);renderCloseWorktree(s,pre,preview,active);return;}
+    closeConfirm();
+    askConfirm('Close this session?',closeProviderCopy(s,active),active?'stop and close':'close session',
+      ()=>executeCloseSession(sid,pre,'preserve'));
+  }catch(error){
+    closeConfirm();
+    askConfirm('Close this session?',closeProviderCopy(s,active)+
+      `<div class="closeblock">Fleet could not inspect the worktree: ${esc(String(error.message||error))}. Closing will preserve it.</div>`,
+      active?'stop and close':'close session',()=>executeCloseSession(sid,pre,'preserve'));
+  }
 }
 // A subagent has NO terminal: the only way to stop it is to Esc its PARENT, which
 // ends the parent's whole turn and every other agent under it. Say so plainly.
@@ -2405,14 +2900,14 @@ function stopAgentParent(sid,pre='amsg'){
 }
 function copyTxt(ev,el){
   ev.stopPropagation();
-  if(!navigator.clipboard)return;
+  const original=el.textContent;el.textContent='copying…';
+  if(!navigator.clipboard){el.textContent='copy unavailable';setTimeout(()=>{el.textContent=original},1200);return;}
   navigator.clipboard.writeText(el.dataset.copy).then(()=>{
-    const o=el.textContent;el.textContent='copied ✓';
-    setTimeout(()=>{el.textContent=o},900);   // UX flash only
-  });
+    el.textContent='copied ✓';setTimeout(()=>{el.textContent=original},900);
+  }).catch(()=>{el.textContent='copy failed';setTimeout(()=>{el.textContent=original},1200);});
 }
 function sendPerm(sid,nonce,choice,pre='msg'){
-  act(sid,{type:'permission',nonce,choice},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'permission',nonce,choice},pre));
 }
 function sendText(sid,ftPre='ft',msgPre='msg'){
   const inp=document.getElementById(ftPre+'-'+sid);
@@ -2432,6 +2927,7 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
 // Menu INSERTS (never sends): most skills take args, and it keeps the send path
 // — with its destructive-command confirm — as the single way anything fires.
 const cmdCache={};          // sessionId -> [{name,desc,scope,danger}]
+const cmdLoads={},cmdErrors={};
 let slashBox=null;          // id of the open menu's container, or null
 function slashClose(){
   if(!slashBox)return;
@@ -2444,21 +2940,27 @@ async function slashInput(sid,pre){
   const v=(inp&&inp.value)||'';
   // menu lives while the text is a single command/skill token; a space starts args
   if((!v.startsWith('/')&&!v.startsWith('$'))||/\s/.test(v))return slashClose();
+  const box=document.getElementById('slash-'+pre+'-'+sid);if(!box)return;
+  slashBox='slash-'+pre+'-'+sid;
   if(!cmdCache[sid]){
-    cmdCache[sid]=[];       // in-flight guard: one fetch per session
-    try{
-      const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
-      const d=await r.json();
-      cmdCache[sid]=d.commands||[];
-    }catch(e){cmdCache[sid]=[];}
+    if(!cmdLoads[sid]){
+      box.innerHTML='<div class="slashmenu"><div class="slashempty"><span class="delivery sending" aria-hidden="true">◌</span> loading commands…</div></div>';
+      cmdLoads[sid]=(async()=>{try{
+        const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
+        const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'commands unavailable');
+        cmdCache[sid]=d.commands||[];delete cmdErrors[sid];
+      }catch(e){cmdErrors[sid]=String(e.message||e);}
+      finally{delete cmdLoads[sid];}})();
+    }
+    await cmdLoads[sid];
+    const current=document.getElementById(pre+'-'+sid);
+    if(!current||current.value!==v)return;
   }
+  if(cmdErrors[sid]){box.innerHTML=`<div class="slashmenu"><div class="slashempty">${esc(cmdErrors[sid])} <button onclick="retryCommands('${sid}','${pre}')">retry</button></div></div>`;return;}
   const q=v.slice(1).toLowerCase();
   const hits=cmdCache[sid].filter(c=>c.name[0]===v[0]&&c.name.slice(1).toLowerCase().includes(q))
     .sort((a,b)=>(a.name.slice(1).toLowerCase().startsWith(q)?0:1)-(b.name.slice(1).toLowerCase().startsWith(q)?0:1))
     .slice(0,40);
-  const box=document.getElementById('slash-'+pre+'-'+sid);
-  if(!box)return;
-  slashBox='slash-'+pre+'-'+sid;
   box.innerHTML=hits.length?`<div class="slashmenu">${hits.map(c=>`
     <button class="slashrow" onmousedown="event.preventDefault()" onclick="slashPick('${sid}','${pre}','${enc(c.name)}')">
       <span class="scmd">${esc(c.name)}${c.danger?' <span class="sdanger">destructive</span>':''}</span>
@@ -2467,6 +2969,7 @@ async function slashInput(sid,pre){
     </button>`).join('')}</div>`
     :`<div class="slashmenu"><div class="slashempty">no command matches “${esc(v)}”</div></div>`;
 }
+function retryCommands(sid,pre){delete cmdCache[sid];delete cmdErrors[sid];slashInput(sid,pre);}
 function slashPick(sid,pre,name){
   const inp=document.getElementById(pre+'-'+sid);
   if(!inp)return;
@@ -2735,8 +3238,87 @@ function filterChips(kind,current,items){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
+let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newPermissionMode='default',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
+let spawnProvisional=null;
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
+function spawnSnapshot(){
+  return{provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    permission_mode:newProvider==='claude'?newPermissionMode:'',
+    worktree:newProvider==='claude'&&newWt,
+    worktree_name:newProvider==='claude'?newWtName:'',message:newMessage.trim()};
+}
+function provisionalSessionObject(){
+  const p=spawnProvisional;if(!p)return null;
+  const failed=p.status==='failed';
+  return{session_id:p.id,provider:p.spec.provider,project:p.spec.cwd.split('/').filter(Boolean).pop()||'new session',
+    title:'New coding session',cwd:p.spec.cwd,branch:p.spec.worktree_name||'',model:p.spec.model,
+    effort:p.spec.effort,collaboration_mode:p.spec.mode,permission_mode:p.spec.permission_mode,
+    permission_modes:['default','acceptEdits','plan'],ui_group:failed?'needs_you':'working',
+    reason_label:failed?'Start failed':'Starting',state:failed?'idle':'running',reg_status:'starting',
+    quiet_s:0,ctx_tokens:0,ctx_pct:null,total_tokens:0,cost:null,agent_cost:null,
+    agents:[],agents_running:0,agents_total:0,last_msg:null,pending:null,provisional:true,
+    error:p.error||'',capabilities:{submit:false,focus_terminal:false},access:'interactive'};
+}
+function sessionsWithProvisional(f){
+  const sessions=[...((f&&f.sessions)||[])],provisional=provisionalSessionObject();
+  if(provisional&&!sessions.some(item=>item.session_id===provisional.session_id))sessions.push(provisional);
+  return sessions;
+}
+function provisionalCardTop(s){
+  const p=spawnProvisional,failed=p?.status==='failed';
+  return`<div class="shead" title="open startup details" onclick="sessionTap(event,'${s.session_id}')">
+      <span class="chip ${failed?'problem':'working'}">${failed?'Start failed':'Starting'}</span>
+      <span class="sname"><span class="stitle">New coding session</span><small>${esc(s.project)} · ${esc(s.provider)}</small></span>
+      <span class="m amodel">${modelLabel(s)}</span>
+    </div>
+    ${p?.spec.message?`<div class="lastmsg"><span class="lmwho user">you</span><span class="lmtext">${esc(p.spec.message)}</span><span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span></div>`:''}
+    <div class="spawncardstate ${failed?'failed':''}">${failed?esc(p.error||'Session did not start'):`<span class="delivery sending" aria-hidden="true">◌</span> ${esc(p?.status==='discovering'?'Finding the new session…':'Starting session…')}`}</div>
+    ${failed&&p?.canRetry?`<div class="spawncardactions"><button class="pbtn send" onclick="event.stopPropagation();retrySpawn()">retry</button><button class="pbtn" onclick="event.stopPropagation();restoreSpawnForm()">restore form</button></div>`:''}`;
+}
+function renderProvisionalSession(s){
+  const p=spawnProvisional;if(!p)return;
+  const failed=p.status==='failed';
+  $('#stitle2').innerHTML=`<b>New coding session</b><small>${esc(s.project)} · ${esc(s.provider)}${s.model?` · ${esc(s.model)}`:''}</small>`;
+  $('#sctrl').innerHTML='';renderEvidenceRail({});
+  const message=p.spec.message?`<div class="cmsg user optimistic"><span class="crole">you</span>
+      <span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span>
+      <div class="cbody"><p>${esc(p.spec.message).replace(/\n/g,'<br>')}</p></div></div>`:'';
+  $('#sbody').innerHTML=`<div class="aconvo">${message}<div class="spawnstage ${failed?'failed':''}">
+    ${failed?'!':`<span class="delivery sending" aria-hidden="true">◌</span>`}
+    <div><b>${failed?'Session did not start':p.status==='discovering'?'Finding the new session…':'Starting session…'}</b>
+    <span>${failed?esc(p.error||'Startup failed'):'Your message is saved here while Fleet waits for the exact native session.'}</span></div></div></div>`;
+  $('#sact').innerHTML=failed?`<div class="spawnrecovery">
+    ${p.canRetry?`<button class="pbtn send" onclick="retrySpawn()">retry same session setup</button><button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`:
+      p.serverSessionId?`<button class="pbtn send" onclick="keepWaitingForSpawn()">keep waiting</button>`:
+      `<button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`}
+    <span>${p.canRetry?'No native session was created.':p.serverSessionId?'Fleet has the exact session ID and can keep looking.':'The request outcome is unknown, so Fleet will not risk creating a duplicate.'}</span></div>`:'';
+  requestAnimationFrame(()=>{const body=$('#sbody');body.scrollTop=body.scrollHeight;});
+}
+function restoreSpawnForm(){
+  const p=spawnProvisional;if(!p)return;
+  newProvider=p.spec.provider;newDir=p.spec.cwd;newModel=p.spec.model;newEffort=p.spec.effort;
+  newMode=p.spec.mode;newPermissionMode=p.spec.permission_mode||'default';newWt=p.spec.worktree;
+  newWtName=p.spec.worktree_name;newMessage=p.spec.message;
+  const sid=p.id;spawnProvisional=null;spawnWait=null;newOpen=true;spawnMsg='';
+  if(sessionView?.sid===sid)closeSession();
+  render(last,true);
+}
+function keepWaitingForSpawn(){
+  if(!spawnProvisional?.serverSessionId)return;
+  spawnProvisional.status='discovering';spawnProvisional.error='';
+  spawnWait={sessionId:spawnProvisional.serverSessionId,until:Date.now()+120000,
+    provider:spawnProvisional.spec.provider,initialMessage:spawnProvisional.spec.message,
+    provisionalId:spawnProvisional.id};render(last,true);
+}
+function retrySpawn(){
+  if(!spawnProvisional?.canRetry)return;
+  startSpawn(spawnProvisional.spec,spawnProvisional);
+}
+function changeNewProvider(value){
+  newProvider=value;newModel='';spawnForecast=null;queueSpawnForecast(0);render(last,true);
+}
+function changeNewDirectory(value){newDir=value;queueSpawnForecast(120);}
+function changeNewModel(value){newModel=value;queueSpawnForecast(0);}
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
   if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
@@ -2756,22 +3338,22 @@ function newSection(){
   return`<div class="newform">
     <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
     <label class="nflab">provider</label>
-    <select class="nfsel" onchange="newProvider=this.value;newModel='';spawnForecast=null;queueSpawnForecast();render(last,true)">
+    <select class="nfsel" onchange="changeNewProvider(this.value)">
       <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
       <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
     </select>
     <label class="nflab">directory</label>
-    <select class="nfsel" onchange="newDir=this.value;spawnForecast=null;queueSpawnForecast();render(last,true)">
+    <select class="nfsel" onchange="changeNewDirectory(this.value)">
       <option value="">— pick a recent directory —</option>
       ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
     </select>
     <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
-      oninput="newDir=this.value;spawnForecast=null;queueSpawnForecast()" autocomplete="off">
+      oninput="changeNewDirectory(this.value)" autocomplete="off">
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
     <div class="nfrow">
       <div class="nfcol"><label class="nflab">model</label>
-        <select class="nfsel" onchange="newModel=this.value;spawnForecast=null;queueSpawnForecast()">
+        <select class="nfsel" onchange="changeNewModel(this.value)">
           <option value="">default</option>
           ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
         </select></div>
@@ -2784,6 +3366,14 @@ function newSection(){
         <select class="nfsel" onchange="newMode=this.value">
           <option value="plan" ${newMode==='plan'?'selected':''}>Plan</option>
           <option value="default" ${newMode==='default'?'selected':''}>Default</option>
+        </select></div>`:''}
+      ${newProvider==='claude'?`<div class="nfcol"><label class="nflab">permission mode</label>
+        <select class="nfsel" onchange="newPermissionMode=this.value">
+          <option value="default" ${newPermissionMode==='default'?'selected':''}>Manual</option>
+          <option value="auto" ${newPermissionMode==='auto'?'selected':''}>Auto</option>
+          <option value="acceptEdits" ${newPermissionMode==='acceptEdits'?'selected':''}>Accept edits</option>
+          <option value="plan" ${newPermissionMode==='plan'?'selected':''}>Plan</option>
+          <optgroup label="Advanced"><option value="dontAsk" ${newPermissionMode==='dontAsk'?'selected':''}>Don't ask</option></optgroup>
         </select></div>`:''}
     </div>
     ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
@@ -2801,41 +3391,68 @@ function newSection(){
 }
 async function doSpawn(){
   if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
-  spawnMsg='starting…';render(last,true);
+  if(spawnProvisional){openSession(spawnProvisional.id);return;}
+  const feedbackStarted=performance.now();
+  const spec=spawnSnapshot();
+  const id='spawn-'+(globalThis.crypto?.randomUUID?.()||String(Date.now()));
+  spawnProvisional={id,spec,status:'starting',error:'',canRetry:false,serverSessionId:null};
+  spawnMsg='';newMessage='';newOpen=false;
+  openSession(id);render(last,true);
+  recordInputFeedback(feedbackStarted,'spawn');
+  await startSpawn(spec,spawnProvisional);
+}
+async function startSpawn(spec,provisional){
+  if(!provisional||spawnProvisional!==provisional)return;
+  provisional.status='starting';provisional.error='';provisional.canRetry=false;render(last,true);
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type:'spawn',provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
-                           worktree:newWt,worktree_name:newWtName,initial_text:newMessage||undefined})});
+      body:JSON.stringify({type:'spawn',provider:spec.provider,cwd:spec.cwd,model:spec.model,effort:spec.effort,mode:spec.mode,
+                           permission_mode:spec.permission_mode,
+                           worktree:spec.worktree,worktree_name:spec.worktree_name,initial_text:spec.message||undefined})});
     const d=await r.json();
-    if(!d.ok){spawnMsg='✗ '+(d.error||'failed');render(last,true);return;}
-    spawnMsg=d.trust_prompt
-      ? '⚠ started — but it is waiting on the trust prompt on your Mac ("do you trust the files in this folder?")'
-      : 'started ✓ — opening it here as soon as it appears…';
+    if(spawnProvisional!==provisional)return;
+    if(!r.ok||!d.ok){provisional.status='failed';provisional.error=d.error||'Session could not be started';
+      provisional.canRetry=true;render(last,true);return;}
+    provisional.serverSessionId=d.session_id;provisional.status='discovering';provisional.trustPrompt=!!d.trust_prompt;
     // Both providers return the exact native session identity. Never guess by cwd:
     // a sibling session in the same repo must not be opened by mistake.
-    spawnWait={sessionId:d.session_id,until:Date.now()+120000,provider:newProvider,initialMessage:newMessage};
-    newMessage='';
-    newOpen=false;render(last,true);
-  }catch(e){spawnMsg='✗ '+e;render(last,true);}
+    spawnWait={sessionId:d.session_id,until:Date.now()+120000,provider:spec.provider,
+      initialMessage:spec.message,provisionalId:provisional.id};render(last,true);
+  }catch(e){if(spawnProvisional===provisional){provisional.status='failed';
+    provisional.error='Fleet lost the startup response: '+String(e.message||e);provisional.canRetry=false;render(last,true);}}
 }
 function doScheduleNew(){
   if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
   if(!newMessage.trim()){spawnMsg='✗ add the message this new session should receive';render(last,true);return;}
   const spec={provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
+    permission_mode:newProvider==='claude'?newPermissionMode:'',
     worktree:newProvider==='claude'&&newWt,worktree_name:newProvider==='claude'?newWtName:''};
   openSchedule('',null,'',null,spec,newMessage);
 }
 // a spawned session only enters the fleet once it writes a transcript
 async function checkSpawn(f){
   if(!spawnWait)return;
-  if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
-  const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
-  if(s){const waiting=spawnWait;spawnWait=null;spawnMsg='';
-    if(waiting.provider==='claude'&&waiting.initialMessage){
-      const delivered=await act(s.session_id,{type:'text',text:waiting.initialMessage},'spawnmsg');
-      if(!delivered.ok)spawnMsg='✗ session started, but the initial message failed: '+(delivered.error||'failed');
+  if(Date.now()>spawnWait.until){
+    if(spawnProvisional&&spawnProvisional.id===spawnWait.provisionalId){
+      spawnProvisional.status='failed';spawnProvisional.error='The native session started, but Fleet could not discover it within two minutes.';
+      spawnProvisional.canRetry=false;
     }
-    openSession(s.session_id);}
+    spawnWait=null;render(last,true);return;
+  }
+  const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
+  if(s){const waiting=spawnWait,provisional=spawnProvisional;spawnWait=null;spawnMsg='';
+    const wasOpen=sessionView?.sid===waiting.provisionalId;
+    let optimisticId=null;
+    if(waiting.initialMessage)optimisticId=addOptimistic(s.session_id,waiting.initialMessage,'text');
+    spawnProvisional=null;
+    if(wasOpen){sessionView={sid:s.session_id,closed:false};sessionOpened=false;}
+    render(last,true);
+    if(waiting.provider==='claude'&&waiting.initialMessage){
+      const delivered=await act(s.session_id,{type:'text',text:waiting.initialMessage},'spawnmsg',optimisticId);
+      if(!delivered.ok)spawnMsg='✗ session started, but the initial message failed: '+(delivered.error||'failed');
+    }else if(optimisticId)updateOptimistic(s.session_id,optimisticId,true,'',true);
+    if(!wasOpen)openSession(s.session_id);
+  }
 }
 function historySection(f){
   const items=historyItems(f);
@@ -2859,9 +3476,11 @@ function historyCount(f){
   return`${total} session${total===1?'':'s'}`;
 }
 function historyRows(items){
-  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':esc(historyData.error||'history unavailable')}</div>`;
+  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':
+    `${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(true)">retry</button>`}</div>`;
   return items.map(item=>historyRow(item)).join('')+
     (historyLoading?'<div class="ctxload">loading history…</div>':'')+
+    (!historyLoading&&!historyData.ok?`<div class="ctxload searcherror">✗ ${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(${items.length?'false':'true'})">retry</button></div>`:'')+
     (!historyLoading&&historyData.next_cursor!=null?`<button class="newbtn" onclick="loadHistory(false)">
       show ${Math.min(100,Math.max(0,historyData.total-(historyData.items||[]).length))} more</button>`:'');
 }
@@ -2883,10 +3502,11 @@ function historyRow(item,pinnedView=false){
       ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
         ${canReopen?`<button class="historyaction" onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">Reopen</button>`:''}`
         :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(action)}</button>`}
-      <button class="spin${pinnedSessions.has(sid)?' on':''}" aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
-        title="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
+      <button class="spin${pinnedSessions.has(sid)?' on':''}" ${pinActions.get(sid)?.busy?'disabled':''} aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
+        title="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
         onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${encoded}'))">📌</button>
     </div>
+    ${pinFeedbackHtml(sid)}
     ${open?`<div class="historydetail"><div class="kv">
       <span>session</span>${cpb(sid)}
       <span>provider</span><b>${esc(provider)}</b>
@@ -2927,6 +3547,7 @@ window.addEventListener('resize',schedulePeekOverflow);
 // ---- budgets and forecasts ------------------------------------------------
 let budgetData={ok:true,budgets:[],forecasts:{},measurement_labels:{}},budgetLoading=false,budgetLoadedAt=0;
 let budgetDraft=null,spawnForecast=null,spawnBudgetHeadroom=[],spawnForecastTimer=null;
+let spawnForecastAbort=null,spawnForecastSequence=0;
 async function loadBudgets(force=false,spawn=null){
   if(budgetLoading&&!spawn)return;
   if(!spawn&&!force&&Date.now()-budgetLoadedAt<10000)return;
@@ -2991,9 +3612,39 @@ async function saveBudgets(){const msg=$('#setmsg');if(msg)msg.textContent='savi
   const data=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budgets:budgetDraft})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
   if(!data.ok){if(msg)msg.textContent='✗ '+(data.error||'failed');return;}
   budgetDraft=(data.budgets||[]).map(budgetEditable);if(msg)msg.textContent='saved ✓';await loadBudgets(true);}
-function queueSpawnForecast(){clearTimeout(spawnForecastTimer);spawnForecastTimer=setTimeout(()=>{
-  spawnForecastTimer=null;if(!newOpen||!newProvider)return;loadBudgets(false,{provider:newProvider,model:newModel,project:(newDir.split('/').filter(Boolean).pop()||''),cwd:newDir});},250);}
+function updateSpawnForecastDisplay(){
+  const current=document.querySelector('#newsess .spawnforecast');
+  if(current)current.outerHTML=spawnForecastHtml();
+}
+async function loadSpawnForecast(spawn,sequence){
+  const controller=new AbortController();spawnForecastAbort=controller;
+  try{
+    const query='?'+new URLSearchParams(Object.entries(spawn).filter(([,value])=>value)).toString();
+    const response=await fetch('/api/budgets'+query,{cache:'no-store',signal:controller.signal});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Forecast unavailable');
+    if(sequence!==spawnForecastSequence)return;
+    spawnForecast=data.spawn_forecast;spawnBudgetHeadroom=data.spawn_budgets||[];
+  }catch(error){
+    if(error.name==='AbortError'||sequence!==spawnForecastSequence)return;
+    spawnForecast={status:'error',error:String(error.message||error)};
+  }finally{
+    if(sequence===spawnForecastSequence){spawnForecastAbort=null;updateSpawnForecastDisplay();}
+  }
+}
+function queueSpawnForecast(delay=120){
+  clearTimeout(spawnForecastTimer);spawnForecastTimer=null;
+  if(spawnForecastAbort){spawnForecastAbort.abort();spawnForecastAbort=null;}
+  const sequence=++spawnForecastSequence;
+  spawnForecast={status:'loading'};spawnBudgetHeadroom=[];updateSpawnForecastDisplay();
+  spawnForecastTimer=setTimeout(()=>{
+    spawnForecastTimer=null;if(!newOpen||!newProvider)return;
+    loadSpawnForecast({provider:newProvider,model:newModel,
+      project:(newDir.split('/').filter(Boolean).pop()||''),cwd:newDir},sequence);
+  },delay);
+}
 function spawnForecastHtml(){const f=spawnForecast;if(!f)return'<div class="spawnforecast">Forecast and budget headroom load from matching local history.</div>';
+  if(f.status==='loading')return'<div class="spawnforecast loading"><span class="delivery sending" aria-hidden="true">◌</span> Updating forecast…</div>';
   if(f.status==='error')return`<div class="spawnforecast unavailable">${esc(f.error)}</div>`;
   if(f.status!=='forecast')return`<div class="spawnforecast">Not enough matching history · ${f.sample_size||0} sample${f.sample_size===1?'':'s'}</div>`;
   const bits=[f.median_usd!=null?`median ${fmt$(f.median_usd)}`:'currency unavailable',f.median_tokens!=null?`${fmtTok(f.median_tokens)} tokens`:null,
@@ -3004,14 +3655,21 @@ function spawnForecastHtml(){const f=spawnForecast;if(!f)return'<div class="spaw
 
 let insightsDays=7;
 const insightsCache={};   // days -> {t, data, fetching}
+let insightsSequence=0;
 function loadInsights(force){
-  const c=insightsCache[insightsDays];
+  const days=insightsDays,c=insightsCache[days];
   if(!force&&c&&(c.fetching||(c.data&&Date.now()-c.t<60000)))return;
-  insightsCache[insightsDays]={...(c||{}),fetching:true};
-  fetch('/api/insights?days='+insightsDays,{cache:'no-store'}).then(r=>r.json()).then(d=>{
-    insightsCache[insightsDays]={t:Date.now(),data:d};
-    render(last,true);
-  }).catch(()=>{delete insightsCache[insightsDays];});
+  const sequence=++insightsSequence;
+  insightsCache[days]={...(c||{}),fetching:true,error:''};
+  fetch('/api/insights?days='+days,{cache:'no-store'}).then(async r=>{
+    const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Insights unavailable');return d;
+  }).then(d=>{
+    insightsCache[days]={t:Date.now(),data:d,fetching:false,error:''};
+    if(insightsDays===days&&sequence===insightsSequence)render(last,true);
+  }).catch(error=>{
+    insightsCache[days]={...(insightsCache[days]||{}),fetching:false,error:String(error.message||error)};
+    if(insightsDays===days&&sequence===insightsSequence)render(last,true);
+  });
 }
 function setInsightsDays(n){insightsDays=n;render(last,true);loadInsights();}
 function insTable(heads,rows){
@@ -3058,11 +3716,13 @@ function insightsSection(){
       +insFold('topsess','top sessions (lifetime $)',
         insTable([['session'],['project'],['$',1]],
           d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
-  }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
+  }else if(c?.error){body=`<div class="ctxload" role="alert">✗ ${esc(c.error)} <button onclick="loadInsights(true)">retry</button></div>`;}
+  else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
   return`<div class="insightspanel">${body}</div>`;
 }
 
 let last=null;
+let pollSequence=0,pollApplied=0,pollController=null;
 function render(f,force){
   if(!f||!f.sessions)return;
   const renderStarted=performance.now();
@@ -3076,15 +3736,18 @@ function render(f,force){
   $('#nav-now-count').textContent=navCount||'';
   $('#nav-now-count').title=`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`;
   const outChip=$('#outboxchip');if(outChip)outChip.textContent=`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`;
+  const activeAgentCount=activeSubagents(f).length;
+  const provisional=provisionalSessionObject();
+  const nowCounts={needs_you:(t.needs_me||0)+(provisional?.ui_group==='needs_you'?1:0),
+    working:(t.busy||0)+(provisional?.ui_group==='working'?1:0),available:t.available||0,
+    subagents:activeAgentCount};
+  const nowLabels={all:'All',needs_you:'Needs you',working:'Working',available:'Available',subagents:'Subagents'};
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
     const active=button.dataset.nowFilter===nowState;
     button.classList.toggle('active',active);
     button.setAttribute('aria-pressed',String(active));
+    button.textContent=nowLabels[button.dataset.nowFilter]+(button.dataset.nowFilter==='all'?'':` · ${nowCounts[button.dataset.nowFilter]||0}`);
   });
-  $('#totals').innerHTML=`<span><b${t.needs_me?' style="color:var(--amber)"':''}>${t.needs_me}</b> need you</span>
-    <span><b>${t.busy}</b> working</span>
-    <span><b>${t.available||0}</b> available <i class="sep">·</i>
-      <b>${t.agents_running}</b> subagent${t.agents_running===1?'':'s'}</span>`;
   usageBar(f.usage,f.provider_usage);
   const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
   const ledgerProblem=f.ledger&&f.ledger.ok===false?
@@ -3095,19 +3758,27 @@ function render(f,force){
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')&&$('#newsess').contains(ae);
   if(force||!touching()){
-    const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
-    const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
-      .map(action=>action.session_id));
-    renderPinned(f,matchesNow);
-    const visibleInboxSessionIds=renderActionInbox(f);
-    renderQueue($('#needsyou'),unpinned.filter(s=>s.ui_group==='needs_you'&&!visibleInboxSessionIds.has(s.session_id)),
-      'Needs You','sessions waiting for your response','needs');
-    renderBriefing();
-    renderOutboxCompact();
-    renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
-      'Working','turns in progress','working');
-    renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
-      'Available','ready for another message','available',true);
+    if(nowState==='subagents'){
+      ['#briefing','#pinned','#actioninbox','#needsyou','#outboxsummary','#working','#sessions'].forEach(selector=>{
+        const element=$(selector);if(element){element.innerHTML='';element.className=selector==='#pinned'?'empty':'';}
+      });
+      renderActiveSubagents(f);
+    }else{
+      const subagents=$('#subagents');if(subagents){subagents.innerHTML='';subagents.className='';}
+      const unpinned=sessionsWithProvisional(f).filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
+      const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
+        .map(action=>action.session_id));
+      renderPinned(f,matchesNow);
+      const visibleInboxSessionIds=renderActionInbox(f);
+      renderQueue($('#needsyou'),unpinned.filter(s=>s.ui_group==='needs_you'&&!visibleInboxSessionIds.has(s.session_id)),
+        'Needs You','sessions waiting for your response','needs');
+      renderBriefing();
+      renderOutboxCompact();
+      renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
+        'Working','turns in progress','working');
+      renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
+        'Available','ready for another message','available',true);
+    }
     if(!typingNew)$('#newsess').innerHTML=newSection();
     if(!typingHistory)$('#history').innerHTML=historySection(f);
     if(currentRoute==='workstreams')renderWorkstreams(workstreamData);
@@ -3126,12 +3797,16 @@ function render(f,force){
 }
 
 async function tick(){
-  const pollStarted=performance.now();
+  const pollStarted=performance.now(),sequence=++pollSequence;
+  if(pollController)pollController.abort();
+  const controller=new AbortController();pollController=controller;
   try{
-    const r=await fetch('/api/fleet',{cache:'no-store'});
+    const r=await fetch('/api/fleet',{cache:'no-store',signal:controller.signal});
     const payload=Number(r.headers.get('X-Fleet-Payload-Bytes')||r.headers.get('Content-Length'));
     if(Number.isFinite(payload))perfRecord('poll_payload_bytes',payload);
-    last=await r.json();
+    const next=await r.json();
+    if(sequence<pollApplied||sequence!==pollSequence)return;
+    pollApplied=sequence;last=next;
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
     $('#stale').style.display='none';
     render(last);
@@ -3139,8 +3814,8 @@ async function tick(){
     if(currentRoute==='now')loadBriefing();
     if(currentRoute==='insights')loadBudgets();
     if(currentRoute==='history'&&Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
-  }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
-  finally{perfRecord('poll_ms',performance.now()-pollStarted);}
+  }catch(e){if(e.name!=='AbortError'&&sequence===pollSequence){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}}
+  finally{if(pollController===controller)pollController=null;if(sequence===pollSequence)perfRecord('poll_ms',performance.now()-pollStarted);}
 }
 navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);

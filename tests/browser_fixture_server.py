@@ -23,20 +23,45 @@ def capabilities(**overrides):
            "decide_approval": False, "spawn_agent": True, "relay_agent": True,
            "relay_agent_direct": False, "account_usage": True, "exact_cost": False,
            "measured_throughput": False, "archive": True, "compact": True,
-           "review": True, "files": True}
+           "review": True, "files": True, "change_permission_mode": False}
     out.update(overrides)
     return out
 
 
+def fixture_status_line(provider, frozen=False):
+    common = {"branch": "status-strip", "worktree": "/Users/test/fleet-dash",
+        "worktree_label": "fleet-dash", "ahead": 3, "behind": 10,
+        "git_observed_at": time.time(), "effort": "high", "frozen": frozen}
+    if provider == "codex":
+        return {**common, "model": "GPT-5.4", "context_tokens": 1200,
+            "context_window": 10000, "context_pct": 12, "compact_remaining": None,
+            "cost_scope": "unavailable", "cost_label": "tree",
+            "cost_breakdown": [], "cost_breakdown_omitted": 0}
+    history = [500 + (index % 8) * 900 for index in range(50)]
+    return {**common, "model": "Opus 4.8", "context_tokens": 470000,
+        "context_window": 1000000, "context_pct": 47, "compact_remaining": 174000,
+        "cache_read_pct": 99, "cache_write": 855,
+        "cache_write_history": history, "cache_write_spikes": 9,
+        "cache_write_peak": 278000, "turn_cost": .254,
+        "session_cost": 80.0, "agent_cost": 4.12, "tree_cost": 84.12,
+        "cost_scope": "estimated", "cost_label": "tree",
+        "cost_breakdown": [{"kind": "main", "label": "Main session", "cost": 80.0},
+            {"kind": "agent", "label": "Review protocol mapping", "cost": 4.12}],
+        "cost_breakdown_omitted": 0}
+
+
 def base_session(provider, sid, title):
     codex = provider == "codex"
-    return {"session_id": sid, "native_session_id": sid.split(":")[-1],
+    session = {"session_id": sid, "native_session_id": sid.split(":")[-1],
             "provider": provider, "pid": None if codex else 4242,
             "name": title, "title": title, "project": "fleet-dash",
             "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
             "model": "gpt-5.4" if codex else "claude-sonnet-4-5",
             "family": "codex" if codex else "sonnet", "effort": "high",
             "collaboration_mode": "plan" if codex else None,
+            "permission_mode": None if codex else "default",
+            "permission_modes": [] if codex else ["default", "acceptEdits", "plan",
+                                                     "bypassPermissions"],
             "running": None, "last_msg": {"role": "assistant",
                 "text": "Ready for the next task."}, "state": "idle",
             "reg_status": "idle", "quiet_s": 3, "ctx_tokens": 1200,
@@ -69,7 +94,9 @@ def base_session(provider, sid, title):
                  "confidence": "confirmed"}],
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
-                measured_throughput=not codex)}
+                measured_throughput=not codex, change_permission_mode=not codex)}
+    session["status_line"] = fixture_status_line(provider)
+    return session
 
 
 def fresh_state():
@@ -317,7 +344,9 @@ def fixture_budgets(spawn=None):
             "provider": provider, "model": spawn.get("model") or "",
             "project": spawn.get("project") or "fleet-dash",
             "median_usd": 1.25 if provider == "claude" else None,
-            "median_tokens": 22000, "median_runtime_seconds": 900,
+            "median_tokens": (53000 if spawn.get("model") == "gpt-5.3-codex" else
+                              54000 if spawn.get("model") == "gpt-5.4" else 22000),
+            "median_runtime_seconds": 900,
             "currency_scope": "exact" if provider == "claude" else "unavailable"}
     spawn_budgets = [item for item in evaluated if spawn and (
         item["scope_type"] == "fleet" or item["scope_type"] == "provider" and
@@ -469,12 +498,16 @@ def fleet():
                     "show_week": True, "show_active": True, "refresh_seconds": 30,
                     "profiles": [{"id": "one", "email": "claude@example.com",
                         "active": True, "five_hour_pct": 20, "weekly_pct": 30,
+                        "fable_weekly_pct": 96 if STATE.get("scenario") == "usage-warning" else 41,
                         "five_hour_reset": "2099-01-01T00:00:00Z",
-                        "weekly_reset": "2099-01-07T00:00:00Z"},
+                        "weekly_reset": "2099-01-07T00:00:00Z",
+                        "fable_weekly_reset": "2099-01-08T00:00:00Z"},
                         {"id": "two", "email": "second@example.com", "active": False,
-                         "five_hour_pct": 4, "weekly_pct": 8,
+                         "five_hour_pct": 94 if STATE.get("scenario") == "usage-warning" else 4,
+                         "weekly_pct": 8, "fable_weekly_pct": 12,
                          "five_hour_reset": "2099-01-01T02:00:00Z",
-                         "weekly_reset": "2099-01-07T02:00:00Z"}]},
+                         "weekly_reset": "2099-01-07T02:00:00Z",
+                         "fable_weekly_reset": "2099-01-08T02:00:00Z"}]},
                 "codex": {"provider": "codex", "email": "codex@example.com",
                     "account_id": "codex@example.com", "plan_type": "pro",
                     "lifetime_tokens": 12345, "buckets": [{"id": "codex:primary",
@@ -488,7 +521,9 @@ def fleet():
             "models": ["sonnet", "opus"], "efforts": ["low", "medium", "high"],
             "models_by_provider": {"claude": [{"id": "sonnet", "name": "sonnet",
                 "efforts": ["low", "high"]}], "codex": [{"id": "gpt-5.4",
-                "name": "GPT-5.4", "efforts": ["medium", "high"]}]},
+                "name": "GPT-5.4", "efforts": ["medium", "high"]},
+                {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex",
+                 "efforts": ["medium", "high"]}]},
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(STATE.get("codex_error")),
                                     "error": STATE.get("codex_error")}},
@@ -511,13 +546,17 @@ def set_scenario(name):
     STATE = fresh_state()
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
-        name.startswith("mobile-needs-you")) else codex_session()
+        name.startswith("mobile-needs-you") or name.startswith("close-worktree")) else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
                        last_msg=None, ctx_tokens=None, ctx_pct=None,
                        total_tokens=None, cost=None, cost_source="unavailable",
                        convo_v="starting:4242:idle")
+        session["status_line"] = {"model": "claude", "effort": "high",
+            "context_tokens": None, "context_window": None, "context_pct": None,
+            "compact_remaining": None, "cache_read_pct": None, "cache_write": None,
+            "tree_cost": None, "cost_scope": "unavailable", "frozen": False}
         STATE["contexts"]["claude-one"] = []
     elif name in ("mobile-needs-you", "mobile-needs-you-missing-action"):
         session.update(title="Get 429 into a mergable state", name="hazy-hatching-curry-d8",
@@ -609,6 +648,13 @@ def set_scenario(name):
         STATE["fail_text"] = True
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
+    elif name.startswith("close-worktree"):
+        session.update(cwd="/Users/test/fleet-dash-worktrees/close-me",
+                       branch="feature/close-me", project="fleet-dash")
+        if name == "close-worktree-shared":
+            codex_session()["cwd"] = session["cwd"]
+        if name == "close-worktree-cleanup-failure":
+            STATE["fail_cleanup"] = True
     elif name == "reply-requested":
         session.update(state="turn_done", reg_status="idle", reply_requested=True,
                        convo_v="reply:1", quiet_s=12,
@@ -885,6 +931,9 @@ class Handler(BaseHTTPRequestHandler):
                 spawn = {key: (query.get(key) or [""])[0]
                          for key in ("provider", "model", "project", "cwd")
                          if (query.get(key) or [""])[0]}
+                if (STATE.get("scenario") == "forecast-race" and
+                        spawn.get("model") == "gpt-5.4"):
+                    time.sleep(.35)
                 return self.json_reply(fixture_budgets(spawn if spawn else None))
             if route == "/api/workstreams":
                 return self.json_reply(fixture_workstreams())
@@ -931,7 +980,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply({"ok": True, **page, "info": {"agent_id": "child-one",
                     "agent_type": "reviewer", "description": "Review protocol mapping",
                     "model": "gpt-5.4", "effort": "high", "tokens": {},
-                    "total_tokens": None, "cost": None}})
+                    "total_tokens": None, "cost": None, "state": "done",
+                    "status_line": {**fixture_status_line("codex", frozen=True),
+                        "model": "GPT-5.4", "cost_label": "agent"}}})
             if route == "/api/closed_context":
                 messages = ([{"role": "assistant", "text": f"Closed report {index:03d}"}
                             for index in range(205)] if STATE["scenario"] == "large-conversation" else
@@ -941,7 +992,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
                 return self.json_reply({"ok": True, "closed": True, **page,
-                    "info": {"project": "fleet-dash", "branch": "old"}})
+                    "info": {"project": "fleet-dash", "branch": "old",
+                        "status_line": fixture_status_line("claude", frozen=True)}})
             if route == "/api/commands":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
@@ -1205,9 +1257,19 @@ class Handler(BaseHTTPRequestHandler):
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == payload.get("session_id")), None)
                 if payload.get("type") == "spawn":
+                    if STATE.get("scenario") == "spawn-failure":
+                        time.sleep(.2)
+                        return self.json_reply({"ok": False,
+                                                "error": "fixture startup rejected"})
+                    if STATE.get("scenario") == "spawn-slow":
+                        time.sleep(.5)
                     exact = "codex:new" if payload.get("provider") == "codex" else "claude-new"
-                    STATE["sessions"].append(base_session(payload.get("provider") or "claude",
-                                                          exact, "New coding session"))
+                    spawned = base_session(payload.get("provider") or "claude",
+                                           exact, "New coding session")
+                    if spawned["provider"] == "claude":
+                        spawned["permission_mode"] = payload.get("permission_mode") or "default"
+                    STATE["sessions"].append(spawned)
+                    STATE.setdefault("contexts", {})[exact] = []
                     return self.json_reply({"ok": True, "session_id": exact,
                                             "cwd": payload.get("cwd")})
                 if payload.get("type") == "handoff":
@@ -1261,9 +1323,51 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_reply({"ok": False,
                                                 "error": "session is not reopenable"})
                     return self.json_reply({"ok": True, "reopened": True})
+                if payload.get("type") == "worktree_cleanup":
+                    if payload.get("cleanup_ticket") != "fixture-cleanup-ticket":
+                        return self.json_reply({"ok": False, "error": "cleanup preview expired"})
+                    if STATE.get("fail_cleanup"):
+                        return self.json_reply({"ok": False,
+                            "error": "fixture Git removal failed", "preserved": True,
+                            "worktree": "/Users/test/fleet-dash-worktrees/close-me"})
+                    STATE["worktree_removed"] = True
+                    return self.json_reply({"ok": True, "removed": True,
+                        "forced": payload.get("force") is True,
+                        "worktree": "/Users/test/fleet-dash-worktrees/close-me",
+                        "branch_preserved": True})
                 if not session:
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")
+                if typ == "close_preview":
+                    secondary = "fleet-dash-worktrees" in session.get("cwd", "")
+                    if not secondary:
+                        return self.json_reply({"ok": True, "secondary_worktree": False,
+                            "remove_allowed": False, "force_remove_allowed": False})
+                    dirty = STATE.get("scenario") != "close-worktree-clean"
+                    shared = ([{"session_id": "codex:thread-one", "provider": "codex",
+                                "title": "Codex parity work"}]
+                              if STATE.get("scenario") == "close-worktree-shared" else [])
+                    return self.json_reply({"ok": True, "secondary_worktree": True,
+                        "inspect_ok": True, "root": "/Users/test/fleet-dash",
+                        "worktree": session["cwd"], "branch": session["branch"],
+                        "revision": "fixture-close-revision",
+                        "cleanup_ticket": "fixture-cleanup-ticket", "dirty": dirty,
+                        "dirty_counts": {"staged": 1 if dirty else 0,
+                            "unstaged": 1 if dirty else 0, "untracked": 1 if dirty else 0,
+                            "conflicts": 0}, "dirty_total": 3 if dirty else 0,
+                        "dirty_files": ([
+                            {"path": "engine.py", "category": "staged", "status": "M."},
+                            {"path": "static/app.js", "category": "unstaged", "status": ".M"},
+                            {"path": "notes.txt", "category": "untracked", "status": "??"}]
+                            if dirty else []),
+                        "ignored_count": 1 if dirty else 0,
+                        "ignored_files": ["build/cache.bin"] if dirty else [],
+                        "shared_sessions": shared,
+                        "remove_allowed": not dirty and not shared,
+                        "force_remove_allowed": dirty and not shared,
+                        "reason": ("Another live Fleet session is using this worktree."
+                                   if shared else "The worktree contains files that removal would erase."
+                                   if dirty else None)})
                 if typ == "text":
                     if STATE.get("fail_text"):
                         return self.json_reply({"ok": False, "error": "terminal rejected input"})
@@ -1282,6 +1386,13 @@ class Handler(BaseHTTPRequestHandler):
                         "Open a Codex TUI attached to Fleet's shared App Server")
                 elif typ == "mode":
                     session["collaboration_mode"] = payload.get("mode")
+                    return self.json_reply({"ok": True, "mode": payload.get("mode")})
+                elif typ == "permission_mode":
+                    if not session.get("capabilities", {}).get("change_permission_mode"):
+                        return self.json_reply({"ok": False, "error": "Claude is not idle"})
+                    if payload.get("mode") not in session.get("permission_modes", []):
+                        return self.json_reply({"ok": False, "error": "mode unavailable"})
+                    session["permission_mode"] = payload.get("mode")
                     return self.json_reply({"ok": True, "mode": payload.get("mode")})
                 elif typ == "close":
                     STATE["sessions"] = [item for item in STATE["sessions"]

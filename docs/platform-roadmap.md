@@ -17,6 +17,7 @@ Status: approved for sequential implementation on `codex-integration`.
 | M8 — Briefings, budgets, and forecasts | Complete · 2026-07-16 | Durable per-device briefings, reviewed history, source links, mute-aware quiet/scheduled digests, persistent notification failures, scoped cumulative budgets, optional fail-closed future-spawn limits, honest mixed-provider measurement, action-inbox alerts, 156 Python tests, 74 deterministic browser checks, and 12 live checks. |
 | M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
+| M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
 
 Completion here records the milestone gate, not proof by assertion. M10 reopened the catalogue rows,
 verified the current implementation and tests, and recorded the final source/runtime limitations.
@@ -37,7 +38,7 @@ every existing control, and the current safe-action boundaries.
   ready-for-review action. Fleet never merges a PR.
 - Briefings appear in the app. Immediate blocker pushes and one fleet-quiet completion digest may
   use ntfy. Scheduled push digests default off.
-- Desktop uses a left navigation rail. Mobile uses bottom navigation. The destinations are Now,
+- Desktop uses a per-device left/right navigation rail. Mobile uses bottom navigation. The destinations are Now,
   Search, Workstreams, History, Insights, and Settings.
 - Workstreams are lightweight repository/project groupings, not a new task-management system.
 - Light automations are one-time outgoing messages, not a general recurring automation system. They
@@ -46,6 +47,8 @@ every existing control, and the current safe-action boundaries.
 - Now owns a central Outbox beside the action inbox. Creating an outbox item is the single explicit
   authorization for its later automatic send; execution does not ask for a second confirmation.
 - Features must remain usable in a 390×844 viewport and must not turn Now into a control wall.
+- Pinned sessions retain persisted insertion order. New pins append at the bottom; urgency and
+  activity changes never reorder them.
 - Each milestone gets deterministic tests, a commit, and a push before dependent work starts.
 
 ## Requirements catalogue and completion ledger
@@ -65,7 +68,7 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-004 | Provider handoff always shows an editable preview with a one-action accept-unchanged path and clearly creates an independent session. | M5 |
 | DEC-005 | Git actions stop at commit, push, draft PR, and explicitly confirmed mark-ready. Fleet never merges. | M6 |
 | DEC-006 | Briefings live in Fleet. ntfy is optional for immediate blockers and one fleet-quiet digest; scheduled push digests default off. | M7 |
-| DEC-007 | Desktop navigation is a left rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1 |
+| DEC-007 | Desktop navigation is a per-device left/right rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1/M11 |
 | DEC-008 | Workstreams are lightweight repo/project groupings, not tasks, kanban, ownership, or dependencies. | M3 |
 | DEC-009 | Every new interaction works at 390×844 and desktop size without overloading Now. Split destinations when density warrants it. | All |
 | DEC-010 | External ChatGPT Desktop/VS Code Codex threads remain view-only unless explicitly connected to Fleet's App Server. They are still discoverable and their observed transcript activity is trackable. | M0/M4 |
@@ -76,6 +79,8 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-015 | A due message waits if its existing target is busy. A closed/missing target becomes Blocked and is never implicitly reopened; the user may retarget it. | M7 |
 | DEC-016 | “When usage resets” binds to one selected provider identity and one provider-reported window. Fleet follows updated provider reset evidence and never infers across accounts/windows. | M7 |
 | DEC-017 | Scheduled new sessions snapshot every New Session field, including provider, project/cwd, model, effort, mode, and optional worktree, and remain editable until dispatch. | M7 |
+| DEC-018 | Pinned sessions use persisted insertion order. New pins append at the bottom; urgency/activity sorting never changes the pinned list. | M11 |
+| DEC-019 | Full-chat operational telemetry is bounded, incrementally maintained, and provider-honest. Missing context, cache, Git, or currency data is omitted rather than inferred. | M11 |
 
 ### Navigation, presentation, and interaction
 
@@ -95,6 +100,10 @@ the current source and running app; a checked box or this document's prose is no
 | UX-012 | Session close/stop controls live in the full-chat overflow menu with confirmation. Stop affects the current turn; Claude close may terminate its terminal, while provider capability text remains explicit. | M1 |
 | UX-013 | Every message composer groups Send now, Schedule, When available, and When usage resets without making the common Send now path slower. New Session offers Schedule session alongside Start session. | M7 |
 | UX-014 | The Outbox is reachable from Now and the sticky command bar, has a pending-count badge, and supports edit, send now, retarget, retry, and cancel where state permits. | M7 |
+| UX-015 | Now puts counts in its All/Needs you/Working/Available/Subagents filters, keeps Fleet Briefing above Pinned, and moves detailed provider usage behind a warning-aware Usage chip. | M11 |
+| UX-016 | Every composer is multiline: Return inserts a newline, modified Return or the explicit button sends, and optimistic startup/sending states retain exact text on failure. | M11 |
+| UX-017 | Full chat and subagent chat expose an adaptive operational status strip; Markdown and chat headers avoid duplicated metadata; nested overlays always stack above chat evidence. | M11 |
+| UX-018 | Every asynchronous control paints a pressed/optimistic/loading state immediately, rejects duplicate submissions, ignores stale responses, and keeps an inline restore/retry path on failure. | M11 |
 
 ### Intelligent global search
 
@@ -191,6 +200,7 @@ the current source and running app; a checked box or this document's prose is no
 | QUAL-003 | Capture baseline and final p50/p95 latency, payload, index lag, render/input latency, and memory on the same corpus; optimize only with before/after evidence. | M0/M9 |
 | QUAL-004 | Each milestone is a focused append-only commit pushed to `codex-integration`; unrelated user work is preserved and `main` is never changed. | All |
 | QUAL-005 | Final audit cites current `file:line` implementation and test evidence for every catalogue ID, reloads the daemon, checks HTTP/browser console/network state, and lists any exact provider limitation. | M10 |
+| QUAL-006 | Input-to-visible-feedback is <100 ms p95 and routine Fleet-local completion is <250 ms p95 on desktop and 390×844 mobile; named interaction surfaces retain repeatable latency gates. | M11 |
 
 ### Milestone traceability gate
 
@@ -1014,6 +1024,48 @@ Commit: `Harden Fleet platform workflows`.
 
 Exit: no known P0/P1 defects, every discovered lower-severity defect was fixed, the daemon was
 reloaded, fresh live console/network and daemon logs were clean, and the branch was pushed.
+
+### M11 — Dashboard UX and responsiveness
+
+Completed 2026-07-16. The detailed product decisions and implementation ledger live in
+[`docs/dashboard-ux-latency-roadmap.md`](dashboard-ux-latency-roadmap.md).
+
+- Now puts state totals in filter chips, adds a flat active-subagent view, moves Fleet Briefing above
+  Pinned, and moves provider/account usage into a compact warning-aware chip. Pinned order is the
+  stored insertion order; new pins append at the bottom and failed mutations restore that exact order.
+- Desktop navigation can sit left or right. Chat/settings/evidence overlays stack and restore
+  correctly. Markdown and full-chat headers no longer duplicate operational metadata.
+- Composers use Return for newlines and modified Return/explicit Send for delivery. Model changes,
+  session startup, messages, questions, relay, Terminal, Outbox, Settings, search/history pagination,
+  commands, files, Briefing, and pinning all paint immediate progress and retain a recovery path.
+- Claude permission modes and secondary-worktree cleanup are capability/state gated. Bypass and
+  dirty force removal retain separate high-warning confirmations and bounded risk lists.
+- Main, subagent, completed-agent, and closed-session chats render an adaptive status strip from
+  bounded incremental context/cache/cost state and cached fixed-argv Git evidence.
+- Poll, Insights, forecast, history, search, and command races are sequence/abort guarded. Unchanged
+  conversations retain their DOM. Live main/subagent context reads use parent-scoped immutable
+  scan-published snapshots instead of waiting behind the fleet-wide Tail fold lock.
+- The newer Claude `task-notification` terminal states (`completed`, `killed`, `failed`) now settle
+  background agents immediately unless newer child output proves that task ID resumed.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 185 passed.
+- `npx playwright test tests/browser/fleet.spec.js tests/browser/latency.spec.js` — 112 passed across
+  desktop and mobile. Every named interaction surface has 20 first-feedback samples below 100 ms;
+  fixture poll/native completion stays below 250 ms.
+- `python3 tests/perf_baseline.py ... --assert-contract` — fleet/main-context/subagent-context/
+  History/search/action-ping client p95 measured 11.107/4.864/3.580/5.533/1.556/0.962 ms on the
+  live corpus; each server-route p95 was below 5 ms.
+- `node tests/browser_baseline.js ... 16 --assert-contract` — first useful render p95 was 236.828 ms
+  desktop and 241.110 ms mobile; render p95 was 5.2/5.9 ms and poll p95 60.7/59.7 ms.
+- `python3 tests/search_benchmark.py` passed every 100k-message/2k-source gate.
+- `python3 tests/live_api_smoke.py`, `python3 tests/live_refresh_soak.py`, and the disposable
+  restart-during-turn smoke passed. The authenticated live browser matrix passed 12/12 after its
+  assertion distinguished intentional stale-request `ERR_ABORTED` cancellation from outages.
+
+Exit: all M11 catalogue rows and the detailed dashboard catalogue have implementation, failure-path,
+responsive, deterministic, and live evidence. The daemon is running the M11 engine.
 
 ## Verification matrix
 

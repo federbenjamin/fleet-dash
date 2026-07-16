@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -91,6 +92,7 @@ class EngineProviderTest(unittest.TestCase):
         self.claude_usage = os.path.join(self.base, "usage.json")
         self.claude_stats = os.path.join(self.tmp.name, "stats-cache.json")
         self.claude_history = os.path.join(self.tmp.name, "history.jsonl")
+        self.claude_settings = os.path.join(self.tmp.name, "settings.json")
         self.claude_usage_prefs = os.path.join(self.tmp.name, "claude-usage.plist")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
@@ -104,6 +106,7 @@ class EngineProviderTest(unittest.TestCase):
             mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
             mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
             mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
+            mock.patch.object(engine_module, "CLAUDE_SETTINGS", self.claude_settings),
             mock.patch.object(engine_module, "CLAUDE_USAGE_PREFS",
                               self.claude_usage_prefs),
         ]
@@ -175,6 +178,58 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(self.engine.session_context("same"), {
             "ok": True, "messages": [], "files": [], "starting": True})
 
+    def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
+        fleet = self.engine.scan()
+        revision = next(item["convo_v"] for item in fleet["sessions"]
+                        if item["session_id"] == "same")
+
+        class RefuseLock:
+            def __enter__(self):
+                raise AssertionError("routine context read waited for scan_lock")
+
+            def __exit__(self, *_):
+                return False
+
+        self.engine.scan_lock = RefuseLock()
+        context = self.engine.session_context("same")
+        self.assertTrue(context["ok"])
+        self.assertEqual(self.engine._claude_context_snapshots["same"]["revision"],
+                         revision)
+        self.assertEqual(context["messages"][-1]["text"], "hi")
+
+    def test_live_agent_context_uses_parent_scoped_snapshot_without_scan_lock(self):
+        subdir = os.path.join(os.path.dirname(self.transcript), "same", "subagents")
+        os.makedirs(subdir)
+        aid = "agent-shared123"
+        with open(os.path.join(subdir, aid + ".meta.json"), "w") as handle:
+            json.dump({"agentType": "quick-build", "description": "Scoped child",
+                       "spawnDepth": 1, "toolUseId": "tool-child"}, handle)
+        with open(os.path.join(subdir, aid + ".jsonl"), "w") as handle:
+            handle.write(json.dumps({"type": "assistant",
+                "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                    "role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 100,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 700, "output_tokens": 5},
+                    "content": [{"type": "text", "text": "child complete"}]}}) + "\n")
+        fleet = self.engine.scan()
+        parent = next(item for item in fleet["sessions"] if item["session_id"] == "same")
+        self.assertEqual(parent["agents"][0]["agent_id"], aid)
+
+        class RefuseLock:
+            def __enter__(self):
+                raise AssertionError("routine agent context read waited for scan_lock")
+
+            def __exit__(self, *_):
+                return False
+
+        self.engine.scan_lock = RefuseLock()
+        context = self.engine.agent_context("same", aid)
+        self.assertTrue(context["ok"])
+        self.assertEqual(context["messages"][-1]["text"], "child complete")
+        self.assertEqual(context["info"]["status_line"]["cache_write"], 200)
+        self.assertIn(("same", aid), self.engine._claude_agent_context_snapshots)
+
     def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
         with open(self.claude_account, "w") as handle:
             json.dump({"oauthAccount": {"emailAddress": "claude@example.com"}}, handle)
@@ -203,15 +258,19 @@ class EngineProviderTest(unittest.TestCase):
                  "oauthAccountJSON": json.dumps({"emailAddress": "first@example.com"}),
                  "claudeUsage": {"sessionPercentage": first_pct,
                                   "weeklyPercentage": 22,
+                                  "fableWeeklyPercentage": 7,
                                   "sessionResetTime": 800_000_000,
-                                  "weeklyResetTime": 800_100_000}},
+                                  "weeklyResetTime": 800_100_000,
+                                  "fableWeeklyResetTime": 800_150_000}},
                 {"id": "profile-two", "name": "second", "isSelectedForDisplay": True,
                  "refreshInterval": 30,
                  "oauthAccountJSON": json.dumps({"emailAddress": "second@example.com"}),
                  "claudeUsage": {"sessionPercentage": 33,
                                   "weeklyPercentage": 44,
+                                  "fableWeeklyPercentage": 66,
                                   "sessionResetTime": 800_200_000,
-                                  "weeklyResetTime": 800_300_000}},
+                                  "weeklyResetTime": 800_300_000,
+                                  "fableWeeklyResetTime": 800_350_000}},
             ]
             with open(self.claude_usage_prefs, "wb") as handle:
                 plistlib.dump({"profiles_v3": json.dumps(profiles).encode(),
@@ -225,6 +284,9 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual([item["email"] for item in usage["profiles"]],
                          ["first@example.com", "second@example.com"])
         self.assertEqual([item["active"] for item in usage["profiles"]], [True, False])
+        self.assertEqual([item["fable_weekly_pct"] for item in usage["profiles"]],
+                         [7, 66])
+        self.assertIsNotNone(usage["profiles"][0]["fable_weekly_reset"])
         self.assertEqual(usage["five_hour_pct"], 11)
         self.assertEqual(usage["refresh_seconds"], 30)
         self.assertNotIn("must-never-leave-the-plist", json.dumps(usage))
@@ -584,6 +646,47 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(relayed["ok"])
         self.assertIn("agent-child", writes[-1][1][0][0])
 
+    def test_claude_permission_mode_uses_only_verified_native_cycle(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet-5")
+        self.engine.tail_for = lambda path: tail
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        changed = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                   "mode": "plan"})
+        self.assertEqual(changed, {"ok": True, "mode": "plan"})
+        self.assertEqual(writes[-1], ("/dev/ttys-test",
+            [("\x1b[Z", False), ("\x1b[Z", False)], 0.4))
+        self.assertEqual(tail.permission_mode, "plan")
+
+        self.engine._claude_command_cache[pid] = (
+            "/usr/local/bin/claude --allow-dangerously-skip-permissions")
+        tail.permission_mode = "plan"
+        bypass = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                  "mode": "bypassPermissions"})
+        self.assertTrue(bypass["ok"])
+        self.assertEqual(writes[-1][1], [("\x1b[Z", False)])
+        tail.permission_mode = "plan"
+        auto = self.engine.act({"type": "permission_mode", "session_id": "same",
+                                "mode": "auto"})
+        self.assertTrue(auto["ok"])
+        self.assertEqual(writes[-1][1], [("\x1b[Z", False), ("\x1b[Z", False)])
+
+        tail.permission_mode = "dontAsk"
+        self.assertIn("startup-only", self.engine.act({"type": "permission_mode",
+            "session_id": "same", "mode": "default"})["error"])
+        reg["status"] = "busy"
+        self.assertIn("idle", self.engine.act({"type": "permission_mode",
+            "session_id": "same", "mode": "plan"})["error"])
+
     def test_claude_close_interrupts_then_terminates_only_registered_process(self):
         pid = 424242
         reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
@@ -623,13 +726,18 @@ class EngineProviderTest(unittest.TestCase):
         self.engine.is_trusted = lambda cwd, trusted=None: True
         with mock.patch.object(engine_module, "HOME", self.tmp.name):
             spawned = self.engine.spawn_session({"cwd": self.cwd, "model": "sonnet",
-                "effort": "high", "worktree": True, "worktree_name": "live-e2e"})
+                "effort": "high", "permission_mode": "acceptEdits",
+                "worktree": True, "worktree_name": "live-e2e"})
         self.assertTrue(spawned["ok"])
         command = writes[-1][1][0][0]
         self.assertRegex(command, r"claude --session-id [0-9a-f-]{36} --model sonnet ")
-        self.assertIn("--effort high --worktree live-e2e", command)
+        self.assertIn("--effort high --permission-mode acceptEdits --worktree live-e2e", command)
         self.assertEqual(spawned["session_id"], command.split("--session-id ", 1)[1].split()[0])
         self.assertFalse(spawned["trust_prompt"])
+        rejected = self.engine.spawn_session({"cwd": self.cwd,
+            "permission_mode": "bypassPermissions"})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("permission mode", rejected["error"])
 
         changed = self.engine.update_settings({"mute_session": "same", "muted": True})
         self.assertTrue(changed["ok"])
@@ -1032,6 +1140,17 @@ class EngineProviderTest(unittest.TestCase):
         pinned = self.engine.update_settings({"pin_session": "codex:same",
                                               "pinned": True})
         self.assertEqual(pinned["pinned_sessions"], ["codex:same"])
+        pinned = self.engine.update_settings({"pin_session": "claude:second",
+                                              "pinned": True})
+        self.assertEqual(pinned["pinned_sessions"],
+                         ["codex:same", "claude:second"])
+        pinned = self.engine.update_settings({"pin_session": "codex:same",
+                                              "pinned": False})
+        self.assertEqual(pinned["pinned_sessions"], ["claude:second"])
+        pinned = self.engine.update_settings({"pin_session": "codex:same",
+                                              "pinned": True})
+        self.assertEqual(pinned["pinned_sessions"],
+                         ["claude:second", "codex:same"])
         dismissed = self.engine.update_settings({
             "mark_available_session": "codex:same", "revision": "reply:2"})
         self.assertEqual(dismissed["reply_available"]["codex:same"], "reply:2")
@@ -1041,7 +1160,7 @@ class EngineProviderTest(unittest.TestCase):
 
         with open(os.path.join(self.base, "config.json")) as handle:
             saved = json.load(handle)
-        self.assertEqual(saved["pinned_sessions"], ["codex:same"])
+        self.assertEqual(saved["pinned_sessions"], ["claude:second", "codex:same"])
         self.assertEqual(saved["reply_available"]["codex:same"], "reply:2")
         self.assertEqual(saved["read_sessions"]["codex:same"], "response:3")
 
@@ -1193,6 +1312,96 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(linked_identity["root"], main_identity["root"])
         self.assertEqual(linked_identity["workstream_id"], main_identity["workstream_id"])
         self.assertEqual(linked_identity["worktree"], os.path.realpath(linked))
+
+    def test_secondary_worktree_close_preview_and_cleanup_are_revision_checked(self):
+        main = os.path.join(self.tmp.name, "close-main")
+        os.makedirs(main)
+
+        def git(*args, cwd=main):
+            return subprocess.run(["git", *args], cwd=cwd, check=True,
+                                  capture_output=True, text=True)
+
+        git("init", "-b", "main")
+        git("config", "user.email", "fleet@example.test")
+        git("config", "user.name", "Fleet Test")
+        with open(os.path.join(main, ".gitignore"), "w") as handle:
+            handle.write("build/\n")
+        with open(os.path.join(main, "tracked.txt"), "w") as handle:
+            handle.write("base\n")
+        git("add", ".gitignore", "tracked.txt")
+        git("commit", "-m", "base")
+
+        dirty = os.path.join(self.tmp.name, "close-dirty")
+        git("worktree", "add", "-b", "feature/dirty", dirty)
+        with open(os.path.join(dirty, "tracked.txt"), "a") as handle:
+            handle.write("unstaged\n")
+        with open(os.path.join(dirty, "staged.txt"), "w") as handle:
+            handle.write("staged\n")
+        git("add", "staged.txt", cwd=dirty)
+        with open(os.path.join(dirty, "untracked.txt"), "w") as handle:
+            handle.write("untracked\n")
+        os.makedirs(os.path.join(dirty, "build"))
+        with open(os.path.join(dirty, "build", "cache.bin"), "w") as handle:
+            handle.write("ignored\n")
+
+        session = {"session_id": "same", "provider": "codex", "cwd": dirty}
+        preview = self.engine.close_worktree_preview(session)
+        self.assertTrue(preview["secondary_worktree"])
+        self.assertTrue(preview["inspect_ok"])
+        self.assertFalse(preview["remove_allowed"])
+        self.assertTrue(preview["force_remove_allowed"])
+        self.assertEqual(preview["dirty_counts"], {
+            "staged": 1, "unstaged": 1, "untracked": 1, "conflicts": 0})
+        self.assertEqual(preview["ignored_files"], ["build/cache.bin"])
+        self.assertEqual({item["path"] for item in preview["dirty_files"]},
+                         {"tracked.txt", "staged.txt", "untracked.txt"})
+
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"sessions": [{"session_id": "codex:other",
+                "provider": "codex", "title": "Other", "cwd": dirty}]}
+        shared = self.engine.close_worktree_preview(session)
+        self.assertFalse(shared["force_remove_allowed"])
+        self.assertEqual(shared["shared_sessions"][0]["session_id"], "codex:other")
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"sessions": []}
+
+        self.engine._mark_cleanup_ticket_closed(preview["cleanup_ticket"], "same")
+        removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": preview["cleanup_ticket"], "force": True})
+        self.assertTrue(removed["ok"])
+        self.assertTrue(removed["branch_preserved"])
+        self.assertFalse(os.path.exists(dirty))
+        self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/dirty").returncode, 0)
+
+        clean = os.path.join(self.tmp.name, "close-clean")
+        git("worktree", "add", "-b", "feature/clean", clean)
+        clean_session = {"session_id": "same", "provider": "codex", "cwd": clean}
+        clean_preview = self.engine.close_worktree_preview(clean_session)
+        self.assertTrue(clean_preview["remove_allowed"])
+        self.engine._mark_cleanup_ticket_closed(clean_preview["cleanup_ticket"], "same")
+        clean_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": clean_preview["cleanup_ticket"], "force": False})
+        self.assertTrue(clean_removed["ok"])
+        self.assertFalse(os.path.exists(clean))
+        self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/clean").returncode, 0)
+
+        stale = os.path.join(self.tmp.name, "close-stale")
+        git("worktree", "add", "-b", "feature/stale", stale)
+        stale_session = {"session_id": "same", "provider": "codex", "cwd": stale}
+        stale_preview = self.engine.close_worktree_preview(stale_session)
+        with open(os.path.join(stale, "after-preview.txt"), "w") as handle:
+            handle.write("changed\n")
+        self.engine._mark_cleanup_ticket_closed(stale_preview["cleanup_ticket"], "same")
+        rejected = self.engine.cleanup_closed_worktree({"session_id": "same",
+            "cleanup_ticket": stale_preview["cleanup_ticket"], "force": False})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("changed after preview", rejected["error"])
+        self.assertTrue(os.path.isdir(stale))
+
+        primary = self.engine.close_worktree_preview(
+            {"session_id": "same", "provider": "codex", "cwd": main})
+        self.assertFalse(primary["secondary_worktree"])
+        self.assertFalse(primary["remove_allowed"])
 
     def test_workstreams_keep_missing_and_unrelated_folders_separate(self):
         one = codex_session()
@@ -1362,6 +1571,102 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(records[0]["test_outcome"]["command"],
                          "python3 -m unittest")
 
+    def test_status_metrics_are_bounded_and_context_excludes_output(self):
+        tail = Tail(os.path.join(self.tmp.name, "status.jsonl"))
+        for index in range(52):
+            tail._status_cache_track({"cache_creation_input_tokens": index * 1000},
+                                     f"2026-07-16T00:00:{index % 60:02d}Z")
+        self.assertEqual(len(tail.cache_write_history), 50)
+        self.assertEqual((tail.cache_write_history[0], tail.cache_write_history[-1]),
+                         (2000, 51000))
+        self.assertEqual(tail.cache_write_spikes, 31)
+        self.assertEqual(tail.cache_write_peak, 51000)
+        tail.last_usage = {"input_tokens": 100, "cache_creation_input_tokens": 200,
+                           "cache_read_input_tokens": 700, "output_tokens": 9000}
+        self.assertEqual(tail.context_tokens(), 1000)
+        metrics = tail.status_metrics(self.engine.cfg)
+        self.assertEqual(metrics["cache_read_pct"], 70)
+        self.assertEqual(metrics["cache_write"], 200)
+
+    def test_compaction_headroom_requires_explicit_valid_settings(self):
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000",
+                               "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"}}, handle)
+        self.assertEqual(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000),
+                         170000)
+        self.engine._compact_settings_cache.clear()
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "2000000",
+                               "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"}}, handle)
+        self.assertEqual(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000),
+                         330000)
+        self.engine._compact_settings_cache.clear()
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "invalid"}}, handle)
+        self.assertIsNone(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000))
+        self.assertIsNone(self.engine.claude_compact_headroom(self.cwd, None, 1000000))
+
+    def test_operational_git_uses_cached_origin_main_comparison(self):
+        calls = []
+        self.engine._bounded_process = lambda argv, **kwargs: (
+            calls.append((argv, kwargs)) or {"ok": True, "stdout": "10 3\n"})
+        worktree = os.path.realpath(self.cwd)
+        self.engine._operational_git_probe(worktree, worktree)
+        with mock.patch.object(self.engine, "workstream_identity", return_value={
+                "kind": "git", "root": worktree, "worktree": worktree,
+                "missing": False}):
+            status = self.engine.operational_git(worktree)
+        self.assertEqual((status["ahead"], status["behind"]), (3, 10))
+        self.assertEqual(calls[0][0], ["git", "-C", worktree, "rev-list",
+            "--left-right", "--count", "refs/remotes/origin/main...HEAD"])
+        self.assertNotIn("fetch", calls[0][0])
+        self.assertEqual(calls[0][1]["timeout"], 4)
+        with mock.patch.object(self.engine, "workstream_identity", return_value={
+                "kind": "folder", "root": worktree, "worktree": worktree,
+                "missing": False}):
+            nongit = self.engine.operational_git(worktree)
+        self.assertIsNone(nongit["worktree_label"])
+        self.assertIsNone(nongit["ahead"])
+
+    def test_status_tree_cost_breakdown_and_closed_snapshot_are_preserved(self):
+        session = codex_session()
+        session.update(provider="claude", session_id="status-session", name="Status",
+                       title="Status", cwd=self.cwd, cost=.25, agent_cost=.75,
+                       agents_total=2, bridge_url=None, agents=[
+                           {"agent_type": "review", "description": "Review one", "cost": .3},
+                           {"agent_type": "test", "description": "Test two", "cost": .45}])
+        with mock.patch.object(self.engine, "operational_git", return_value={
+                "worktree": self.cwd, "worktree_label": "repo", "ahead": 3,
+                "behind": 10, "git_observed_at": 1}), \
+             mock.patch.object(self.engine, "claude_compact_headroom", return_value=None):
+            status = self.engine.session_status_line(session)
+        self.assertEqual(status["tree_cost"], 1.0)
+        self.assertEqual([item["cost"] for item in status["cost_breakdown"]],
+                         [.25, .3, .45])
+        session["status_line"] = status
+        self.engine.record_sessions([session], 100)
+        self.engine.record_sessions([], 101)
+        self.engine._closed_sessions_cache = None
+        closed = next(item for item in self.engine.closed_sessions()
+                      if item["session_id"] == "status-session")
+        self.assertEqual(closed["status_line"]["tree_cost"], 1.0)
+        self.assertTrue(closed["status_line"]["frozen"])
+
+    def test_unchanged_session_ledger_projection_skips_mutating_sql(self):
+        session = codex_session()
+        session.update(status_line={"ahead": 2, "git_observed_at": 1},
+                       name="Codex", title="Codex")
+        self.engine.record_sessions([session], 100)
+        statements = []
+        self.engine.ensure_db().set_trace_callback(statements.append)
+        refreshed = copy.deepcopy(session)
+        refreshed["status_line"]["git_observed_at"] = 2
+        self.engine.record_sessions([refreshed], 102)
+        mutations = [statement for statement in statements
+                     if statement.lstrip().upper().startswith(
+                         ("INSERT", "UPDATE", "DELETE", "REPLACE", "COMMIT"))]
+        self.assertEqual(mutations, [])
+
     def test_claude_peek_preserves_markdown_blocks(self):
         tail = Tail(self.transcript)
         text = "### Default width\n\nUse **Fit the screen**."
@@ -1372,6 +1677,96 @@ class EngineProviderTest(unittest.TestCase):
         preview = tail.last_message(500)["text"]
         self.assertEqual(len(preview), 500)
         self.assertTrue(preview.endswith("…"))
+
+    def test_task_notification_ends_killed_agent_but_not_a_resumed_agent(self):
+        subdir = os.path.join(self.tmp.name, "agent-parent", "subagents")
+        os.makedirs(subdir)
+
+        def write_agent(agent_id, rows):
+            with open(os.path.join(subdir, agent_id + ".meta.json"), "w") as handle:
+                json.dump({"agentType": "quick-build", "description": "Gate batch",
+                           "toolUseId": "tool-" + agent_id}, handle)
+            with open(os.path.join(subdir, agent_id + ".jsonl"), "w") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+        killed_id = "agent-killed123"
+        resumed_id = "agent-resumed123"
+        write_agent(killed_id, [{"type": "user", "timestamp": "2026-07-16T20:39:44.478Z",
+            "message": {"role": "user", "content": [{"type": "text",
+                "text": "[Request interrupted by user]"}]}}])
+        write_agent(resumed_id, [{"type": "assistant",
+            "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                "role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "still-running",
+                             "name": "Bash", "input": {}}]}}])
+
+        parent_path = os.path.join(self.tmp.name, "agent-parent.jsonl")
+        with open(parent_path, "w") as handle:
+            for agent_id in (killed_id, resumed_id):
+                bare_id = agent_id.removeprefix("agent-")
+                prompt = ("<task-notification>\n"
+                          f"<task-id>{bare_id}</task-id>\n"
+                          "<status>killed</status>\n"
+                          "</task-notification>")
+                handle.write(json.dumps({"type": "attachment",
+                    "timestamp": "2026-07-16T20:39:44.480Z",
+                    "attachment": {"type": "queued_command",
+                                   "commandMode": "task-notification",
+                                   "prompt": prompt}}) + "\n")
+        parent = Tail(parent_path)
+        self.assertTrue(parent.poll())
+
+        states = {agent["agent_id"]: agent["state"] for agent in
+                  self.engine.scan_agents(subdir, time.time(), parent=parent)}
+        self.assertEqual(states[killed_id], "ended")
+        self.assertEqual(states[resumed_id], "running")
+
+    def test_agent_finalization_dedupe_is_scoped_to_parent(self):
+        aid = "agent-collision123"
+
+        def make_parent(name):
+            subdir = os.path.join(self.tmp.name, name, "subagents")
+            os.makedirs(subdir)
+            with open(os.path.join(subdir, aid + ".meta.json"), "w") as handle:
+                json.dump({"agentType": "review", "description": name}, handle)
+            transcript = os.path.join(subdir, aid + ".jsonl")
+            with open(transcript, "w") as handle:
+                handle.write(json.dumps({"type": "assistant",
+                    "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                        "role": "assistant", "model": "claude-sonnet",
+                        "stop_reason": "end_turn", "usage": {"input_tokens": 1,
+                            "output_tokens": 1}, "content": [{"type": "text",
+                                                               "text": "done"}]}}) + "\n")
+            old = time.time() - 60
+            os.utime(transcript, (old, old))
+            return subdir
+
+        subdirs = [make_parent("parent-one"), make_parent("parent-two")]
+        finalized = []
+        self.engine.ledger_finalize = lambda subdir, agent_id, meta, tail: (
+            finalized.append((subdir, agent_id)))
+        for subdir in subdirs:
+            self.engine.scan_agents(subdir, time.time())
+        self.assertEqual(finalized, [(subdirs[0], aid), (subdirs[1], aid)])
+        for subdir in subdirs:
+            self.engine.scan_agents(subdir, time.time())
+        self.assertEqual(len(finalized), 2)
+
+    def test_tail_tracks_only_known_claude_permission_modes(self):
+        path = os.path.join(self.tmp.name, "permission-mode.jsonl")
+        rows = [
+            {"type": "permission-mode", "permissionMode": "acceptEdits"},
+            {"type": "permission-mode", "permissionMode": "invented"},
+            {"type": "user", "permissionMode": "plan",
+             "message": {"role": "user", "content": "continue"}},
+        ]
+        with open(path, "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        tail = Tail(path)
+        self.assertTrue(tail.poll())
+        self.assertEqual(tail.permission_mode, "plan")
 
 
 if __name__ == "__main__":

@@ -1034,6 +1034,7 @@ class CodexAdapter:
                                         (observation or {}).get("error")),
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
+                "ctx_window": ctx_window,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,
                 "total_tokens": _usage_cumulative(usage),
                 "cost": None, "cost_source": "unavailable", "bridge_url": None,
@@ -1349,6 +1350,7 @@ class CodexAdapter:
                     "collaboration_mode": mode, "running": None,
                     "last_msg": None, "state": "idle",
                     "reg_status": "loaded", "quiet_s": 0, "ctx_tokens": 0,
+                    "ctx_window": None,
                     "ctx_pct": None, "cost": None, "cost_source": "unavailable",
                     "bridge_url": None, "started_ms": round(now * 1000), "pending": None,
                     "compacting": None, "muted": False, "convo_v": f"{int(now * 1000)}:0",
@@ -1436,10 +1438,15 @@ class CodexAdapter:
         out = self.context(self.key(agent_id))
         if out.get("ok"):
             usage = self.client.thread_state.get(agent_id, {}).get("token_usage") or {}
+            ctx_tokens = _usage_total(usage) if usage else None
+            ctx_window = _usage_window(usage) if usage else None
             out["info"] = {"agent_id": agent_id, "agent_type": "codex",
                            "description": "Codex subagent", "model": "",
                            "family": "codex", "tokens": _token_breakdown(usage),
-                           "total_tokens": _usage_total(usage) if usage else None,
+                           "total_tokens": _usage_cumulative(usage) if usage else None,
+                           "ctx_tokens": ctx_tokens, "ctx_window": ctx_window,
+                           "ctx_pct": (round(100 * ctx_tokens / ctx_window, 1)
+                                       if ctx_window else None),
                            "cost": None, "cost_source": "unavailable"}
         return out
 

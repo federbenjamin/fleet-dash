@@ -92,18 +92,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    immediately; a bare waiting flag must persist for `WAITING_CONFIRM_SECONDS` because Claude
    can flash it between progress prose and the next tool; idle → turn_done if fresh end_turn
    else idle; busy → running/stalled).
-   **CANCELLED is separate, authoritative and immediate:** the parent's `tool_result` for that
-   Agent tool_use comes back `is_error: true` ("The user doesn't want to proceed with this tool
-   use"). `Tail.errored_tools` collects those ids; `scan_agents` flips any agent whose
-   `meta.toolUseId` is among them to `ended` with no timing heuristic. This is NOT optional: a
-   killed agent's own transcript ends on a USER row (the rejection), so the assistant-last
-   `settled` rule structurally cannot see it and it would sit "running" → red "stalled" forever
-   (verified 2026-07-14 on session b5996cb1).
-   Two non-signals, both checked and rejected 2026-07-14: the *presence* of the parent's
-   `tool_result` proves nothing about completion (a background agent gets one at SPAWN —
-   "Async agent launched successfully"; only its `is_error` flag is meaningful); and the
-   `task-notification` rows carrying a real `<status>completed</status>` aren't written while
-   the parent is mid-turn, so they lag exactly when you need them.
+   **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
+   parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
+   ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/
+   attached `<task-notification>` with `<status>killed</status>` after `TaskStop` (verified
+   2026-07-16 on session `9e8b990e`, agent `agent-a9f377…`). `Tail.agent_terminals` retains bounded
+   `completed`/`killed`/`failed` notices and `scan_agents` maps them to `done`/`ended` immediately.
+   A task id can resume, so a terminal notice applies only when its timestamp is at or after the
+   child transcript's newest row; later child output supersedes it. The *presence* of the parent's
+   ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
 8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
    daemon start. Spend pushes fire only on the highest crossed multiple.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
@@ -223,15 +220,18 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     real multi-question ask before shipping.
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
-    command. `act` type `focus` powers the card's desktop-only "open" button (`.deskonly`, hidden
+    command. `act` type `focus` powers the Claude card's desktop-only **Terminal** button (`.deskonly`, hidden
     on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
 26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
     `Engine.claude_usage_profiles` watches
     `~/Library/Preferences/HamedElfayome.Claude-Usage.plist` by mtime/size and projects ONLY profile
-    id/name, account email, selected/active state, refresh interval, display flags, quota percentages,
-    resets, and last-update time. The same profile objects also contain session keys and credential
+    id/name, account email, selected/active state, refresh interval, display flags, 5-hour/general-
+    weekly/Fable-weekly quota percentages and resets, and last-update time. The same profile objects
+    also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
-    selected account and its active marker. If the app is absent/unreadable, fall back to the Claude
+    selected account and its active marker. The Now command-bar chip normally says `Usage`; at 70% it
+    shows the worst selected account/window percentage in amber and at 90% in red. Its popover/sheet
+    contains the full gauges. If the app is absent/unreadable, fall back to the Claude
     Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
     `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`
@@ -247,9 +247,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 28. **Pinned sessions are server-persisted and live in a GLOBAL block.**
     `pinnedSessions` mirrors `/api/fleet.settings.pinned_sessions`; `toggleSessionPin` writes
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
-    `#usage`) in urgency order, then newest activity. Pinned cards are relocated, never duplicated.
+    Fleet Briefing) in persisted insertion order. Fleet urgency/activity changes never reorder it; a
+    new pin appends at the bottom. Pinned cards are relocated, never duplicated.
     Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
-    `sessionTap` swallows the following click so pinning does not also open the chat.
+    the hold paints immediately and `sessionTap` swallows the following click so pinning does not
+    also open the chat. `pinActions` suppresses duplicate writes; failure restores the exact prior
+    order and renders inline retry instead of a blocking alert.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
     `openClosed`) forces `#sbody` to `scrollHeight` on the first render regardless of prior
     scrollTop (a tall cached convo starts at 0 → the sticky-bottom test would otherwise keep the
@@ -282,7 +285,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     interrupt, archive, close, attach, compact, review, or relay capabilities.
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
-    `reply_requested`, and `new_response`. Now order is Pinned → Needs you → Working → Available.
+    `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
+    Pinned → Needs you → Working → Available.
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
     with one chronological list and access/provider filters. `requests_reply` examines the newest
     complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
@@ -316,6 +320,61 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     caps both providers; CSS controls the collapsed line count. When measured content overflows, the
     final collapsed row is a clickable `...`; expanded state removes the height clamp but does not
     fetch or imply more than the bounded 500-character payload.
+36. **Now counts and subagent filtering are presentation-only.** The standalone totals line is gone;
+    Needs you/Working/Available counts live in their matching command-bar chips. Needs you counts
+    distinct sessions. `Subagents` flattens every child not in `done`/`ended`, including `stalled`,
+    with its parent breadcrumb; selecting it hides the session queues without changing
+    `Engine.organize_session` or turning subagents into session cards.
+37. **Nested Settings preserves chat state.** When Settings opens over full chat it gets a separate
+    history entry and remains above `#sevidence`. Back closes Settings alone, restores the exact
+    `#sbody.scrollTop`, and preserves whether `Why Fleet put this here` was open. A pending sticky-
+    bottom animation must not overwrite that saved position.
+38. **Desktop rail side is per browser; file viewer identity is file-only.** `fleet.navSide.v1`
+    toggles `html[data-nav-side]` between left/right and never affects mobile bottom navigation.
+    `#vtitle` contains only the escaped file name/caption; session metadata and `.vfsep` do not belong
+    in the Markdown viewer. Ordinary Claude cards open chat through `.shead` and keep only the
+    distinct **Terminal** native-focus button; Respond/Review actions remain explicit.
+39. **New-session identity is optimistic but exact.** `spawnProvisional` immediately owns one
+    client-generated card/full-chat identity and the initial user message while `/api/act spawn` is
+    pending. Only the exact server-returned `session_id` may replace it; never reconcile by cwd.
+    Claude's initial text is sent after that exact session becomes discoverable, while Codex accepts
+    it atomically at thread creation. Explicit spawn rejection may offer retry; a lost response may
+    have created a session and must not retry automatically. Forecast requests are abortable and
+    sequence-gated so an older model result cannot overwrite the latest selection. Message and relay
+    composers are `<textarea>` controls: Return is always a newline; only Command-Return on macOS or
+    Control-Return elsewhere sends.
+40. **Claude permission mode is a native, state-gated control.** `Tail.permission_mode` accepts only
+    Claude's allowlisted transcript values. Live changes are allowed only for an idle registered
+    Claude session whose process exposes the target in `permission_modes`; `act(permission_mode)`
+    composes fixed Shift+Tab steps and retains the 0.4s native-TUI inter-key delay. `dontAsk` is a
+    new-session-only Advanced choice because it is not in Claude's live cycle. `bypassPermissions`
+    is exposed only when the already-running process was launched with Claude's enabling flag and
+    the client must show a separate high-warning confirmation every time. Fleet never accepts
+    Claude's folder-trust or bypass warning on the user's behalf.
+41. **Secondary-worktree cleanup is preview-ticketed and happens after provider close.**
+    `close_worktree_preview` resolves the canonical workstream identity, refuses primary/unregistered/
+    locked/prunable worktrees, and returns bounded porcelain-v2 dirty plus ignored-file evidence.
+    Its opaque five-minute ticket binds session/provider/root/worktree and the exact status revision.
+    Normal removal requires clean status and no ignored files; force requires the explicit dirty path;
+    either is refused while another live Fleet session uses the exact worktree. Only after close marks
+    the ticket may `cleanup_closed_worktree` re-probe the revision and run fixed argv
+    `git -C <root> worktree remove [--force] <worktree>`. Never delete the branch. A close/cleanup
+    partial failure is reported as session closed with the worktree preserved; never retry silently.
+42. **Full-chat operational status is bounded, cached, and provider-honest.** `status_line` is the
+    only payload for the strip directly above the main/subagent composer. Claude `Tail` retains the
+    latest usage, turn cost, and at most 50 changed CacheWrite values; writes above 20k increment the
+    spike ledger. Context excludes output tokens. Git comparison is fixed to
+    `refs/remotes/origin/main...HEAD`, runs via fixed argv on a background cache refresh, and never
+    fetches or blocks an HTTP/render path. Main cost is the session tree with a bounded breakdown;
+    subagent cost is child-only. Unknown Codex/starting fields are omitted, never rendered as zero.
+    `session_runs.status_line_json` freezes the final bounded payload for closed sessions; completed
+    child payloads freeze with the child. Full-chat headers contain the title and controls only.
+43. **Routine Claude conversation reads never wait for the fleet-wide Tail fold.** `_scan` publishes
+    immutable bounded main snapshots keyed by session and subagent snapshots keyed by
+    `(parent_session_id, agent_id)`; `/api/context`, `/api/agent_context`, and `/api/file` read those
+    projections without `scan_lock`. The locked `Tail.poll()` path is startup/fallback only, before a
+    completed scan has published that exact conversation. Keep the parent in the child key because
+    different sessions can reuse an agent ID. Snapshot pruning follows the live registry/child set.
 
 ## Dev workflow
 
@@ -369,7 +428,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
-- `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a left rail;
+- `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a per-device left/right rail;
   mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
   routed, participate in browser/native back, and keep History/Insights out of Now.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-

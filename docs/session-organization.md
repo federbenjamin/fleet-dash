@@ -169,5 +169,5 @@ Card faces use the labels in this document. Raw provider state, CLI status, owne
 and error details remain in expanded session information. The raw labels `idle`,
 `turn_done`, `dormant`, `headless`, and `reopenable` are not main-page sections.
 
-Terminal Open/Attach remains a secondary control. The primary action describes the
+Terminal/Attach remains a secondary control. The primary action describes the
 conversation action and must remain truthful when the terminal is unavailable.

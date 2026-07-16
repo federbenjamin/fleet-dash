@@ -36,20 +36,21 @@
           <button data-now-filter="needs_you" onclick="setNowState('needs_you')">Needs you</button>
           <button data-now-filter="working" onclick="setNowState('working')">Working</button>
           <button data-now-filter="available" onclick="setNowState('available')">Available</button>
+          <button data-now-filter="subagents" onclick="setNowState('subagents')">Subagents</button>
           <button id="outboxchip" onclick="openOutbox()">Outbox</button>
+          <button id="usagechip" aria-haspopup="dialog" aria-expanded="false" onclick="toggleUsage()">Usage</button>
           <span id="nowsaved" class="savedviews"></span>
           <button class="saveview" onclick="saveCurrentView('now')" title="Save this filter">＋ Save view</button>
         </div>
       </div>
-      <header><div id="totals"></div></header>
-      <div id="usage"></div>
+      <div id="briefing"></div>
       <div id="pinned"></div>
       <div id="stale">server unreachable — showing last snapshot</div>
       <div id="providerstate"></div>
       <div id="notoken">read-only: this device has no act token — buttons won't work until you open the <code>?token=…</code> URL once</div>
       <div id="actioninbox"></div>
       <div id="needsyou"></div>
-      <div id="briefing"></div>
+      <div id="subagents"></div>
       <div id="outboxsummary"></div>
       <div id="working"></div>
       <div id="sessions"></div>
@@ -112,6 +113,11 @@
 <div id="mobilemore" role="menu">
   <button role="menuitem" onclick="navigateTo('insights')">⌁ <span>Insights</span></button>
   <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
+</div>
+<div id="usagepanel" role="dialog" aria-modal="false" aria-labelledby="usagetitle">
+  <div class="usagepanelhead"><span><b id="usagetitle">Usage</b><small>Provider windows and local totals</small></span>
+    <button aria-label="close usage" onclick="closeUsage()">✕</button></div>
+  <div id="usagebody"></div>
 </div>
 <div id="viewer">
   <div id="vhead"><button id="vclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="vtitle"></span><span id="vctrl"></span></div>
