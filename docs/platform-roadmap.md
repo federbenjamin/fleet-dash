@@ -21,6 +21,11 @@ every existing control, and the current safe-action boundaries.
 - Desktop uses a left navigation rail. Mobile uses bottom navigation. The destinations are Now,
   Search, Workstreams, History, Insights, and Settings.
 - Workstreams are lightweight repository/project groupings, not a new task-management system.
+- Light automations are one-time outgoing messages, not a general recurring automation system. They
+  support send at a time, send when an existing session/agent is next available, send when a selected
+  usage window resets, and start a configured new coding session at a time and send its message.
+- Now owns a central Outbox beside the action inbox. Creating an outbox item is the single explicit
+  authorization for its later automatic send; execution does not ask for a second confirmation.
 - Features must remain usable in a 390×844 viewport and must not turn Now into a control wall.
 - Each milestone gets deterministic tests, a commit, and a push before dependent work starts.
 
@@ -28,7 +33,7 @@ every existing control, and the current safe-action boundaries.
 
 This catalogue is the source-of-truth checklist for the work below. Every requirement has a stable
 ID, an observable acceptance condition, and an owning milestone. A milestone is not complete until
-its IDs have implementation evidence and passing deterministic tests. M9 re-audits every ID against
+its IDs have implementation evidence and passing deterministic tests. M10 re-audits every ID against
 the current source and running app; a checked box or this document's prose is not evidence by itself.
 
 ### Product and safety decisions
@@ -47,6 +52,11 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-010 | External ChatGPT Desktop/VS Code Codex threads remain view-only unless explicitly connected to Fleet's App Server. They are still discoverable and their observed transcript activity is trackable. | M0/M4 |
 | DEC-011 | Preserve stable insertion order while a session remains Working. Re-sort only when it leaves and later re-enters Working. | M1/M3 |
 | DEC-012 | User messages, quick replies, question answers, and approvals appear optimistically with sending, confirmed, and failed states. Failed content stays retryable. | M0/M1 |
+| DEC-013 | Automations are one-time send variants, not recurring jobs: send at time, when available, when a selected usage window resets, or by starting a configured new session at time. | M7 |
+| DEC-014 | Now contains the central Outbox. Creating an item explicitly authorizes its later automatic spawn/send; no unattended merge, shell, approval, or other action is generalized from this permission. | M7 |
+| DEC-015 | A due message waits if its existing target is busy. A closed/missing target becomes Blocked and is never implicitly reopened; the user may retarget it. | M7 |
+| DEC-016 | “When usage resets” binds to one selected provider identity and one provider-reported window. Fleet follows updated provider reset evidence and never infers across accounts/windows. | M7 |
+| DEC-017 | Scheduled new sessions snapshot every New Session field, including provider, project/cwd, model, effort, mode, and optional worktree, and remain editable until dispatch. | M7 |
 
 ### Navigation, presentation, and interaction
 
@@ -62,8 +72,10 @@ the current source and running app; a checked box or this document's prose is no
 | UX-008 | Peek renders safe formatted Markdown, truncates at 500 characters, replaces overflow with a clickable ellipsis, and expands to the complete response without a second truncation limit. | M0/M1 |
 | UX-009 | Mobile scroll gestures collapse the open keyboard, and all touch targets, overlays, sticky regions, and bottom navigation remain usable at 390×844. | M1 |
 | UX-010 | Loading, empty, stale, unavailable, read-only, validation, sending, success, and failure states exist for every destination and mutation. | All |
-| UX-011 | Account summaries show provider, signed-in identity, plan/usage details, and honest locally scoped lifetime token descriptions; multiple Claude identities are supported where local data exposes them. | M7 |
+| UX-011 | Account summaries show provider, signed-in identity, plan/usage details, and honest locally scoped lifetime token descriptions; multiple Claude identities are supported where local data exposes them. | M8 |
 | UX-012 | Session close/stop controls live in the full-chat overflow menu with confirmation. Stop affects the current turn; Claude close may terminate its terminal, while provider capability text remains explicit. | M1 |
+| UX-013 | Every message composer groups Send now, Schedule, When available, and When usage resets without making the common Send now path slower. New Session offers Schedule session alongside Start session. | M7 |
+| UX-014 | The Outbox is reachable from Now and the sticky command bar, has a pending-count badge, and supports edit, send now, retarget, retry, and cancel where state permits. | M7 |
 
 ### Intelligent global search
 
@@ -75,7 +87,7 @@ the current source and running app; a checked box or this document's prose is no
 | SRCH-004 | Support debounced queries, cancellation, prefix matching, relevance/recency boosts, provider/project/kind filters, bounded safe snippets, pagination, and recent-conversation empty queries. | M2 |
 | SRCH-005 | Expose index progress, lag, per-source errors, and a controlled rebuild. Malformed/unknown records degrade visibly without stopping other sources. | M2 |
 | SRCH-006 | Require local action authentication because unmanaged transcripts become searchable. Never disclose unauthorized source paths or bypass artifact preview safety. | M2 |
-| SRCH-007 | Pass the 100k-message/2k-source benchmark: warm p95 <75 ms, cold p95 <150 ms, live lag <2 polls, HTTP blocking slice <25 ms, and `/api/fleet` p95 regression <5 ms. | M2/M8 |
+| SRCH-007 | Pass the 100k-message/2k-source benchmark: warm p95 <75 ms, cold p95 <150 ms, live lag <2 polls, HTTP blocking slice <25 ms, and `/api/fleet` p95 regression <5 ms. | M2/M9 |
 | SRCH-008 | Search results open the canonical session/subagent/artifact context and work on desktop and mobile with keyboard and screen-reader navigation. | M2 |
 
 ### Action inbox and Workstreams
@@ -88,7 +100,7 @@ the current source and running app; a checked box or this document's prose is no
 | ACT-004 | Bulk actions are limited to mark read/available, mute, and notification dismissal. Never bulk-approve a command or file change. | M3 |
 | ACT-005 | Immediate submission feedback appears both inside full chat and on main-page quick responses; question answers remain visible with sending/confirmed/failed status. | M0/M1 |
 | WORK-001 | Group Git sessions by canonical main repository root, roll linked worktrees underneath it, and group non-Git sessions by canonical cwd. | M3 |
-| WORK-002 | Show per-workstream state counts, active branches/worktrees/providers, latest outcome, changed files/tests/PR summary, measured usage/cost, budget state, and filtered sessions. | M3/M6/M7 |
+| WORK-002 | Show per-workstream state counts, active branches/worktrees/providers, latest outcome, changed files/tests/PR summary, measured usage/cost, budget state, and filtered sessions. | M3/M6/M8 |
 | WORK-003 | Handle symlinks, missing paths, nested repositories, detached heads, renamed roots, and one-provider outages without merging unrelated projects. | M3 |
 
 ### State evidence and external tracking
@@ -100,7 +112,7 @@ the current source and running app; a checked box or this document's prose is no
 | EVID-003 | Persist meaningful deduplicated transitions with bounded safe evidence, expose paginated history, and recover after restart without rewriting past truth. | M4 |
 | EVID-004 | The evidence rail explains the exact current placement using provider signal, transcript event, pending work, age, classifier rule, and stale/inferred status. | M4 |
 | EVID-005 | External view-only Codex transcripts move to Working when current local transcript evidence shows an active turn, then Available/recently completed or History based on completion and inactivity. Fleet never implies it can steer them. | M0/M4 |
-| EVID-006 | Provider/index/account errors retain the last good snapshot as explicitly stale, recover automatically, and never take the other provider down. | M4/M9 |
+| EVID-006 | Provider/index/account errors retain the last good snapshot as explicitly stale, recover automatically, and never take the other provider down. | M4/M10 |
 
 ### Editable provider handoff
 
@@ -122,33 +134,50 @@ the current source and running app; a checked box or this document's prose is no
 | REPO-004 | All mutations require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, retry/error UI, and no free-form shell. | M6 |
 | REPO-005 | Never offer or execute merge, automatic commit/push/PR readiness, or history rewrite. | M6 |
 
+### Message Outbox and light automations
+
+| ID | Requirement and acceptance condition | Owner |
+| --- | --- | --- |
+| AUTO-001 | Persist four message intents: send to an existing session/agent at a time, send when it is next available, send when a selected usage window resets, and start a configured new session at a time then send. | M7 |
+| AUTO-002 | Store absolute triggers in UTC plus the creation-time IANA zone for display. Reject nonexistent local times, disambiguate repeated DST times, and execute an overdue item once after restart. | M7 |
+| AUTO-003 | Existing-target delivery revalidates target identity, access, pending requests, and provider capability. Busy targets wait; already-available targets queued “when available” send immediately; closed/missing/read-only targets become Blocked. | M7 |
+| AUTO-004 | Agent targets use only the provider's supported relay path. Completed, missing, direct-relay-unsupported, or read-only agents become Blocked with a retarget action rather than silently sending to the parent. | M7 |
+| AUTO-005 | Usage-reset delivery stores provider, stable account/profile identity, window identity, and last reported reset. It follows a provider-updated reset time, waits for fresh post-reset evidence, and blocks visibly when identity/window data becomes unavailable. | M7 |
+| AUTO-006 | Scheduled new-session delivery snapshots the validated New Session form, revalidates it at dispatch, spawns exactly one identifiable session, and sends only after that identity is confirmed. A spawn failure never sends to a similar existing session. | M7 |
+| AUTO-007 | Use durable claim/lease transitions so concurrent polls and daemon restarts do not intentionally duplicate a send. If Fleet crashes after dispatch but before confirmation, mark Confirmation unknown and never auto-retry. | M7 |
+| AUTO-008 | User-visible states are Scheduled, Waiting for availability, Waiting for usage reset, Spawning, Sending, Sent, Confirmation unknown, Blocked, Failed, and Cancelled, each with reason, timestamps, target, trigger, and permitted actions. | M7 |
+| AUTO-009 | Pending items are editable and cancellable. Send now bypasses the trigger but revalidates the target. Failed/Blocked/Confirmation-unknown items require an explicit retry; Sent and Cancelled records are immutable audit history. | M7 |
+| AUTO-010 | The ordinary Send now button remains primary and one tap. Adjacent scheduling choices share the same composer text, validation, attachments, provider targeting, and optimistic delivery component. | M7 |
+| AUTO-011 | Outbox reads and mutations require local action authentication, messages are length-bounded and stored locally, secret fields are never copied from provider/account config, and no automation accepts shell text as an executable action. | M7 |
+| AUTO-012 | Deterministic fake-clock/provider tests cover same-second due items, concurrency, order, DST, restart in every state, unavailable providers/accounts, reset shifts, busy-to-available, closed/retargeted targets, spawn/send partial failure, stale IDs, cancellation races, and large queues. | M7/M10 |
+
 ### Briefings, notifications, usage, and budgets
 
 | ID | Requirement and acceptance condition | Owner |
 | --- | --- | --- |
-| BRIEF-001 | Build deterministic in-app sections for attention, reviewed/unreviewed completion, slow work, Git/test/artifact outcomes, budget warnings, and unavailable measurements. | M7 |
-| BRIEF-002 | Persist a per-device review cursor without deleting evidence/history; deduplicate events across poll/restart and preserve source links. | M7 |
-| BRIEF-003 | Respect persistent session mute across providers. Immediate blocker pushes and one quiet-episode digest are optional; scheduled pushes are off by default and failures are visible. | M7 |
-| BUD-001 | Configure alert-only budgets by session, workstream, provider, or fleet for exact USD, tokens, runtime, and concurrency, with optional explicit blocking of future spawns only. | M7 |
-| BUD-002 | Label exact, partial, token-only, and unavailable measurement. Never convert Codex quota tokens into API spend or display fabricated zero cost/throughput. | M7 |
-| BUD-003 | Forecast from recent measured burn and provider/model/project history, showing sample size/confidence and “not enough history”; never interrupt active work automatically. | M7 |
-| USE-001 | Claude historical totals state their local transcript/stat-cache scope; Codex quota/lifetime/context numbers state their provider scope and omit unused Spark-specific quota. | M7 |
+| BRIEF-001 | Build deterministic in-app sections for attention, reviewed/unreviewed completion, slow work, Git/test/artifact outcomes, budget warnings, and unavailable measurements. | M8 |
+| BRIEF-002 | Persist a per-device review cursor without deleting evidence/history; deduplicate events across poll/restart and preserve source links. | M8 |
+| BRIEF-003 | Respect persistent session mute across providers. Immediate blocker pushes and one quiet-episode digest are optional; scheduled pushes are off by default and failures are visible. | M8 |
+| BUD-001 | Configure alert-only budgets by session, workstream, provider, or fleet for exact USD, tokens, runtime, and concurrency, with optional explicit blocking of future spawns only. | M8 |
+| BUD-002 | Label exact, partial, token-only, and unavailable measurement. Never convert Codex quota tokens into API spend or display fabricated zero cost/throughput. | M8 |
+| BUD-003 | Forecast from recent measured burn and provider/model/project history, showing sample size/confidence and “not enough history”; never interrupt active work automatically. | M8 |
+| USE-001 | Claude historical totals state their local transcript/stat-cache scope; Codex quota/lifetime/context numbers state their provider scope and omit unused Spark-specific quota. | M8 |
 
 ### Cross-cutting quality gates
 
 | ID | Requirement and acceptance condition | Owner |
 | --- | --- | --- |
 | QUAL-001 | Every new read/mutation route validates auth, IDs, enums, lengths, cursors, and canonical paths; outputs are escaped and paginated/bounded. | All |
-| QUAL-002 | Unit, fake-provider/protocol, engine/API, Playwright desktop/mobile, safe-path, auth/read-only, crash/restart, and opt-in live tests cover each requirement's success and failure paths. | All/M9 |
-| QUAL-003 | Capture baseline and final p50/p95 latency, payload, index lag, render/input latency, and memory on the same corpus; optimize only with before/after evidence. | M0/M8 |
+| QUAL-002 | Unit, fake-provider/protocol, engine/API, Playwright desktop/mobile, safe-path, auth/read-only, crash/restart, and opt-in live tests cover each requirement's success and failure paths. | All/M10 |
+| QUAL-003 | Capture baseline and final p50/p95 latency, payload, index lag, render/input latency, and memory on the same corpus; optimize only with before/after evidence. | M0/M9 |
 | QUAL-004 | Each milestone is a focused append-only commit pushed to `codex-integration`; unrelated user work is preserved and `main` is never changed. | All |
-| QUAL-005 | Final audit cites current `file:line` implementation and test evidence for every catalogue ID, reloads the daemon, checks HTTP/browser console/network state, and lists any exact provider limitation. | M9 |
+| QUAL-005 | Final audit cites current `file:line` implementation and test evidence for every catalogue ID, reloads the daemon, checks HTTP/browser console/network state, and lists any exact provider limitation. | M10 |
 
 ### Milestone traceability gate
 
 Before each milestone commit, its catalogue IDs are copied into the commit's verification note with
 the exact tests that prove them. The completion audit must account for every ID in this catalogue;
-missing, partially implemented, or documentation-only IDs keep M9 open. New decisions discovered
+missing, partially implemented, or documentation-only IDs keep M10 open. New decisions discovered
 during implementation receive a new ID here before dependent code is written.
 
 ## Product model
@@ -435,6 +464,82 @@ Provider or GitHub failure marks the cached result stale and leaves the other pr
 Actions require authentication, run only inside the canonical repository, stream bounded progress,
 record outcomes, and cannot accept free-form shell commands.
 
+## Message Outbox and light automations
+
+The Outbox is the outgoing counterpart to the action inbox. It lives within Now, with a compact
+pending count in the navigation/command bar, because these records are current operational work—not
+settings and not historical conversations. The default Now view shows only the next few pending or
+blocked items; opening Outbox shows the complete filterable audit list.
+
+### Send modes
+
+| Mode | Trigger | Target behavior |
+| --- | --- | --- |
+| Send at time | One absolute local date/time | Revalidate the existing session/agent at or after the instant; wait if busy |
+| When available | First observed Available state, or immediately if already Available | Send to the exact existing interactive session or supported agent relay |
+| When usage resets | Fresh provider evidence that one selected account/window passed its reported reset | Revalidate that target, then send or wait for availability |
+| Schedule new session | One absolute local date/time | Revalidate the snapshotted New Session form, spawn one exact session, identify it, then send |
+
+Scheduling is deliberately one-time. A recurring job editor, arbitrary state predicates, shell hooks,
+automatic approvals, and chained workflows are outside this scope.
+
+### Durable data and state machine
+
+Use the existing ledger database with a dedicated table and indexes; scheduling must not depend on an
+open browser tab.
+
+```text
+outbox_messages(
+  id TEXT PRIMARY KEY, created_at, updated_at, created_zone,
+  kind, state, message, target_provider, target_session_id, target_agent_id,
+  trigger_at, usage_account_id, usage_window_id, observed_reset_at,
+  spawn_spec_json, claimed_at, lease_until, attempt_count,
+  destination_session_id, provider_receipt, sent_at, error, blocked_reason
+)
+```
+
+The state machine is:
+
+```text
+Scheduled ───────────────┐
+Waiting for availability├─> Spawning? -> Sending -> Sent
+Waiting for usage reset ┘                  │  │
+                                          │  └-> Confirmation unknown
+                                          └----> Failed
+Any pending state -> Blocked | Cancelled
+Blocked/Failed/Confirmation unknown --explicit retry/retarget--> pending
+```
+
+The scheduler uses an atomic database claim and expiring lease so only one poller owns a due record.
+It persists `Sending` before provider dispatch and a provider receipt immediately after acceptance.
+Provider APIs do not promise an idempotency key for an arbitrary turn, so a process death in that
+narrow interval becomes **Confirmation unknown**. Fleet must not auto-retry and risk sending the same
+message twice.
+
+Times are stored in UTC and retain the IANA creation zone for editing/display. The UI rejects a local
+time skipped by daylight-saving changes and asks which occurrence is intended for an ambiguous time.
+Overdue records execute once after restart. Equal-time records use creation order. A transient
+provider outage retries with bounded backoff until 24 hours after the trigger, then becomes Blocked;
+the user may edit that expiry or send now.
+
+### Validation and editing
+
+- Existing targets must still exist, be interactive, expose submit/relay, have no unresolved provider
+  request that would make a free-text turn unsafe, and not be actively running. Busy targets wait.
+- Closed, missing, external view-only, or unsupported direct-agent targets become Blocked. Fleet never
+  silently reopens, takes over, or substitutes a parent session.
+- Usage-reset records store the stable local account/profile and provider window identifiers. A reset
+  time update moves the trigger; missing/stale usage data pauses rather than guessing.
+- Scheduled new sessions persist the same validated provider, cwd/project, model, effort, mode,
+  worktree, and initial-message fields as New Session. Dispatch never selects a session by recency.
+- Until claimed, records can be edited or cancelled. Send now still performs all current validation.
+  Sent and Cancelled rows are immutable; retry creates an explicit new attempt linked in audit data.
+
+Every composer keeps Send now as its primary button and puts Schedule, When available, and When usage
+resets in one adjacent send-options control. The New Session form similarly offers Start session and
+Schedule session. Both use the canonical delivery receipt so the Outbox and conversation do not
+disagree about Sending, Sent, or failure.
+
 ## Briefings and digests
 
 Briefings are deterministic selections from state transitions, Git outcomes, delivery events, and
@@ -485,6 +590,7 @@ GET /api/workstreams
 GET /api/evidence?sid=&cursor=
 GET /api/handoff?sid=&provider=
 GET /api/repo?root=
+GET /api/outbox?state=&cursor=
 GET /api/briefing?cursor=
 GET /api/budgets
 ```
@@ -494,6 +600,8 @@ Planned authenticated mutations remain under the existing action/settings bounda
 ```text
 POST /api/act  type=handoff
 POST /api/act  type=git_commit | git_push | pr_create_draft | pr_mark_ready
+POST /api/act  type=outbox_create | outbox_update | outbox_cancel
+POST /api/act  type=outbox_send_now | outbox_retry | outbox_retarget
 POST /api/settings  budgets, digest preferences, saved views
 ```
 
@@ -577,7 +685,20 @@ Commit: `Add repository and pull-request outcome center`.
 Exit: clean/dirty/detached/ahead/behind/no-remote/no-gh/unauthenticated/stale-network fixtures,
 action validation, confirmation, and real opt-in repository smoke tests pass.
 
-### M7 — Briefings, digests, budgets, and forecasts
+### M7 — Message Outbox and light automations
+
+- Add durable outbox storage, fake-clock scheduler, four send modes, target/reset/spawn validation,
+  claim/lease recovery, bounded retry, and audit states.
+- Add composer send options, scheduled New Session, central Outbox, pending count, filters, editing,
+  send-now, retarget, retry, and cancel actions.
+
+Commit: `Add scheduled and state-triggered message outbox`.
+
+Exit: every `AUTO-*` requirement passes unit, fake-provider/API, restart/crash/concurrency, desktop,
+mobile, authentication, read-only, and safe opt-in provider tests. Ordinary Send now has no added tap
+or latency regression.
+
+### M8 — Briefings, digests, budgets, and forecasts
 
 - Add event selection, briefing cursors, quiet digest, optional schedules, budget scopes, alerts, and
   honest mixed-provider forecasts.
@@ -587,7 +708,7 @@ Commit: `Add fleet briefings and measurable budgets`.
 Exit: dedupe, mute, quiet episodes, restart, partial cost, token-only Codex, forecast confidence,
 settings persistence, and push-failure tests pass.
 
-### M8 — Optimization pass
+### M9 — Optimization pass
 
 - Instrument server timing, poll duration, index lag, DB waits, payload sizes, render duration, input
   latency, and memory.
@@ -601,7 +722,7 @@ Commit: `Optimize fleet indexing and interaction latency`.
 Exit: before/after measurements recorded below, no correctness regression, and no hidden background
 work on the HTTP hot path.
 
-### M9 — Bug-fix and resilience pass
+### M10 — Bug-fix and resilience pass
 
 - Audit every route, action, empty/error/loading/stale state, desktop/mobile surface, and provider
   capability branch.
@@ -616,7 +737,7 @@ console/network logs clean, and branch pushed.
 
 ## Verification matrix
 
-Each milestone runs the relevant subset; M8 and M9 run all of it.
+Each milestone runs the relevant subset; M9 and M10 run all of it.
 
 - Python unit and provider-fixture suite.
 - Protocol/failure harnesses and index parser fixtures.
@@ -629,9 +750,9 @@ Each milestone runs the relevant subset; M8 and M9 run all of it.
 
 ## Optimization results
 
-Populate in M0 and M8. Measurements use the same real corpus and deterministic benchmark fixtures.
+Populate in M0 and M9. Measurements use the same real corpus and deterministic benchmark fixtures.
 
-| Metric | M0 baseline | M8 result | Gate |
+| Metric | M0 baseline | M9 result | Gate |
 | --- | ---: | ---: | ---: |
 | Engine scan p50/p95 | pending | pending | no regression from indexing |
 | `/api/fleet` p50/p95 | pending | pending | baseline + <5 ms p95 |
@@ -652,4 +773,6 @@ Populate in M0 and M8. Measurements use the same real corpus and deterministic b
 - Indexing arbitrary repository files or remote cloud conversations absent locally.
 - Fabricating Codex currency costs.
 - Automatic commits, pushes, PR readiness, merges, or active-turn interruption.
+- Recurring schedules, arbitrary workflow predicates, chained automations, shell hooks, or automatic
+  approvals. Outbox authorization applies only to its exact saved message intent.
 - Multi-user permissions, hosted deployment, or replacing provider-native trust controls.
