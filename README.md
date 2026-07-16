@@ -9,10 +9,15 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **One card per session** on **Now**, organized as an action queue: **Pinned**, **Needs you**,
-  **Working**, then **Available**. Pinned/Needs you/Working disappear when empty; Available remains
-  visible. The separate **History** destination owns dormant, external, reopenable, and closed
-  sessions. Cards use reasons such as **Reply requested**, **Command
+- **Now is an operations queue:** **Pinned** sessions stay first, then one deduplicated **Action
+  inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
+  unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
+  while Available retains a small empty state. Action rows show provider, access, reason, age, and
+  delivery state, then open the same full-chat response controls used everywhere else. Safe bulk
+  triage is limited to review/available markers, mute, and dismissal of reviewable notices—never an
+  unresolved provider request and never approval. The
+  separate **History** destination owns dormant, external, reopenable, and closed sessions. Cards
+  use reasons such as **Reply requested**, **Command
   approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). Each card is headed by the
@@ -22,7 +27,16 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **Responsive application navigation:** desktop uses a persistent left rail for Now, Search,
   Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
   fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
-  across refresh and browser/native back gestures. Now has a sticky text filter plus state chips.
+  across refresh and browser/native back gestures. Now and Workstreams have sticky text/state
+  filters whose named saved views remain on this device.
+- **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
+  roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
+  canonical cwd, missing or unknown locations stay separate, and symlink/nested-repository cases do
+  not merge unrelated work. Each group shows state counts, providers, branches, current context,
+  measured or partial cost, latest outcome, and its filtered sessions. Git changes, tests, PR state,
+  and budgets say **not observed/not configured** until their later evidence systems measure them.
+  Repository grouping is loaded through `/api/workstreams` only while that destination is open, so
+  it does not enlarge or delay the two-second `/api/fleet` poll.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
   including sessions Fleet did not create. Provider, project, and event-type filters narrow results;

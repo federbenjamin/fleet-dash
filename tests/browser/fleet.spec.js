@@ -25,6 +25,14 @@ async function goTo(page, route) {
   else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
+async function openAction(page, sid) {
+  const row = page.locator(`[data-action-sid="${sid}"]`);
+  await expect(row).toBeVisible();
+  await row.locator('.primarybtn').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  return row;
+}
+
 test.beforeEach(async ({ page }) => {
   const failures = [];
   page.on('pageerror', error => failures.push(String(error)));
@@ -76,7 +84,7 @@ test('responsive application shell routes, filters, and follows browser back', a
   await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
   await expect(page.locator('[data-sid="claude-one"]')).toBeHidden();
   await page.locator('[data-now-filter="working"]').click();
-  await expect(page.locator('#needs .card, #working .card, #sessions .card, #pinned .card')).toHaveCount(0);
+  await expect(page.locator('#actioninbox .actionrow, #working .card, #sessions .card, #pinned .card')).toHaveCount(0);
   await page.locator('[data-now-filter="all"]').click();
   await page.locator('#nowfilter').fill('');
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
@@ -89,11 +97,11 @@ test('cross-provider search filters, exact context, live handoff, and rebuild', 
   await goTo(page, 'search');
   await expect(page.locator('#searchstatus')).toContainText('Indexed 37 items');
   await expect(page.locator('#searchstatus')).toContainText('1 warning');
-  await expect(page.locator('#searchresults .searchresult')).toHaveCount(3);
-  await expect(page.locator('#searchproject')).toContainText('fleet-dash');
-
+  await expect(page.locator('#searchresults')).toContainText('Type a search or choose a filter.');
   await page.locator('#searchquery').fill('protocol regression');
   await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await expect(page.locator('#searchproject')).toContainText('fleet-dash');
+
   await expect(page.locator('#searchresults')).toContainText('Codex parity work');
   await page.locator('#searchresults .searchresult').click();
   await expect(page.locator('#searchview')).toBeVisible();
@@ -137,6 +145,8 @@ test('transcript search is action-token protected', async ({ page }) => {
   await expect(page.locator('#totals')).toBeVisible();
   await goTo(page, 'search');
   await expect(page.locator('#searchstatus')).toContainText('action token');
+  await expect(page.locator('#searchresults')).toContainText('Type a search or choose a filter.');
+  await page.locator('#searchquery').fill('fleet');
   await expect(page.locator('#searchresults')).toContainText('action token');
   page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
 });
@@ -491,14 +501,14 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
 
 test('single, multi, free-text, dismiss, invalid, and stale questions', async ({ page }) => {
   await reset(page, 'single-question');
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('option');
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#oth-smsg-codex\\:thread-one').fill('Only the adapter');
   await page.locator('#sact').getByRole('button', { name: 'answer' }).click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).other)
@@ -513,7 +523,7 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
 
   await page.request.post('/test/reset', { data: { scenario: 'multi-question' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact').getByRole('button', { name: 'Desktop' }).click();
   await page.locator('#sact .mqarr').last().click();
   await page.locator('#sact').getByRole('button', { name: 'Full' }).click();
@@ -522,7 +532,7 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact .xbtn').click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('dismiss');
 });
@@ -545,7 +555,7 @@ test('messages and question answers render optimistically and recover from failu
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   const answer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
   await expect(answer).toBeVisible();
@@ -558,7 +568,7 @@ test('messages and question answers render optimistically and recover from failu
 
   await page.request.post('/test/reset', { data: { scenario: 'answer-failure' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   const failedAnswer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
   const restoreAnswer = failedAnswer.getByRole('button', {
@@ -598,8 +608,7 @@ test('messages and question answers render optimistically and recover from failu
 
 test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
   await reset(page, 'claude-question-slow');
-  let card = page.locator('[data-sid="claude-one"]');
-  await card.locator('.qanswer').click();
+  let card = await openAction(page, 'claude-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await expect(page.locator('#sbody .optimistic').getByLabel('sending')).toBeVisible();
   await page.locator('#sclose').click();
@@ -617,8 +626,7 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await expect(card.locator('.quickfeedback')).toHaveCount(0);
 
   await reset(page, 'claude-question-failure');
-  card = page.locator('[data-sid="claude-one"]');
-  await card.locator('.qanswer').click();
+  card = await openAction(page, 'claude-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await page.locator('#sclose').click();
   feedback = card.locator('.quickfeedback');
@@ -627,11 +635,12 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await expect(restore).toBeVisible();
   await restore.click();
   await expect(card.locator('.quickfeedback')).toHaveCount(0);
-  await expect(card.locator('.qanswer')).toBeVisible();
+  await expect(card.locator('.primarybtn')).toBeVisible();
 
   await reset(page, 'approval-slow');
-  card = page.locator('[data-sid="codex:thread-one"]');
-  await card.getByRole('button', { name: 'allow', exact: true }).click();
+  card = await openAction(page, 'codex:thread-one');
+  await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
+  await page.locator('#sclose').click();
   feedback = card.locator('.quickfeedback');
   await expect(feedback).toContainText('Submitting');
   await expect(feedback).toContainText('Allow permission');
@@ -643,14 +652,14 @@ test('every approval decision and MCP single/multi-select elicitation', async ({
   for (const [label, choice] of [['allow', 'allow'], ['always allow', 'always'],
                                  ['deny', 'deny'], ['cancel', 'cancel']]) {
     await reset(page, 'approval');
-    await page.locator('[data-sid="codex:thread-one"]').getByRole('button', { name: label,
-      exact: true }).click();
+    await openAction(page, 'codex:thread-one');
+    await page.locator('#sact').getByRole('button', { name: label, exact: true }).click();
     await expect.poll(async () => (await fixtureState(page)).actions.at(-1).choice)
       .toBe(choice);
   }
 
   await reset(page, 'elicitation');
-  await page.locator('[data-sid="codex:thread-one"] .qanswer').click();
+  await openAction(page, 'codex:thread-one');
   await page.locator('#sact select').selectOption({ label: 'Prod' });
   await page.locator('#sact').getByRole('button', { name: 'US', exact: true }).click();
   await page.locator('#sact').getByRole('button', { name: 'EU', exact: true }).click();
@@ -782,14 +791,15 @@ test('available stays visible while inactive lifecycles live in the History dest
   await page.screenshot({ path: testInfo.outputPath('organized-session-inventory.png'), fullPage: true });
 });
 
-test('action queue separates requests, work, availability, and unread responses', async ({ page }, testInfo) => {
+test('action inbox separates requests, work, availability, and unread responses', async ({ page }, testInfo) => {
   await reset(page, 'single-question');
-  const question = page.locator('[data-sid="codex:thread-one"]');
-  await expect(page.locator('#needs')).toContainText('Needs you · 1');
-  await expect(question.locator('.chip')).toHaveText('Question waiting');
+  const question = page.locator('[data-action-sid="codex:thread-one"]');
+  await expect(page.locator('#actioninbox')).toContainText('Action inbox');
+  await expect(question).toContainText('How broad should the change be?');
+  await expect(question).toContainText('Question waiting');
   await expect(question.getByRole('button', { name: 'Respond' })).toBeVisible();
   await expect(page.locator('#usage .uprovider')).toHaveCount(2);
-  await page.screenshot({ path: testInfo.outputPath('needs-you-queue.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('action-inbox.png'), fullPage: true });
 
   await reset(page, 'subagent');
   const working = page.locator('[data-sid="codex:thread-one"]');
@@ -800,25 +810,86 @@ test('action queue separates requests, work, availability, and unread responses'
   await page.screenshot({ path: testInfo.outputPath('working-queue.png'), fullPage: true });
 
   await reset(page, 'reply-requested');
-  const reply = page.locator('[data-sid="codex:thread-one"]');
-  await expect(page.locator('#needs')).toContainText('Needs you · 1');
-  await expect(reply.locator('.chip')).toHaveText('Reply requested');
+  const reply = page.locator('[data-action-sid="codex:thread-one"]');
+  await expect(page.locator('#actioninbox')).toContainText('1 item needs review');
+  await expect(reply).toContainText('Reply requested');
   await expect(reply).toContainText('Which organization should we use?');
-  await reply.getByRole('button', { name: 'mark available' }).click();
+  await reply.getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Mark available 1' }).click();
   await expect.poll(async () => (await fixtureState(page)).reply_available['codex:thread-one'])
     .toBe('reply:1');
   await refresh(page);
   await expect(page.locator('#sessions [data-sid="codex:thread-one"] .chip')).toHaveText('Available');
 
   await reset(page, 'new-response');
-  const fresh = page.locator('[data-sid="codex:thread-one"]');
-  await expect(fresh.locator('.newbadge')).toHaveText('new');
+  const fresh = page.locator('[data-action-sid="codex:thread-one"]');
+  await expect(fresh).toContainText('Completed work is ready to review');
   await fresh.getByRole('button', { name: 'Continue' }).click();
   await expect.poll(async () => (await fixtureState(page)).read_sessions['codex:thread-one'])
     .toBe('response:1');
   await page.locator('#sclose').click();
   await page.reload();
-  await expect(page.locator('[data-sid="codex:thread-one"] .newbadge')).toHaveCount(0);
+  await expect(page.locator('[data-action-sid="codex:thread-one"]')).toHaveCount(0);
+  await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toBeVisible();
+});
+
+test('action inbox bulk triage is safe and never offers bulk approval', async ({ page }) => {
+  await reset(page, 'approval');
+  let action = page.locator('[data-action-sid="codex:thread-one"]');
+  const actionId = await action.getAttribute('data-action-id');
+  const unsafe = await page.request.post('/api/settings', { data: { bulk_triage: {
+    operation: 'dismiss', items: [{ action_id: actionId, session_id: 'codex:thread-one' }] } } });
+  expect((await unsafe.json()).ok).toBe(false);
+  await action.getByRole('checkbox').check();
+  const bulk = page.locator('.bulkbar');
+  await expect(bulk).toContainText('Mute 1');
+  await expect(bulk).not.toContainText(/allow|approve|dismiss/i);
+  await bulk.getByRole('button', { name: 'Mute 1' }).click();
+  await expect.poll(async () => (await fixtureState(page)).sessions
+    .find(item => item.session_id === 'codex:thread-one').muted).toBe(true);
+  await expect(page.locator('.bulkbar')).toHaveCount(0);
+
+  await reset(page, 'new-response');
+  action = page.locator('[data-action-sid="codex:thread-one"]');
+  await action.getByRole('checkbox').check();
+  await page.locator('.bulkbar').getByRole('button', { name: 'Dismiss 1' }).click();
+  await expect(action).toHaveCount(0);
+  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .newbadge')).toBeVisible();
+  await page.reload();
+  await expect(page.locator('[data-action-sid="codex:thread-one"]')).toHaveCount(0);
+  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .newbadge')).toBeVisible();
+});
+
+test('workstreams roll repositories, worktrees, providers, honest evidence, and saved views', async ({ page }, testInfo) => {
+  await reset(page, 'workstreams');
+  await goTo(page, 'workstreams');
+  const workstream = page.locator('[data-workstream-id="ws-fleet"]');
+  await expect(workstream).toBeVisible();
+  await expect(workstream).toContainText('fleet-dash');
+  await expect(workstream).toContainText('claude · codex');
+  await expect(workstream).toContainText('feature/action-inbox');
+  await expect(workstream).toContainText('Changes not observed');
+  await expect(workstream).toContainText('Tests not observed');
+  await expect(workstream).toContainText('PR not observed');
+  await expect(workstream).toContainText('Budget not configured');
+  await workstream.locator('.workhead').click();
+  await expect(workstream.locator('.worksession')).toHaveCount(3);
+  await expect(workstream.locator('.worktrees')).toContainText('/Users/test/fleet-dash-worktrees/ui');
+
+  await page.locator('#workfilter').fill('feature/action-inbox');
+  await page.locator('[data-work-filter="mixed"]').click();
+  page.once('dialog', dialog => dialog.accept('Cross-provider UI'));
+  await page.getByRole('button', { name: /Save view/ }).click();
+  await expect(page.locator('#worksaved')).toContainText('Cross-provider UI');
+  await page.locator('#workfilter').fill('does-not-match');
+  await expect(page.locator('[data-workstream-id]')).toHaveCount(0);
+  await page.locator('#worksaved').getByRole('button', { name: 'Cross-provider UI', exact: true }).click();
+  await expect(page.locator('#workfilter')).toHaveValue('feature/action-inbox');
+  await expect(workstream).toBeVisible();
+  await page.reload();
+  await goTo(page, 'workstreams');
+  await expect(page.locator('#worksaved')).toContainText('Cross-provider UI');
+  await page.screenshot({ path: testInfo.outputPath('workstreams.png'), fullPage: true });
 });
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
@@ -827,9 +898,9 @@ test('pins persist and relocate sessions above the needs-you queue', async ({ pa
   await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
     .toContain('codex:thread-one');
   await expect(page.locator('#pinned [data-sid="codex:thread-one"]')).toBeVisible();
-  await expect(page.locator('#needs [data-sid="codex:thread-one"]')).toHaveCount(0);
+  await expect(page.locator('#actioninbox [data-action-sid="codex:thread-one"]')).toHaveCount(0);
   expect(await page.evaluate(() => Boolean(document.querySelector('#pinned')
-    .compareDocumentPosition(document.querySelector('#needs')) & Node.DOCUMENT_POSITION_FOLLOWING)))
+    .compareDocumentPosition(document.querySelector('#actioninbox')) & Node.DOCUMENT_POSITION_FOLLOWING)))
     .toBe(true);
 
   await page.reload();

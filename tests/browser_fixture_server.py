@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic HTTP fixture for the repository-native browser suite."""
 import copy
+import hashlib
 import json
 import os
 import threading
@@ -82,10 +83,81 @@ def fresh_state():
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
                 "reader_width": "fit", "pinned_sessions": []},
-            "reply_available": {}, "read_sessions": {}}
+            "reply_available": {}, "read_sessions": {}, "dismissed_actions": {}}
 
 
 STATE = fresh_state()
+
+
+def fixture_actions(sessions):
+    records = []
+    for session in sessions:
+        pending = session.get("pending") or {}
+        kind = request = delivery = None
+        safe = ["mute"]
+        revision = str(session.get("convo_v") or "")
+        if pending.get("kind") == "question":
+            kind, delivery = "question", "Awaiting response"
+            request = " · ".join(item.get("question") or item.get("header") or "Question"
+                                 for item in pending.get("questions") or [])
+            revision = str(pending.get("nonce") or revision)
+        elif pending.get("kind") == "permission":
+            kind, request, delivery = "approval", "Review command approval", "Awaiting decision"
+            revision = str(pending.get("nonce") or revision)
+        elif pending.get("kind") == "elicitation":
+            kind, request, delivery = "form", pending.get("message") or "Form waiting", "Awaiting response"
+            revision = str(pending.get("nonce") or revision)
+        elif session.get("reply_requested"):
+            kind, request, delivery = "reply", "Reply requested", "Awaiting response"
+            safe.append("mark_available")
+        elif session.get("ui_group") == "needs_you":
+            kind = "problem" if session.get("state") in ("error", "stalled_or_prompt") else "attention"
+            request, delivery = session.get("error") or session.get("reason_label"), "Intervention needed"
+        elif session.get("new_response"):
+            kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
+            safe.extend(("mark_read", "dismiss"))
+        if not kind:
+            continue
+        raw = "\0".join((session.get("provider") or "claude", session["session_id"], kind, revision))
+        action_id = "act-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+        if action_id in STATE.get("dismissed_actions", {}):
+            continue
+        records.append({"action_id": action_id, "session_id": session["session_id"],
+            "provider": session.get("provider") or "claude", "kind": kind,
+            "request": request, "context": (pending.get("input_summary") or
+                (session.get("last_msg") or {}).get("text") or session.get("project")),
+            "created_at": session.get("activity_at") or time.time(),
+            "reason": session.get("reason_label"), "access": session.get("access"),
+            "access_label": session.get("access_label"),
+            "primary_action": session.get("primary_action"),
+            "primary_action_label": session.get("primary_action_label"),
+            "delivery_state": delivery, "safe_bulk": safe,
+            "revision": str(session.get("convo_v") or ""),
+            "pending_nonce": pending.get("nonce"), "title": session.get("title"),
+            "project": session.get("project"), "muted": session.get("muted", False)})
+    return records
+
+
+def fixture_workstreams():
+    snapshot = fleet()
+    sessions = snapshot["sessions"] + snapshot["closed"]
+    counts = {"needs_you": 0, "working": 0, "available": 0, "history": 0}
+    for item in sessions:
+        counts[item.get("ui_group") or "history"] += 1
+    cost_values = [item.get("cost") for item in sessions if isinstance(item.get("cost"), (int, float))]
+    return {"ok": True, "t": time.time(), "elapsed_ms": .2, "workstreams": [{
+        "workstream_id": "ws-fleet", "kind": "git", "root": "/Users/test/fleet-dash",
+        "worktree": "/Users/test/fleet-dash", "missing": False, "title": "fleet-dash",
+        "counts": counts, "branches": sorted({item.get("branch") for item in sessions if item.get("branch")}),
+        "worktrees": sorted({item.get("cwd") for item in sessions if item.get("cwd")}),
+        "providers": sorted({item.get("provider") or "claude" for item in sessions}),
+        "latest_at": time.time(), "latest_outcome": "Ready for the next task.",
+        "cost": round(sum(cost_values), 4) if cost_values else None,
+        "cost_scope": "partial" if len(cost_values) != len(sessions) else "exact",
+        "context_tokens": sum(item.get("ctx_tokens") or 0 for item in sessions) or None,
+        "repo_summary": {"changed_files": "not_observed", "tests": "not_observed",
+                         "pull_request": "not_observed"}, "budget_state": "not_configured",
+        "sessions": sessions}]}
 
 
 def organize_session(session):
@@ -158,7 +230,7 @@ def fleet():
                 "agents_total": 0, "closed_at": int(time.time()) - 60,
                 "first_seen": int(time.time()) - 3600, "bridge_url": None},
                 *copy.deepcopy(STATE["closed"])]]
-    return {"t": time.time(), "sessions": sessions,
+    return {"t": time.time(), "sessions": sessions, "actions": fixture_actions(sessions),
             "totals": {"sessions": len(sessions),
                 "busy": sum(item["ui_group"] == "working" for item in sessions),
                 "needs_me": sum(item["ui_group"] == "needs_you" for item in sessions),
@@ -332,6 +404,9 @@ def set_scenario(name):
                 "closed_at": now - index, "first_seen": now - 3600 - index,
                 "last_seen": now - index, "bridge_url": None,
                 "can_reopen": False})
+    elif name == "workstreams":
+        session.update(cwd="/Users/test/fleet-dash-worktrees/ui",
+                       branch="feature/action-inbox", project="fleet-dash")
 
 
 def authorized(handler):
@@ -442,6 +517,8 @@ class Handler(BaseHTTPRequestHandler):
                     "next_cursor": None, "projects": ["fleet-dash"], "elapsed_ms": 1.2})
             if route == "/api/fleet":
                 return self.json_reply(fleet())
+            if route == "/api/workstreams":
+                return self.json_reply(fixture_workstreams())
             if route == "/api/context":
                 sid = (query.get("sid") or [""])[0]
                 return self.json_reply({"ok": True,
@@ -545,6 +622,31 @@ class Handler(BaseHTTPRequestHandler):
                     if target:
                         target["new_response"] = False
                     STATE["read_sessions"][sid] = payload.get("revision")
+                bulk = payload.get("bulk_triage") or {}
+                if bulk:
+                    operation = bulk.get("operation")
+                    current = {item["action_id"]: item for item in fleet()["actions"]}
+                    if operation != "mute":
+                        for item in bulk.get("items") or []:
+                            action = current.get(item.get("action_id"))
+                            if (not action or action.get("session_id") != item.get("session_id") or
+                                    operation not in action.get("safe_bulk", [])):
+                                return self.json_reply({"ok": False,
+                                    "error": "stale or ineligible bulk triage action"})
+                    for item in bulk.get("items") or []:
+                        sid = item.get("session_id")
+                        target = next((session for session in STATE["sessions"]
+                                       if session["session_id"] == sid), None)
+                        if operation == "mark_read" and target:
+                            target["new_response"] = False
+                            STATE["read_sessions"][sid] = item.get("revision")
+                        elif operation == "mark_available" and target:
+                            target["reply_requested"] = False
+                            STATE["reply_available"][sid] = item.get("revision")
+                        elif operation == "mute" and target:
+                            target["muted"] = True
+                        elif operation == "dismiss":
+                            STATE["dismissed_actions"][item.get("action_id")] = time.time()
                 STATE["actions"].append(payload)
                 return self.json_reply({"ok": True, **payload})
             if route == "/api/act":

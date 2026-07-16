@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
+    "dismissed_actions": {},             # action_id -> dismissal ts (inbox only)
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -665,6 +666,8 @@ class Engine:
         self.snapshot_cache = {}
         self.scan_timings_ms = deque(maxlen=240)
         self.history_backfilled = False
+        self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
+        self._workstreams_snapshot_cache = None
         # Claude's registry can flash `waiting` between assistant text and the
         # next tool call. Keep the transition time so an uncorroborated flash
         # remains Working instead of manufacturing a "Response needed" card.
@@ -835,6 +838,245 @@ class Engine:
                        activity_at=session.get("last_seen") or session.get("closed_at") or 0,
                        pinned=sid in set(self.cfg.get("pinned_sessions") or []))
         return session
+
+    @staticmethod
+    def _bounded_text(value, limit=280):
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
+
+    @staticmethod
+    def _action_identity(session, kind, revision):
+        raw = "\0".join((str(session.get("provider") or "claude"),
+                          str(session.get("session_id") or ""), kind,
+                          str(revision or "")))
+        return "act-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def action_records(self, sessions):
+        """Build one stable, provider-neutral inbox record per underlying request."""
+        dismissed = self.cfg.get("dismissed_actions") or {}
+        records, seen = [], set()
+        for session in sessions:
+            sid = str(session.get("session_id") or "")
+            if not sid:
+                continue
+            pending = session.get("pending") or {}
+            revision = str(session.get("convo_v") or "")
+            kind, request, delivery, safe_bulk = None, None, None, ["mute"]
+            action_revision = revision
+            if pending:
+                nonce = str(pending.get("nonce") or revision)
+                action_revision = nonce
+                if pending.get("kind") == "question":
+                    kind, delivery = "question", "Awaiting response"
+                    questions = pending.get("questions") or []
+                    request = " · ".join(
+                        self._bounded_text(q.get("question") or q.get("header"), 140)
+                        for q in questions if isinstance(q, dict)) or "Question waiting"
+                elif pending.get("kind") == "elicitation":
+                    kind, delivery = "form", "Awaiting response"
+                    request = pending.get("message") or "Form waiting"
+                elif pending.get("kind") == "permission":
+                    kind, delivery = "approval", "Awaiting decision"
+                    approval = pending.get("approval_kind") or pending.get("tool")
+                    label = {"command": "Review command approval",
+                             "file_change": "Review file approval"}.get(
+                                 approval, "Review permission request")
+                    request = label
+            elif session.get("reply_requested"):
+                kind, request, delivery = "reply", "Reply requested", "Awaiting response"
+                safe_bulk.append("mark_available")
+            elif session.get("ui_group") == "needs_you":
+                kind = "problem" if session.get("state") in ("error", "stalled_or_prompt") \
+                    else "attention"
+                request = session.get("error") or session.get("reason_label") or "Session needs attention"
+                delivery = "Intervention needed"
+            elif session.get("new_response"):
+                kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
+                safe_bulk.extend(("mark_read", "dismiss"))
+            if not kind:
+                continue
+            action_id = self._action_identity(session, kind, action_revision)
+            if action_id in seen or action_id in dismissed:
+                continue
+            seen.add(action_id)
+            last_msg = session.get("last_msg") or {}
+            context = pending.get("input_summary") or last_msg.get("text") or session.get("project")
+            records.append({
+                "action_id": action_id,
+                "session_id": sid,
+                "provider": session.get("provider") or "claude",
+                "kind": kind,
+                "request": self._bounded_text(request),
+                "context": self._bounded_text(context, 360),
+                "created_at": float(session.get("activity_at") or 0),
+                "reason": session.get("reason_label") or "Needs attention",
+                "access": session.get("access") or "view_only",
+                "access_label": session.get("access_label") or "View only",
+                "primary_action": session.get("primary_action") or "view",
+                "primary_action_label": session.get("primary_action_label") or "View",
+                "delivery_state": delivery,
+                "safe_bulk": safe_bulk,
+                "revision": revision,
+                "pending_nonce": pending.get("nonce"),
+                "title": session.get("title") or session.get("name") or session.get("project"),
+                "project": session.get("project"),
+                "muted": bool(session.get("muted")),
+            })
+        priority = {"approval": 0, "question": 1, "form": 1, "problem": 2,
+                    "attention": 3, "reply": 4, "outcome": 5}
+        records.sort(key=lambda item: (priority.get(item["kind"], 9),
+                                       -float(item.get("created_at") or 0),
+                                       item["action_id"]))
+        return records
+
+    @staticmethod
+    def _workstream_git_identity(canonical_cwd):
+        """Resolve the nearest repository and its common main root without Git."""
+        if not canonical_cwd or not os.path.isdir(canonical_cwd):
+            return None
+        current = canonical_cwd
+        while True:
+            marker = os.path.join(current, ".git")
+            if os.path.isdir(marker):
+                return {"kind": "git", "root": current, "worktree": current,
+                        "missing": False}
+            if os.path.isfile(marker):
+                try:
+                    with open(marker, errors="replace") as handle:
+                        line = handle.readline(4096).strip()
+                    if not line.lower().startswith("gitdir:"):
+                        raise ValueError("invalid .git file")
+                    gitdir = os.path.realpath(os.path.join(
+                        current, line.split(":", 1)[1].strip()))
+                    common_file = os.path.join(gitdir, "commondir")
+                    if os.path.isfile(common_file):
+                        with open(common_file, errors="replace") as handle:
+                            common = handle.readline(4096).strip()
+                        common_git = os.path.realpath(os.path.join(gitdir, common))
+                    else:
+                        common_git = gitdir
+                    main_root = (os.path.dirname(common_git)
+                                 if os.path.basename(common_git) == ".git" else current)
+                    if not os.path.isdir(main_root):
+                        main_root = current
+                    return {"kind": "git", "root": main_root, "worktree": current,
+                            "missing": False}
+                except (OSError, ValueError):
+                    return {"kind": "git", "root": current, "worktree": current,
+                            "missing": False, "stale": True,
+                            "error": "Git worktree metadata is unreadable"}
+            parent = os.path.dirname(current)
+            if parent == current:
+                return None
+            current = parent
+
+    def workstream_identity(self, cwd):
+        raw = str(cwd or "").strip()
+        expanded = os.path.abspath(os.path.expanduser(raw or os.sep))
+        canonical = os.path.realpath(expanded)
+        now = time.monotonic()
+        cached = self._workstream_cache.get(canonical)
+        if cached and cached[0] > now:
+            value = cached[1]
+            cwd_missing = not os.path.isdir(canonical)
+            root_missing = value.get("kind") == "git" and not os.path.isdir(value.get("root") or "")
+            if bool(value.get("missing")) == cwd_missing and not root_missing:
+                return dict(value)
+        identity = self._workstream_git_identity(canonical)
+        if identity is None:
+            identity = {"kind": "folder", "root": canonical,
+                        "worktree": canonical, "missing": not os.path.isdir(canonical)}
+        key = identity["kind"] + "\0" + identity["root"]
+        identity["workstream_id"] = "ws-" + hashlib.sha256(
+            key.encode("utf-8")).hexdigest()[:20]
+        self._workstream_cache[canonical] = (now + 30, dict(identity))
+        if len(self._workstream_cache) > 2000:
+            self._workstream_cache = {canonical: self._workstream_cache[canonical]}
+        return identity
+
+    def workstream_records(self, sessions, closed):
+        """Group live and historical sessions by canonical repository/project."""
+        groups = {}
+        live_ids = {str(item.get("session_id") or "") for item in sessions}
+        for is_closed, session in ([(False, item) for item in sessions] +
+                                   [(True, item) for item in closed]):
+            sid = str(session.get("session_id") or "")
+            if not sid or (is_closed and sid in live_ids):
+                continue
+            if session.get("cwd"):
+                identity = self.workstream_identity(session.get("cwd"))
+            else:
+                unknown_key = "unknown\0" + str(session.get("provider") or "claude") + "\0" + sid
+                identity = {"kind": "unknown", "root": "Location unavailable",
+                            "worktree": None, "missing": True,
+                            "error": "Provider did not report a working directory",
+                            "workstream_id": "ws-" + hashlib.sha256(
+                                unknown_key.encode("utf-8")).hexdigest()[:20]}
+            group = groups.setdefault(identity["workstream_id"], {
+                **identity,
+                "title": os.path.basename(identity["root"].rstrip(os.sep)) or identity["root"],
+                "sessions": [], "counts": {"needs_you": 0, "working": 0,
+                                                "available": 0, "history": 0},
+                "branches": set(), "worktrees": set(), "providers": set(),
+                "latest_at": 0, "latest_outcome": None,
+                "cost": 0.0, "cost_known": 0, "cost_unknown": 0,
+                "context_tokens": 0, "context_known": 0,
+            })
+            ui_group = session.get("ui_group") or "history"
+            if ui_group not in group["counts"]:
+                ui_group = "history"
+            group["counts"][ui_group] += 1
+            summary = {key: session.get(key) for key in
+                       ("session_id", "provider", "title", "name", "project", "cwd",
+                        "branch", "state", "ui_group", "reason_label", "access",
+                        "access_label", "primary_action", "primary_action_label",
+                        "activity_at", "closed_at", "can_reopen", "cost", "ctx_tokens")}
+            group["sessions"].append(summary)
+            if session.get("branch"):
+                group["branches"].add(str(session["branch"]))
+            if identity.get("worktree"):
+                group["worktrees"].add(identity["worktree"])
+            group["providers"].add(str(session.get("provider") or "claude"))
+            activity = float(session.get("activity_at") or session.get("last_seen") or
+                             session.get("closed_at") or 0)
+            if activity >= group["latest_at"]:
+                group["latest_at"] = activity
+                last_msg = session.get("last_msg") or {}
+                group["latest_outcome"] = self._bounded_text(
+                    last_msg.get("text") or session.get("reason_label") or
+                    session.get("title") or session.get("project"), 240)
+            cost = session.get("cost")
+            if isinstance(cost, (int, float)):
+                group["cost"] += float(cost)
+                group["cost_known"] += 1
+            else:
+                group["cost_unknown"] += 1
+            context = session.get("ctx_tokens")
+            if isinstance(context, (int, float)):
+                group["context_tokens"] += int(context)
+                group["context_known"] += 1
+        records = []
+        for group in groups.values():
+            group["branches"] = sorted(group["branches"])
+            group["worktrees"] = sorted(group["worktrees"])
+            group["providers"] = sorted(group["providers"])
+            group["sessions"].sort(key=lambda item: (
+                {"needs_you": 0, "working": 1, "available": 2, "history": 3}.get(
+                    item.get("ui_group"), 3), -float(item.get("activity_at") or 0)))
+            group["cost"] = round(group["cost"], 4) if group["cost_known"] else None
+            group["cost_scope"] = ("unavailable" if not group["cost_known"] else
+                                   "partial" if group["cost_unknown"] else "exact")
+            if not group["context_known"]:
+                group["context_tokens"] = None
+            group["repo_summary"] = {"changed_files": "not_observed",
+                                     "tests": "not_observed", "pull_request": "not_observed"}
+            group["budget_state"] = "not_configured"
+            records.append(group)
+        records.sort(key=lambda item: (
+            0 if item["counts"]["needs_you"] else 1,
+            0 if item["counts"]["working"] else 1,
+            -float(item.get("latest_at") or 0), item["title"].lower()))
+        return records
 
     def scan(self):
         started = time.perf_counter()
@@ -1036,6 +1278,7 @@ class Engine:
                       flush=True)
         closed = [self.organize_closed(item) for item in self.closed_sessions()]
         closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
+        actions = self.action_records(sessions)
         claude_usage = self.read_usage()
         try:
             codex_usage = self.codex.account_usage()
@@ -1063,6 +1306,7 @@ class Engine:
             },
             "usage": claude_usage,
             "provider_usage": {"claude": claude_usage, "codex": codex_usage},
+            "actions": actions,
             "closed": closed,
             "recent_dirs": self.recent_dirs(),
             "models": list(self.MODELS), "efforts": list(self.EFFORTS),
@@ -1079,9 +1323,26 @@ class Engine:
                           "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
                           "preview_sessions", "preview_session_lines",
                           "preview_agents", "preview_agent_lines", "reader_width",
-                          "pinned_sessions")},
+                          "pinned_sessions", "dismissed_actions")},
         }
         return fleet
+
+    def workstreams_snapshot(self):
+        """Build the heavier repository rollup outside the two-second fleet path."""
+        with self.lock:
+            snapshot = self.snapshot_cache
+            stamp = snapshot.get("t")
+            sessions = list(snapshot.get("sessions") or [])
+            closed = list(snapshot.get("closed") or [])
+        cached = self._workstreams_snapshot_cache
+        if cached and cached[0] == stamp:
+            return cached[1]
+        started = time.perf_counter()
+        records = self.workstream_records(sessions, closed)
+        result = {"ok": True, "t": stamp or time.time(), "workstreams": records,
+                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+        self._workstreams_snapshot_cache = (stamp, result)
+        return result
 
     def _persist_config_fields(self, changed):
         """Merge internal/UI state into config.json without dropping secret fields."""
@@ -2742,6 +3003,61 @@ class Engine:
             values[sid] = revision
             values = dict(list(values.items())[-1000:])
             self.cfg[config_key] = changed[config_key] = values
+        bulk = patch.get("bulk_triage")
+        if bulk is not None:
+            if not isinstance(bulk, dict):
+                return {"ok": False, "error": "bulk_triage must be an object"}
+            operation = str(bulk.get("operation") or "")
+            items = bulk.get("items")
+            if operation not in ("mark_read", "mark_available", "mute", "dismiss"):
+                return {"ok": False, "error": "unsupported bulk triage operation"}
+            if not isinstance(items, list) or not 1 <= len(items) <= 100:
+                return {"ok": False, "error": "bulk triage requires 1–100 items"}
+            normalized = []
+            for item in items:
+                if not isinstance(item, dict):
+                    return {"ok": False, "error": "invalid bulk triage item"}
+                sid = str(item.get("session_id") or "").strip()[:300]
+                action_id = str(item.get("action_id") or "").strip()[:80]
+                revision = str(item.get("revision") or "").strip()[:300]
+                if not sid or not action_id:
+                    return {"ok": False, "error": "bulk triage item needs session and action IDs"}
+                if operation in ("mark_read", "mark_available") and not revision:
+                    return {"ok": False, "error": "bulk triage revision is required"}
+                normalized.append((sid, action_id, revision))
+            if operation != "mute":
+                with self.lock:
+                    current_actions = {item.get("action_id"): item for item in
+                                       (self.snapshot_cache.get("actions") or [])}
+                for sid, action_id, revision in normalized:
+                    current = current_actions.get(action_id)
+                    if (not current or current.get("session_id") != sid or
+                            operation not in (current.get("safe_bulk") or []) or
+                            (revision and str(current.get("revision") or "") != revision)):
+                        return {"ok": False,
+                                "error": "stale or ineligible bulk triage action"}
+            now = time.time()
+            if operation == "mute":
+                values = dict(self.cfg.get("muted_sessions") or {})
+                for sid, _, _ in normalized:
+                    values[sid] = now
+                values = {key: value for key, value in values.items()
+                          if now - float(value or 0) < 30 * 86400}
+                self.cfg["muted_sessions"] = changed["muted_sessions"] = values
+            elif operation == "dismiss":
+                values = dict(self.cfg.get("dismissed_actions") or {})
+                for _, action_id, _ in normalized:
+                    values[action_id] = now
+                values = dict(list(values.items())[-2000:])
+                self.cfg["dismissed_actions"] = changed["dismissed_actions"] = values
+            else:
+                key = "read_sessions" if operation == "mark_read" else "reply_available"
+                values = dict(self.cfg.get(key) or {})
+                for sid, _, revision in normalized:
+                    values.pop(sid, None)
+                    values[sid] = revision
+                values = dict(list(values.items())[-1000:])
+                self.cfg[key] = changed[key] = values
         if not changed:
             return {"ok": False, "error": "nothing to update"}
         self._persist_config_fields(changed)

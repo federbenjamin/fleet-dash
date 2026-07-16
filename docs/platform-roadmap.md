@@ -9,7 +9,8 @@ Status: approved for sequential implementation on `codex-integration`.
 | M0 — Baseline and roadmap | Complete · 2026-07-16 | Roadmap catalogue, persistent external-thread observation, quick-response delivery, repeatable Python/browser baselines, and pushed commits through `b9bf0e0`. |
 | M1 — App shell and shared components | Complete · 2026-07-16 | Semantic zero-build shell in `dashboard.html`, responsive/navigation/component rules in `static/fleet.css`, route/back/filter behavior in `static/app.js`, 82 Python tests, 40 deterministic Playwright desktop/mobile tests, and 2 running-daemon Playwright checks. |
 | M2 — Incremental global search | Complete · 2026-07-16 | Isolated low-priority index process, per-source WAL/FTS5 state, authenticated search/status/context/rebuild APIs, desktop/mobile Search UI, exact session/subagent/artifact context, 88 Python tests, 44 deterministic browser tests, and the 100k-message/2k-source benchmark. Live while indexing 2.7 GB: `/api/fleet` p95 12.653 ms, search p95 26.619 ms, server search p95 24.515 ms. |
-| M3 — Action inbox and Workstreams | Next | Normalize actionable records and add lightweight repository grouping without expanding Now into a control wall. |
+| M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
+| M4 — State evidence | Next | Extract the placement classifier and persist the exact evidence behind every user-facing state. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -106,7 +107,7 @@ the current source and running app; a checked box or this document's prose is no
 
 | ID | Requirement and acceptance condition | Owner |
 | --- | --- | --- |
-| ACT-001 | Normalize structured questions, explicit prose questions/reply requests, approvals, permissions, MCP forms, actionable errors, budget alerts, Git/PR failures, and unreviewed completed outcomes into one inbox. | M3 |
+| ACT-001 | Normalize structured questions, explicit prose questions/reply requests, approvals, permissions, MCP forms, actionable errors, budget alerts, Git/PR failures, and unreviewed completed outcomes into one inbox. | M3/M6/M8 |
 | ACT-002 | Each action shows request, essential context, age, provider, access, reason, primary action, and delivery state, and opens the canonical interaction component. | M3 |
 | ACT-003 | Deduplicate the same underlying request across cards/inbox/refresh/restart and reject stale or duplicate answers without losing the pending request. | M3 |
 | ACT-004 | Bulk actions are limited to mark read/available, mute, and notification dismissal. Never bulk-approve a command or file change. | M3 |
@@ -667,6 +668,23 @@ Commit: `Add action inbox and repository workstreams`.
 Exit: no duplicate actions, stable Working order, provider outage isolation, mobile triage, and
 worktree rollup tests pass.
 
+Completed 2026-07-16. `ACT-001`–`ACT-005`, `WORK-001`–`WORK-003`, `UX-005`, `UX-006`, and the
+applicable `UX-010` states are represented by normalized action records, persistent safe-only bulk
+triage, the existing canonical question/approval/full-chat renderer, saved Now/Workstreams filters,
+and lazy repository grouping. Git changes, test results, PR state, and budgets remain explicitly
+`not_observed`/`not_configured`; their measured enrichments stay owned by M6 and M8 rather than being
+fabricated here. Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 96 passed.
+- `npx playwright test tests/browser/fleet.spec.js` — 48 passed at desktop 1440×1000 and mobile
+  390×844, including inbox dedupe/triage, no bulk approval, worktree rollup, saved views, provider
+  outage, read-only, stale, optimistic delivery, and pin placement.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377 FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 4 passed across both viewports with no console/network failures.
+- The initial implementation exposed a 158-workstream grouping cost on every fleet poll. The final
+  design moves it to `GET /api/workstreams`; `/api/fleet` contains only the bounded action inbox, and
+  the Workstreams page refreshes its lazy cached rollup only while open.
+
 ### M4 — State evidence
 
 - Extract pure placement classifier.
@@ -794,6 +812,12 @@ Real local corpus baseline:
 | Claude projects | 3,212 | 536,706 | 2,639,704,900 |
 | Codex sessions | 47 | 25,894 | 87,897,067 |
 | Total | 3,259 | 562,600 | 2,727,601,967 |
+
+M3 live verification found that the unfiltered “recent results” Search query can take about 5.2
+seconds while the real multi-gigabyte index is actively growing, although an actual `fleet` text
+query returned in about 103 ms in the same check. M3 stopped issuing that blank query automatically;
+Search now waits for text or a filter. M9 should add an indexed recent-results path before any blank
+browse behavior is reintroduced and should reduce read contention during active indexing.
 
 Repeat with:
 

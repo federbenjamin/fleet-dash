@@ -8,7 +8,14 @@ const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set();  // detail-pane
 const routeNames={now:'Now',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights'};
 const validRoutes=new Set(Object.keys(routeNames));
 let currentRoute=validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now';
-let nowFilter='',nowState='all';
+let nowFilter='',nowState='all',workFilter='',workState='all';
+let workstreamData={ok:true,workstreams:[]},workstreamsLoading=false,workstreamsLoadedAt=0;
+const SAVED_VIEW_KEY='fleet.savedViews.v1';
+let savedViews=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(SAVED_VIEW_KEY)||'{}');
+  return {now:Array.isArray(value.now)?value.now:[],
+    workstreams:Array.isArray(value.workstreams)?value.workstreams:[]};
+}catch(_){return {now:[],workstreams:[]};}})();
 function closeMobileMore(){
   const menu=$('#mobilemore'),button=$('#bottomnav [data-route="more"]');
   if(menu)menu.classList.remove('open');
@@ -46,12 +53,59 @@ function navigateTo(route,push=true){
   if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
   if(route==='insights')loadInsights();
   if(route==='search'){loadSearchStatus(true);runSearch(true);}
+  if(route==='workstreams')loadWorkstreams(true);
   window.scrollTo({top:0,behavior:'auto'});
 }
 function setNowFilter(value){nowFilter=value;render(last,true);}
 function setNowState(value){
   nowState=['all','needs_you','working','available'].includes(value)?value:'all';
   render(last,true);
+}
+async function loadWorkstreams(force=false){
+  if(workstreamsLoading||(!force&&Date.now()-workstreamsLoadedAt<1800))return;
+  workstreamsLoading=true;renderWorkstreams(workstreamData);
+  try{
+    const r=await fetch('/api/workstreams',{cache:'no-store'}),data=await r.json();
+    if(!r.ok||!data.ok)throw new Error(data.error||'Workstreams unavailable');
+    workstreamData=data;workstreamsLoadedAt=Date.now();
+  }catch(error){workstreamData={ok:false,error:String(error),workstreams:workstreamData.workstreams||[]};}
+  finally{workstreamsLoading=false;renderWorkstreams(workstreamData);}
+}
+function setWorkFilter(value){workFilter=value;renderWorkstreams(workstreamData);}
+function setWorkState(value){
+  workState=['all','needs_you','working','mixed'].includes(value)?value:'all';
+  renderWorkstreams(workstreamData);
+}
+function saveCurrentView(destination){
+  if(!['now','workstreams'].includes(destination))return;
+  const name=(prompt('Name this saved view')||'').trim().slice(0,40);
+  if(!name)return;
+  const item=destination==='now'?{name,query:nowFilter,state:nowState}:
+    {name,query:workFilter,state:workState};
+  const items=savedViews[destination].filter(view=>view.name.toLowerCase()!==name.toLowerCase());
+  savedViews[destination]=[...items,item].slice(-12);
+  localStorage.setItem(SAVED_VIEW_KEY,JSON.stringify(savedViews));
+  renderSavedViews(destination);
+}
+function applySavedView(destination,index){
+  const view=(savedViews[destination]||[])[index];if(!view)return;
+  if(destination==='now'){
+    nowFilter=view.query||'';nowState=view.state||'all';
+    const input=$('#nowfilter');if(input)input.value=nowFilter;render(last,true);
+  }else{
+    workFilter=view.query||'';workState=view.state||'all';
+    const input=$('#workfilter');if(input)input.value=workFilter;renderWorkstreams(workstreamData);
+  }
+}
+function deleteSavedView(destination,index,event){
+  event?.stopPropagation();savedViews[destination].splice(index,1);
+  localStorage.setItem(SAVED_VIEW_KEY,JSON.stringify(savedViews));renderSavedViews(destination);
+}
+function renderSavedViews(destination){
+  const el=$(destination==='now'?'#nowsaved':'#worksaved');if(!el)return;
+  el.innerHTML=(savedViews[destination]||[]).map((view,index)=>
+    `<span class="savedchip"><button onclick="applySavedView('${destination}',${index})">${esc(view.name)}</button>`+
+    `<button aria-label="delete saved view ${esc(view.name)}" onclick="deleteSavedView('${destination}',${index},event)">×</button></span>`).join('');
 }
 function matchesNow(session){
   if(!session)return false;
@@ -77,6 +131,8 @@ function searchParams(cursor){
     project:$('#searchproject')?.value||'',cursor:String(cursor||0),limit:'30'});
   return params.toString();
 }
+function searchHasCriteria(){return Boolean(($('#searchquery')?.value||'').trim()||
+  $('#searchprovider')?.value||$('#searchkind')?.value||$('#searchproject')?.value);}
 function renderSearchStatus(){
   const el=$('#searchstatus'),warnings=$('#searchwarnings'),s=searchStatusData;
   if(!el)return;
@@ -95,6 +151,7 @@ function renderSearchStatus(){
 async function loadSearchStatus(force){
   if(!force&&Date.now()-searchStatusAt<4000)return;
   searchStatusAt=Date.now();
+  renderSearchStatus();
   try{
     const r=await fetch('/api/search/status',{cache:'no-store'}),d=await r.json();
     searchStatusData=r.ok?d:{ok:false,error:r.status===403?'Search needs this device’s action token':(d.error||'Search unavailable')};
@@ -109,7 +166,8 @@ function renderSearchResults(){
   const el=$('#searchresults'),more=$('#searchmore');if(!el||!more)return;
   if(searchError){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)}</div>`;more.hidden=true;return;}
   if(searchBusy&&!searchItems.length){el.innerHTML='<div class="searchempty">Searching…</div>';more.hidden=true;return;}
-  if(!searchItems.length){el.innerHTML='<div class="searchempty">No indexed conversation matches these filters.</div>';more.hidden=true;return;}
+  if(!searchItems.length){el.innerHTML=`<div class="searchempty">${searchHasCriteria()?
+    'No indexed conversation matches these filters.':'Type a search or choose a filter.'}</div>`;more.hidden=true;return;}
   el.innerHTML=searchItems.map(item=>`<button class="searchresult" onclick="openSearchContext(${Number(item.id)})">
     <span class="searchprovider ${item.provider==='claude'?'claude':'codex'}">${item.provider==='claude'?'C':'X'}</span>
     <span class="searchcopy"><span class="searchtitle"><b>${esc(item.title||item.project||'Conversation')}</b>
@@ -130,6 +188,9 @@ async function runSearch(reset=true){
   if(!$('#searchresults'))return;
   clearTimeout(searchTimer);
   if(reset){searchCursor=0;searchItems=[];searchError='';if(searchAbort)searchAbort.abort();}
+  if(reset&&!searchHasCriteria()){
+    searchBusy=false;searchAbort=null;renderSearchResults();return;
+  }
   if(searchBusy&&!reset)return;
   const cursor=reset?0:searchCursor;if(cursor==null)return;
   const controller=new AbortController();searchAbort=controller;searchBusy=true;renderSearchResults();
@@ -1704,6 +1765,146 @@ function slashPick(sid,pre,name){
 }
 let historyFilter='',historyAccess='all',historyProvider='all',historyVisible=100;
 const historyInfoOpen=new Set();
+const actionSelected=new Set(),workstreamOpen=new Set();
+let actionKind='all',actionBulkBusy=false;
+
+function actionSession(action){
+  return ((last&&last.sessions)||[]).find(item=>item.session_id===action.session_id)||null;
+}
+function actionMatches(action){
+  const session=actionSession(action);
+  if(!session||pinnedSessions.has(action.session_id)||!matchesNow(session))return false;
+  if(actionKind==='requests'&&!['question','form','reply'].includes(action.kind))return false;
+  if(actionKind==='approvals'&&action.kind!=='approval')return false;
+  if(actionKind==='outcomes'&&action.kind!=='outcome')return false;
+  if(actionKind==='problems'&&!['problem','attention'].includes(action.kind))return false;
+  return true;
+}
+function openInboxAction(actionId){
+  const action=((last&&last.actions)||[]).find(item=>item.action_id===actionId);if(!action)return;
+  ['question','form','approval'].includes(action.kind)?openSessionQ(action.session_id):
+    primarySessionAction(action.session_id);
+}
+function setActionKind(value){
+  actionKind=['all','requests','approvals','outcomes','problems'].includes(value)?value:'all';
+  renderActionInbox(last);
+}
+function toggleActionSelection(actionId,checked){
+  checked?actionSelected.add(actionId):actionSelected.delete(actionId);renderActionInbox(last);
+}
+function toggleVisibleActions(checked){
+  const visible=((last&&last.actions)||[]).filter(actionMatches);
+  visible.forEach(item=>checked?actionSelected.add(item.action_id):actionSelected.delete(item.action_id));
+  renderActionInbox(last);
+}
+async function bulkTriage(operation){
+  if(actionBulkBusy)return;
+  const selected=((last&&last.actions)||[]).filter(item=>actionSelected.has(item.action_id));
+  const eligible=selected.filter(item=>(item.safe_bulk||[]).includes(operation));
+  if(!eligible.length)return;
+  actionBulkBusy=true;renderActionInbox(last);
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({bulk_triage:{operation,items:eligible.map(item=>({
+        action_id:item.action_id,session_id:item.session_id,revision:String(item.revision||'')}))}})});
+    const data=await r.json();if(!data.ok)throw new Error(data.error||'bulk update failed');
+    eligible.forEach(item=>actionSelected.delete(item.action_id));await tick();
+  }catch(error){alert('bulk action failed: '+error);}
+  finally{actionBulkBusy=false;renderActionInbox(last);}
+}
+function actionIcon(kind){return {question:'?',form:'≡',approval:'!',reply:'↩',problem:'×',
+  attention:'!',outcome:'✓'}[kind]||'•';}
+function renderActionInbox(f){
+  const el=$('#actioninbox');if(!el)return;
+  const actions=((f&&f.actions)||[]).filter(actionMatches);
+  const activeIds=new Set(((f&&f.actions)||[]).map(item=>item.action_id));
+  [...actionSelected].forEach(id=>{if(!activeIds.has(id))actionSelected.delete(id);});
+  if(!actions.length){el.className='';el.innerHTML='';return;}
+  const selected=actions.filter(item=>actionSelected.has(item.action_id));
+  const eligible=operation=>selected.filter(item=>(item.safe_bulk||[]).includes(operation)).length;
+  const allSelected=actions.length>0&&actions.every(item=>actionSelected.has(item.action_id));
+  el.className='actioninbox';
+  el.innerHTML=`<div class="actionhead"><label><input type="checkbox" aria-label="select visible actions"
+      ${allSelected?'checked':''} onchange="toggleVisibleActions(this.checked)"><span><b>Action inbox</b><small>${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
+    <div class="actionfilters">${[['all','All'],['requests','Requests'],['approvals','Approvals'],
+      ['outcomes','Outcomes'],['problems','Problems']].map(([value,label])=>
+      `<button class="${actionKind===value?'active':''}" onclick="setActionKind('${value}')">${label}</button>`).join('')}</div></div>
+    ${selected.length?`<div class="bulkbar"><b>${selected.length} selected</b>
+      ${eligible('mark_read')?`<button onclick="bulkTriage('mark_read')">Review ${eligible('mark_read')}</button>`:''}
+      ${eligible('mark_available')?`<button onclick="bulkTriage('mark_available')">Mark available ${eligible('mark_available')}</button>`:''}
+      ${eligible('mute')?`<button onclick="bulkTriage('mute')">Mute ${eligible('mute')}</button>`:''}
+      ${eligible('dismiss')?`<button onclick="bulkTriage('dismiss')">Dismiss ${eligible('dismiss')}</button>`:''}
+      ${actionBulkBusy?'<span>updating…</span>':''}</div>`:''}
+    <div class="actionrows">${actions.map(action=>{
+      const session=actionSession(action),encoded=enc(action.action_id);
+      const age=Math.max(0,Math.round(((f&&f.t)||Date.now()/1000)-(action.created_at||0)));
+      return`<div class="actionrow ${esc(action.kind)}" data-action-id="${esc(action.action_id)}" data-action-sid="${esc(action.session_id)}">
+        <label class="actioncheck" onclick="event.stopPropagation()"><input type="checkbox" aria-label="select ${esc(action.request)}"
+          ${actionSelected.has(action.action_id)?'checked':''} onchange="toggleActionSelection(decodeURIComponent('${encoded}'),this.checked)"></label>
+        <button class="actionopen" onclick="openInboxAction(decodeURIComponent('${encoded}'))">
+          <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(action.request)}</span>
+          ${action.context?`<span class="actioncontext">${esc(action.context)}</span>`:''}
+          <span class="actionmeta">${esc(action.provider)} · ${esc(action.access_label)} · ${esc(action.reason)} · ${fmtAge(age)} ago</span></span>
+          <span class="actiondelivery">${esc(action.delivery_state)}</span></button>
+        <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label)}</button>
+        ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
+        ${session?cardResponseFeedback(session):''}
+      </div>`;}).join('')}</div>`;
+}
+
+function filteredWorkstreams(f){
+  const query=workFilter.trim().toLowerCase();
+  return ((f&&f.workstreams)||[]).filter(item=>{
+    const stateOk=workState==='all'||(workState==='mixed'?(item.providers||[]).length>1:
+      (item.counts&&item.counts[workState]>0));
+    const hay=[item.title,item.root,...(item.branches||[]),...(item.providers||[]),
+      ...(item.worktrees||[]),...(item.sessions||[]).flatMap(s=>[s.title,s.name,s.project,s.branch,s.provider])]
+      .filter(Boolean).join(' ').toLowerCase();
+    return stateOk&&(!query||hay.includes(query));
+  });
+}
+function toggleWorkstream(id){workstreamOpen.has(id)?workstreamOpen.delete(id):workstreamOpen.add(id);renderWorkstreams(workstreamData);}
+function workstreamSessionRow(session){
+  const sid=String(session.session_id||''),encoded=enc(sid),closed=session.closed_at!=null;
+  const title=session.title||session.name||session.project||'Session';
+  return`<div class="worksession"><span class="workstate ${esc(session.ui_group||'history')}"></span>
+    <span class="worksessioncopy"><b>${esc(title)}</b><small>${esc(session.reason_label||'History')} · ${esc(session.provider||'claude')}${session.branch?` · ${esc(session.branch)}`:''}</small></span>
+    <button class="historyaction" onclick="${closed?`openClosed(decodeURIComponent('${encoded}'))`:`primarySessionAction(decodeURIComponent('${encoded}'))`}">${esc(session.primary_action_label||'View')}</button></div>`;
+}
+function renderWorkstreams(f){
+  const el=$('#workstreams');if(!el)return;
+  document.querySelectorAll('[data-work-filter]').forEach(button=>{
+    const active=button.dataset.workFilter===workState;button.classList.toggle('active',active);
+    button.setAttribute('aria-pressed',String(active));
+  });
+  renderSavedViews('workstreams');
+  if(workstreamsLoading&&!(f&&f.workstreams&&f.workstreams.length)){
+    el.innerHTML='<div class="destinationempty"><span>⌘</span><b>Grouping repositories…</b><p>Now continues polling while this page loads.</p></div>';return;
+  }
+  const staleAlert=f&&f.ok===false?
+    `<div class="provideralert"><b>Workstreams stale</b> — ${esc(f.error||'repository grouping failed')}. Showing the last successful grouping.</div>`:'';
+  const items=filteredWorkstreams(f);
+  if(!items.length){el.innerHTML=staleAlert+'<div class="destinationempty"><span>⌘</span><b>No matching workstreams</b><p>Repositories and project folders appear when Fleet observes a session.</p></div>';return;}
+  el.innerHTML=staleAlert+items.map(item=>{
+    const id=enc(item.workstream_id),expanded=workstreamOpen.has(item.workstream_id),counts=item.counts||{};
+    const stateCounts=[['needs_you','needs you'],['working','working'],['available','available'],['history','history']]
+      .filter(([key])=>counts[key]).map(([key,label])=>`<span class="wcount ${key}"><b>${counts[key]}</b> ${label}</span>`).join('');
+    const cost=item.cost_scope==='unavailable'?'cost unavailable':
+      `${fmt$(item.cost)}${item.cost_scope==='partial'?' partial':''}`;
+    const context=item.context_tokens==null?'context unavailable':`${fmtTok(item.context_tokens)} context now`;
+    return`<section class="workstream ${item.missing?'missing':''}" data-workstream-id="${esc(item.workstream_id)}">
+      <button class="workhead" onclick="toggleWorkstream(decodeURIComponent('${id}'))">
+        <span class="workkind">${item.kind==='git'?'git':item.kind==='unknown'?'?':'dir'}</span><span class="worktitle"><b>${esc(item.title)}${item.missing?' · missing':''}${item.stale?' · stale':''}</b><small>${esc(item.root)}</small></span>
+        <span class="workcounts">${stateCounts||'<span class="wcount">no sessions</span>'}</span><span class="chev">${expanded?'⌃':'⌄'}</span></button>
+      <div class="worksummary"><span>${(item.providers||[]).map(esc).join(' · ')||'provider unavailable'}</span>
+        <span>${(item.branches||[]).map(branch=>`<code>${esc(branch)}</code>`).join(' ')||'branch unavailable'}</span>
+        <span>${esc(cost)} · ${esc(context)}</span></div>
+      <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
+      <div class="worksignals"><span>Changes <b>not observed</b></span><span>Tests <b>not observed</b></span><span>PR <b>not observed</b></span><span>Budget <b>not configured</b></span></div>
+      ${expanded?`<div class="workdetail"><div class="worktrees"><b>Worktrees</b>${(item.worktrees||[]).map(path=>`<code>${esc(path)}</code>`).join('')}</div>
+        <div class="worksessions">${(item.sessions||[]).map(workstreamSessionRow).join('')}</div></div>`:''}</section>`;
+  }).join('');
+}
 function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
   if(!list.length&&!keepEmpty){el.innerHTML='';el.className='';return;}
   el.className=`queue ${kind}`;
@@ -2001,15 +2202,18 @@ function render(f,force){
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')&&$('#newsess').contains(ae);
   if(force||!touching()){
     const unpinned=f.sessions.filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
+    const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
+      .map(action=>action.session_id));
     renderPinned(f,matchesNow);
-    renderQueue($('#needs'),unpinned.filter(s=>s.ui_group==='needs_you'),
-      'Needs you','waiting for a response or intervention','needs');
+    renderActionInbox(f);
     renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
       'Working','turns in progress','working');
-    renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'),
+    renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
       'Available','ready for another message','available',true);
     if(!typingNew)$('#newsess').innerHTML=newSection();
     if(!typingHistory)$('#history').innerHTML=historySection(f);
+    if(currentRoute==='workstreams')renderWorkstreams(workstreamData);
+    renderSavedViews('now');
     $('#rollup').innerHTML=insightsSection();
   }
   checkSpawn(f);
@@ -2033,5 +2237,6 @@ async function tick(){
 navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);
 setInterval(()=>{if(currentRoute==='search')loadSearchStatus();},5000);
+setInterval(()=>{if(currentRoute==='workstreams')loadWorkstreams();},2000);
 fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
   .then(r=>{$('#notoken').style.display=r.status===403?'block':'none';}).catch(()=>{});

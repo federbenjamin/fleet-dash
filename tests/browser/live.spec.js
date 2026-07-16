@@ -53,6 +53,10 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(page.locator('#settitle')).toHaveText('Settings');
   await page.evaluate(() => history.back());
   await expect(page.locator('#settingsview')).toBeHidden();
+  await goTo(page, 'workstreams');
+  await expect(page.locator('#workstreams .workstream').first()).toBeVisible();
+  await expect(page.locator('#workstreams')).toContainText(/not observed|not configured/);
+  await goTo(page, 'now');
   const codex = page.locator('[data-sid^="codex:"]').first();
   if (await codex.isVisible()) {
     await expect(codex.locator('select.modesel')).toHaveCount(0);
@@ -88,13 +92,14 @@ test('running Fleet Dash searches indexed transcripts with exact context', async
     `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await goTo(page, 'search');
-  await expect(page.locator('#searchstatus')).toContainText(/Indexing|Indexed/);
-  await expect(page.locator('#searchresults .searchresult').first()).toBeVisible();
+  await expect(page.locator('#searchstatus')).toContainText(/Checking|Indexing|Indexed/);
   await page.locator('#searchquery').fill('fleet');
-  await expect(page.locator('#searchresults .searchresult').first()).toBeVisible();
+  // The real multi-gigabyte index may be committing a batch; wait through one
+  // bounded writer-contention window while still requiring a real result.
+  await expect(page.locator('#searchresults .searchresult').first()).toBeVisible({ timeout: 15_000 });
   await page.locator('#searchresults .searchresult').first().click();
   await expect(page.locator('#searchview')).toBeVisible();
-  await expect(page.locator('#searchviewbody .searchcontext')).toBeVisible();
+  await expect(page.locator('#searchviewbody .searchcontext')).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: testInfo.outputPath('running-search.png'), fullPage: true });
   expect(failures).toEqual([]);
 });

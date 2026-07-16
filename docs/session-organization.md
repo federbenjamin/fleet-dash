@@ -14,7 +14,7 @@ Every session has three independent user-facing dimensions:
 The Now destination order is:
 
 1. **Pinned**
-2. **Needs you**
+2. **Action inbox**
 3. **Working**
 4. **Available**
 
@@ -22,13 +22,24 @@ The separate **History** destination follows those four live-inventory groups an
 inventory.
 
 Pinned sessions are relocated, not duplicated. They retain their reason, access,
-and primary action. Pinned cards sort by the same urgency order as the main page,
-then by newest activity. Pins persist in Fleet's server settings across browser
-reloads, daemon restarts, and devices.
+and primary action. An unpinned Needs-you session appears once as an inbox row, not
+again as a full card. An unreviewed completed response also appears in the inbox
+until it is opened or marked reviewed, then returns to the Available cards. Pinned
+cards keep their inline interaction instead of duplicating an inbox row. Pins persist
+in Fleet's server settings across browser reloads, daemon restarts, and devices.
 
-Empty Pinned, Needs you, and Working sections are hidden. Available remains visible
+Empty Pinned, Action inbox, and Working sections are hidden. Available remains visible
 with an empty-state message. History shows one flat list or an explicit empty state; it is not a
 disclosure nested under Now.
+
+The Action inbox is a presentation of normalized action records, not another lifecycle.
+It includes provider-native questions, approvals, permissions, MCP forms, direct prose reply
+requests, session errors requiring intervention, and completed work not yet reviewed. Every row has
+a stable id derived from provider, session, kind, and pending nonce/conversation revision, so the same
+request does not duplicate across refreshes or daemon restarts. Selecting it opens the existing full
+session interaction. Bulk actions are restricted to mark reviewed, mark available, mute, and dismiss
+reviewable completion notices. Unresolved questions/forms/approvals cannot be hidden by bulk triage,
+and command/file approvals are never bulk actions.
 
 ## Placement and classification
 
@@ -62,7 +73,7 @@ question, it moves to Needs you with View-only access instead.
 | Working | Working elsewhere | An external provider runtime owns an active turn. | View |
 | Working | Slow | The turn is still active but activity has exceeded the stall threshold. | Open, or View when external |
 | Available | Available | The session is interactive, has no active turn, and has no reply request. | Continue |
-| Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. This is a secondary badge; the placement remains Available. | Continue |
+| Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. Its placement remains Available, but the unreviewed outcome is presented in the Action inbox until reviewed. | Continue |
 | Session history | Inactive | A managed, interactive session is dormant. | Continue |
 | Session history | External | The external/view-only session has no active turn. | View |
 | Session history | Reopenable | The provider explicitly supports reopening the inactive session, or a closed Claude session still has its exact main transcript and original working directory. | Reopen; closed rows also retain View |
@@ -117,7 +128,8 @@ dismissal.
 ## Sorting
 
 - Pinned: Needs you, Working, Available, History; newest activity breaks ties.
-- Needs you: longest waiting first.
+- Action inbox: approvals, questions/forms, problems, general attention, reply requests, then
+  unreviewed outcomes; newest activity breaks ties within each kind.
 - Working: stable entry order. A session appends at the bottom when it enters Working and keeps
   that position until it leaves Working. The order persists across browser reloads and daemon
   restarts; re-entering Working creates a new position at the bottom.

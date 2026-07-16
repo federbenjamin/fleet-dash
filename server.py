@@ -3,6 +3,7 @@
 
 GET /            dashboard.html (re-read per request, edit without restart)
 GET /api/fleet   latest fleet snapshot JSON
+GET /api/workstreams lazy repository/project rollup
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -148,6 +149,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 days = 7
             self.reply(200, "application/json", json.dumps(self.eng.insights(days)).encode())
+        elif route == "/api/workstreams":
+            self.reply(200, "application/json",
+                       json.dumps(self.eng.workstreams_snapshot()).encode())
         elif route == "/api/fleet":
             with self.eng.lock:
                 snap = dict(self.eng.snapshot_cache)
@@ -180,7 +184,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser navigation and cancelled searches can close the socket
+            # after the response has already been prepared. That is not a
+            # daemon failure and should not create a traceback in the log.
+            pass
 
     def log_message(self, *a):
         pass

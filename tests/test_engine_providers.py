@@ -623,6 +623,152 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(organized["ui_group"], "available")
         self.assertTrue(organized["pinned"])
 
+    def test_action_records_are_stable_deduplicated_and_bulk_triage_is_safe(self):
+        session = codex_session()
+        session.update(state="needs_you", convo_v="revision:7", quiet_s=5,
+                       pending={"kind": "question", "nonce": "question:7",
+                                "questions": [{"header": "Scope",
+                                               "question": "Which scope?"}]},
+                       last_msg={"role": "assistant", "text": "Choose one."})
+        organized = self.engine.organize_session(session, 100)
+        first = self.engine.action_records([organized, dict(organized)])
+        second = self.engine.action_records([organized])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["action_id"], second[0]["action_id"])
+        self.assertEqual((first[0]["kind"], first[0]["request"],
+                          first[0]["delivery_state"]),
+                         ("question", "Which scope?", "Awaiting response"))
+        self.assertNotIn("approve", first[0]["safe_bulk"])
+        self.assertNotIn("dismiss", first[0]["safe_bulk"])
+
+        rejected = self.engine.update_settings({"bulk_triage": {
+            "operation": "approve", "items": [{"session_id": "codex:same",
+                                                   "action_id": first[0]["action_id"]}]}})
+        self.assertFalse(rejected["ok"])
+        self.engine.snapshot_cache = {"actions": first}
+        dismissed = self.engine.update_settings({"bulk_triage": {
+            "operation": "dismiss", "items": [{"session_id": "codex:same",
+                                                  "action_id": first[0]["action_id"]}]}})
+        self.assertFalse(dismissed["ok"])
+        self.assertEqual(len(self.engine.action_records([organized])), 1)
+
+    def test_completed_and_reply_actions_expose_only_valid_bulk_operations(self):
+        reply = codex_session()
+        reply.update(ui_group="needs_you", reason_label="Reply requested",
+                     primary_action="respond", primary_action_label="Respond",
+                     access="interactive", access_label="Interactive",
+                     activity_at=90, reply_requested=True, new_response=False,
+                     last_msg={"role": "assistant", "text": "Which layout?"})
+        outcome = codex_session()
+        outcome.update(session_id="codex:other", native_session_id="other",
+                       ui_group="available", reason_label="Available",
+                       primary_action="continue", primary_action_label="Continue",
+                       access="interactive", access_label="Interactive",
+                       activity_at=95, reply_requested=False, new_response=True,
+                       last_msg={"role": "assistant", "text": "Done."})
+        records = {item["kind"]: item for item in self.engine.action_records([reply, outcome])}
+        self.assertIn("mark_available", records["reply"]["safe_bulk"])
+        self.assertNotIn("mark_read", records["reply"]["safe_bulk"])
+        self.assertIn("mark_read", records["outcome"]["safe_bulk"])
+        self.assertIn("dismiss", records["outcome"]["safe_bulk"])
+        self.engine.snapshot_cache = {"actions": list(records.values())}
+        dismissed = self.engine.update_settings({"bulk_triage": {
+            "operation": "dismiss", "items": [{"session_id": "codex:other",
+                "action_id": records["outcome"]["action_id"],
+                "revision": records["outcome"]["revision"]}]}})
+        self.assertTrue(dismissed["ok"])
+        self.assertNotIn("outcome", {item["kind"] for item in
+                                     self.engine.action_records([reply, outcome])})
+
+    def test_workstream_identity_rolls_linked_worktrees_into_main_repository(self):
+        main = os.path.join(self.tmp.name, "main-repo")
+        linked = os.path.join(self.tmp.name, "linked-worktree")
+        gitdir = os.path.join(main, ".git")
+        linked_gitdir = os.path.join(gitdir, "worktrees", "linked")
+        os.makedirs(linked_gitdir)
+        os.makedirs(linked)
+        with open(os.path.join(linked, ".git"), "w") as handle:
+            handle.write("gitdir: " + linked_gitdir + "\n")
+        with open(os.path.join(linked_gitdir, "commondir"), "w") as handle:
+            handle.write("../..\n")
+        main_identity = self.engine.workstream_identity(main)
+        linked_identity = self.engine.workstream_identity(linked)
+        self.assertEqual(main_identity["kind"], "git")
+        self.assertEqual(main_identity["root"], os.path.realpath(main))
+        self.assertEqual(linked_identity["root"], main_identity["root"])
+        self.assertEqual(linked_identity["workstream_id"], main_identity["workstream_id"])
+        self.assertEqual(linked_identity["worktree"], os.path.realpath(linked))
+
+    def test_workstreams_keep_missing_and_unrelated_folders_separate(self):
+        one = codex_session()
+        two = codex_session()
+        one.update(session_id="codex:one", native_session_id="one",
+                   cwd=os.path.join(self.tmp.name, "missing-one"), ui_group="available",
+                   reason_label="Available", activity_at=2)
+        two.update(session_id="codex:two", native_session_id="two",
+                   cwd=os.path.join(self.tmp.name, "missing-two"), ui_group="history",
+                   reason_label="External", activity_at=1)
+        records = self.engine.workstream_records([one], [two])
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(item["missing"] for item in records))
+        self.assertNotEqual(records[0]["workstream_id"], records[1]["workstream_id"])
+        self.assertEqual(sum(item["counts"]["available"] for item in records), 1)
+        self.assertEqual(sum(item["counts"]["history"] for item in records), 1)
+
+    def test_workstream_identity_prefers_nested_repo_and_resolves_symlinks(self):
+        outer = os.path.join(self.tmp.name, "outer")
+        inner = os.path.join(outer, "packages", "inner")
+        cwd = os.path.join(inner, "src")
+        os.makedirs(os.path.join(outer, ".git"))
+        os.makedirs(os.path.join(inner, ".git"))
+        os.makedirs(cwd)
+        link = os.path.join(self.tmp.name, "inner-link")
+        os.symlink(inner, link)
+        nested = self.engine.workstream_identity(cwd)
+        linked = self.engine.workstream_identity(link)
+        self.assertEqual(nested["root"], os.path.realpath(inner))
+        self.assertEqual(linked["workstream_id"], nested["workstream_id"])
+
+    def test_workstream_identity_invalidates_a_renamed_root_and_flags_bad_metadata(self):
+        repo = os.path.join(self.tmp.name, "rename-me")
+        os.makedirs(os.path.join(repo, ".git"))
+        before = self.engine.workstream_identity(repo)
+        renamed = os.path.join(self.tmp.name, "renamed")
+        os.rename(repo, renamed)
+        after = self.engine.workstream_identity(repo)
+        moved = self.engine.workstream_identity(renamed)
+        self.assertTrue(after["missing"])
+        self.assertNotEqual(before["workstream_id"], moved["workstream_id"])
+
+        broken = os.path.join(self.tmp.name, "broken-worktree")
+        os.makedirs(broken)
+        with open(os.path.join(broken, ".git"), "w") as handle:
+            handle.write("not git metadata\n")
+        identity = self.engine.workstream_identity(broken)
+        self.assertTrue(identity["stale"])
+        self.assertIn("unreadable", identity["error"])
+
+    def test_workstream_records_preserve_detached_branch_and_provider_outage_shape(self):
+        session = codex_session()
+        session.update(branch="HEAD", ui_group="working", reason_label="Working",
+                       activity_at=9, cwd=self.cwd)
+        records = self.engine.workstream_records([session], [])
+        self.assertEqual(records[0]["branches"], ["HEAD"])
+        self.assertEqual(records[0]["providers"], ["codex"])
+        self.assertEqual(records[0]["counts"]["working"], 1)
+        self.assertEqual(records[0]["repo_summary"]["tests"], "not_observed")
+
+    def test_workstreams_do_not_merge_sessions_whose_locations_are_unknown(self):
+        one = codex_session()
+        two = codex_session()
+        one.update(session_id="codex:one", cwd=None, ui_group="available", activity_at=2)
+        two.update(session_id="codex:two", cwd="", ui_group="available", activity_at=1)
+        records = self.engine.workstream_records([one, two], [])
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(item["kind"] == "unknown" for item in records))
+        self.assertTrue(all(item["root"] == "Location unavailable" for item in records))
+        self.assertNotEqual(records[0]["workstream_id"], records[1]["workstream_id"])
+
     def test_claude_peek_preserves_markdown_blocks(self):
         tail = Tail(self.transcript)
         text = "### Default width\n\nUse **Fit the screen**."
