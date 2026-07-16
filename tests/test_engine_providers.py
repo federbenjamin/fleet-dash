@@ -448,6 +448,29 @@ class EngineProviderTest(unittest.TestCase):
         self.engine.check_notifications(fleet)
         self.assertEqual(sent, [])
 
+    def test_scheduled_digest_dispatches_after_restart_due_time_and_dedupes(self):
+        self.engine.cfg["notify"] = {**self.engine.cfg["notify"],
+                                      "scheduled_digest": True,
+                                      "fleet_quiet": False}
+        self.engine.cfg["digest_schedule_time"] = "00:00"
+        self.engine.cfg["digest_schedule_zone"] = "UTC"
+        sent = []
+        self.engine.ntfy = lambda *args, **kwargs: sent.append(args)
+        snapshot = {"sessions": [], "totals": {"busy": 0, "agents_running": 0,
+                                                  "sessions": 0}}
+        self.engine.check_notifications(snapshot)
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0][0].startswith("digest:UTC:"))
+
+        restarted = Engine(dict(self.engine.cfg))
+        restarted.codex = self.codex
+        duplicate = []
+        restarted.ntfy = lambda *args, **kwargs: duplicate.append(args)
+        restarted.check_notifications(snapshot)
+        self.assertEqual(duplicate, [])
+        if restarted.db:
+            restarted.db.close()
+
     def test_token_cookie_requires_exact_cookie_name_and_value(self):
         def check(cookie="", header=""):
             obj = SimpleNamespace(eng=SimpleNamespace(cfg={"act_token": "secret"}),
@@ -934,6 +957,66 @@ class EngineProviderTest(unittest.TestCase):
         organized = self.engine.organize_session(session, time.time())
         self.assertEqual(organized["ui_group"], "available")
         self.assertTrue(organized["pinned"])
+
+    def test_digest_and_budget_settings_persist_without_copying_budgets_to_config(self):
+        self.engine.cfg["notify"] = {"needs_you": True}
+        migrated = self.engine.scan()["notify"]
+        self.assertFalse(migrated["scheduled_digest"])
+        self.assertTrue(migrated["stall"])
+        saved = self.engine.update_settings({
+            "notify": {"scheduled_digest": True},
+            "digest_schedule_time": "08:30",
+            "digest_schedule_zone": "America/New_York",
+            "budgets": [{"id": "fleet-token", "scope_type": "fleet",
+                         "metric": "tokens", "limit_value": 50000,
+                         "block_spawns": False}],
+        })
+        self.assertTrue(saved["ok"])
+        self.assertTrue(saved["notify"]["scheduled_digest"])
+        self.assertEqual(saved["budgets"][0]["id"], "fleet-token")
+        with open(os.path.join(self.base, "config.json")) as handle:
+            config = json.load(handle)
+        self.assertEqual(config["digest_schedule_time"], "08:30")
+        self.assertEqual(config["digest_schedule_zone"], "America/New_York")
+        self.assertNotIn("budgets", config)
+        self.engine.scan()
+        budget = self.engine.budgets_snapshot()["budgets"][0]
+        self.assertEqual((budget["metric"], budget["measurement_scope"]),
+                         ("tokens", "partial"))
+
+        invalid = self.engine.update_settings({"digest_schedule_zone": "Not/AZone"})
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
+
+    def test_explicit_hard_budget_blocks_new_spawns_but_not_existing_work(self):
+        self.engine.update_settings({"budgets": [{
+            "id": "hard-fleet", "scope_type": "fleet", "metric": "tokens",
+            "limit_value": 1, "block_spawns": True,
+        }]})
+        snapshot = self.engine.scan()
+        self.assertGreater(snapshot["sessions"][0].get("total_tokens") or 0, 1)
+        budget_action = next(item for item in snapshot["actions"]
+                             if item.get("kind") == "budget")
+        self.assertIsNone(budget_action["session_id"])
+        self.assertEqual(budget_action["primary_action"], "view_budget")
+        self.assertEqual(budget_action["safe_bulk"], [])
+        self.assertEqual(budget_action["delivery_state"], "Future spawns blocked")
+        result = self.engine.spawn_codex_session({"cwd": self.cwd, "model": "gpt-5.4",
+                                                  "effort": "high", "mode": "plan"})
+        self.assertFalse(result["ok"])
+        self.assertIn("blocked by an exceeded budget", result["error"])
+        self.assertEqual(result["budget_blockers"][0]["id"], "hard-fleet")
+        self.assertTrue(any(item.get("ui_group") == "available"
+                            for item in self.engine.snapshot_cache.get("sessions", []) or
+                            snapshot["sessions"]))
+
+    def test_explicit_spawn_limit_fails_closed_when_budget_check_breaks(self):
+        self.engine.operations.has_spawn_limits = lambda: True
+        self.engine.operations.spawn_blockers = mock.Mock(
+            side_effect=RuntimeError("ledger unavailable"))
+        blockers = self.engine._spawn_budget_blockers("codex", self.cwd)
+        self.assertEqual(blockers[0]["id"], "budget-check-unavailable")
+        self.assertEqual(blockers[0]["measurement_scope"], "unavailable")
 
     def test_action_records_are_stable_deduplicated_and_bulk_triage_is_safe(self):
         session = codex_session()

@@ -10,12 +10,14 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, datetime as dt
 from collections import deque
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
 from outbox import OutboxError, OutboxManager
+from briefing import FleetOperations, OperationsError
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -38,8 +40,11 @@ DEFAULT_CONFIG = {
     "agent_idle_done_seconds": 30,      # settled-but-no-end_turn agent: done after this
     "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
-    "notify": {"needs_you": True, "stall": True, "spend": True, "fleet_quiet": True},
+    "notify": {"needs_you": True, "stall": True, "spend": True,
+               "fleet_quiet": True, "scheduled_digest": False},
     "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
+    "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
+    "digest_schedule_zone": "UTC",
     "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
     "pinned_sessions": [],               # shared watchlist, ordered by UI urgency
     "working_order": [],                 # stable entry order while sessions remain Working
@@ -897,6 +902,7 @@ class Engine:
         self._workstreams_snapshot_cache = None
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         self.outbox = OutboxManager(os.path.join(BASE, "ledger.db"))
+        self.operations = FleetOperations(os.path.join(BASE, "ledger.db"))
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -1001,6 +1007,15 @@ class Engine:
                           str(revision or "")))
         return "act-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
+    @staticmethod
+    def _sort_action_records(records):
+        priority = {"approval": 0, "question": 1, "form": 1, "budget": 2,
+                    "problem": 3, "attention": 4, "reply": 5, "outcome": 6}
+        records.sort(key=lambda item: (priority.get(item["kind"], 9),
+                                       -float(item.get("created_at") or 0),
+                                       item["action_id"]))
+        return records
+
     def action_records(self, sessions):
         """Build one stable, provider-neutral inbox record per underlying request."""
         dismissed = self.cfg.get("dismissed_actions") or {}
@@ -1072,12 +1087,48 @@ class Engine:
                 "project": session.get("project"),
                 "muted": bool(session.get("muted")),
             })
-        priority = {"approval": 0, "question": 1, "form": 1, "problem": 2,
-                    "attention": 3, "reply": 4, "outcome": 5}
-        records.sort(key=lambda item: (priority.get(item["kind"], 9),
-                                       -float(item.get("created_at") or 0),
-                                       item["action_id"]))
-        return records
+        return self._sort_action_records(records)
+
+    def budget_action_records(self, evaluations):
+        """Expose current warning/exceeded budgets through the shared action inbox."""
+        records = []
+        for item in evaluations or []:
+            status = item.get("status")
+            if status not in ("warning", "exceeded"):
+                continue
+            alert_key = str(item.get("alert_key") or
+                            f"budget:{item.get('id')}:{status}")
+            action_id = "act-budget-" + hashlib.sha256(
+                alert_key.encode("utf-8")).hexdigest()[:20]
+            blocking = bool(item.get("block_spawns") and status == "exceeded")
+            scope = str(item.get("scope_type") or "fleet")
+            target = str(item.get("scope_id") or "all sessions")
+            records.append({
+                "action_id": action_id,
+                "session_id": None,
+                "provider": (target if scope == "provider" else "fleet"),
+                "kind": "budget",
+                "request": (f"{item.get('label') or 'Budget'} exceeded" if
+                            status == "exceeded" else
+                            f"{item.get('label') or 'Budget'} is nearing its limit"),
+                "context": self._bounded_text(item.get("summary"), 360),
+                "created_at": float(item.get("alert_created_at") or 0),
+                "reason": "Budget exceeded" if status == "exceeded" else "Budget warning",
+                "access": "measurement",
+                "access_label": f"{scope.title()} scope",
+                "primary_action": "view_budget",
+                "primary_action_label": "Review budget",
+                "delivery_state": "Future spawns blocked" if blocking else "Alert only",
+                "safe_bulk": [],
+                "revision": alert_key,
+                "title": item.get("label"),
+                "project": target if scope in ("workstream", "session") else None,
+                "muted": False,
+                "status": status,
+                "measurement_scope": item.get("measurement_scope"),
+                "budget_id": item.get("id"),
+            })
+        return self._sort_action_records(records)
 
     @staticmethod
     def _workstream_git_identity(canonical_cwd):
@@ -1371,6 +1422,7 @@ class Engine:
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx, "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
+                "total_tokens": mt.total_tokens,
                 "cost": round(mt.cost(cfg), 4),
                 "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
                                if reg.get("bridgeSessionId") else None),
@@ -1495,10 +1547,11 @@ class Engine:
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(self.codex_scan_error or self.codex.error),
                                     "error": self.codex_scan_error or self.codex.error}},
-            "notify": dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"]),
+            "notify": {**DEFAULT_CONFIG["notify"], **(self.cfg.get("notify") or {})},
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("awaiting_input_notify_seconds", "stall_seconds",
                           "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
+                          "digest_schedule_time", "digest_schedule_zone",
                           "preview_sessions", "preview_session_lines",
                           "preview_agents", "preview_agent_lines", "reader_width",
                           "pinned_sessions", "dismissed_actions")},
@@ -1508,6 +1561,19 @@ class Engine:
         except Exception as exc:
             fleet["outbox_summary"] = {"pending": 0, "attention": 0,
                                         "stale": True, "error": str(exc)}
+        try:
+            budgets = self.operations.observe(fleet, self.workstream_identity)
+            fleet["actions"] = self._sort_action_records([
+                *(fleet.get("actions") or []), *self.budget_action_records(budgets)])
+            fleet["budget_summary"] = {
+                "configured": len(budgets),
+                "warning": sum(item.get("status") == "warning" for item in budgets),
+                "exceeded": sum(item.get("status") == "exceeded" for item in budgets),
+                "unavailable": sum(item.get("status") == "unavailable" for item in budgets),
+            }
+        except Exception as exc:
+            fleet["budget_summary"] = {"configured": 0, "stale": True,
+                                       "error": str(exc)}
         return fleet
 
     def workstreams_snapshot(self):
@@ -1522,6 +1588,24 @@ class Engine:
             return cached[1]
         started = time.perf_counter()
         records = self.workstream_records(sessions, closed)
+        try:
+            budget_data = self.operations.budgets_snapshot(snapshot)
+            by_workstream = {}
+            for budget in budget_data.get("budgets") or []:
+                if budget.get("scope_type") == "workstream":
+                    by_workstream.setdefault(str(budget.get("scope_id") or ""), []).append(budget)
+            for group in records:
+                scoped = by_workstream.get(group["workstream_id"], [])
+                group["budgets"] = scoped
+                group["budget_state"] = (
+                    "exceeded" if any(item.get("status") == "exceeded" for item in scoped) else
+                    "warning" if any(item.get("status") == "warning" for item in scoped) else
+                    "unavailable" if any(item.get("status") == "unavailable" for item in scoped) else
+                    "ok" if scoped else "not_configured")
+        except Exception as exc:
+            for group in records:
+                group["budget_state"] = "stale"
+                group["budget_error"] = str(exc)[:300]
         for group in records:
             if group.get("kind") != "git" or group.get("missing"):
                 continue
@@ -3249,6 +3333,40 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception as exc:
             return {"ok": False, "error": f"outbox is temporarily unavailable: {exc}"}
 
+    def briefing_snapshot(self, device_id="default", cursor=None, limit=100):
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        try:
+            return self.operations.briefing_snapshot(
+                snapshot, device_id=device_id or "default", cursor=cursor, limit=limit)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"briefing is temporarily unavailable: {exc}"}
+
+    def budgets_snapshot(self, spawn=None):
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        try:
+            prepared = dict(spawn or {})
+            if prepared.get("cwd"):
+                prepared["workstream_id"] = self.workstream_identity(
+                    prepared["cwd"]).get("workstream_id")
+            return self.operations.budgets_snapshot(snapshot, spawn=prepared or None)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"budgets are temporarily unavailable: {exc}"}
+
+    def briefing_action(self, action):
+        try:
+            cursor = self.operations.review(action.get("device_id"), action.get("cursor"))
+            return {"ok": True, "cursor": cursor}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"briefing review failed: {exc}"}
+
     def _outbox_current_target(self, payload):
         with self.lock:
             snapshot = copy.deepcopy(self.snapshot_cache)
@@ -3397,6 +3515,8 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if action.get("type") == "briefing_review":
+            return self.briefing_action(action)
         if str(action.get("type") or "").startswith("outbox_"):
             return self.outbox_action(action)
         if action.get("type") == "handoff":
@@ -3790,6 +3910,10 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
             return {"ok": False, "error": "directory must be under your home folder"}
+        blocked = self._spawn_budget_blockers("codex", cwd)
+        if blocked:
+            return {"ok": False, "error": "new Codex sessions are blocked by an exceeded budget",
+                    "budget_blockers": blocked}
         initial_text = str(action.get("initial_text") or "hi").strip()
         if not initial_text or len(initial_text) > 2000:
             return {"ok": False, "error": "initial message must be 1–2,000 characters"}
@@ -3819,6 +3943,10 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
             return {"ok": False, "error": "directory must be under your home folder"}
+        blocked = self._spawn_budget_blockers("claude", cwd)
+        if blocked:
+            return {"ok": False, "error": "new Claude sessions are blocked by an exceeded budget",
+                    "budget_blockers": blocked}
         model = str(action.get("model") or "").strip()
         if model and model not in self.MODELS:
             return {"ok": False, "error": "unknown model"}
@@ -3860,6 +3988,27 @@ Treat this as an independent session. Verify the repository state before changin
             # waiting for a session that never starts
             r["trust_prompt"] = not self.is_trusted(cwd)
         return r
+
+    def _spawn_budget_blockers(self, provider, cwd):
+        if not self.operations.has_spawn_limits():
+            return []
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        try:
+            identity = self.workstream_identity(cwd)
+            blockers = self.operations.spawn_blockers(
+                snapshot, provider, cwd, identity.get("workstream_id"))
+            return [{key: item.get(key) for key in
+                     ("id", "label", "scope_type", "scope_id", "metric",
+                      "value", "limit_value", "measurement_scope")}
+                    for item in blockers]
+        except Exception as exc:
+            print(f"budget spawn check failed: {exc}", file=sys.stderr, flush=True)
+            return [{"id": "budget-check-unavailable",
+                     "label": "Budget safety check unavailable",
+                     "scope_type": "fleet", "scope_id": None,
+                     "metric": "unknown", "value": None, "limit_value": None,
+                     "measurement_scope": "unavailable"}]
 
     def _iterm_write(self, tty, steps, step_delay=None):
         # launchd-context osascript can never summon the automation-permission
@@ -3908,22 +4057,25 @@ Treat this as an independent session. Verify the repository state before changin
                 "dialog appeared, grant it and retry"}
 
     # ---------------------------------------------------------------- ntfy
-    def ntfy(self, title, body, tags="robot", priority="default"):
+    def ntfy(self, key, title, body, tags="robot", priority="default"):
         topic = self.cfg.get("ntfy_topic")
         if not topic:
+            self.operations.notification_status(key, "disabled")
             return
         url = f"{self.cfg['ntfy_server'].rstrip('/')}/{topic}"
         headers = {"Title": title, "Tags": tags, "Priority": priority}
         if self.cfg.get("dashboard_url"):
             headers["Click"] = self.cfg["dashboard_url"]
         req = urllib.request.Request(url, data=body.encode(), method="POST", headers=headers)
-        threading.Thread(target=lambda: self._post(req), daemon=True).start()
+        threading.Thread(target=lambda: self._post(key, req), daemon=True).start()
 
-    def _post(self, req):
+    def _post(self, key, req):
         try:
-            urllib.request.urlopen(req, timeout=10)
-        except Exception:
-            pass
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+            self.operations.notification_status(key, "sent")
+        except Exception as exc:
+            self.operations.notification_status(key, "failed", str(exc))
 
     def check_notifications(self, fleet):
         cfg, now = self.cfg, time.time()
@@ -3955,20 +4107,32 @@ Treat this as an independent session. Verify the repository state before changin
                           f"{s['name']}: ${measured_cost:.2f} "
                           f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
         busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
-        if busy > 0:
-            self.quiet_since = None
-        elif self.prev_fleet_busy:          # busy -> idle transition starts the clock
-            self.quiet_since = now
+        self.quiet_since = self.operations.fleet_activity_transition(busy, now)
         if on.get("fleet_quiet", True) and busy == 0 and self.quiet_since \
            and now - self.quiet_since >= float(cfg.get("fleet_quiet_minutes") or 0) * 60 \
            and fleet["totals"]["sessions"] > 0:
             # keyed on the episode start: one push per quiet stretch
             self.once(f"quiet:{int(self.quiet_since)}", "Fleet quiet",
-                      f"All {fleet['totals']['sessions']} sessions idle — come harvest", "white_check_mark")
+                      self.operations.quiet_digest(self.quiet_since), "white_check_mark",
+                      force=True)
+        if on.get("scheduled_digest", False):
+            try:
+                zone_name = str(cfg.get("digest_schedule_zone") or "UTC")
+                local = dt.datetime.fromtimestamp(now, ZoneInfo(zone_name))
+                hour, minute = [int(part) for part in
+                                str(cfg.get("digest_schedule_time") or "09:00").split(":", 1)]
+                due = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if local >= due:
+                    start = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+                    self.once(f"digest:{zone_name}:{local.date().isoformat()}",
+                              "Fleet daily briefing", self.operations.quiet_digest(start),
+                              "clipboard", force=True)
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
         self.prev_fleet_busy = busy
         self.seeded = True
 
-    NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet")
+    NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet", "scheduled_digest")
     #                key                              type  min  max
     NUM_KEYS = {"awaiting_input_notify_seconds": (int,   0,    86400),
                 "stall_seconds":                 (int,   30,   86400),
@@ -3984,7 +4148,7 @@ Treat this as an independent session. Verify the repository state before changin
         changed = {}
         nt = patch.get("notify")
         if isinstance(nt, dict):
-            cur = dict(self.cfg.get("notify") or DEFAULT_CONFIG["notify"])
+            cur = {**DEFAULT_CONFIG["notify"], **(self.cfg.get("notify") or {})}
             for k, v in nt.items():
                 if k in self.NOTIFY_KEYS:
                     cur[k] = bool(v)
@@ -4011,6 +4175,18 @@ Treat this as an independent session. Verify the repository state before changin
             if u and not u.startswith(("http://", "https://")):
                 return {"ok": False, "error": "dashboard_url must start with http(s)://"}
             self.cfg["dashboard_url"] = changed["dashboard_url"] = u
+        if "digest_schedule_time" in patch:
+            wall = str(patch.get("digest_schedule_time") or "").strip()
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", wall):
+                return {"ok": False, "error": "digest_schedule_time must be HH:MM"}
+            self.cfg["digest_schedule_time"] = changed["digest_schedule_time"] = wall
+        if "digest_schedule_zone" in patch:
+            zone = str(patch.get("digest_schedule_zone") or "").strip()[:120]
+            try:
+                ZoneInfo(zone)
+            except ZoneInfoNotFoundError:
+                return {"ok": False, "error": "digest_schedule_zone must be an IANA timezone"}
+            self.cfg["digest_schedule_zone"] = changed["digest_schedule_zone"] = zone
         ms = patch.get("mute_session")
         if ms:
             mu = dict(self.cfg.get("muted_sessions") or {})
@@ -4098,19 +4274,28 @@ Treat this as an independent session. Verify the repository state before changin
                     values[sid] = revision
                 values = dict(list(values.items())[-1000:])
                 self.cfg[key] = changed[key] = values
+        if "budgets" in patch:
+            try:
+                changed["budgets"] = self.operations.replace_budgets(patch.get("budgets"))
+            except OperationsError as exc:
+                return {"ok": False, "error": str(exc)}
         if not changed:
             return {"ok": False, "error": "nothing to update"}
-        self._persist_config_fields(changed)
+        persisted = {key: value for key, value in changed.items() if key != "budgets"}
+        if persisted:
+            self._persist_config_fields(persisted)
         return {"ok": True, **changed}
 
-    def once(self, key, title, body, tags="robot", priority="default"):
+    def once(self, key, title, body, tags="robot", priority="default", force=False):
         if key in self.notified:
             return
         self.notified[key] = time.time()
         if len(self.notified) > 5000:
             self.notified.clear()
-        if self.seeded:                 # first pass: register only, no push
-            self.ntfy(title, body, tags, priority)
+        if self.operations.notification_claim(
+                key, key.split(":", 1)[0], title, body,
+                dispatch=self.seeded or bool(force)):
+            self.ntfy(key, title, body, tags, priority)
 
 
 # ---------------------------------------------------------------- one-shots

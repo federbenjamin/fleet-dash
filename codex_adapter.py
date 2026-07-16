@@ -1031,6 +1031,7 @@ class CodexAdapter:
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,
+                "total_tokens": _usage_cumulative(usage),
                 "cost": None, "cost_source": "unavailable", "bridge_url": None,
                 "started_ms": _millis(thread.get("createdAt")), "pending": pending,
                 "compacting": live.get("compacting"), "muted": False,
@@ -1634,6 +1635,19 @@ def _usage_total(usage):
         return int(latest.get("totalTokens") or 0)
     return sum(int(latest.get(k) or 0) for k in
                ("inputTokens", "outputTokens", "reasoningOutputTokens"))
+
+
+def _usage_cumulative(usage):
+    """Return only provider-reported cumulative usage; never relabel a turn as lifetime."""
+    total = usage.get("total") if isinstance(usage, dict) else None
+    if not isinstance(total, dict):
+        return None
+    if total.get("totalTokens") is not None:
+        return int(total.get("totalTokens") or 0)
+    fields = ("inputTokens", "outputTokens", "reasoningOutputTokens")
+    if not any(total.get(key) is not None for key in fields):
+        return None
+    return sum(int(total.get(key) or 0) for key in fields)
 
 
 def _usage_window(usage):

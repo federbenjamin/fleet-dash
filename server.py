@@ -8,6 +8,8 @@ GET /api/evidence durable session placement history
 GET /api/handoff authenticated editable provider-handoff preview
 GET /api/repo authenticated repository outcome/action preview
 GET /api/outbox authenticated scheduled-message list and audit trail
+GET /api/briefing deterministic operational briefing and per-device cursor
+GET /api/budgets measured budget state and forecasts
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -181,6 +183,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 days = 7
             self.reply(200, "application/json", json.dumps(self.eng.insights(days)).encode())
+        elif route == "/api/briefing":
+            out = self.eng.briefing_snapshot(
+                self.query("device") or "default", self.query("cursor") or None,
+                self.query("limit") or 100)
+            self.reply(200, "application/json", json.dumps(out).encode())
+        elif route == "/api/budgets":
+            spawn = {key: self.query(key) for key in ("provider", "model", "project", "cwd")
+                     if self.query(key)}
+            self.reply(200, "application/json",
+                       json.dumps(self.eng.budgets_snapshot(spawn or None)).encode())
         elif route == "/api/workstreams":
             self.reply(200, "application/json",
                        json.dumps(self.eng.workstreams_snapshot()).encode())

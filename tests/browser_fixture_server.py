@@ -40,6 +40,7 @@ def base_session(provider, sid, title):
             "running": None, "last_msg": {"role": "assistant",
                 "text": "Ready for the next task."}, "state": "idle",
             "reg_status": "idle", "quiet_s": 3, "ctx_tokens": 1200,
+            "total_tokens": 18000 if codex else 24000,
             "ctx_pct": 12.5, "cost": None if codex else 0.12,
             "agent_cost": None if codex else 0.03,
             "cost_source": "unavailable" if codex else "calculated",
@@ -144,13 +145,17 @@ def fresh_state():
                      "evidence_summary": "Provider signal: codex state idle; Last activity: 3s quiet",
                      "revision": "1:1", "winning_rule": "placement.default.available",
                      "suppressed_rules": [], "confidence": "confirmed", "evidence": []}]},
+            "notify": {"needs_you": True, "stall": True, "spend": True,
+                       "fleet_quiet": True, "scheduled_digest": False},
             "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
                 "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
+                "digest_schedule_time": "09:00", "digest_schedule_zone": "UTC",
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
                 "reader_width": "fit", "pinned_sessions": []},
             "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
-            "repo": repo, "repo_actions": [], "outbox": []}
+            "repo": repo, "repo_actions": [], "outbox": [], "budgets": [],
+            "briefing_reviewed": {}}
 
 
 STATE = fresh_state()
@@ -232,8 +237,126 @@ def fixture_workstreams():
                             STATE["repo"]["pr"].get("state"))},
         "repository": {key: copy.deepcopy(STATE["repo"].get(key)) for key in
             ("ok", "state", "worktree", "observed_at", "elapsed_ms", "cached", "error")
-            if key in STATE["repo"]}, "budget_state": "not_configured",
+            if key in STATE["repo"]}, "budget_state": next((item.get("status") for item in
+                fixture_budgets()["budgets"] if item.get("scope_type") == "workstream" and
+                item.get("scope_id") == "ws-fleet"), "not_configured"),
         "sessions": sessions}]}
+
+
+def fixture_budget_evaluations(sessions):
+    evaluated = []
+    for raw in STATE.get("budgets", []):
+        matched = sessions if raw["scope_type"] == "fleet" else [item for item in sessions if
+            (raw["scope_type"] == "provider" and item.get("provider") == raw.get("scope_id")) or
+            (raw["scope_type"] == "session" and item.get("session_id") == raw.get("scope_id")) or
+            (raw["scope_type"] == "workstream" and raw.get("scope_id") == "ws-fleet")]
+        metric = raw["metric"]
+        if metric == "usd":
+            known = [item.get("cost") for item in matched if item.get("capabilities", {}).get("exact_cost") and isinstance(item.get("cost"), (int, float))]
+        elif metric == "tokens":
+            known = [item.get("total_tokens") for item in matched if isinstance(item.get("total_tokens"), (int, float))]
+        elif metric == "runtime":
+            known = [60 for item in matched]
+        else:
+            known = [(1 if item.get("ui_group") == "working" else 0) + int(item.get("agents_running") or 0) for item in matched]
+        unknown = len(matched) - len(known) if metric != "concurrency" else 0
+        value = sum(known) if known else None
+        scope = "unavailable" if value is None else "partial" if unknown else "token_only" if metric == "tokens" and any(not item.get("capabilities", {}).get("exact_cost") for item in matched) else "exact"
+        ratio = value / raw["limit_value"] if value is not None else None
+        status = "unavailable" if value is None else "exceeded" if ratio >= 1 else "warning" if ratio >= .8 else "ok"
+        evaluated.append({**copy.deepcopy(raw), "value": value, "headroom": max(0,raw["limit_value"]-value) if value is not None else None,
+            "ratio": ratio, "status": status, "measurement_scope": scope,
+            "matched_sessions": len(matched), "unknown_sessions": unknown,
+            "label": raw.get("label") or f"{raw['scope_type'].title()} {metric} budget",
+            "summary": "measurement unavailable" if value is None else f"{value:g} of {raw['limit_value']:g} · {scope.replace('_',' ')}",
+            "alert_key": f"budget:{raw['id']}:{status}:1",
+            "alert_created_at": time.time() - 120})
+    return evaluated
+
+
+def fixture_budget_actions(evaluated):
+    records = []
+    for item in evaluated:
+        if item["status"] not in ("warning", "exceeded"):
+            continue
+        action_id = "act-budget-" + hashlib.sha256(item["alert_key"].encode()).hexdigest()[:20]
+        blocking = bool(item.get("block_spawns") and item["status"] == "exceeded")
+        scope = item.get("scope_type") or "fleet"
+        target = item.get("scope_id") or "all sessions"
+        records.append({"action_id": action_id, "session_id": None,
+            "provider": target if scope == "provider" else "fleet", "kind": "budget",
+            "request": (f"{item['label']} exceeded" if item["status"] == "exceeded" else
+                        f"{item['label']} is nearing its limit"),
+            "context": item["summary"], "created_at": item["alert_created_at"],
+            "reason": "Budget exceeded" if item["status"] == "exceeded" else "Budget warning",
+            "access": "measurement", "access_label": f"{scope.title()} scope",
+            "primary_action": "view_budget", "primary_action_label": "Review budget",
+            "delivery_state": "Future spawns blocked" if blocking else "Alert only",
+            "safe_bulk": [], "revision": item["alert_key"], "title": item["label"],
+            "project": target if scope in ("workstream", "session") else None,
+            "muted": False, "status": item["status"],
+            "measurement_scope": item["measurement_scope"], "budget_id": item["id"]})
+    return records
+
+
+def fixture_budgets(spawn=None):
+    snapshot = fleet()
+    sessions = snapshot["sessions"] + snapshot["closed"]
+    evaluated = fixture_budget_evaluations(sessions)
+    forecasts = {item["id"]: {"status": "forecast", "sample_size": 4,
+        "confidence": "medium", "burn_per_hour": 1000, "seconds_to_limit": 7200}
+        for item in evaluated if item.get("value") is not None}
+    forecast = None
+    if spawn is not None:
+        provider = spawn.get("provider") or ""
+        forecast = {"status": "forecast", "sample_size": 4, "confidence": "medium",
+            "provider": provider, "model": spawn.get("model") or "",
+            "project": spawn.get("project") or "fleet-dash",
+            "median_usd": 1.25 if provider == "claude" else None,
+            "median_tokens": 22000, "median_runtime_seconds": 900,
+            "currency_scope": "exact" if provider == "claude" else "unavailable"}
+    spawn_budgets = [item for item in evaluated if spawn and (
+        item["scope_type"] == "fleet" or item["scope_type"] == "provider" and
+        item.get("scope_id") == spawn.get("provider"))]
+    return {"ok": True, "budgets": evaluated, "forecasts": forecasts,
+        "spawn_forecast": forecast, "spawn_budgets": spawn_budgets,
+        "measurement_labels": {
+            "exact": "Exact provider measurement", "partial": "Partial measurement",
+            "token_only": "Token-only", "unavailable": "Unavailable"}}
+
+
+def fixture_briefing(device):
+    reviewed = int(STATE.get("briefing_reviewed", {}).get(device, 0))
+    sessions = [organize_session(item) for item in copy.deepcopy(STATE["sessions"])]
+    actions = fixture_actions(sessions)
+    attention = [{"id": "current:"+item["action_id"], "category": "attention",
+        "severity": "warning", "title": item["request"], "summary": item["delivery_state"],
+        "provider": item["provider"], "session_id": item["session_id"],
+        "link_kind": "session", "link_id": item["session_id"], "muted": item["muted"],
+        "current": True} for item in actions]
+    completed = [] if reviewed >= 2 else [{"id": 2, "category": "completed",
+        "severity": "success", "title": "Work completed", "summary": "Parser tests passed",
+        "provider": "claude", "session_id": "claude-one", "link_kind": "session",
+        "link_id": "claude-one", "muted": False}]
+    outcomes = [] if reviewed >= 3 else [{"id": 3, "category": "outcome",
+        "severity": "success", "title": "Artifacts delivered", "summary": "artifact.md available",
+        "provider": "codex", "session_id": "codex:thread-one", "link_kind": "session",
+        "link_id": "codex:thread-one", "muted": False}]
+    reviewed_items = [] if reviewed < 3 else [
+        {"id": 3, "category": "outcome", "severity": "success",
+         "title": "Artifacts delivered", "summary": "artifact.md available",
+         "provider": "codex", "session_id": "codex:thread-one",
+         "link_kind": "session", "link_id": "codex:thread-one", "muted": False},
+        {"id": 2, "category": "completed", "severity": "success",
+         "title": "Work completed", "summary": "Parser tests passed",
+         "provider": "claude", "session_id": "claude-one",
+         "link_kind": "session", "link_id": "claude-one", "muted": False}]
+    budgets = fixture_budgets()["budgets"]
+    return {"ok": True, "device_id": device, "review_cursor": reviewed,
+        "next_cursor": 3, "unread": max(0,3-reviewed), "muted_omitted": 0,
+        "sections": {"attention": attention, "completed": completed, "slow": [],
+            "outcomes": outcomes, "budgets": budgets, "measurements": [],
+            "reviewed": reviewed_items}}
 
 
 def organize_session(session):
@@ -303,6 +426,7 @@ def fleet():
         for item in [{"session_id": "codex:closed", "provider": "codex",
                 "title": "Closed Codex", "project": "fleet-dash", "cwd": "/Users/test/fleet-dash",
                 "branch": "old", "model": "gpt-5.4", "cost": None, "agent_cost": None,
+                "total_tokens": 12000,
                 "agents_total": 0, "closed_at": int(time.time()) - 60,
                 "first_seen": int(time.time()) - 3600, "bridge_url": None},
                 *copy.deepcopy(STATE["closed"])]]
@@ -313,9 +437,15 @@ def fleet():
         ("scheduled", "waiting_availability", "waiting_usage_reset", "spawning", "sending"))
     outbox_attention = sum(outbox_states.get(state, 0) for state in
         ("blocked", "failed", "confirmation_unknown"))
-    return {"t": time.time(), "sessions": sessions, "actions": fixture_actions(sessions),
+    budget_evaluations = fixture_budget_evaluations(sessions + closed)
+    actions = fixture_actions(sessions) + fixture_budget_actions(budget_evaluations)
+    return {"t": time.time(), "sessions": sessions, "actions": actions,
             "outbox_summary": {"pending": outbox_pending, "attention": outbox_attention,
                                "states": outbox_states},
+            "budget_summary": {"configured": len(budget_evaluations),
+                "warning": sum(item["status"] == "warning" for item in budget_evaluations),
+                "exceeded": sum(item["status"] == "exceeded" for item in budget_evaluations),
+                "unavailable": sum(item["status"] == "unavailable" for item in budget_evaluations)},
             "totals": {"sessions": len(sessions),
                 "busy": sum(item["ui_group"] == "working" for item in sessions),
                 "needs_me": sum(item["ui_group"] == "needs_you" for item in sessions),
@@ -358,8 +488,7 @@ def fleet():
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(STATE.get("codex_error")),
                                     "error": STATE.get("codex_error")}},
-            "notify": {"needs_you": True, "stall": True, "spend": True,
-                       "fleet_quiet": True},
+            "notify": copy.deepcopy(STATE["notify"]),
             "settings": copy.deepcopy(STATE["settings"]),
             "page_v": 1}
 
@@ -649,6 +778,13 @@ class Handler(BaseHTTPRequestHandler):
                     "next_cursor": None, "projects": ["fleet-dash"], "elapsed_ms": 1.2})
             if route == "/api/fleet":
                 return self.json_reply(fleet())
+            if route == "/api/briefing":
+                return self.json_reply(fixture_briefing((query.get("device") or ["default"])[0]))
+            if route == "/api/budgets":
+                spawn = {key: (query.get(key) or [""])[0]
+                         for key in ("provider", "model", "project", "cwd")
+                         if (query.get(key) or [""])[0]}
+                return self.json_reply(fixture_budgets(spawn if spawn else None))
             if route == "/api/workstreams":
                 return self.json_reply(fixture_workstreams())
             if route == "/api/evidence":
@@ -748,10 +884,27 @@ class Handler(BaseHTTPRequestHandler):
                                 if item["session_id"] == payload.get("mute_session")), None)
                 if session:
                     session["muted"] = bool(payload.get("muted"))
+                if isinstance(payload.get("notify"), dict):
+                    STATE["notify"].update({key: bool(value) for key,value in payload["notify"].items()
+                                            if key in STATE["notify"]})
+                    payload["notify"] = copy.deepcopy(STATE["notify"])
                 for key in ("reader_width", "preview_sessions", "preview_session_lines",
-                            "preview_agents", "preview_agent_lines"):
+                            "preview_agents", "preview_agent_lines", "digest_schedule_time",
+                            "digest_schedule_zone", "awaiting_input_notify_seconds",
+                            "stall_seconds", "spend_threshold_usd", "fleet_quiet_minutes",
+                            "dashboard_url"):
                     if key in payload:
                         STATE["settings"][key] = payload[key]
+                if "budgets" in payload:
+                    normalized=[]
+                    for index,item in enumerate(payload.get("budgets") or []):
+                        normalized.append({"id": item.get("id") or f"fixture-budget-{index+1}",
+                            "scope_type": item.get("scope_type"), "scope_id": item.get("scope_id") or None,
+                            "metric": item.get("metric"), "limit_value": float(item.get("limit_value")),
+                            "block_spawns": bool(item.get("block_spawns")), "enabled": item.get("enabled") is not False,
+                            "label": item.get("label") or None})
+                    STATE["budgets"] = normalized
+                    payload["budgets"] = copy.deepcopy(normalized)
                 if payload.get("pin_session"):
                     sid=payload["pin_session"]
                     pins=[item for item in STATE["settings"]["pinned_sessions"] if item != sid]
@@ -801,6 +954,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/act":
                 if payload.get("type") == "ping":
                     return self.json_reply({"ok": True})
+                if payload.get("type") == "briefing_review":
+                    STATE["briefing_reviewed"][payload.get("device_id")] = int(payload.get("cursor") or 0)
+                    return self.json_reply({"ok": True, "cursor": int(payload.get("cursor") or 0)})
                 STATE["actions"].append(payload)
                 if str(payload.get("type") or "").startswith("outbox_"):
                     typ = payload["type"]

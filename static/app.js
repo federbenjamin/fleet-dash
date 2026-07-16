@@ -51,7 +51,7 @@ function navigateTo(route,push=true){
   document.querySelectorAll('[data-destination]').forEach(section=>{section.hidden=section.dataset.destination!==route;});
   applyRouteNav(route);
   if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
-  if(route==='insights')loadInsights();
+  if(route==='insights'){loadInsights();loadBudgets();}
   if(route==='search'){loadSearchStatus(true);runSearch(true);}
   if(route==='workstreams')loadWorkstreams(true);
   window.scrollTo({top:0,behavior:'auto'});
@@ -69,7 +69,7 @@ async function loadWorkstreams(force=false){
     if(!r.ok||!data.ok)throw new Error(data.error||'Workstreams unavailable');
     workstreamData=data;workstreamsLoadedAt=Date.now();
   }catch(error){workstreamData={ok:false,error:String(error),workstreams:workstreamData.workstreams||[]};}
-  finally{workstreamsLoading=false;renderWorkstreams(workstreamData);}
+  finally{workstreamsLoading=false;renderWorkstreams(workstreamData);if(settingsOpen&&budgetSettingsOpen)renderSettings();}
 }
 function setWorkFilter(value){workFilter=value;renderWorkstreams(workstreamData);}
 function setWorkState(value){
@@ -587,6 +587,69 @@ async function submitSchedule(){
   mergeOutboxResult(result);
   const input=v.inputId&&document.getElementById(v.inputId);if(input)input.value='';
   dismissOverlay();await loadOutbox(true);render(last,true);
+}
+
+// ---- deterministic in-app briefing ---------------------------------------
+const BRIEF_DEVICE_KEY='fleet.briefingDevice.v1';
+const briefingDevice=(()=>{let value=localStorage.getItem(BRIEF_DEVICE_KEY);
+  if(!value){value=(crypto.randomUUID?crypto.randomUUID():`device-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    localStorage.setItem(BRIEF_DEVICE_KEY,value);}return value;})();
+let briefingData={ok:true,sections:{attention:[],completed:[],slow:[],outcomes:[],budgets:[],measurements:[],reviewed:[]},unread:0};
+let briefingLoading=false,briefingLoadPromise=null,briefingLoadedAt=0,briefingOpen=false,briefingReviewing=false;
+async function loadBriefing(force=false){
+  if(briefingLoading)return briefingLoadPromise;
+  if(!force&&Date.now()-briefingLoadedAt<4000)return;
+  briefingLoading=true;briefingLoadPromise=(async()=>{try{
+    const r=await fetch(`/api/briefing?device=${encodeURIComponent(briefingDevice)}&limit=120`,{cache:'no-store'}),data=await r.json();
+    if(!r.ok||!data.ok)throw new Error(data.error||'Briefing unavailable');
+    briefingData=data;briefingLoadedAt=Date.now();
+  }catch(error){briefingData={...briefingData,ok:false,error:String(error)};}
+  finally{briefingLoading=false;briefingLoadPromise=null;renderBriefing();}})();
+  return briefingLoadPromise;
+}
+function briefingItem(item){
+  const linked=['session','repository','outbox','budget','settings'].includes(item.link_kind);
+  const action=linked?`onclick="openBriefingSource(decodeURIComponent('${enc(item.link_kind)}'),decodeURIComponent('${enc(item.link_id||'')}'))"`:'';
+  return`<button class="briefitem ${esc(item.severity||'info')}" ${action} ${action?'':'disabled'}>
+    <span class="briefdot"></span><span><b>${esc(item.title||'Update')}</b><small>${esc(item.summary||'')}</small></span>
+    ${item.provider?`<em>${esc(item.provider)}</em>`:''}</button>`;
+}
+function briefingBudget(item){
+  const ratio=item.ratio==null?0:Math.min(1,item.ratio),scope=item.measurement_scope||'unavailable';
+  return`<button class="briefbudget ${esc(item.status||'ok')}" onclick="openBriefingSource('budget','${enc(item.id)}')"><span><b>${esc(item.label)}</b><small>${esc(item.summary)}</small></span>
+    <span class="budgetscope">${esc(scope.replaceAll('_',' '))}</span><span class="budgetbar"><i style="width:${Math.round(ratio*100)}%"></i></span></button>`;
+}
+function briefingGroup(title,items,renderer=briefingItem){
+  if(!items?.length)return'';return`<section class="briefgroup"><h3>${esc(title)} <span>${items.length}</span></h3>${items.map(renderer).join('')}</section>`;
+}
+function openBriefingSource(kind,id){
+  if(kind==='session'&&id){openSession(id);return;}
+  if(kind==='repository'&&id){openRepository(id,id);return;}
+  if(kind==='outbox'){openOutbox();return;}
+  if(kind==='budget'){navigateTo('insights');return;}
+  if(kind==='settings')navigateTo('settings');
+}
+async function markBriefingReviewed(){
+  const cursor=briefingData.next_cursor;if(!cursor||cursor<=briefingData.review_cursor||briefingReviewing)return;
+  briefingReviewing=true;try{const data=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'briefing_review',device_id:briefingDevice,cursor})}).then(r=>r.json());
+    if(data.ok)briefingData.review_cursor=data.cursor;
+  }catch(_){}finally{briefingReviewing=false;}
+}
+async function toggleBriefing(){briefingOpen=!briefingOpen;renderBriefing();if(briefingOpen){await loadBriefing(true);setTimeout(markBriefingReviewed,600);}}
+function renderBriefing(){
+  const el=$('#briefing');if(!el)return;const d=briefingData,s=d.sections||{};
+  const current=(s.attention?.length||0)+(s.slow?.length||0)+(s.budgets||[]).filter(x=>['warning','exceeded','unavailable'].includes(x.status)).length;
+  const unread=(s.completed?.length||0)+(s.outcomes?.length||0)+(s.measurements?.length||0);
+  const reviewed=s.reviewed?.length||0;
+  if(!current&&!unread&&!reviewed&&!d.error){el.innerHTML='';return;}
+  const status=d.error?'Briefing unavailable':`${current} current · ${unread} since review${reviewed?` · ${reviewed} recently reviewed`:''}${d.muted_omitted?` · ${d.muted_omitted} muted from push`:''}`;
+  el.innerHTML=`<section class="briefingpanel"><button class="briefhead" onclick="toggleBriefing()"><span><b>Fleet briefing</b><small>${esc(status)}</small></span><b>${briefingOpen?'Hide':'Review'} ${briefingOpen?'↑':'→'}</b></button>
+    ${briefingOpen?`<div class="briefbody">${d.error?`<div class="provideralert">${esc(d.error)}</div>`:''}
+      ${briefingGroup('Needs attention now',s.attention)}${briefingGroup('Completed since last review',s.completed)}
+      ${briefingGroup('Still working unusually slowly',s.slow)}${briefingGroup('Outcomes and artifacts',s.outcomes)}
+      ${briefingGroup('Budgets and measurement',(s.budgets||[]).filter(x=>x.status!=='ok'),briefingBudget)}
+      ${briefingGroup('Unavailable measurements',s.measurements)}${briefingGroup('Recently reviewed',s.reviewed)}</div>`:''}</section>`;
 }
 
 // Compact Markdown for card peeks. Preserve headings/emphasis/lists while
@@ -1859,7 +1922,7 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
-let settingsOpen=false;
+let settingsOpen=false,budgetSettingsOpen=false;
 function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
   if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
 function openSettings(){
@@ -1867,6 +1930,8 @@ function openSettings(){
   $('#settingsview').style.display='flex';
   $('#settings').scrollTop=0;
   renderSettings();
+  loadBudgets();
+  loadWorkstreams();
   syncOverlayHistory();
 }
 function closeSettings(){
@@ -1889,6 +1954,10 @@ function renderSettings(){
     ${row('stall','session stalled',`frozen > ${num('stall_seconds',30)} s (also drives the chip)`)}
     ${row('spend','spend threshold',`every $ ${num('spend_threshold_usd',1)}`)}
     ${row('fleet_quiet','fleet gone quiet',`idle ${num('fleet_quiet_minutes',1)} min first (0 = right away)`)}
+    ${row('scheduled_digest','daily briefing push','off by default')}
+    <div class="digestsettings"><label><span>Daily time</span><input type="time" value="${esc(st.digest_schedule_time||'09:00')}"
+      onchange="setStr('digest_schedule_time',this.value)"></label><label><span>IANA timezone</span><input value="${esc(st.digest_schedule_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC')}"
+      onchange="setStr('digest_schedule_zone',this.value)"></label></div>
     <div class="setnum" style="padding:6px 0 2px">tap-target for pushes (opens on tap; blank = none)</div>
     <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
       value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
@@ -1908,6 +1977,7 @@ function renderSettings(){
     <label class="setrow"><input type="checkbox" ${st.preview_agents?'checked':''}
       onchange="setBool('preview_agents',this.checked)">on subagent rows<span class="setnum">
       — ${num('preview_agent_lines',1)} line(s)</span></label>
+    <details class="budgetsettingsfold" ${budgetSettingsOpen?'open':''} ontoggle="budgetSettingsOpen=this.open"><summary>Budgets and spawn limits</summary>${budgetSettingsHtml()}</details>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
 async function setNotify(k,v){
@@ -2327,27 +2397,29 @@ function actionSession(action){
 }
 function actionMatches(action){
   const session=actionSession(action);
-  if(!session||pinnedSessions.has(action.session_id)||!matchesNow(session))return false;
+  if(action.kind!=='budget'&&(!session||pinnedSessions.has(action.session_id)||!matchesNow(session)))return false;
   if(actionKind==='requests'&&!['question','form','reply'].includes(action.kind))return false;
   if(actionKind==='approvals'&&action.kind!=='approval')return false;
   if(actionKind==='outcomes'&&action.kind!=='outcome')return false;
   if(actionKind==='problems'&&!['problem','attention'].includes(action.kind))return false;
+  if(actionKind==='budgets'&&action.kind!=='budget')return false;
   return true;
 }
 function openInboxAction(actionId){
   const action=((last&&last.actions)||[]).find(item=>item.action_id===actionId);if(!action)return;
+  if(action.kind==='budget'){navigateTo('insights');return;}
   ['question','form','approval'].includes(action.kind)?openSessionQ(action.session_id):
     primarySessionAction(action.session_id);
 }
 function setActionKind(value){
-  actionKind=['all','requests','approvals','outcomes','problems'].includes(value)?value:'all';
+  actionKind=['all','requests','approvals','outcomes','problems','budgets'].includes(value)?value:'all';
   renderActionInbox(last);
 }
 function toggleActionSelection(actionId,checked){
   checked?actionSelected.add(actionId):actionSelected.delete(actionId);renderActionInbox(last);
 }
 function toggleVisibleActions(checked){
-  const visible=((last&&last.actions)||[]).filter(actionMatches);
+  const visible=((last&&last.actions)||[]).filter(action=>actionMatches(action)&&(action.safe_bulk||[]).length);
   visible.forEach(item=>checked?actionSelected.add(item.action_id):actionSelected.delete(item.action_id));
   renderActionInbox(last);
 }
@@ -2367,7 +2439,7 @@ async function bulkTriage(operation){
   finally{actionBulkBusy=false;renderActionInbox(last);}
 }
 function actionIcon(kind){return {question:'?',form:'≡',approval:'!',reply:'↩',problem:'×',
-  attention:'!',outcome:'✓'}[kind]||'•';}
+  attention:'!',outcome:'✓',budget:'$'}[kind]||'•';}
 function renderActionInbox(f){
   const el=$('#actioninbox');if(!el)return;
   const actions=((f&&f.actions)||[]).filter(actionMatches);
@@ -2376,12 +2448,13 @@ function renderActionInbox(f){
   if(!actions.length){el.className='';el.innerHTML='';return;}
   const selected=actions.filter(item=>actionSelected.has(item.action_id));
   const eligible=operation=>selected.filter(item=>(item.safe_bulk||[]).includes(operation)).length;
-  const allSelected=actions.length>0&&actions.every(item=>actionSelected.has(item.action_id));
+  const selectable=actions.filter(item=>(item.safe_bulk||[]).length);
+  const allSelected=selectable.length>0&&selectable.every(item=>actionSelected.has(item.action_id));
   el.className='actioninbox';
   el.innerHTML=`<div class="actionhead"><label><input type="checkbox" aria-label="select visible actions"
-      ${allSelected?'checked':''} onchange="toggleVisibleActions(this.checked)"><span><b>Action inbox</b><small>${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
+      ${allSelected?'checked':''} ${selectable.length?'':'disabled'} onchange="toggleVisibleActions(this.checked)"><span><b>Action inbox</b><small>${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
     <div class="actionfilters">${[['all','All'],['requests','Requests'],['approvals','Approvals'],
-      ['outcomes','Outcomes'],['problems','Problems']].map(([value,label])=>
+      ['outcomes','Outcomes'],['problems','Problems'],['budgets','Budgets']].map(([value,label])=>
       `<button class="${actionKind===value?'active':''}" onclick="setActionKind('${value}')">${label}</button>`).join('')}</div></div>
     ${selected.length?`<div class="bulkbar"><b>${selected.length} selected</b>
       ${eligible('mark_read')?`<button onclick="bulkTriage('mark_read')">Review ${eligible('mark_read')}</button>`:''}
@@ -2392,15 +2465,16 @@ function renderActionInbox(f){
     <div class="actionrows">${actions.map(action=>{
       const session=actionSession(action),encoded=enc(action.action_id);
       const age=Math.max(0,Math.round(((f&&f.t)||Date.now()/1000)-(action.created_at||0)));
-      return`<div class="actionrow ${esc(action.kind)}" data-action-id="${esc(action.action_id)}" data-action-sid="${esc(action.session_id)}">
-        <label class="actioncheck" onclick="event.stopPropagation()"><input type="checkbox" aria-label="select ${esc(action.request)}"
-          ${actionSelected.has(action.action_id)?'checked':''} onchange="toggleActionSelection(decodeURIComponent('${encoded}'),this.checked)"></label>
+      const selectable=(action.safe_bulk||[]).length;
+      return`<div class="actionrow ${esc(action.kind)} ${esc(action.status||'')}" data-action-id="${esc(action.action_id)}" data-action-sid="${esc(action.session_id||'')}">
+        <label class="actioncheck" onclick="event.stopPropagation()">${selectable?`<input type="checkbox" aria-label="select ${esc(action.request)}"
+          ${actionSelected.has(action.action_id)?'checked':''} onchange="toggleActionSelection(decodeURIComponent('${encoded}'),this.checked)">`:''}</label>
         <button class="actionopen" onclick="openInboxAction(decodeURIComponent('${encoded}'))">
           <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(action.request)}</span>
           ${action.context?`<span class="actioncontext">${esc(action.context)}</span>`:''}
-          <span class="actionmeta">${esc(action.provider)} · ${esc(action.access_label)} · ${esc(action.reason)} · ${fmtAge(age)} ago</span></span>
-          <span class="actiondelivery">${esc(action.delivery_state)}</span></button>
-        <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label)}</button>
+          <span class="actionmeta">${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${esc(action.reason||'Needs review')} · ${fmtAge(age)} ago</span></span>
+          <span class="actiondelivery">${esc(action.delivery_state||'Review')}</span></button>
+        <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label||'Review')}</button>
         ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
         ${session?cardResponseFeedback(session):''}
       </div>`;}).join('')}</div>`;
@@ -2455,7 +2529,7 @@ function renderWorkstreams(f){
         <span>${(item.branches||[]).map(branch=>`<code>${esc(branch)}</code>`).join(' ')||'branch unavailable'}</span>
         <span>${esc(cost)} · ${esc(context)}</span></div>
       <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
-      <div class="worksignals"><span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>not configured</b></span>
+      <div class="worksignals"><span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>${esc(String(item.budget_state||'not_configured').replaceAll('_',' '))}</b></span>
         ${item.kind==='git'?`<button class="repoopen" onclick="openRepository(decodeURIComponent('${enc(item.root)}'),decodeURIComponent('${enc(repository.worktree||item.worktree||item.root)}'))">Repository</button>`:''}</div>
       ${expanded?`<div class="workdetail"><div class="worktrees"><b>Worktrees</b>${(item.worktrees||[]).map(path=>`<code>${esc(path)}</code>`).join('')}</div>
         <div class="worksessions">${(item.sessions||[]).map(workstreamSessionRow).join('')}</div></div>`:''}</section>`;
@@ -2519,6 +2593,7 @@ function newSection(){
   const picked=catalog.find(m=>m.id===newModel);
   const efforts=(picked&&picked.efforts&&picked.efforts.length)?picked.efforts:
     ((last&&last.efforts)||[]);
+  if(newOpen&&!spawnForecast&&!spawnForecastTimer)queueSpawnForecast();
   if(!newOpen)
     return`<button class="newbtn" onclick="newOpen=true;render(last,true)">+ new coding session</button>
       ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
@@ -2528,22 +2603,22 @@ function newSection(){
   return`<div class="newform">
     <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
     <label class="nflab">provider</label>
-    <select class="nfsel" onchange="newProvider=this.value;newModel='';render(last,true)">
+    <select class="nfsel" onchange="newProvider=this.value;newModel='';spawnForecast=null;queueSpawnForecast();render(last,true)">
       <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
       <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
     </select>
     <label class="nflab">directory</label>
-    <select class="nfsel" onchange="newDir=this.value;render(last,true)">
+    <select class="nfsel" onchange="newDir=this.value;spawnForecast=null;queueSpawnForecast();render(last,true)">
       <option value="">— pick a recent directory —</option>
       ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
     </select>
     <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
-      oninput="newDir=this.value" autocomplete="off">
+      oninput="newDir=this.value;spawnForecast=null;queueSpawnForecast()" autocomplete="off">
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
     <div class="nfrow">
       <div class="nfcol"><label class="nflab">model</label>
-        <select class="nfsel" onchange="newModel=this.value">
+        <select class="nfsel" onchange="newModel=this.value;spawnForecast=null;queueSpawnForecast()">
           <option value="">default</option>
           ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
         </select></div>
@@ -2564,6 +2639,7 @@ function newSection(){
       oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
     <label class="nflab">initial message <span style="text-transform:none;letter-spacing:0">(optional now, required to schedule)</span></label>
     <textarea class="nfin nfmessage" maxlength="2000" placeholder="What should this session work on?" oninput="newMessage=this.value">${esc(newMessage)}</textarea>
+    ${spawnForecastHtml()}
     <div class="nfactions"><button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
       <button class="pbtn sendoption nfgo" onclick="doScheduleNew()">schedule session</button></div>
     ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
@@ -2688,6 +2764,84 @@ function schedulePeekOverflow(){
 }
 window.addEventListener('resize',schedulePeekOverflow);
 
+// ---- budgets and forecasts ------------------------------------------------
+let budgetData={ok:true,budgets:[],forecasts:{},measurement_labels:{}},budgetLoading=false,budgetLoadedAt=0;
+let budgetDraft=null,spawnForecast=null,spawnBudgetHeadroom=[],spawnForecastTimer=null;
+async function loadBudgets(force=false,spawn=null){
+  if(budgetLoading&&!spawn)return;
+  if(!spawn&&!force&&Date.now()-budgetLoadedAt<10000)return;
+  if(!spawn)budgetLoading=true;
+  try{
+    const query=spawn?('?'+new URLSearchParams(Object.entries(spawn).filter(([,value])=>value)).toString()):'';
+    const r=await fetch('/api/budgets'+query,{cache:'no-store'}),data=await r.json();
+    if(!r.ok||!data.ok)throw new Error(data.error||'Budgets unavailable');
+    if(spawn){spawnForecast=data.spawn_forecast;spawnBudgetHeadroom=data.spawn_budgets||[];}
+    else{budgetData=data;budgetLoadedAt=Date.now();if(budgetDraft===null)budgetDraft=(data.budgets||[]).map(budgetEditable);}
+  }catch(error){if(spawn)spawnForecast={status:'error',error:String(error)};else budgetData={...budgetData,ok:false,error:String(error)};}
+  finally{if(!spawn)budgetLoading=false;renderBudgetPanel();if(settingsOpen)renderSettings();if(newOpen)render(last,true);}
+}
+function budgetEditable(item){return{id:item.id,scope_type:item.scope_type,scope_id:item.scope_id||'',metric:item.metric,
+  limit_value:item.limit_value,block_spawns:!!item.block_spawns,enabled:item.enabled!==false,label:item.label||''};}
+function budgetValue(item){
+  if(item.value==null)return'Unavailable';
+  if(item.metric==='usd')return fmt$(item.value);
+  if(item.metric==='tokens')return`${fmtTok(item.value)} tokens`;
+  if(item.metric==='runtime')return`${Math.round(item.value/3600*10)/10} h`;
+  return`${Math.round(item.value)} concurrent`;
+}
+function budgetForecastText(item){const f=(budgetData.forecasts||{})[item.id]||{};
+  if(f.status!=='forecast')return`Forecast: not enough history · ${f.sample_size||0} samples`;
+  const eta=f.seconds_to_limit==null?'unknown':f.seconds_to_limit<86400?`${Math.max(1,Math.round(f.seconds_to_limit/3600))} h`:`${Math.round(f.seconds_to_limit/86400)} d`;
+  return`Forecast: limit in ${eta} · ${f.confidence} confidence · ${f.sample_size} samples`;}
+function renderBudgetPanel(){
+  const el=$('#budgets');if(!el)return;
+  if(budgetLoading&&!budgetData.budgets?.length){el.innerHTML='<div class="ctxload">Measuring budgets…</div>';return;}
+  if(!budgetData.ok){el.innerHTML=`<div class="provideralert"><b>Budgets unavailable</b> — ${esc(budgetData.error||'failed')}</div>`;return;}
+  const items=budgetData.budgets||[];
+  if(!items.length){el.innerHTML='<section class="budgetpanel emptybudget"><b>No budgets configured</b><span>Budgets alert only unless you explicitly enable “block future spawns.” Configure them in Settings.</span><button onclick="navigateTo(\'settings\')">Open Settings</button></section>';return;}
+  el.innerHTML=`<section class="budgetpanel"><div class="budgetpanelhead"><span><b>Budgets</b><small>Cumulative local usage; concurrency is current</small></span><button onclick="navigateTo('settings')">Manage</button></div>
+    <div class="budgetcards">${items.map(item=>`<article class="budgetcard ${esc(item.status)}"><div><b>${esc(item.label)}</b><small>${esc(item.scope_type)}${item.scope_id?` · ${esc(item.scope_id)}`:''}</small></div>
+      <strong>${esc(budgetValue(item))} <small>of ${item.metric==='usd'?fmt$(item.limit_value):item.metric==='tokens'?fmtTok(item.limit_value):Math.round(item.limit_value)}</small></strong>
+      <span class="budgetmeasure">${esc(String(item.measurement_scope||'unavailable').replaceAll('_',' '))}${item.block_spawns?' · blocks future spawns':''}</span>
+      <div class="budgetbar"><i style="width:${Math.round(Math.min(1,item.ratio||0)*100)}%"></i></div><p>${esc(budgetForecastText(item))}</p></article>`).join('')}</div></section>`;
+}
+function budgetTargetOptions(item){
+  if(item.scope_type==='fleet')return'';
+  if(item.scope_type==='provider')return[['claude','Claude Code'],['codex','Codex CLI']];
+  if(item.scope_type==='session')return((last&&last.sessions)||[]).map(s=>[s.session_id,`${s.provider} · ${s.title||s.project}`]);
+  return(workstreamData.workstreams||[]).map(w=>[w.workstream_id,w.title||w.root]);
+}
+function budgetSettingsHtml(){
+  if(budgetDraft===null)return'<div class="ctxload">Loading budgets…</div>';
+  const rows=budgetDraft.map((item,index)=>{const targets=budgetTargetOptions(item);
+    return`<div class="budgetedit"><div class="budgeteditrow"><select onchange="editBudget(${index},'scope_type',this.value)">${[['fleet','Fleet'],['provider','Provider'],['workstream','Workstream'],['session','Session']].map(([v,l])=>`<option value="${v}" ${item.scope_type===v?'selected':''}>${l}</option>`).join('')}</select>
+      ${targets?`<select onchange="editBudget(${index},'scope_id',this.value)"><option value="">Choose target</option>${targets.map(([v,l])=>`<option value="${esc(v)}" ${item.scope_id===v?'selected':''}>${esc(l)}</option>`).join('')}</select>`:'<span class="budgettarget">All providers and sessions</span>'}
+      <button aria-label="remove budget" onclick="removeBudget(${index})">✕</button></div>
+      <div class="budgeteditrow"><select onchange="editBudget(${index},'metric',this.value)">${[['usd','Exact USD'],['tokens','Tokens'],['runtime','Runtime seconds'],['concurrency','Concurrency']].map(([v,l])=>`<option value="${v}" ${item.metric===v?'selected':''}>${l}</option>`).join('')}</select>
+      <input type="number" min="0.01" step="${item.metric==='usd'?'0.5':'1'}" value="${esc(String(item.limit_value))}" onchange="editBudget(${index},'limit_value',Number(this.value))">
+      <label><input type="checkbox" ${item.block_spawns?'checked':''} onchange="editBudget(${index},'block_spawns',this.checked)"> block future spawns only</label></div></div>`;}).join('');
+  return`<div class="budgetsettings"><div class="sethint">USD, tokens, and runtime use cumulative usage observed on this Mac. Concurrency is current. Codex stays token-only unless its protocol reports session currency. Active work is never interrupted.</div>${rows||'<div class="sethint">No budgets yet.</div>'}
+    <div class="budgeteditactions"><button onclick="addBudget()">＋ Add budget</button><button class="primary" onclick="saveBudgets()">Save budgets</button></div></div>`;
+}
+function editBudget(index,key,value){if(!budgetDraft?.[index])return;budgetDraft[index][key]=value;
+  if(key==='scope_type'){budgetDraft[index].scope_id=value==='fleet'?'':value==='provider'?'claude':'';}renderSettings();}
+function addBudget(){if(budgetDraft===null)budgetDraft=[];budgetDraft.push({scope_type:'fleet',scope_id:'',metric:'tokens',limit_value:1000000,block_spawns:false,enabled:true});renderSettings();}
+function removeBudget(index){budgetDraft.splice(index,1);renderSettings();}
+async function saveBudgets(){const msg=$('#setmsg');if(msg)msg.textContent='saving budgets…';
+  const data=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budgets:budgetDraft})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
+  if(!data.ok){if(msg)msg.textContent='✗ '+(data.error||'failed');return;}
+  budgetDraft=(data.budgets||[]).map(budgetEditable);if(msg)msg.textContent='saved ✓';await loadBudgets(true);}
+function queueSpawnForecast(){clearTimeout(spawnForecastTimer);spawnForecastTimer=setTimeout(()=>{
+  spawnForecastTimer=null;if(!newOpen||!newProvider)return;loadBudgets(false,{provider:newProvider,model:newModel,project:(newDir.split('/').filter(Boolean).pop()||''),cwd:newDir});},250);}
+function spawnForecastHtml(){const f=spawnForecast;if(!f)return'<div class="spawnforecast">Forecast and budget headroom load from matching local history.</div>';
+  if(f.status==='error')return`<div class="spawnforecast unavailable">${esc(f.error)}</div>`;
+  if(f.status!=='forecast')return`<div class="spawnforecast">Not enough matching history · ${f.sample_size||0} sample${f.sample_size===1?'':'s'}</div>`;
+  const bits=[f.median_usd!=null?`median ${fmt$(f.median_usd)}`:'currency unavailable',f.median_tokens!=null?`${fmtTok(f.median_tokens)} tokens`:null,
+    f.median_runtime_seconds!=null?`${Math.round(f.median_runtime_seconds/60)} min`:null,`${f.confidence} confidence · ${f.sample_size} samples`].filter(Boolean);
+  const headroom=spawnBudgetHeadroom.length?spawnBudgetHeadroom.map(item=>item.headroom==null?`${item.label}: unavailable`:
+    `${item.label}: ${item.metric==='usd'?fmt$(item.headroom):item.metric==='tokens'?fmtTok(item.headroom)+' tokens':Math.round(item.headroom)} headroom${item.block_spawns&&item.status==='exceeded'?' · spawn blocked':''}`).join(' · '):'No matching budget';
+  return`<div class="spawnforecast">Historical match: ${bits.map(esc).join(' · ')}<br>Budget: ${esc(headroom)}</div>`;}
+
 let insightsDays=7;
 const insightsCache={};   // days -> {t, data, fetching}
 function loadInsights(force){
@@ -2782,6 +2936,7 @@ function render(f,force){
       .map(action=>action.session_id));
     renderPinned(f,matchesNow);
     renderActionInbox(f);
+    renderBriefing();
     renderOutboxCompact();
     renderQueue($('#working'),unpinned.filter(s=>s.ui_group==='working'),
       'Working','turns in progress','working');
@@ -2791,6 +2946,7 @@ function render(f,force){
     if(!typingHistory)$('#history').innerHTML=historySection(f);
     if(currentRoute==='workstreams')renderWorkstreams(workstreamData);
     renderSavedViews('now');
+    renderBudgetPanel();
     $('#rollup').innerHTML=insightsSection();
   }
   checkSpawn(f);
@@ -2810,6 +2966,8 @@ async function tick(){
     $('#stale').style.display='none';
     render(last);
     if(currentRoute==='now'||$('#outboxview').style.display==='flex')loadOutbox();
+    if(currentRoute==='now')loadBriefing();
+    if(currentRoute==='insights')loadBudgets();
   }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
 }
 navigateTo(currentRoute,false);

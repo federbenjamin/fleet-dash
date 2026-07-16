@@ -1153,6 +1153,79 @@ test('usage-reset and scheduled-new-session forms keep full target configuration
   expect(item.message).toBe('Audit the scheduled release workflow');
 });
 
+test('fleet briefing separates current attention from completed outcomes and persists review', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await expect(page.locator('#briefing')).toContainText('Fleet briefing');
+  await expect(page.locator('#briefing')).toContainText('2 since review');
+  await page.locator('.briefhead').click();
+  await expect(page.locator('.briefbody')).toContainText('Completed since last review');
+  await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
+  await expect(page.locator('.briefbody')).toContainText('Artifacts delivered');
+  await expect.poll(async () => Object.values((await fixtureState(page)).briefing_reviewed)[0]).toBe(3);
+  await page.screenshot({ path: testInfo.outputPath('fleet-briefing.png'), fullPage: true });
+
+  await page.reload();
+  await expect(page.locator('#briefing')).toContainText('2 recently reviewed');
+  await page.locator('.briefhead').click();
+  await expect(page.locator('.briefbody')).toContainText('Recently reviewed');
+  await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
+});
+
+test('budget editor, scheduled digest, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await goTo(page, 'settings');
+  await page.locator('.budgetsettingsfold summary').click();
+  await page.getByRole('button', { name: '＋ Add budget' }).click();
+  const budget = page.locator('.budgetedit').first();
+  await budget.locator('select').nth(0).selectOption('fleet');
+  await budget.locator('select').nth(1).selectOption('tokens');
+  await budget.locator('input[type="number"]').fill('10000');
+  await budget.locator('input[type="checkbox"]').check();
+  await page.getByRole('button', { name: '＋ Add budget' }).click();
+  const providerBudget = page.locator('.budgetedit').nth(1);
+  await providerBudget.locator('select').nth(0).selectOption('provider');
+  await providerBudget.locator('select').nth(1).selectOption('codex');
+  await providerBudget.locator('select').nth(2).selectOption('tokens');
+  await providerBudget.locator('input[type="number"]').fill('50000');
+  await page.locator('.setrow:has-text("daily briefing push") input[type="checkbox"]').check();
+  await page.locator('.digestsettings input[type="time"]').fill('08:30');
+  await page.locator('.digestsettings input:not([type="time"])').fill('America/New_York');
+  await page.locator('.digestsettings input:not([type="time"])').press('Tab');
+  await page.getByRole('button', { name: 'Save budgets' }).click();
+  await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
+  const state = await fixtureState(page);
+  expect(state.budgets[0]).toMatchObject({scope_type: 'fleet', metric: 'tokens',
+    limit_value: 10000, block_spawns: true});
+  expect(state.budgets[1]).toMatchObject({scope_type: 'provider', scope_id: 'codex',
+    metric: 'tokens', limit_value: 50000, block_spawns: false});
+  expect(state.notify.scheduled_digest).toBe(true);
+  expect(state.settings.digest_schedule_time).toBe('08:30');
+  expect(state.settings.digest_schedule_zone).toBe('America/New_York');
+
+  await page.locator('#setclose').click();
+  await goTo(page, 'now');
+  await page.locator('.actionfilters').getByRole('button', { name: 'Budgets' }).click();
+  const budgetAction = page.locator('.actionrow.budget');
+  await expect(budgetAction).toContainText('Fleet tokens budget exceeded');
+  await expect(budgetAction).toContainText('Future spawns blocked');
+  await expect(budgetAction.getByRole('checkbox')).toHaveCount(0);
+  await budgetAction.getByRole('button', { name: 'Review budget' }).click();
+  await expect(page.locator('#budgets')).toContainText('Fleet tokens budget');
+  await expect(page.locator('#budgets')).toContainText('Provider tokens budget');
+  await expect(page.locator('#budgets')).toContainText('token only');
+  await expect(page.locator('#budgets')).toContainText('blocks future spawns');
+  await expect(page.locator('#budgets')).toContainText('medium confidence');
+
+  await goTo(page, 'now');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  await page.locator('#newsess select').first().selectOption('codex');
+  await page.locator('#newsess select').nth(1).selectOption('/Users/test/fleet-dash');
+  await expect(page.locator('.spawnforecast')).toContainText('currency unavailable');
+  await expect(page.locator('.spawnforecast')).toContainText('medium confidence');
+  await expect(page.locator('.spawnforecast')).toContainText('Budget:');
+  await page.screenshot({ path: testInfo.outputPath('budgets-and-forecast.png'), fullPage: true });
+});
+
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
   await reset(page, 'single-question');
   await page.evaluate(() => toggleSessionPin('codex:thread-one'));

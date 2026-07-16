@@ -101,6 +101,41 @@ test('running Fleet Dash opens the authenticated Outbox without dispatching work
   expect(failures).toEqual([]);
 });
 
+test('running Fleet Dash reads briefings, budgets, digest settings, and spawn forecasts without mutation', async ({ page }, testInfo) => {
+  const target = authenticatedLiveURL();
+  test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
+  const failures = [];
+  page.on('pageerror', error => failures.push(`page: ${error}`));
+  page.on('console', message => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
+  page.on('requestfailed', request => failures.push(`network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  await page.goto(target, { waitUntil: 'domcontentloaded' });
+  const briefing = await (await page.request.get('/api/briefing?device=playwright-live')).json();
+  expect(briefing.ok).toBe(true);
+  const budgets = await (await page.request.get('/api/budgets')).json();
+  expect(budgets.ok).toBe(true);
+  await page.evaluate(() => loadBriefing(true));
+  if (await page.locator('#briefing .briefhead').isVisible()) {
+    await page.locator('#briefing .briefhead').click();
+    await expect(page.locator('#briefing .briefbody')).toBeVisible();
+  }
+  await goTo(page, 'settings');
+  await expect(page.locator('.setrow:has-text("daily briefing push")')).toBeVisible();
+  await expect(page.locator('.digestsettings input[type="time"]')).toBeVisible();
+  await expect(page.locator('.budgetsettingsfold')).toBeVisible();
+  await page.locator('#setclose').click();
+  await goTo(page, 'insights');
+  await expect(page.locator('#budgets')).toContainText(/Budgets|No budgets configured/);
+  await goTo(page, 'now');
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  const dirs = page.locator('#newsess select').nth(1).locator('option');
+  if (await dirs.count() > 1) {
+    await page.locator('#newsess select').nth(1).selectOption({ index: 1 });
+    await expect(page.locator('.spawnforecast')).toContainText(/history|confidence|currency unavailable/, { timeout: 10_000 });
+  }
+  await page.screenshot({ path: testInfo.outputPath('running-briefing-budgets.png'), fullPage: true });
+  expect(failures).toEqual([]);
+});
+
 test('running Fleet Dash searches indexed transcripts with exact context', async ({ page }, testInfo) => {
   const target = authenticatedLiveURL();
   test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');

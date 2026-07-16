@@ -3,7 +3,8 @@ import os
 import tempfile
 
 from codex_adapter import (CodexAdapter, CodexAppServer, _account_usage, _agents,
-                           _conversation, _files, _usage_total, _usage_window)
+                           _conversation, _files, _usage_cumulative, _usage_total,
+                           _usage_window)
 
 
 class ResponseClient(CodexAppServer):
@@ -198,6 +199,10 @@ class CodexAdapterTest(unittest.TestCase):
                            "totalTokens": 105}, "modelContextWindow": 1000}
         self.assertEqual(_usage_total(usage), 105)
         self.assertEqual(_usage_window(usage), 1000)
+        self.assertIsNone(_usage_cumulative(usage))
+        usage["total"] = {"inputTokens": 900, "outputTokens": 100,
+                          "reasoningOutputTokens": 50, "totalTokens": 1050}
+        self.assertEqual(_usage_cumulative(usage), 1050)
 
     def test_account_usage_flattens_quota_windows(self):
         normalized = _account_usage({"rateLimitsByLimitId": {"codex": {

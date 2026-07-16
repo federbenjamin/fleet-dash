@@ -14,6 +14,7 @@ Status: approved for sequential implementation on `codex-integration`.
 | M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
 | M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
 | M7 — Message Outbox and light automations | Complete · 2026-07-16 | Durable SQLite outbox, four one-time send modes, atomic claim/lease recovery, exact target/account/session validation, central responsive UI, 139 Python tests, 70 deterministic browser checks, 10 safe running-daemon checks, and a real create/cancel smoke with no message dispatched. |
+| M8 — Briefings, budgets, and forecasts | Complete · 2026-07-16 | Durable per-device briefings, reviewed history, source links, mute-aware quiet/scheduled digests, persistent notification failures, scoped cumulative budgets, optional fail-closed future-spawn limits, honest mixed-provider measurement, action-inbox alerts, 156 Python tests, 74 deterministic browser checks, and 12 live checks. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -827,6 +828,44 @@ or latency regression.
 
 - Add event selection, briefing cursors, quiet digest, optional schedules, budget scopes, alerts, and
   honest mixed-provider forecasts.
+
+Completed 2026-07-16. `BRIEF-001`–`BRIEF-003`, `BUD-001`–`BUD-003`, `USE-001`, and the M8 portions of
+`ACT-001` and `WORK-002` are implemented by a WAL-backed operations ledger. Briefing events retain
+evidence and source links after a monotonic per-device review cursor advances; alert episodes dedupe
+across polling and restart, then reappear after recovery and recurrence. Current attention, reviewed
+and unreviewed completions, unusually slow work, repository/outbox/artifact outcomes, budget alerts,
+unavailable measurements, and persistent notification failures have deterministic in-app sections.
+Muted sessions remain visible in-app while being omitted from per-session pushes and counted in
+quiet digests.
+
+Budgets target session, workstream, provider, or fleet scopes for cumulative locally observed USD,
+tokens, and runtime, plus current concurrency. Measurement is explicitly exact, partial, token-only,
+or unavailable. Codex currency remains unavailable and is never inferred from quota tokens. Budget
+alerts appear in the shared action inbox and link to Insights. Hard limits are opt-in, block only
+future matching spawns, never interrupt active work, and fail closed if an explicitly enabled safety
+check becomes unavailable. Spawn estimates use matching provider/model/project medians and recent
+measured burn with sample size and confidence.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 156 passed, including event dedupe and
+  recurrence, review cursors, mute/quiet restart behavior, notification failure evidence, every
+  budget scope/measurement state, cumulative closed-session measurements, forecast confidence,
+  durable settings, action-inbox normalization, and fail-closed explicit spawn limits.
+- `npx playwright test tests/browser/fleet.spec.js` — 74 passed across desktop 1440×1000 and mobile
+  390×844, including reviewed/unreviewed briefings, source navigation, budget inbox alerts, responsive
+  settings, scheduled-digest preferences, honest token scope, spawn forecasts, and all prior flows.
+- `python3 tests/live_api_smoke.py` — passed against 26 live sessions and seven Codex models; briefing,
+  budget, forecast, notification-setting, command, context, and authentication contracts were read
+  without dispatching work.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377 FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 12 passed across both viewports with no console or network failures.
+- After restart settled, live reads measured `/api/fleet` 11.300 ms, `/api/briefing` 38.942 ms, and
+  `/api/budgets` 45.219 ms. Startup lock contention is retained as an explicit M9 optimization target.
+- The daemon was restarted repeatedly during implementation and returned HTTP 200 after the final
+  existing-config notification-default migration. The installed in-app Browser runtime remains
+  blocked by the previously documented helper/socket trust rejection; repository-native and live
+  Playwright provide deterministic visual coverage in the meantime.
 
 Commit: `Add fleet briefings and measurable budgets`.
 

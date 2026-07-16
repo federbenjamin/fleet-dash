@@ -25,6 +25,8 @@ def main():
     assert status == 200 and kind == "text/html"
     assert b'<div id="appshell">' in html
     assert b'<div id="outboxview">' in html
+    assert b'<div id="briefing">' in html
+    assert b'<div id="budgets">' in html
     assert b'<script src="/static/app.js"></script>' in html
 
     fleet = None
@@ -49,6 +51,27 @@ def main():
     assert commands["ok"] and {"/compact", "/review"} <= names, commands
     insights = json.loads(get("/api/insights?days=7")[1])
     assert insights["ok"] is True
+    briefing = json.loads(get("/api/briefing?device=live-api-smoke&limit=20")[1])
+    assert briefing["ok"] is True
+    assert {"attention", "completed", "slow", "outcomes", "budgets",
+            "measurements", "reviewed"} <= set(briefing["sections"])
+    budget_query = urllib.parse.urlencode({
+        "provider": "codex", "model": codex.get("model") or "",
+        "project": codex.get("project") or "", "cwd": codex.get("cwd") or "",
+    })
+    budgets = json.loads(get("/api/budgets?" + budget_query)[1])
+    assert budgets["ok"] is True
+    assert budgets["spawn_forecast"] is not None
+    assert set(budgets["measurement_labels"]) == {
+        "exact", "partial", "token_only", "unavailable"}
+    assert "budget_summary" in fleet
+    assert "scheduled_digest" in fleet["notify"]
+    assert "digest_schedule_time" in fleet["settings"]
+    assert "digest_schedule_zone" in fleet["settings"]
+    for action in fleet.get("actions") or []:
+        if action.get("kind") == "budget":
+            assert action.get("primary_action") == "view_budget"
+            assert action.get("safe_bulk") == []
 
     try:
         urllib.request.urlopen(urllib.request.Request(ROOT + "/api/act", data=b'{"type":"ping"}',
@@ -59,7 +82,9 @@ def main():
         raise AssertionError("unauthenticated /api/act was accepted")
     print(json.dumps({"ok": True, "sessions": len(fleet["sessions"]),
                       "codex_models": len(fleet["models_by_provider"]["codex"]),
-                      "codex_commands": len(commands["commands"])}, indent=2))
+                      "codex_commands": len(commands["commands"]),
+                      "briefing_unread": briefing["unread"],
+                      "budgets": len(budgets["budgets"])}, indent=2))
 
 
 if __name__ == "__main__":
