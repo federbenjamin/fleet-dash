@@ -114,6 +114,7 @@ def fresh_state():
         "pr_mark_ready": {"enabled": False, "reason": "No pull request",
             "number": None, "url": None}}
     return {"sessions": [claude, codex], "closed": [], "actions": [],
+            "hidden_action_sessions": [],
             "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
@@ -165,6 +166,8 @@ STATE = fresh_state()
 def fixture_actions(sessions):
     records = []
     for session in sessions:
+        if session["session_id"] in STATE.get("hidden_action_sessions", []):
+            continue
         pending = session.get("pending") or {}
         kind = request = delivery = None
         safe = ["mute"]
@@ -507,7 +510,8 @@ def set_scenario(name):
     global STATE
     STATE = fresh_state()
     STATE["scenario"] = name
-    session = claude_session() if name.startswith("claude-question") else codex_session()
+    session = claude_session() if (name.startswith("claude-question") or
+        name.startswith("mobile-needs-you")) else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -515,6 +519,20 @@ def set_scenario(name):
                        total_tokens=None, cost=None, cost_source="unavailable",
                        convo_v="starting:4242:idle")
         STATE["contexts"]["claude-one"] = []
+    elif name in ("mobile-needs-you", "mobile-needs-you-missing-action"):
+        session.update(title="Get 429 into a mergable state", name="hazy-hatching-curry-d8",
+            project="hazy-hatching-curry", branch="fix/pr-429", state="needs_you",
+            normalized_state="needs_you", reg_status="waiting", quiet_s=28 * 60,
+            last_msg={"role": "assistant", "text": "I'll run the statusline fix script."},
+            pending={"kind": "question", "nonce": "mobile-needs-you-q1",
+                "dismiss_action": "cancel_turn", "questions": [{"header": "Update branch",
+                "question": "How should I bring PR #429 up to date with main (required by strict branch protection)?",
+                "multiSelect": False, "allowOther": True, "options": [
+                    {"label": "Remote update-branch", "description": "Merge main into the head branch on GitHub."},
+                    {"label": "Wait on current CI first", "description": "Let the current checks finish first."},
+                    {"label": "I'll do it in the worktree", "description": "Leave the manual merge to the owner."}]}]})
+        if name.endswith("missing-action"):
+            STATE["hidden_action_sessions"].append(session["session_id"])
     elif name in ("single-question", "answer-failure", "claude-question-slow",
                 "claude-question-failure"):
         session.update(state="needs_you", pending={"kind": "question", "nonce": "q1",
