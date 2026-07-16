@@ -646,6 +646,7 @@ function overflowMenu(key,s,kind='session',done=false){
     : Boolean(s?.capabilities?.interrupt);
   const canClose=Boolean(lifecycle&&s?.capabilities?.close);
   const canHandoff=Boolean(s?.session_id&&['session','viewer','closed'].includes(kind));
+  const canRepo=Boolean(s?.cwd&&['session','viewer','closed','subagent'].includes(kind));
   return`<span class="ovwrap">
     <button class="ovbtn" aria-label="${label}" aria-haspopup="menu" aria-expanded="${open?'true':'false'}"
       onclick="toggleOverflow(event,'${key}')">⋮</button>
@@ -658,6 +659,8 @@ function overflowMenu(key,s,kind='session',done=false){
       </span></span><span class="ovsep"></span>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
+      ${canRepo?`<button class="ovitem" role="menuitem" onclick="closeOverflow();openRepository('',decodeURIComponent('${enc(s.cwd)}'))">
+        <span>Repository outcome</span><small>changes · tests · PR</small></button>`:''}
       ${canHandoff?`<span class="ovsep"></span>
         <button class="ovitem" role="menuitem" onclick="closeOverflow();openHandoff(decodeURIComponent('${enc(s.session_id)}'),'claude')">
           <span>Continue in Claude</span><small>new session</small></button>
@@ -820,6 +823,124 @@ function handoffLinksHtml(s){
   return`<div class="handofflinks">${links.map(link=>`<button class="handofflink ${link.status==='delivery_failed'?'failed':''}"
     title="${esc(link.status+(link.error?' — '+link.error:''))}" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${enc(link.session_id)}'))">${link.direction==='from'?'continued in':'continued from'} ${esc(link.provider)} · ${esc(link.status)}</button>`).join('')}</div>`;
 }
+
+// ---- repository outcomes --------------------------------------------------
+// Reads are cached, bounded Git/GitHub argv probes. Mutations always use the
+// revision from this editable preview and a second confirmation interstitial.
+let repoView=null,repoPushed=false;
+function repoSignal(state){
+  return({passed:'passed',failed:'failed',running:'running',unknown:'unknown',
+    not_observed:'not observed',stale:'stale',unavailable:'unavailable'})[state]||state||'not observed';
+}
+function updateRepoSelection(path,checked){
+  if(!repoView)return;checked?repoView.selected.add(path):repoView.selected.delete(path);
+  renderRepository();
+}
+function renderRepository(){
+  const root=$('#repobody');if(!repoView||!root)return;
+  if(repoView.loading&&!repoView.data){root.innerHTML='<div class="ctxload">Reading repository evidence…</div>';return;}
+  if(repoView.error&&!repoView.data){root.innerHTML=`<div class="destinationempty"><span>!</span><b>Repository unavailable</b><p>${esc(repoView.error)}</p><button class="pbtn" onclick="loadRepository(true)">retry</button></div>`;return;}
+  const d=repoView.data||{},actions=d.actions||{},commit=actions.commit||{},push=actions.push||{},
+    create=actions.pr_create_draft||{},ready=actions.pr_mark_ready||{},pr=d.pr||{},tests=d.tests||{};
+  const files=d.files||[],selected=repoView.selected||new Set();
+  const checks=pr.checks||{};
+  const branch=d.detached?'detached HEAD':(d.branch||'branch unavailable');
+  const worktrees=d.worktrees||[d.worktree].filter(Boolean);
+  root.innerHTML=`<div class="repolayout">
+    <section class="reposummary">
+      <div class="repostatus"><span><small>Branch</small><b>${esc(branch)}</b></span>
+        <span><small>Changes</small><b class="${d.dirty?'warn':'ok'}">${d.dirty?`${files.length} file${files.length===1?'':'s'}`:'clean'}</b></span>
+        <span><small>Sync</small><b>${d.ahead||0} ahead · ${d.behind||0} behind</b></span>
+        <span><small>Tests/build</small><b class="${tests.state==='failed'?'bad':tests.state==='passed'?'ok':''}">${esc(repoSignal(tests.state))}</b></span>
+        <span><small>Pull request</small><b>${pr.state==='ok'?`#${esc(String(pr.number))}${pr.is_draft?' · draft':' · ready'}`:esc(repoSignal(pr.state==='none'?'not_observed':pr.state))}</b></span></div>
+      <div class="repoevidence"><span>Observed ${d.observed_at?fmtAge(Math.max(0,Date.now()/1000-d.observed_at))+' ago':'now'}${d.cached?' · cached':''}</span>
+        ${tests.command?`<code title="${esc(tests.command)}">${esc(tests.command)}</code>`:'<span>no test/build command observed in session transcripts</span>'}
+        ${pr.state==='ok'?`<span>${checks.total||0} checks · ${checks.passed||0} passed · ${checks.pending||0} pending · ${checks.failed||0} failed</span>`:''}
+        ${pr.error?`<span class="repoerror">${esc(pr.error)}</span>`:''}</div>
+      ${worktrees.length>1?`<label class="repolabel">Worktree<select onchange="changeRepositoryWorktree(this.value)">${worktrees.map(path=>`<option value="${esc(path)}" ${path===d.worktree?'selected':''}>${esc(path)}</option>`).join('')}</select></label>`:`<div class="repopath">${esc(d.worktree||'')}</div>`}
+      ${repoView.status?`<div class="reporesult ${repoView.failed?'bad':'ok'}">${esc(repoView.status)}</div>`:''}
+      ${(d.recent_actions||[]).length?`<div class="repohistory"><b>Recent actions</b>${d.recent_actions.map(item=>`<span class="${item.status==='failed'?'bad':'ok'}"><strong>${esc(String(item.kind||'').replaceAll('_',' '))}</strong><small>${esc(item.status)} · ${fmtAge(Math.max(0,Date.now()/1000-(item.finished_at||item.started_at||0)))} ago</small>${item.error?`<em>${esc(item.error)}</em>`:''}</span>`).join('')}</div>`:''}
+    </section>
+    <section class="repoactions">
+      <article class="repoaction"><div><h3>Commit</h3><p>Review the exact files and edit the message before committing.</p></div>
+        <div class="repofiles">${files.length?files.map(file=>`<label><input type="checkbox" ${selected.has(file.path)?'checked':''} ${file.conflict||file.staged?'disabled':''}
+          onchange="updateRepoSelection(decodeURIComponent('${enc(file.path)}'),this.checked)"><span><code>${esc(file.status)}</code>${esc(file.path)}${file.staged?'<small>staged</small>':''}${file.untracked?'<small>new</small>':''}</span></label>`).join(''):'<span class="repoempty">Working tree is clean.</span>'}</div>
+        <label class="repolabel">Commit message<textarea id="repocommit" maxlength="1000" oninput="repoView.commitMessage=this.value">${esc(repoView.commitMessage||commit.default_message||'')}</textarea></label>
+        <small class="reponote">The commit includes selected files plus anything already staged in this worktree.</small>
+        <button class="pbtn send" ${!commit.enabled||!selected.size||repoView.busy?'disabled':''} onclick="confirmRepoCommit()">Commit ${selected.size||''} file${selected.size===1?'':'s'}</button>
+        ${!commit.enabled&&commit.reason?`<small class="repoerror">${esc(commit.reason)}</small>`:''}</article>
+      <article class="repoaction"><div><h3>Push</h3><p>${push.remote?`Push ${push.ahead||0} commit${push.ahead===1?'':'s'} to ${esc(push.remote)}/${esc(push.branch||'')}.`:'No push destination is configured.'}</p></div>
+        <button class="pbtn send" ${!push.enabled||repoView.busy?'disabled':''} onclick="confirmRepoPush()">Push</button>
+        ${!push.enabled&&push.reason?`<small class="repoerror">${esc(push.reason)}</small>`:''}</article>
+      <article class="repoaction"><div><h3>Draft pull request</h3><p>Fleet always creates a draft. It never merges.</p></div>
+        <label class="repolabel">Title<input id="reprtitle" maxlength="200" value="${esc(repoView.prTitle||create.title||'')}" oninput="repoView.prTitle=this.value"></label>
+        <label class="repolabel">Base branch<input id="reprbase" maxlength="200" value="${esc(repoView.prBase||create.base||'main')}" oninput="repoView.prBase=this.value"></label>
+        <label class="repolabel">Body<textarea id="reprbody" maxlength="20000" oninput="repoView.prBody=this.value">${esc(repoView.prBody||create.body||'')}</textarea></label>
+        <button class="pbtn send" ${!create.enabled||repoView.busy?'disabled':''} onclick="confirmRepoDraftPr()">Create draft PR</button>
+        ${!create.enabled&&create.reason?`<small class="repoerror">${esc(create.reason)}</small>`:''}</article>
+      <article class="repoaction"><div><h3>Ready for review</h3><p>${pr.state==='ok'?`PR #${esc(String(pr.number))} · ${esc(pr.title||'')}`:'No pull request is attached to this branch.'}</p></div>
+        <button class="pbtn send" ${!ready.enabled||repoView.busy?'disabled':''} onclick="confirmRepoReady()">Mark ready</button>
+        ${!ready.enabled&&ready.reason?`<small class="repoerror">${esc(ready.reason)}</small>`:''}</article>
+    </section></div>`;
+}
+async function loadRepository(force=false){
+  const view=repoView;if(!view)return;view.loading=true;view.error='';renderRepository();
+  const q=new URLSearchParams({root:view.root||'',worktree:view.worktree||'',force:force?'1':'0'});
+  try{const r=await fetch('/api/repo?'+q,{cache:'no-store'}),d=await r.json();
+    if(repoView!==view)return;if(!r.ok||!d.ok)throw new Error(r.status===403?'This device needs Fleet’s action token for repository details':(d.error||'repository unavailable'));
+    view.data=d;view.root=d.root;view.worktree=d.worktree;
+    const paths=new Set((d.files||[]).filter(file=>!file.conflict).map(file=>file.path));
+    if(!view.selectionInitialized){view.selected=paths;view.selectionInitialized=true;}
+    else view.selected=new Set([...view.selected].filter(path=>paths.has(path)));
+    if(!view.commitMessage)view.commitMessage=d.actions?.commit?.default_message||'';
+    if(!view.prTitle)view.prTitle=d.actions?.pr_create_draft?.title||'';
+    if(!view.prBase)view.prBase=d.actions?.pr_create_draft?.base||'main';
+  }catch(error){if(repoView===view)view.error=String(error.message||error);}
+  finally{if(repoView===view){view.loading=false;renderRepository();}}
+}
+function openRepository(root,worktree){
+  const stacked=anyOverlay();repoView={root,worktree,data:null,selected:new Set(),selectionInitialized:false,
+    commitMessage:'',prTitle:'',prBody:'',prBase:'',loading:true,busy:false,error:'',status:'',failed:false};
+  $('#repoview').style.display='flex';
+  if(stacked){repoPushed=true;history.pushState({fdRepo:1},'');}else syncOverlayHistory();
+  loadRepository();
+}
+function closeRepository(){repoView=null;$('#repoview').style.display='none';$('#repobody').innerHTML='';}
+function changeRepositoryWorktree(path){if(!repoView)return;repoView.worktree=path;repoView.data=null;
+  repoView.selectionInitialized=false;repoView.commitMessage='';repoView.status='';loadRepository(true);}
+async function runRepoAction(type,payload={}){
+  const view=repoView;if(!view||view.busy||!view.data)return;view.busy=true;view.failed=false;
+  view.status='Running '+type.replaceAll('_',' ')+'…';renderRepository();
+  try{const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      type,root:view.data.root,worktree:view.data.worktree,revision:view.data.revision,...payload})});
+    const d=await r.json();if(repoView!==view)return;
+    if(d.snapshot)view.data=d.snapshot;
+    if(!r.ok||!d.ok)throw new Error(d.error||'repository action failed');
+    view.status=(d.summary||type.replaceAll('_',' ')+' completed')+' ✓';view.failed=false;
+    view.selectionInitialized=false;view.selected=new Set();
+    view.commitMessage='';
+    await loadWorkstreams(true);
+  }catch(error){if(repoView===view){view.status=String(error.message||error);view.failed=true;}}
+  finally{if(repoView===view){view.busy=false;renderRepository();}}
+}
+function confirmRepoCommit(){
+  if(!repoView?.data)return;const input=$('#repocommit');if(input)repoView.commitMessage=input.value;
+  const paths=[...repoView.selected];askConfirm('Commit selected files?',
+    `<b>${paths.length} file${paths.length===1?'':'s'}</b> will be staged and committed in <code>${esc(repoView.data.worktree)}</code>.<br><br>${esc(repoView.commitMessage)}`,
+    'commit',()=>runRepoAction('git_commit',{paths,message:repoView.commitMessage}));
+}
+function confirmRepoPush(){const p=repoView?.data?.actions?.push;if(!p)return;askConfirm('Push this branch?',
+  `Pushes <b>${p.ahead||0} commit${p.ahead===1?'':'s'}</b> to <code>${esc(p.remote)}/${esc(p.branch)}</code>. No force push is used.`,
+  'push',()=>runRepoAction('git_push'));}
+function confirmRepoDraftPr(){
+  if(!repoView)return;repoView.prTitle=$('#reprtitle')?.value||repoView.prTitle;
+  repoView.prBase=$('#reprbase')?.value||repoView.prBase;repoView.prBody=$('#reprbody')?.value||repoView.prBody;
+  askConfirm('Create draft pull request?',`Creates a <b>draft</b> from <code>${esc(repoView.data.branch)}</code> into <code>${esc(repoView.prBase)}</code>.<br><br>${esc(repoView.prTitle)}`,
+    'create draft',()=>runRepoAction('pr_create_draft',{title:repoView.prTitle,base:repoView.prBase,body:repoView.prBody}));
+}
+function confirmRepoReady(){const pr=repoView?.data?.pr;if(!pr)return;askConfirm('Mark pull request ready?',
+  `PR <b>#${esc(String(pr.number))}</b> will leave draft state and request review. Fleet will not merge it.`,
+  'mark ready',()=>runRepoAction('pr_mark_ready',{number:pr.number}));}
 function terminalButton(s,card=false){
   if(!s)return'';
   const cls=`expandbtn termbtn${card?' deskonly':''}`;
@@ -953,11 +1074,12 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
 let histPushed=false;
-const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview'].some(id=>$(id).style.display==='flex');
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  if(repoPushed){repoPushed=false;closeRepository();return;}
   if(handoffPushed){
     handoffPushed=false;
     const destination=handoffOpenAfterBack;handoffOpenAfterBack=null;
@@ -967,7 +1089,7 @@ window.addEventListener('popstate',()=>{
   }
   if(histPushed){
     histPushed=false;
-    closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();
+    closeConfirm();closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();
     return;
   }
   navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
@@ -975,9 +1097,10 @@ window.addEventListener('popstate',()=>{
 function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(repoPushed)return history.back();
   if(handoffPushed)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();}
+  else{closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
@@ -2143,6 +2266,7 @@ function renderWorkstreams(f){
   if(!items.length){el.innerHTML=staleAlert+'<div class="destinationempty"><span>⌘</span><b>No matching workstreams</b><p>Repositories and project folders appear when Fleet observes a session.</p></div>';return;}
   el.innerHTML=staleAlert+items.map(item=>{
     const id=enc(item.workstream_id),expanded=workstreamOpen.has(item.workstream_id),counts=item.counts||{};
+    const summary=item.repo_summary||{},repository=item.repository||{};
     const stateCounts=[['needs_you','needs you'],['working','working'],['available','available'],['history','history']]
       .filter(([key])=>counts[key]).map(([key,label])=>`<span class="wcount ${key}"><b>${counts[key]}</b> ${label}</span>`).join('');
     const cost=item.cost_scope==='unavailable'?'cost unavailable':
@@ -2156,7 +2280,8 @@ function renderWorkstreams(f){
         <span>${(item.branches||[]).map(branch=>`<code>${esc(branch)}</code>`).join(' ')||'branch unavailable'}</span>
         <span>${esc(cost)} · ${esc(context)}</span></div>
       <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
-      <div class="worksignals"><span>Changes <b>not observed</b></span><span>Tests <b>not observed</b></span><span>PR <b>not observed</b></span><span>Budget <b>not configured</b></span></div>
+      <div class="worksignals"><span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>not configured</b></span>
+        ${item.kind==='git'?`<button class="repoopen" onclick="openRepository(decodeURIComponent('${enc(item.root)}'),decodeURIComponent('${enc(repository.worktree||item.worktree||item.root)}'))">Repository</button>`:''}</div>
       ${expanded?`<div class="workdetail"><div class="worktrees"><b>Worktrees</b>${(item.worktrees||[]).map(path=>`<code>${esc(path)}</code>`).join('')}</div>
         <div class="worksessions">${(item.sessions||[]).map(workstreamSessionRow).join('')}</div></div>`:''}</section>`;
   }).join('');

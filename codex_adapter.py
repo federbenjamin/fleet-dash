@@ -17,6 +17,7 @@ import glob
 import hashlib
 import socket
 from collections import deque
+from repo_center import observed_test_outcome
 
 
 class CodexError(RuntimeError):
@@ -1014,6 +1015,8 @@ class CodexAdapter:
                 "collaboration_mode": mode, "running": None,
                 "last_msg": _last_message(messages, thread.get("preview")),
                 "_latest_prose": _latest_prose(messages),
+                "repo_outcome": observed_test_outcome(
+                    messages, session_id=self.key(tid), provider="codex"),
                 "state": state, "reg_status": reg_status,
                 "headless": not is_managed, "read_only": not is_managed,
                 "read_only_reason": ("ChatGPT Desktop and VS Code use a different App Server; "
@@ -1723,9 +1726,22 @@ def _conversation(thread):
                 if not isinstance(raw_arg, str):
                     raw_arg = json.dumps(raw_arg, separators=(",", ":"))
                 name = item.get("tool") or typ
+                status = item.get("status")
+                exit_code = item.get("exitCode")
+                failed = None
+                if isinstance(exit_code, int):
+                    failed = exit_code != 0
+                elif str(status or "").lower() in ("failed", "error", "interrupted",
+                                                    "cancelled", "canceled"):
+                    failed = True
+                elif str(status or "").lower() in ("completed", "succeeded", "success"):
+                    failed = False
                 messages.append({"role": "tool", "name": name, "arg": raw_arg[:500],
+                                 "command": raw_arg[:2000] if typ == "commandExecution" else None,
                                  "result": (item.get("aggregatedOutput") or item.get("result") or
                                             item.get("error") or item.get("status")),
+                                 "status": status, "exit_code": exit_code, "failed": failed,
+                                 "completed_at": item.get("completedAt"),
                                  "ts": item.get("createdAt")})
             elif typ == "webSearch":
                 messages.append({"role": "tool", "name": "webSearch",

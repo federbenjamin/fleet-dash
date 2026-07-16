@@ -12,7 +12,8 @@ Status: approved for sequential implementation on `codex-integration`.
 | M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
 | M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
 | M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
-| M6 — Repository outcome center | Next | Add cached Git/GitHub/test evidence plus confirmed commit, push, draft-PR, and mark-ready actions. |
+| M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
+| M7 — Message Outbox and light automations | Next | Add durable scheduled, available-triggered, usage-reset-triggered, and scheduled-new-session sends with a central Outbox. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -756,6 +757,26 @@ wrong-session protection, and mobile acceptance tests pass.
 
 - Add cached Git/GitHub/test outcome probes and Workstream/session presentation.
 - Add confirmed commit, push, draft-PR, and mark-ready actions.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 121 passed, including clean/dirty,
+  detached, remote/no-remote, upstream/no-upstream, ahead/behind, cache, timeout/error, no-gh,
+  unauthenticated/network/malformed GitHub payloads, observed test/build outcomes, stale revisions,
+  canonical observed-worktree confinement, fixed argv, durable outcomes, and every supported action.
+- `npx playwright test tests/browser/fleet.spec.js` — 64 passed across desktop and 390×844 mobile,
+  including Workstream and session entry points, authenticated repository details, editable commit and
+  draft-PR previews, all confirmations, commit/push/draft/ready lifecycle, back navigation, and no
+  browser console/runtime failures.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377/ FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 8 safe running-daemon checks across both viewports, including a real
+  Git/GitHub repository outcome read with no mutation.
+- `python3 tests/live_repo_smoke.py` — passed a real temporary local commit and push against a
+  temporary bare remote; it did not touch the Fleet checkout or GitHub.
+- Live after restart: `/api/workstreams` returned in 0.011 s from the repository cache; an explicit
+  `federbenjamin/fleet-dash` GitHub detail lookup returned in 0.702 s and honestly reported that the
+  current branch has no PR. The bulk Workstreams route deliberately skips per-repository GitHub
+  network calls; opening Repository outcome performs the bounded full lookup.
 
 Commit: `Add repository and pull-request outcome center`.
 

@@ -85,6 +85,33 @@ def fresh_state():
                {"role": "assistant", "text": "Working through the matrix."},
                {"role": "event", "kind": "reasoning", "title": "Reasoning",
                 "detail": "Compared protocol states", "level": "info"}]
+    repo = {"ok": True, "state": "ok", "root": "/Users/test/fleet-dash",
+        "worktree": "/Users/test/fleet-dash", "worktrees": ["/Users/test/fleet-dash",
+            "/Users/test/fleet-dash-worktrees/ui"], "title": "fleet-dash",
+        "branch": "codex-integration", "detached": False, "head_oid": "abc123",
+        "upstream": "origin/codex-integration", "ahead": 2, "behind": 0,
+        "dirty": True, "conflicts": 0, "remotes": ["origin"], "remote": "origin",
+        "remote_branch": "codex-integration", "default_base": "main",
+        "files": [{"path": "engine.py", "status": ".M", "staged": False,
+            "unstaged": True, "untracked": False, "conflict": False},
+            {"path": "repo_center.py", "status": "??", "staged": False,
+             "unstaged": True, "untracked": True, "conflict": False}],
+        "latest_commit": {"oid": "abc123", "short_oid": "abc123",
+            "subject": "Add workstreams", "at": int(time.time()) - 60},
+        "pr": {"state": "none", "summary": "No pull request"},
+        "tests": {"state": "passed", "command": "python3 -m unittest discover",
+            "at": time.time() - 30, "source": "transcript", "provider": "claude",
+            "session_id": "claude-one", "result": "115 passed"},
+        "observed_at": time.time(), "elapsed_ms": 1.4, "revision": "repo-rev-1",
+        "cached": False, "actions": {}, "recent_actions": []}
+    repo["actions"] = {"commit": {"enabled": True, "reason": None,
+            "files": copy.deepcopy(repo["files"]), "default_message": "Update 2 files"},
+        "push": {"enabled": True, "reason": None, "remote": "origin",
+            "branch": "codex-integration", "ahead": 2, "set_upstream": False},
+        "pr_create_draft": {"enabled": True, "reason": None,
+            "title": "Add repository outcome center", "body": "", "base": "main"},
+        "pr_mark_ready": {"enabled": False, "reason": "No pull request",
+            "number": None, "url": None}}
     return {"sessions": [claude, codex], "closed": [], "actions": [],
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
@@ -122,7 +149,8 @@ def fresh_state():
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
                 "reader_width": "fit", "pinned_sessions": []},
-            "reply_available": {}, "read_sessions": {}, "dismissed_actions": {}}
+            "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
+            "repo": repo, "repo_actions": []}
 
 
 STATE = fresh_state()
@@ -194,8 +222,17 @@ def fixture_workstreams():
         "cost": round(sum(cost_values), 4) if cost_values else None,
         "cost_scope": "partial" if len(cost_values) != len(sessions) else "exact",
         "context_tokens": sum(item.get("ctx_tokens") or 0 for item in sessions) or None,
-        "repo_summary": {"changed_files": "not_observed", "tests": "not_observed",
-                         "pull_request": "not_observed"}, "budget_state": "not_configured",
+        "repo_summary": {"changed_files": ("clean" if not STATE["repo"]["dirty"] else
+                                             f"{len(STATE['repo']['files'])} files"),
+                         "tests": STATE["repo"]["tests"]["state"],
+                         "pull_request": (f"#{STATE['repo']['pr']['number']} draft"
+                            if STATE["repo"]["pr"].get("state") == "ok" and
+                               STATE["repo"]["pr"].get("is_draft") else
+                            "none" if STATE["repo"]["pr"].get("state") == "none" else
+                            STATE["repo"]["pr"].get("state"))},
+        "repository": {key: copy.deepcopy(STATE["repo"].get(key)) for key in
+            ("ok", "state", "worktree", "observed_at", "elapsed_ms", "cached", "error")
+            if key in STATE["repo"]}, "budget_state": "not_configured",
         "sessions": sessions}]}
 
 
@@ -445,9 +482,11 @@ def set_scenario(name):
                 "closed_at": now - index, "first_seen": now - 3600 - index,
                 "last_seen": now - index, "bridge_url": None,
                 "can_reopen": False})
-    elif name == "workstreams":
+    elif name in ("workstreams", "repo-action-failure"):
         session.update(cwd="/Users/test/fleet-dash-worktrees/ui",
                        branch="feature/action-inbox", project="fleet-dash")
+        if name == "repo-action-failure":
+            STATE["fail_repo_once"] = True
 
 
 def authorized(handler):
@@ -478,9 +517,11 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         with LOCK:
             if route in ("/api/search", "/api/search/status", "/api/search/context",
-                         "/api/handoff"):
+                         "/api/handoff", "/api/repo"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                if route == "/api/repo":
+                    return self.json_reply(copy.deepcopy(STATE["repo"]))
                 if route == "/api/handoff":
                     sid = (query.get("sid") or [""])[0]
                     provider = (query.get("provider") or [""])[0]
@@ -736,6 +777,70 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("type") == "ping":
                     return self.json_reply({"ok": True})
                 STATE["actions"].append(payload)
+                if payload.get("type") in ("git_commit", "git_push", "pr_create_draft",
+                                           "pr_mark_ready"):
+                    repo = STATE["repo"]
+                    if payload.get("revision") != repo.get("revision"):
+                        return self.json_reply({"ok": False,
+                            "error": "Repository changed since preview; review it again",
+                            "stale": True})
+                    typ = payload["type"]
+                    if typ == "git_commit":
+                        if STATE.pop("fail_repo_once", False):
+                            return self.json_reply({"ok": False,
+                                "error": "commit hook rejected the commit",
+                                "snapshot": copy.deepcopy(repo)})
+                        paths = payload.get("paths") or []
+                        allowed = {item["path"] for item in repo["files"]}
+                        if not paths or any(path not in allowed for path in paths):
+                            return self.json_reply({"ok": False,
+                                "error": "A selected file is stale or invalid"})
+                        if not str(payload.get("message") or "").strip():
+                            return self.json_reply({"ok": False,
+                                "error": "Commit message must be 1–1,000 characters"})
+                        repo.update(files=[], dirty=False, revision="repo-rev-2", ahead=3)
+                        repo["actions"]["commit"].update(enabled=False,
+                            reason="No changed files", files=[])
+                        repo["actions"]["push"].update(enabled=True, ahead=3)
+                        summary = "[codex-integration def456] " + payload["message"]
+                    elif typ == "git_push":
+                        if not repo["actions"]["push"]["enabled"]:
+                            return self.json_reply({"ok": False,
+                                "error": repo["actions"]["push"]["reason"]})
+                        repo.update(ahead=0, revision="repo-rev-3")
+                        repo["actions"]["push"].update(enabled=False, ahead=0,
+                            reason="No local commits to push")
+                        summary = "pushed to origin/codex-integration"
+                    elif typ == "pr_create_draft":
+                        if not str(payload.get("title") or "").strip():
+                            return self.json_reply({"ok": False,
+                                "error": "Pull-request title must be 1–200 characters"})
+                        repo.update(revision="repo-rev-4")
+                        repo["pr"] = {"state": "ok", "number": 7, "is_draft": True,
+                            "url": "https://github.test/pull/7", "title": payload["title"],
+                            "base": payload.get("base"), "head": repo["branch"],
+                            "checks": {"total": 2, "passed": 1, "pending": 1, "failed": 0}}
+                        repo["actions"]["pr_create_draft"].update(enabled=False,
+                            reason="A pull request already exists")
+                        repo["actions"]["pr_mark_ready"] = {"enabled": True,
+                            "reason": None, "number": 7, "url": repo["pr"]["url"]}
+                        summary = repo["pr"]["url"]
+                    else:
+                        if payload.get("number") != repo["pr"].get("number"):
+                            return self.json_reply({"ok": False,
+                                "error": "Pull request changed since preview"})
+                        repo.update(revision="repo-rev-5")
+                        repo["pr"]["is_draft"] = False
+                        repo["actions"]["pr_mark_ready"].update(enabled=False,
+                            reason="Pull request is already ready")
+                        summary = "Pull request #7 is ready for review"
+                    STATE["repo_actions"].append({"type": typ, "summary": summary})
+                    repo["recent_actions"].insert(0, {"action_id": "repo-action-1",
+                        "kind": typ, "started_at": time.time(), "finished_at": time.time(),
+                        "status": "succeeded", "summary": summary, "error": None})
+                    return self.json_reply({"ok": True, "action_id": "repo-action-1",
+                        "kind": typ, "summary": summary,
+                        "snapshot": copy.deepcopy(repo)})
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == payload.get("session_id")), None)
                 if payload.get("type") == "spawn":

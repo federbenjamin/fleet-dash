@@ -1030,6 +1030,53 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(all(item["root"] == "Location unavailable" for item in records))
         self.assertNotEqual(records[0]["workstream_id"], records[1]["workstream_id"])
 
+    def test_repository_routes_are_confined_to_observed_worktrees_and_audit_actions(self):
+        os.makedirs(os.path.join(self.cwd, ".git"))
+        fleet = self.engine.scan()
+        self.assertTrue(fleet["sessions"])
+
+        class FakeCenter:
+            def snapshot(inner, root, worktree, test_outcome=None, force=False):
+                return {"ok": True, "state": "ok", "root": root, "worktree": worktree,
+                    "branch": "feature", "dirty": True, "files": [{"path": "engine.py"}],
+                    "revision": "rev-1", "actions": {"commit": {"enabled": True}},
+                    "pr": {"state": "none"}, "tests": test_outcome or
+                    {"state": "not_observed"}}
+
+            def perform(inner, kind, snapshot, payload):
+                return {"ok": True, "kind": kind, "summary": "committed",
+                        "snapshot": {**snapshot, "dirty": False, "files": [],
+                                     "revision": "rev-2"}}
+
+        self.engine.repo_center = FakeCenter()
+        snapshot = self.engine.repository_snapshot("", self.cwd)
+        self.assertTrue(snapshot["ok"])
+        outside = os.path.join(self.tmp.name, "outside")
+        os.makedirs(os.path.join(outside, ".git"))
+        rejected = self.engine.repository_snapshot("", outside)
+        self.assertIn("current Fleet", rejected["error"])
+        result = self.engine.repository_action({"type": "git_commit", "root": self.cwd,
+            "worktree": self.cwd, "revision": "rev-1", "paths": ["engine.py"],
+            "message": "Commit"})
+        self.assertTrue(result["ok"])
+        row = self.engine.ensure_db().execute(
+            "SELECT kind,status,summary FROM repo_actions WHERE action_id=?",
+            (result["action_id"],)).fetchone()
+        self.assertEqual(row, ("git_commit", "succeeded", "committed"))
+
+    def test_workstream_uses_newest_transcript_test_outcome(self):
+        one = codex_session()
+        one.update(cwd=self.cwd, repo_outcome={"state": "failed", "at": 4,
+            "command": "npm test", "provider": "codex"})
+        two = codex_session()
+        two.update(session_id="codex:two", cwd=self.cwd,
+                   repo_outcome={"state": "passed", "at": 8,
+                                 "command": "python3 -m unittest", "provider": "claude"})
+        records = self.engine.workstream_records([one, two], [])
+        self.assertEqual(records[0]["test_outcome"]["state"], "passed")
+        self.assertEqual(records[0]["test_outcome"]["command"],
+                         "python3 -m unittest")
+
     def test_claude_peek_preserves_markdown_blocks(self):
         tail = Tail(self.transcript)
         text = "### Default width\n\nUse **Fit the screen**."

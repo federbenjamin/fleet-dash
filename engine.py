@@ -14,6 +14,7 @@ import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subproces
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
+from repo_center import RepositoryOutcomeCenter, observed_test_outcome
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -567,6 +568,8 @@ class Tail:
                         ref = self._tool_refs.pop(b.get("tool_use_id"), None)
                         if ref is not None:
                             ref["result"] = self._result_summary(b, ref.get("name"))
+                            ref["failed"] = bool(b.get("is_error"))
+                            ref["completed_at"] = ts
                             self.convo_rev += 1
                         qa = self._qa_refs.pop(b.get("tool_use_id"), None)
                         if qa is not None:
@@ -599,6 +602,8 @@ class Tail:
             entry["caption"] = inp.get("caption", "")
         else:
             entry["arg"] = self._tool_arg(name, inp)
+            if name == "Bash" and inp.get("command"):
+                entry["command"] = str(inp.get("command"))[:2000]
         self.convo.append(entry)
         self.convo_rev += 1
         if b.get("id"):
@@ -889,6 +894,7 @@ class Engine:
         self.history_backfilled = False
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
+        self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -1163,6 +1169,7 @@ class Engine:
                 "latest_at": 0, "latest_outcome": None,
                 "cost": 0.0, "cost_known": 0, "cost_unknown": 0,
                 "context_tokens": 0, "context_known": 0,
+                "repo_outcomes": [],
             })
             ui_group = session.get("ui_group") or "history"
             if ui_group not in group["counts"]:
@@ -1174,6 +1181,8 @@ class Engine:
                         "access_label", "primary_action", "primary_action_label",
                         "activity_at", "closed_at", "can_reopen", "cost", "ctx_tokens")}
             group["sessions"].append(summary)
+            if session.get("repo_outcome"):
+                group["repo_outcomes"].append(dict(session["repo_outcome"]))
             if session.get("branch"):
                 group["branches"].add(str(session["branch"]))
             if identity.get("worktree"):
@@ -1210,6 +1219,11 @@ class Engine:
                                    "partial" if group["cost_unknown"] else "exact")
             if not group["context_known"]:
                 group["context_tokens"] = None
+            group["repo_outcomes"].sort(key=lambda item: float(item.get("at") or 0),
+                                        reverse=True)
+            group["test_outcome"] = (group["repo_outcomes"][0]
+                                     if group["repo_outcomes"] else None)
+            group.pop("repo_outcomes", None)
             group["repo_summary"] = {"changed_files": "not_observed",
                                      "tests": "not_observed", "pull_request": "not_observed"}
             group["budget_state"] = "not_configured"
@@ -1349,6 +1363,8 @@ class Engine:
                 "last_msg": (mt.last_message(500)
                              if cfg.get("preview_sessions", True) else None),
                 "_latest_prose": mt.latest_prose(),
+                "repo_outcome": observed_test_outcome(
+                    mt.convo, session_id=sid, provider="claude"),
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
@@ -1499,9 +1515,148 @@ class Engine:
             return cached[1]
         started = time.perf_counter()
         records = self.workstream_records(sessions, closed)
+        for group in records:
+            if group.get("kind") != "git" or group.get("missing"):
+                continue
+            worktree = group.get("worktree") or group.get("root")
+            repo = self.repo_center.snapshot(
+                group["root"], worktree, test_outcome=group.get("test_outcome"),
+                include_github=False)
+            group["repository"] = {key: repo.get(key) for key in
+                                   ("ok", "state", "worktree", "observed_at",
+                                    "elapsed_ms", "cached", "error") if key in repo}
+            group["repo_summary"] = self._repository_summary(repo)
         result = {"ok": True, "t": stamp or time.time(), "workstreams": records,
                   "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
         self._workstreams_snapshot_cache = (stamp, result)
+        return result
+
+    @staticmethod
+    def _repository_summary(repo):
+        if not repo or not repo.get("ok"):
+            return {"changed_files": "stale", "tests": "stale",
+                    "pull_request": "stale"}
+        changed = "clean" if not repo.get("dirty") else (
+            f"{len(repo.get('files') or [])} file" +
+            ("" if len(repo.get("files") or []) == 1 else "s"))
+        tests = (repo.get("tests") or {}).get("state") or "not_observed"
+        pr = repo.get("pr") or {}
+        pull_request = RepositoryOutcomeCenter._pr_summary(pr)
+        return {"changed_files": changed, "tests": tests,
+                "pull_request": pull_request}
+
+    @staticmethod
+    def _repository_public(repo):
+        """Return bounded repository evidence; subprocess output stays server-side."""
+        if not repo:
+            return None
+        keys = ("ok", "state", "root", "worktree", "branch", "detached", "head_oid",
+                "upstream", "ahead", "behind", "dirty", "conflicts", "files", "remotes",
+                "remote", "remote_branch", "repo_slug", "default_base", "latest_commit", "pr", "tests",
+                "observed_at", "elapsed_ms", "revision", "actions", "cached", "error")
+        return {key: repo.get(key) for key in keys if key in repo}
+
+    def _repository_group(self, root, worktree=None):
+        raw_root = str(root or "").strip()
+        raw_worktree = str(worktree or "").strip()
+        if len(raw_root) > 4096 or len(raw_worktree) > 4096:
+            return None, None, "Repository path is too long"
+        if not raw_root and not raw_worktree:
+            return None, None, "Repository path is required"
+        requested = os.path.realpath(os.path.expanduser(raw_worktree or raw_root))
+        if raw_root:
+            root = os.path.realpath(os.path.expanduser(raw_root))
+        else:
+            inferred = self.workstream_identity(requested)
+            root = inferred.get("root") if inferred.get("kind") == "git" else ""
+        with self.lock:
+            sessions = list(self.snapshot_cache.get("sessions") or [])
+            closed = list(self.snapshot_cache.get("closed") or [])
+        group = next((item for item in self.workstream_records(sessions, closed)
+                      if item.get("kind") == "git" and item.get("root") == root), None)
+        if not group:
+            return None, None, "Repository is not part of the current Fleet"
+        identity = self.workstream_identity(requested)
+        if identity.get("kind") != "git" or identity.get("root") != root:
+            return None, None, "Worktree does not belong to this repository"
+        observed = {os.path.realpath(path) for path in (group.get("worktrees") or []) if path}
+        observed.add(os.path.realpath(group.get("root") or root))
+        if requested not in observed:
+            return None, None, "Worktree is not part of an observed Fleet session"
+        if not os.path.isdir(requested):
+            return None, None, "Worktree is no longer available"
+        return group, requested, None
+
+    def repository_snapshot(self, root, worktree=None, force=False):
+        group, target, error = self._repository_group(root, worktree)
+        if error:
+            return {"ok": False, "error": error}
+        repo = self.repo_center.snapshot(group["root"], target,
+                                         test_outcome=group.get("test_outcome"),
+                                         force=force)
+        out = self._repository_public(repo)
+        out["title"] = group.get("title")
+        out["worktrees"] = list(group.get("worktrees") or [])
+        out["recent_actions"] = self.repository_action_history(group["root"], target)
+        return out
+
+    def _record_repository_action(self, action_id, kind, root, worktree, started,
+                                  status, revision, summary=None, error=None):
+        self.ensure_db()
+        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        try:
+            db.execute("""INSERT INTO repo_actions(
+                action_id,kind,root,worktree,started_at,finished_at,status,summary,error,revision)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (
+                action_id, kind, root, worktree, started, time.time(), status,
+                str(summary or "")[:1000] or None, str(error or "")[:1000] or None,
+                str(revision or "")[:80] or None))
+            db.commit()
+        finally:
+            db.close()
+
+    def repository_action_history(self, root, worktree, limit=8):
+        self.ensure_db()
+        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        try:
+            rows = db.execute("""SELECT action_id,kind,started_at,finished_at,status,
+                summary,error FROM repo_actions WHERE root=? AND worktree=?
+                ORDER BY id DESC LIMIT ?""", (str(root), str(worktree),
+                                                max(1, min(20, int(limit))))).fetchall()
+        finally:
+            db.close()
+        keys = ("action_id", "kind", "started_at", "finished_at", "status",
+                "summary", "error")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def repository_action(self, action):
+        kind = str(action.get("type") or "")
+        if kind not in ("git_commit", "git_push", "pr_create_draft", "pr_mark_ready"):
+            return {"ok": False, "error": "Unknown repository action"}
+        group, target, error = self._repository_group(action.get("root"),
+                                                       action.get("worktree"))
+        if error:
+            return {"ok": False, "error": error}
+        preview = self.repo_center.snapshot(group["root"], target,
+                                            test_outcome=group.get("test_outcome"))
+        action_id = "repo-" + secrets.token_hex(12)
+        started = time.time()
+        result = self.repo_center.perform(kind, preview, action)
+        try:
+            self._record_repository_action(
+                action_id, kind, group["root"], target, started,
+                "succeeded" if result.get("ok") else "failed", action.get("revision"),
+                result.get("summary"), result.get("error"))
+        except Exception as exc:
+            result = {**result, "audit_warning": f"action outcome could not be recorded: {exc}"}
+        result["action_id"] = action_id
+        if result.get("snapshot"):
+            result["snapshot"] = self._repository_public(result["snapshot"])
+            result["snapshot"]["title"] = group.get("title")
+            result["snapshot"]["worktrees"] = list(group.get("worktrees") or [])
+            result["snapshot"]["recent_actions"] = self.repository_action_history(
+                group["root"], target)
+        self._workstreams_snapshot_cache = None
         return result
 
     def _persist_config_fields(self, changed):
@@ -1872,6 +2027,13 @@ class Engine:
                 status TEXT NOT NULL, error TEXT, preview_hash TEXT NOT NULL)""")
             self.db.execute("""CREATE INDEX IF NOT EXISTS session_links_source
                 ON session_links(source_session_id, id DESC)""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS repo_actions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, action_id TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL, root TEXT NOT NULL, worktree TEXT NOT NULL,
+                started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL,
+                summary TEXT, error TEXT, revision TEXT)""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS repo_actions_root
+                ON repo_actions(root, id DESC)""")
             self.db.commit()
         return self.db
 
@@ -3058,6 +3220,9 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": True}
         if action.get("type") == "handoff":
             return self.execute_handoff(action)
+        if action.get("type") in ("git_commit", "git_push", "pr_create_draft",
+                                  "pr_mark_ready"):
+            return self.repository_action(action)
         if str(action.get("session_id") or "").startswith("codex:") \
            and action.get("type") == "focus":
             return self.attach_codex_terminal(action)

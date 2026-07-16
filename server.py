@@ -6,6 +6,7 @@ GET /api/fleet   latest fleet snapshot JSON
 GET /api/workstreams lazy repository/project rollup
 GET /api/evidence durable session placement history
 GET /api/handoff authenticated editable provider-handoff preview
+GET /api/repo authenticated repository outcome/action preview
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -89,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
         if action.get("type") != "ping":
             # Keep the action/identity audit trail without persisting message or
             # handoff bodies in the daemon log. Provider transcripts own that text.
-            for key in ("text", "preview"):
+            for key in ("text", "preview", "message", "body"):
                 if key in audit:
                     audit[key] = f"[{len(str(audit[key] or ''))} chars omitted]"
             print(f"act: {json.dumps(audit)[:500]}", file=sys.stderr, flush=True)
@@ -105,12 +106,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff"):
+                     "/api/handoff", "/api/repo"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
             if route == "/api/handoff":
                 out = self.eng.handoff_preview(self.query("sid"), self.query("provider"))
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/repo":
+                out = self.eng.repository_snapshot(
+                    self.query("root"), self.query("worktree"),
+                    self.query("force") in ("1", "true"))
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:

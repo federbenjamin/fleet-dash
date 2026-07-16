@@ -381,6 +381,8 @@ details.insfold>summary:hover{color:var(--fg)}
 .workoutcome span{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .worksignals{display:flex;gap:12px;flex-wrap:wrap;padding:7px 12px;border-top:1px solid #20262e;color:var(--faint);font-size:9.5px}
 .worksignals b{color:var(--dim);font-weight:500}.workdetail{border-top:1px solid var(--line);background:var(--card2)}
+.repoopen{margin-left:auto;border:1px solid var(--line);border-radius:7px;background:var(--card2);color:var(--blue);
+  font:700 9.5px/1 inherit;padding:5px 8px;cursor:pointer}.repoopen:hover{border-color:var(--blue)}
 .worktrees{display:flex;gap:8px;align-items:center;overflow-x:auto;padding:8px 11px;border-bottom:1px solid var(--line);
   color:var(--faint);font-size:9.5px}.worktrees>b{text-transform:uppercase;letter-spacing:.4px}.worktrees code{white-space:nowrap;color:var(--dim)}
 .worksession{display:flex;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid var(--line)}
@@ -717,6 +719,46 @@ td.r,th.r{text-align:right}
 .handofflink{border:1px solid var(--line);border-radius:999px;background:var(--card2);color:var(--blue);
   font:10.5px/1.2 "SF Mono",Menlo,monospace;padding:5px 9px;cursor:pointer}
 .handofflink.failed{color:var(--red);border-color:rgba(248,81,73,.35)}
+
+/* Repository outcome center. Evidence stays compact; each mutation is a
+   separate preview card with its own confirmation interstitial. */
+#repoview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:61;flex-direction:column}
+#repohead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
+  background:#0d1117;flex:0 0 auto}#repoclose{flex:0 0 auto;background:var(--card);border:1px solid var(--line);
+  border-radius:8px;color:var(--fg);font:inherit;font-size:17px;width:34px;height:32px;cursor:pointer}
+#repotitle{display:flex;min-width:0;flex-direction:column;gap:1px}#repotitle b{font-size:14px}
+#repotitle small{font-size:10.5px;color:var(--faint)}#repobody{flex:1;min-height:0;overflow:auto;
+  padding:16px 18px calc(22px + env(safe-area-inset-bottom));overscroll-behavior:contain}
+.repolayout{width:100%;max-width:1180px;margin:0 auto;display:grid;grid-template-columns:320px minmax(0,1fr);gap:14px}
+.reposummary,.repoaction{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px}
+.reposummary{align-self:start;position:sticky;top:0}.repostatus{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.repostatus>span{display:flex;min-width:0;flex-direction:column;gap:2px;padding:8px;border:1px solid var(--line);
+  border-radius:8px;background:var(--card2)}.repostatus small{color:var(--faint);font-size:9px;text-transform:uppercase;
+  letter-spacing:.4px}.repostatus b{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.repostatus b.ok,.reporesult.ok{color:var(--green)}.repostatus b.warn{color:var(--amber)}
+.repostatus b.bad,.reporesult.bad{color:var(--red)}.repoevidence{display:flex;flex-direction:column;gap:5px;
+  margin-top:9px;color:var(--faint);font-size:9.5px}.repoevidence code{display:block;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;color:var(--dim);background:#0b0f14;border:1px solid var(--line);border-radius:6px;padding:6px}
+.repopath{margin-top:10px;color:var(--faint);font:9.5px/1.4 "SF Mono",Menlo,monospace;overflow-wrap:anywhere}
+.repoactions{display:grid;grid-template-columns:1fr 1fr;gap:12px}.repoaction{display:flex;min-width:0;flex-direction:column;
+  gap:9px;align-self:start}.repoaction h3{font-size:13px;margin:0}.repoaction p{color:var(--dim);font-size:10.5px;
+  line-height:1.45;margin:3px 0 0}.repolabel{display:flex;flex-direction:column;gap:4px;color:var(--faint);font-size:9px;
+  text-transform:uppercase;letter-spacing:.45px;margin-top:9px}.repolabel input,.repolabel select,.repolabel textarea{
+  width:100%;background:#0b0f14;border:1px solid var(--line);border-radius:7px;color:var(--fg);font:11.5px/1.4 inherit;
+  padding:8px;text-transform:none;letter-spacing:0}.repolabel textarea{min-height:70px;resize:vertical}
+.repofiles{max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#0b0f14}
+.repofiles label{display:grid;grid-template-columns:22px minmax(0,1fr);gap:5px;padding:7px 8px;border-bottom:1px solid var(--line);
+  color:var(--dim);font-size:10.5px;cursor:pointer}.repofiles label:last-child{border-bottom:0}.repofiles input{margin:2px 0;
+  accent-color:var(--blue)}.repofiles span{min-width:0;overflow-wrap:anywhere}.repofiles code{color:var(--amber);margin-right:7px}
+.repofiles small{display:inline-block;color:var(--faint);margin-left:7px}.repoempty{display:block;padding:10px;color:var(--faint);
+  font-size:10.5px}.reponote,.repoerror{display:block;color:var(--faint);font-size:9.5px;line-height:1.45}
+.repoerror{color:var(--red)}.reporesult{margin-top:10px;border:1px solid var(--line);border-radius:7px;padding:8px;
+  font-size:10.5px;overflow-wrap:anywhere}.repoaction>.pbtn{align-self:flex-start;margin-top:auto}
+.repohistory{display:flex;flex-direction:column;gap:5px;margin-top:12px;border-top:1px solid var(--line);padding-top:9px}
+.repohistory>b{color:var(--faint);font-size:9px;text-transform:uppercase;letter-spacing:.4px}.repohistory>span{
+  display:grid;grid-template-columns:1fr auto;gap:2px 6px;font-size:9.5px}.repohistory strong{font-weight:600;color:var(--dim)}
+.repohistory small{color:var(--faint)}.repohistory em{grid-column:1/-1;color:var(--red);font-style:normal;overflow-wrap:anywhere}
+.repohistory>span.ok strong{color:var(--green)}.repohistory>span.bad strong{color:var(--red)}
 /* card tail reveal: session info / files / completed agents / claude.ai link */
 .morebtn{display:block;width:100%;background:none;border:none;border-top:1px solid var(--line);
   color:var(--dim);font:inherit;font-size:10px;cursor:pointer;padding:2px 6px;user-select:none;text-align:center}
@@ -946,6 +988,9 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   #handoffbody{padding:10px 10px calc(16px + env(safe-area-inset-bottom))}
   .handofflayout{grid-template-columns:1fr;gap:10px}.handoffeditor,.handoffoptions{padding:11px}
   #handoffpreview{min-height:44vh;font-size:12px}.handoffoptions{order:-1}
+  #repobody{padding:10px 10px calc(16px + env(safe-area-inset-bottom))}
+  .repolayout{grid-template-columns:1fr;gap:10px}.reposummary{position:static}.repoactions{grid-template-columns:1fr}
+  .repoaction{padding:11px}.repostatus{grid-template-columns:1fr 1fr}.repoaction>.pbtn{width:100%}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}

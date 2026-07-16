@@ -144,3 +144,25 @@ test('running Fleet Dash builds an editable authenticated handoff without sendin
   await expect(page.locator('#sview')).toBeVisible();
   expect(failures).toEqual([]);
 });
+
+test('running Fleet Dash reads an authenticated repository outcome without mutating it', async ({ page }, testInfo) => {
+  const target = authenticatedLiveURL();
+  test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
+  const failures = [];
+  page.on('pageerror', error => failures.push(`page: ${error}`));
+  page.on('console', message => {
+    if (message.type() === 'error') failures.push(`console: ${message.text()}`);
+  });
+  page.on('requestfailed', request => failures.push(
+    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  await page.goto(target, { waitUntil: 'domcontentloaded' });
+  await goTo(page, 'workstreams');
+  const git = page.locator('#workstreams .workstream').filter({ has: page.getByRole('button', { name: 'Repository' }) }).first();
+  await expect(git).toBeVisible({ timeout: 15_000 });
+  await git.getByRole('button', { name: 'Repository' }).click();
+  await expect(page.locator('#repoview')).toBeVisible();
+  await expect(page.locator('#repobody .repostatus')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('#repobody')).toContainText('never merges');
+  await page.screenshot({ path: testInfo.outputPath('running-repository-outcome.png'), fullPage: true });
+  expect(failures).toEqual([]);
+});

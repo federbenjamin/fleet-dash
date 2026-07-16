@@ -238,6 +238,18 @@ test('transcript search is action-token protected', async ({ page }) => {
   page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
 });
 
+test('repository details and actions are action-token protected', async ({ page }) => {
+  await reset(page, 'workstreams');
+  await page.context().clearCookies();
+  await page.goto('/');
+  await goTo(page, 'workstreams');
+  await expect(page.locator('#workstreams')).not.toContainText('repo_center.py');
+  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
+  await expect(page.locator('#repobody')).toContainText('needs Fleet’s action token');
+  await expect(page.locator('#repobody .repoaction')).toHaveCount(0);
+  page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
+});
+
 test('shared fleet, spawn controls, usage, files, and capability-aware cost', async ({ page }, testInfo) => {
   await reset(page);
   await expect(page.locator('#totals > span')).toHaveText([
@@ -981,9 +993,9 @@ test('workstreams roll repositories, worktrees, providers, honest evidence, and 
   await expect(workstream).toContainText('fleet-dash');
   await expect(workstream).toContainText('claude · codex');
   await expect(workstream).toContainText('feature/action-inbox');
-  await expect(workstream).toContainText('Changes not observed');
-  await expect(workstream).toContainText('Tests not observed');
-  await expect(workstream).toContainText('PR not observed');
+  await expect(workstream).toContainText('Changes 2 files');
+  await expect(workstream).toContainText('Tests passed');
+  await expect(workstream).toContainText('PR none');
   await expect(workstream).toContainText('Budget not configured');
   await workstream.locator('.workhead').click();
   await expect(workstream.locator('.worksession')).toHaveCount(3);
@@ -1003,6 +1015,69 @@ test('workstreams roll repositories, worktrees, providers, honest evidence, and 
   await goTo(page, 'workstreams');
   await expect(page.locator('#worksaved')).toContainText('Cross-provider UI');
   await page.screenshot({ path: testInfo.outputPath('workstreams.png'), fullPage: true });
+});
+
+test('repository outcome center previews and confirms commit push draft PR and ready', async ({ page }, testInfo) => {
+  await reset(page, 'workstreams');
+  await goTo(page, 'workstreams');
+  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
+  const repo = page.locator('#repoview');
+  await expect(repo).toBeVisible();
+  await expect(repo).toContainText('codex-integration');
+  await expect(repo).toContainText('passed');
+  await expect(repo.locator('.repofiles input')).toHaveCount(2);
+  await repo.locator('#repocommit').fill('Add repository outcome center');
+  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
+  await expect(page.locator('#confirm')).toContainText('2 files');
+  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
+  await expect(repo).toContainText('Working tree is clean');
+  await expect.poll(async () => (await fixtureState(page)).repo_actions.map(item => item.type))
+    .toContain('git_commit');
+
+  await repo.getByRole('button', { name: 'Push', exact: true }).click();
+  await expect(page.locator('#confirm')).toContainText('No force push');
+  await page.locator('#confirm').getByRole('button', { name: 'push' }).click();
+  await expect.poll(async () => (await fixtureState(page)).repo.ahead).toBe(0);
+
+  await repo.locator('#reprtitle').fill('Repository outcomes');
+  await repo.locator('#reprbody').fill('Adds bounded Git and GitHub evidence.');
+  await repo.getByRole('button', { name: 'Create draft PR' }).click();
+  await expect(page.locator('#confirm')).toContainText('Creates a draft');
+  await page.locator('#confirm').getByRole('button', { name: 'create draft' }).click();
+  await expect(repo).toContainText('#7 · draft');
+
+  await repo.getByRole('button', { name: 'Mark ready' }).click();
+  await expect(page.locator('#confirm')).toContainText('will not merge');
+  await page.locator('#confirm').getByRole('button', { name: 'mark ready' }).click();
+  await expect(repo).toContainText('#7 · ready');
+  await expect.poll(async () => (await fixtureState(page)).repo_actions.map(item => item.type))
+    .toEqual(['git_commit', 'git_push', 'pr_create_draft', 'pr_mark_ready']);
+  await page.screenshot({ path: testInfo.outputPath('repository-outcome.png'), fullPage: true });
+});
+
+test('session action menu opens the same repository outcome center', async ({ page }) => {
+  await reset(page, 'base');
+  await page.locator('[data-sid="claude-one"] .primarybtn').click();
+  await page.locator('#sctrl .ovbtn').click();
+  await page.locator('#sctrl').getByRole('menuitem', { name: /Repository outcome/ }).click();
+  await expect(page.locator('#repoview')).toBeVisible();
+  await page.locator('#repoclose').click();
+  await expect(page.locator('#repoview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+});
+
+test('failed repository actions stay visible and retry against the same preview', async ({ page }) => {
+  await reset(page, 'repo-action-failure');
+  await goTo(page, 'workstreams');
+  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
+  const repo = page.locator('#repoview');
+  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
+  await expect(repo.locator('.reporesult.bad')).toContainText('commit hook rejected');
+  await expect(repo.locator('.repofiles input')).toHaveCount(2);
+  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
+  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
+  await expect(repo).toContainText('Working tree is clean');
 });
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
