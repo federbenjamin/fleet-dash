@@ -645,6 +645,7 @@ function overflowMenu(key,s,kind='session',done=false){
     ? Boolean(!done&&s?.capabilities?.interrupt)
     : Boolean(s?.capabilities?.interrupt);
   const canClose=Boolean(lifecycle&&s?.capabilities?.close);
+  const canHandoff=Boolean(s?.session_id&&['session','viewer','closed'].includes(kind));
   return`<span class="ovwrap">
     <button class="ovbtn" aria-label="${label}" aria-haspopup="menu" aria-expanded="${open?'true':'false'}"
       onclick="toggleOverflow(event,'${key}')">⋮</button>
@@ -657,6 +658,11 @@ function overflowMenu(key,s,kind='session',done=false){
       </span></span><span class="ovsep"></span>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
+      ${canHandoff?`<span class="ovsep"></span>
+        <button class="ovitem" role="menuitem" onclick="closeOverflow();openHandoff(decodeURIComponent('${enc(s.session_id)}'),'claude')">
+          <span>Continue in Claude</span><small>new session</small></button>
+        <button class="ovitem" role="menuitem" onclick="closeOverflow();openHandoff(decodeURIComponent('${enc(s.session_id)}'),'codex')">
+          <span>Continue in Codex</span><small>new session</small></button>`:''}
       ${(lifecycle||kind==='subagent')?`<span class="ovsep"></span>
         <button class="ovitem danger" role="menuitem" ${canStop?'':'disabled'}
           onclick="closeOverflow();${kind==='subagent'
@@ -667,6 +673,152 @@ function overflowMenu(key,s,kind='session',done=false){
           onclick="closeOverflow();sendCloseSession('${s?.session_id||''}','${kind==='viewer'?'vmsg':'smsg'}')">
           <span>Close session</span><small>${canClose?'move to history':'unavailable'}</small></button>`:''}
     </span></span>`;
+}
+
+// ---- exact provider handoff ------------------------------------------------
+// A handoff creates a separate provider-native session. Fleet stores only the
+// source/destination identity and delivery status; the editable body is not kept.
+let handoffView=null,handoffPushed=false,handoffOpenAfterBack=null;
+function handoffCatalog(provider){
+  return ((((last||{}).models_by_provider||{})[provider])||[]).map(item=>
+    typeof item==='string'?{id:item,name:item,efforts:[]} : item);
+}
+function handoffArtifactSection(){
+  const selected=(handoffView?.data?.artifacts||[]).filter(item=>
+    handoffView.selected.has(item.path)&&!item.missing);
+  const lines=['[Selected artifact references]'];
+  if(!selected.length)lines.push('(none)');
+  selected.forEach(item=>lines.push(`- ${item.path}${item.caption?' — '+item.caption:''}`));
+  lines.push('[End artifact references]');
+  return lines.join('\n');
+}
+function updateHandoffArtifacts(path,checked){
+  const textarea=$('#handoffpreview');
+  if(textarea)handoffView.draft=textarea.value;
+  if(checked)handoffView.selected.add(path);else handoffView.selected.delete(path);
+  const section=handoffArtifactSection();
+  const marker=/\[Selected artifact references\][\s\S]*?\[End artifact references\]/;
+  handoffView.draft=marker.test(handoffView.draft)
+    ?handoffView.draft.replace(marker,section):handoffView.draft+'\n\n'+section;
+  if(textarea)textarea.value=handoffView.draft;
+}
+function renderHandoff(){
+  const root=$('#handoffbody');if(!handoffView||!root)return;
+  if(handoffView.loading){root.innerHTML='<div class="ctxload">Building a safe handoff preview…</div>';return;}
+  if(handoffView.error&&!handoffView.data){
+    root.innerHTML=`<div class="destinationempty"><span>!</span><b>Handoff unavailable</b><p>${esc(handoffView.error)}</p></div>`;return;
+  }
+  const d=handoffView.data,defaults=handoffView.defaults||{},provider=handoffView.target;
+  const catalog=handoffCatalog(provider),picked=catalog.find(item=>item.id===defaults.model);
+  const efforts=(picked?.efforts?.length?picked.efforts:((last||{}).efforts||[]));
+  const artifacts=d.artifacts||[];
+  root.innerHTML=`<div class="handofflayout">
+    <section class="handoffeditor"><div class="handoffnotice"><b>Independent session</b><span>The source keeps running. Fleet creates one exact ${provider==='claude'?'Claude Code':'Codex CLI'} destination and sends this editable message to it.</span></div>
+      <label class="handofflabel" for="handoffpreview"><span>Message to send</span><small>${handoffView.draft.length.toLocaleString()} / 30,000</small></label>
+      <textarea id="handoffpreview" maxlength="30000" oninput="handoffView.draft=this.value;this.previousElementSibling.querySelector('small').textContent=this.value.length.toLocaleString()+' / 30,000'">${esc(handoffView.draft)}</textarea>
+    </section>
+    <aside class="handoffoptions"><h3>New coding session</h3>
+      <label class="nflab">provider</label><select class="nfsel" onchange="changeHandoffProvider(this.value)">
+        <option value="claude" ${provider==='claude'?'selected':''}>Claude Code</option>
+        <option value="codex" ${provider==='codex'?'selected':''}>Codex CLI</option></select>
+      <label class="nflab">directory</label><input class="nfin" value="${esc(defaults.cwd||'')}"
+        oninput="handoffView.defaults.cwd=this.value" autocomplete="off">
+      ${artifacts.length?`<label class="nflab">artifact references</label><div class="handoffartifacts">${artifacts.map(item=>
+        `<label class="handoffartifact"><input type="checkbox" ${handoffView.selected.has(item.path)?'checked':''} ${item.missing?'disabled':''}
+          onchange="updateHandoffArtifacts(decodeURIComponent('${enc(item.path)}'),this.checked)"><span>${esc(item.name||item.path)}${item.missing?' (gone)':''}<small>${esc(item.caption||item.path)}</small></span></label>`).join('')}</div>`:''}
+      <details class="handoffadvanced" ${handoffView.advanced?'open':''} ontoggle="handoffView.advanced=this.open"><summary>Advanced session settings</summary>
+        <label class="nflab">model</label><select class="nfsel" onchange="handoffView.defaults.model=this.value">
+          <option value="">provider default</option>${catalog.map(item=>`<option value="${esc(item.id)}" ${defaults.model===item.id?'selected':''}>${esc(item.name||item.id)}</option>`).join('')}</select>
+        <label class="nflab">effort</label><select class="nfsel" onchange="handoffView.defaults.effort=this.value">
+          <option value="">provider default</option>${efforts.map(value=>`<option value="${esc(value)}" ${defaults.effort===value?'selected':''}>${esc(value)}</option>`).join('')}</select>
+        ${provider==='codex'?`<label class="nflab">mode</label><select class="nfsel" onchange="handoffView.defaults.mode=this.value">
+          <option value="plan" ${defaults.mode==='plan'?'selected':''}>Plan</option><option value="default" ${defaults.mode==='default'?'selected':''}>Default</option></select>`:''}
+        <label class="nfcheck"><input type="checkbox" ${defaults.worktree?'checked':''}
+          onchange="handoffView.defaults.worktree=this.checked;renderHandoff()"><span>start in a new Git worktree</span></label>
+        ${defaults.worktree?`<label class="nflab">worktree name</label><input class="nfin" maxlength="40" value="${esc(defaults.worktree_name||'')}"
+          placeholder="optional" oninput="handoffView.defaults.worktree_name=this.value">`:''}
+      </details>
+      <button class="pbtn send handoffsubmit" ${handoffView.busy?'disabled':''} onclick="submitHandoff(false)">${handoffView.busy?'Creating and sending…':`Start ${provider==='claude'?'Claude':'Codex'} and send`}</button>
+      <div class="handoffstatus ${handoffView.error?'error':handoffView.destination?'ok':''}">${esc(handoffView.status||handoffView.error||'')}</div>
+      ${handoffView.retryable&&handoffView.destination?`<button class="pbtn handoffretry" onclick="submitHandoff(true)">Retry delivery to the same session</button>`:''}
+      ${handoffView.destination?`<button class="pbtn handoffretry" onclick="openHandoffDestination()">Open exact destination</button>`:''}
+    </aside></div>`;
+}
+async function loadHandoff(){
+  const view=handoffView;if(!view)return;
+  view.loading=true;view.error='';renderHandoff();
+  try{
+    const r=await fetch(`/api/handoff?sid=${encodeURIComponent(view.sid)}&provider=${encodeURIComponent(view.target)}`,{cache:'no-store'});
+    const d=await r.json();if(!r.ok||!d.ok)throw new Error(r.status===403?'This device needs Fleet’s action token to read and send handoffs':(d.error||'handoff unavailable'));
+    if(handoffView!==view)return;
+    view.data=d;view.draft=d.preview||'';view.defaults={...(d.defaults||{})};
+    view.selected=new Set((d.artifacts||[]).filter(item=>!item.missing).map(item=>item.path));
+  }catch(error){if(handoffView===view)view.error=String(error.message||error);}
+  finally{if(handoffView===view){view.loading=false;renderHandoff();}}
+}
+function openHandoff(sid,target){
+  handoffView={sid,target,data:null,draft:'',defaults:{},selected:new Set(),loading:true,
+    busy:false,error:'',status:'',destination:null,retryable:false,advanced:false,
+    providerDrafts:{}};
+  $('#handoffview').style.display='flex';
+  if(!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
+  if(!handoffPushed){handoffPushed=true;history.pushState({fdHandoff:1},'');}
+  loadHandoff();
+}
+function closeHandoff(){
+  handoffView=null;$('#handoffview').style.display='none';$('#handoffbody').innerHTML='';
+}
+function changeHandoffProvider(provider){
+  if(!handoffView||!['claude','codex'].includes(provider))return;
+  const textarea=$('#handoffpreview');if(textarea)handoffView.draft=textarea.value;
+  handoffView.providerDrafts[handoffView.target]={data:handoffView.data,
+    draft:handoffView.draft,defaults:{...handoffView.defaults},
+    selected:new Set(handoffView.selected)};
+  handoffView.target=provider;handoffView.destination=null;handoffView.retryable=false;
+  const saved=handoffView.providerDrafts[provider];
+  if(saved){handoffView.data=saved.data;handoffView.draft=saved.draft;
+    handoffView.defaults={...saved.defaults};handoffView.selected=new Set(saved.selected);
+    handoffView.error='';handoffView.loading=false;renderHandoff();}
+  else loadHandoff();
+}
+async function submitHandoff(retry){
+  if(!handoffView||handoffView.busy)return;
+  const view=handoffView,textarea=$('#handoffpreview');if(textarea)view.draft=textarea.value;
+  view.busy=true;view.error='';view.status=retry?'Retrying the exact destination…':'Creating one exact destination…';renderHandoff();
+  const payload={type:'handoff',session_id:view.sid,provider:view.target,preview:view.draft,
+    cwd:view.defaults.cwd,model:view.defaults.model,effort:view.defaults.effort,
+    mode:view.defaults.mode,worktree:Boolean(view.defaults.worktree),
+    worktree_name:view.defaults.worktree_name||''};
+  if(retry)payload.destination_session_id=view.destination;
+  try{
+    const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json();if(handoffView!==view)return;
+    view.destination=d.destination_session_id||d.session_id||view.destination;
+    view.retryable=Boolean(d.retryable);
+    if(!r.ok||!d.ok)throw new Error(d.error||'handoff failed');
+    view.status='Sent ✓ — opening the exact destination';view.error='';
+    await tick();
+    if(handoffView===view)setTimeout(()=>openHandoffDestination(true),150);
+  }catch(error){if(handoffView===view){view.error=String(error.message||error);view.status='';}}
+  finally{if(handoffView===view){view.busy=false;renderHandoff();}}
+}
+async function openHandoffDestination(automatic=false){
+  if(!handoffView?.destination)return;
+  const sid=handoffView.destination;
+  await tick();
+  const exists=((last||{}).sessions||[]).some(item=>item.session_id===sid)||
+    ((last||{}).closed||[]).some(item=>item.session_id===sid);
+  if(!exists){
+    handoffView.status=automatic?'Sent ✓ — destination is still starting; use Open exact destination in a moment':'Destination is still starting.';
+    renderHandoff();return;
+  }
+  handoffOpenAfterBack=sid;
+  if(handoffPushed)history.back();else{closeHandoff();primarySessionAction(sid);}
+}
+function handoffLinksHtml(s){
+  const links=s?.handoff_links||[];if(!links.length)return'';
+  return`<div class="handofflinks">${links.map(link=>`<button class="handofflink ${link.status==='delivery_failed'?'failed':''}"
+    title="${esc(link.status+(link.error?' — '+link.error:''))}" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${enc(link.session_id)}'))">${link.direction==='from'?'continued in':'continued from'} ${esc(link.provider)} · ${esc(link.status)}</button>`).join('')}</div>`;
 }
 function terminalButton(s,card=false){
   if(!s)return'';
@@ -752,6 +904,7 @@ function renderViewerBar(force){
     h+=pendingBox(s,'vmsg');
   }
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
+    ${handoffLinksHtml(s)}
     ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
     ${s&&s.capabilities?.submit?`<div class="freetext"><input id="vft-${viewerSid}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
@@ -800,14 +953,21 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
 let histPushed=false;
-const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview'].some(id=>$(id).style.display==='flex');
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  if(handoffPushed){
+    handoffPushed=false;
+    const destination=handoffOpenAfterBack;handoffOpenAfterBack=null;
+    closeHandoff();
+    if(destination)primarySessionAction(destination);
+    return;
+  }
   if(histPushed){
     histPushed=false;
-    closeConfirm();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();
+    closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();
     return;
   }
   navigateTo(validRoutes.has(location.hash.slice(1))?location.hash.slice(1):'now',false);
@@ -815,8 +975,9 @@ window.addEventListener('popstate',()=>{
 function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(handoffPushed)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();}
+  else{closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
@@ -973,10 +1134,11 @@ async function renderClosed(){
   const sid=sessionView.sid;
   const body=$('#sbody');
   const meta=((last&&last.closed)||[]).find(x=>x.session_id===sid)||{};
-  $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',null,'closed');
+  $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',meta,'closed');
   renderEvidenceRail(meta);
   $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
     so there is nothing to send to. The conversation is read-only.</div>
+    ${handoffLinksHtml(meta)}
     ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
       onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
       <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
@@ -1049,6 +1211,7 @@ function renderSession(force){
   keepStripScroll(act,()=>{act.innerHTML=`
     ${qHtml}
     ${fileStrip(s.session_id,(c&&c.files)||[])}
+    ${handoffLinksHtml(s)}
     ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
     ${s.capabilities?.submit?`<div class="freetext"><input id="sft-${s.session_id}" placeholder="send a message  ·  / or $ for commands and skills" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
@@ -1301,6 +1464,7 @@ function cardDetail(s){
         <span>${s.muted?'push notifications muted for this session':'notify me about this session'}</span>
       </div>
       <div class="actmsg" id="msg-${s.session_id}"></div>
+      ${handoffLinksHtml(s)}
       <details class="dfold statewhy" ${stateInfoOpen.has(s.session_id)?'open':''}
         ontoggle="stateInfoOpen[this.open?'add':'delete']('${s.session_id}')">
         <summary>why this is ${esc((s.reason_label||s.ui_group||'here').toLowerCase())}</summary>
@@ -1348,7 +1512,8 @@ function detailSig(s){
   const files=((ctxCache[s.session_id]||{}).files||[]).length;
   return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.reg_status,s.ctx_tokens,
     s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files,
-    s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh'].join('|');
+    s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh',
+    (s.handoff_links||[]).map(link=>[link.direction,link.session_id,link.status].join(':')).join(',')].join('|');
 }
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
@@ -2114,10 +2279,9 @@ async function doSpawn(){
     spawnMsg=d.trust_prompt
       ? '⚠ started — but it is waiting on the trust prompt on your Mac ("do you trust the files in this folder?")'
       : 'started ✓ — opening it here as soon as it appears…';
-    // a `-w` spawn lands in a NEW dir under the repo, so match by prefix — but only
-    // against sessions that did NOT already exist, or we'd hijack a sibling session
-    spawnWait={cwd:d.cwd,worktree:newWt,until:Date.now()+120000,
-               known:new Set(((last||{}).sessions||[]).map(x=>x.session_id))};
+    // Both providers return the exact native session identity. Never guess by cwd:
+    // a sibling session in the same repo must not be opened by mistake.
+    spawnWait={sessionId:d.session_id,until:Date.now()+120000};
     newOpen=false;render(last,true);
   }catch(e){spawnMsg='✗ '+e;render(last,true);}
 }
@@ -2125,8 +2289,7 @@ async function doSpawn(){
 function checkSpawn(f){
   if(!spawnWait)return;
   if(Date.now()>spawnWait.until){spawnWait=null;spawnMsg='';return;}
-  const s=(f.sessions||[]).find(x=>!spawnWait.known.has(x.session_id)&&
-    (x.cwd===spawnWait.cwd||(spawnWait.worktree&&(x.cwd||'').startsWith(spawnWait.cwd+'/'))));
+  const s=(f.sessions||[]).find(x=>x.session_id===spawnWait.sessionId);
   if(s){spawnWait=null;spawnMsg='';openSession(s.session_id);}
 }
 function historySection(f){

@@ -9,7 +9,7 @@ from unittest import mock
 
 import engine as engine_module
 from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail,
-                    classify_placement, requests_reply)
+                    classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
 
@@ -494,7 +494,9 @@ class EngineProviderTest(unittest.TestCase):
                 "effort": "high", "worktree": True, "worktree_name": "live-e2e"})
         self.assertTrue(spawned["ok"])
         command = writes[-1][1][0][0]
-        self.assertIn("claude --model sonnet --effort high --worktree live-e2e", command)
+        self.assertRegex(command, r"claude --session-id [0-9a-f-]{36} --model sonnet ")
+        self.assertIn("--effort high --worktree live-e2e", command)
+        self.assertEqual(spawned["session_id"], command.split("--session-id ", 1)[1].split()[0])
         self.assertFalse(spawned["trust_prompt"])
 
         changed = self.engine.update_settings({"mute_session": "same", "muted": True})
@@ -514,6 +516,144 @@ class EngineProviderTest(unittest.TestCase):
         invalid = self.engine.update_settings({"reader_width": "left"})
         self.assertFalse(invalid["ok"])
         self.assertEqual(self.engine.cfg["reader_width"], "centered")
+
+    def test_handoff_preview_redacts_credentials_and_exposes_safe_defaults(self):
+        fleet = self.engine.scan()
+        claude = next(item for item in fleet["sessions"] if item["provider"] == "claude")
+        claude["last_msg"] = {"role": "assistant", "text":
+            "Next step: verify Authorization: Bearer abcdefghijklmnop"}
+        preview = self.engine.handoff_preview("same", "codex")
+        self.assertTrue(preview["ok"])
+        self.assertTrue(preview["independent_session"])
+        self.assertEqual(preview["defaults"]["cwd"], self.cwd)
+        self.assertEqual(preview["defaults"]["mode"], "plan")
+        self.assertIn("Source session: claude · same", preview["preview"])
+        self.assertIn("Treat this as an independent session", preview["preview"])
+        self.assertNotIn("abcdefghijklmnop", redact_handoff_text(
+            "Authorization: Bearer abcdefghijklmnop"))
+        self.assertIn("[REDACTED", redact_handoff_text(
+            "api_key=abcdefghijklmnop"))
+        self.assertNotIn("private-material", redact_handoff_text(
+            "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----"))
+
+    def test_codex_handoff_starts_exact_thread_with_hi_and_durable_link(self):
+        self.engine.scan()
+        result = self.engine.execute_handoff({"type": "handoff", "session_id": "same",
+            "provider": "codex", "cwd": self.cwd, "preview": "Continue exact work",
+            "model": "gpt-5.4", "effort": "high", "mode": "default"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["destination_session_id"], "codex:new-thread")
+        self.assertEqual(self.codex.started_thread["initial_text"],
+                         "hi\n\nContinue exact work")
+        link = self.engine._handoff_link("same", "codex:new-thread")
+        self.assertEqual(link["status"], "delivered")
+        self.assertNotIn("Continue exact work", json.dumps(link))
+        fleet = self.engine.scan()
+        source = next(item for item in fleet["sessions"] if item["session_id"] == "same")
+        self.assertEqual(source["handoff_links"][0]["session_id"], "codex:new-thread")
+
+    def test_claude_handoff_uses_reserved_uuid_and_delivers_only_to_exact_session(self):
+        self.engine.scan()
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        self.engine.is_trusted = lambda cwd, trusted=None: True
+        original_live = self.engine.live_sessions
+        spawned_ids = []
+
+        def live():
+            if not spawned_ids:
+                return original_live()
+            return [{"sessionId": spawned_ids[-1], "pid": 9090, "cwd": self.cwd,
+                     "status": "idle", "name": "Handoff"},
+                    {"sessionId": "similar-but-wrong", "pid": 9191, "cwd": self.cwd,
+                     "status": "idle", "name": "Wrong"}]
+
+        def write(tty, steps, step_delay=None):
+            writes.append((tty, steps, step_delay))
+            if tty == "SPAWN":
+                command = steps[0][0]
+                spawned_ids.append(command.split("--session-id ", 1)[1].split()[0])
+            return {"ok": True}
+
+        self.engine._iterm_write = write
+        self.engine.live_sessions = live
+        self.engine._tty_cache[9090] = "ttys-exact"
+        result = self.engine.execute_handoff({"type": "handoff", "session_id": "codex:same",
+            "provider": "claude", "cwd": self.cwd, "preview": "Exact destination"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["destination_session_id"], spawned_ids[0])
+        self.assertEqual(writes[-1][0], "/dev/ttys-exact")
+        self.assertEqual(writes[-1][1], [("Exact destination", True)])
+        self.assertNotEqual(result["destination_session_id"], "similar-but-wrong")
+
+    def test_same_provider_handoff_remains_an_independent_codex_thread(self):
+        self.engine.scan()
+        result = self.engine.execute_handoff({"type": "handoff",
+            "session_id": "codex:same", "provider": "codex", "cwd": self.cwd,
+            "preview": "Continue independently", "mode": "plan"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["destination_session_id"], "codex:new-thread")
+        self.assertNotEqual(result["destination_session_id"], "codex:same")
+        self.assertEqual(self.codex.started_thread["initial_text"],
+                         "hi\n\nContinue independently")
+
+    def test_claude_handoff_timeout_is_linked_and_retryable(self):
+        self.engine.scan()
+        self.engine.is_trusted = lambda cwd, trusted=None: True
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: {"ok": True}
+        self.engine.live_sessions = lambda: []
+        with mock.patch.object(engine_module.time, "monotonic", side_effect=[0, 31]):
+            result = self.engine.execute_handoff({"type": "handoff",
+                "session_id": "same", "provider": "claude", "cwd": self.cwd,
+                "preview": "Wait for exact identity"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["created"])
+        self.assertTrue(result["retryable"])
+        link = self.engine._handoff_link("same", result["destination_session_id"])
+        self.assertEqual(link["status"], "delivery_failed")
+
+    def test_failed_codex_handoff_cleans_up_only_the_created_worktree(self):
+        self.engine.scan()
+        created = {"ok": True, "created": True, "cwd": os.path.join(self.tmp.name, "wt"),
+                   "root": self.cwd, "branch": "fleet/fail", "worktree_name": "fail"}
+        self.engine._create_codex_worktree = lambda cwd, name="": created
+        cleaned = []
+        self.engine._remove_failed_codex_worktree = lambda value: cleaned.append(value) or None
+        self.codex.start_thread = mock.Mock(side_effect=RuntimeError("app-server stopped"))
+        result = self.engine.execute_handoff({"type": "handoff", "session_id": "same",
+            "provider": "codex", "cwd": self.cwd, "preview": "Continue",
+            "worktree": True, "worktree_name": "fail", "mode": "plan"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(cleaned, [created])
+
+    def test_handoff_retry_requires_recorded_exact_destination(self):
+        self.engine.scan()
+        stale = self.engine.execute_handoff({"type": "handoff", "session_id": "same",
+            "provider": "codex", "preview": "retry", "destination_session_id": "codex:nope"})
+        self.assertFalse(stale["ok"])
+        self.assertIn("stale", stale["error"])
+        self.engine._record_handoff_link("same", "claude", "codex:retry", "codex",
+                                         "delivery_failed", "hash", "old failure")
+        retried = self.engine.execute_handoff({"type": "handoff", "session_id": "same",
+            "provider": "codex", "preview": "retry exact",
+            "destination_session_id": "codex:retry"})
+        self.assertTrue(retried["ok"])
+        self.assertFalse(retried["created"])
+        self.assertEqual(self.codex.actions[-1]["session_id"], "codex:retry")
+
+    def test_codex_worktree_creation_uses_argv_and_validates_name(self):
+        os.makedirs(os.path.join(self.cwd, ".git"), exist_ok=True)
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(engine_module.subprocess, "run", return_value=completed) as run:
+            made = self.engine._create_codex_worktree(self.cwd, "handoff-ui")
+        self.assertTrue(made["ok"])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:5], ["git", "-C", os.path.realpath(self.cwd),
+                                    "worktree", "add"])
+        self.assertEqual(argv[-2:], [made["cwd"], "HEAD"])
+        invalid = self.engine._create_codex_worktree(self.cwd, "bad name")
+        self.assertFalse(invalid["ok"])
 
     def test_plain_prose_reply_detection_ignores_examples_and_finds_requests(self):
         self.assertTrue(requests_reply("Which option should I implement?"))

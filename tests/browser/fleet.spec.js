@@ -140,6 +140,93 @@ test('cross-provider search filters, exact context, live handoff, and rebuild', 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test('editable exact provider handoff works from chat and Markdown with nested back', async ({ page }, testInfo) => {
+  await reset(page);
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await page.locator('#sctrl .ovbtn').click();
+  await page.getByRole('menuitem', { name: /Continue in Claude/ }).click();
+  await expect(page.locator('#handoffview')).toBeVisible();
+  await expect(page.locator('#handoffpreview')).toHaveValue(/Source session: codex · codex:thread-one/);
+  await page.locator('#handoffpreview').fill((await page.locator('#handoffpreview').inputValue()) + '\n\nEdited by the user.');
+  const artifact = page.locator('.handoffartifact input');
+  await artifact.uncheck();
+  await expect(page.locator('#handoffpreview')).not.toHaveValue(/\/fixture\/artifact\.md/);
+  await artifact.check();
+  await expect(page.locator('#handoffpreview')).toHaveValue(/\/fixture\/artifact\.md/);
+  await page.locator('.handoffoptions > .nfsel').selectOption('codex');
+  await expect(page.locator('.handoffsubmit')).toContainText('Start Codex');
+  await page.locator('.handoffoptions > .nfsel').selectOption('claude');
+  await expect(page.locator('#handoffpreview')).toHaveValue(/Edited by the user/);
+  await page.locator('.handoffadvanced summary').click();
+  await page.locator('.handoffadvanced .nfsel').nth(0).selectOption('sonnet');
+  await page.locator('.handoffadvanced .nfsel').nth(1).selectOption('high');
+  await page.locator('.handoffadvanced input[type="checkbox"]').check();
+  await page.locator('.handoffadvanced input[placeholder="optional"]').fill('handoff-ui');
+  await page.locator('#handoffclose').click();
+  await expect(page.locator('#handoffview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+
+  await page.evaluate(() => openClosed('codex:closed'));
+  await page.locator('#sctrl .ovbtn').click();
+  await page.getByRole('menuitem', { name: /Continue in Claude/ }).click();
+  await expect(page.locator('#handoffpreview')).toHaveValue(/Source session: codex · codex:closed/);
+  await page.locator('#handoffclose').click();
+  await expect(page.locator('#sview')).toContainText('Durable closed conversation');
+
+  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
+    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
+  await expect(page.locator('#viewer')).toBeVisible();
+  await page.locator('#vctrl .ovbtn').click();
+  await expect(page.getByRole('menuitem', { name: /Continue in Codex/ })).toBeVisible();
+  await page.getByRole('menuitem', { name: /Continue in Claude/ }).click();
+  await page.locator('#handoffpreview').fill((await page.locator('#handoffpreview').inputValue()) + '\n\nAccepted edit.');
+  await page.locator('.handoffsubmit').click();
+  await expect(page.locator('#handoffview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#stitle2')).toContainText('Continued from Codex parity work');
+  await expect(page.locator('#sact .handofflink')).toContainText('continued from codex · delivered');
+  const state = await fixtureState(page);
+  const action = state.actions.filter(item => item.type === 'handoff').at(-1);
+  expect(action.provider).toBe('claude');
+  expect(action.preview).toContain('Accepted edit.');
+  expect(state.sessions.filter(item => item.session_id === 'handoff-1')).toHaveLength(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('provider-handoff.png'), fullPage: true });
+});
+
+test('handoff failure retries the same destination without creating a duplicate', async ({ page }) => {
+  await reset(page, 'handoff-failure');
+  await page.evaluate(() => openSession('claude-one'));
+  await page.locator('#sctrl .ovbtn').click();
+  await page.getByRole('menuitem', { name: /Continue in Codex/ }).click();
+  await page.locator('.handoffsubmit').click();
+  await expect(page.locator('.handoffstatus')).toContainText('fixture delivery failure');
+  await expect(page.getByRole('button', { name: 'Retry delivery to the same session' })).toBeVisible();
+  let state = await fixtureState(page);
+  expect(state.sessions.filter(item => item.session_id === 'codex:handoff-1')).toHaveLength(1);
+  await page.getByRole('button', { name: 'Retry delivery to the same session' }).click();
+  await expect(page.locator('#handoffview')).toBeHidden();
+  await expect(page.locator('#stitle2')).toContainText('Continued from Claude parser fix');
+  state = await fixtureState(page);
+  expect(state.sessions.filter(item => item.session_id === 'codex:handoff-1')).toHaveLength(1);
+  const actions = state.actions.filter(item => item.type === 'handoff');
+  expect(actions).toHaveLength(2);
+  expect(actions[1].destination_session_id).toBe('codex:handoff-1');
+});
+
+test('handoff preview is action-token protected', async ({ page }) => {
+  await reset(page);
+  await page.context().clearCookies();
+  await page.goto('/');
+  await expect(page.locator('#totals')).toBeVisible();
+  await page.evaluate(() => openSession('claude-one'));
+  await page.locator('#sctrl .ovbtn').click();
+  await page.getByRole('menuitem', { name: /Continue in Codex/ }).click();
+  await expect(page.locator('#handoffbody')).toContainText('needs Fleet’s action token');
+  await expect(page.locator('#handoffbody .handoffsubmit')).toHaveCount(0);
+  page.__failures.length = 0; // the two intentional 403 responses are the behavior under test
+});
+
 test('transcript search is action-token protected', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#totals')).toBeVisible();

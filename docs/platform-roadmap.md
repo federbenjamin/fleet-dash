@@ -11,7 +11,8 @@ Status: approved for sequential implementation on `codex-integration`.
 | M2 — Incremental global search | Complete · 2026-07-16 | Isolated low-priority index process, per-source WAL/FTS5 state, authenticated search/status/context/rebuild APIs, desktop/mobile Search UI, exact session/subagent/artifact context, 88 Python tests, 44 deterministic browser tests, and the 100k-message/2k-source benchmark. Live while indexing 2.7 GB: `/api/fleet` p95 12.653 ms, search p95 26.619 ms, server search p95 24.515 ms. |
 | M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
 | M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
-| M5 — Provider handoff | Next | Synthesize an editable continuation preview and deliver it only to a newly identified provider-native session. |
+| M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
+| M6 — Repository outcome center | Next | Add cached Git/GitHub/test evidence plus confirmed commit, push, draft-PR, and mark-ready actions. |
 
 Completion here records the milestone gate, not proof by assertion. M10 still reopens every row and
 verifies the current implementation and tests against the full catalogue.
@@ -447,9 +448,12 @@ Advanced controls choose provider, model, effort, mode, same directory versus ne
 artifact references to include. Secret fields and raw credentials never enter the preview.
 
 Creation uses provider-native starts where available. Codex starts through Fleet's App Server. Claude
-starts through the existing validated terminal path, then submits the approved handoff only after the
-new registered session is identified. Failure at either stage remains visible and retryable; Fleet
-never sends the handoff to a merely similar pre-existing session.
+starts through the existing validated terminal path with a Fleet-reserved `--session-id`, then submits
+the approved handoff only after that exact registered UUID appears. New Codex worktrees are created
+with bounded argv-only Git commands beneath Fleet's managed worktree root. Failure at either stage
+remains visible and retryable against the recorded destination; Fleet never sends the handoff to a
+merely similar pre-existing session. Only link identity/status and a preview hash are retained; edited
+handoff bodies are omitted from Fleet's ledger and daemon action log.
 
 ## Git, PR, build, and delivery outcomes
 
@@ -724,6 +728,24 @@ Verification:
 
 - Add handoff synthesis, editable preview, worktree/provider controls, safe spawn/identification, and
   retryable delivery.
+
+Verification:
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` — 108 passed, including redaction,
+  indexed/fallback preview context, Claude→Codex, Codex→Claude, same-provider continuation, exact
+  UUID targeting, timeout/retry, durable links, argv-only worktree creation, and failed-worktree
+  cleanup.
+- `npx playwright test tests/browser/fleet.spec.js` — 56 passed across desktop and 390×844 mobile,
+  including chat/Markdown/closed-session entry points, editable accept flow, artifact toggles,
+  advanced controls, native back, token protection, exact navigation, and no-duplicate retry.
+- `FLEET_DASH_LIVE_URL=http://127.0.0.1:8377/ FLEET_DASH_LIVE_AUTH=1 npx playwright test
+  tests/browser/live.spec.js` — 6 safe running-daemon checks across both viewports, including an
+  authenticated handoff preview that does not create or send a session.
+- The installed in-app Browser was initialized exactly through its Browser skill, but this desktop
+  task advertises no browser surfaces. The newest desktop log shows the native pipe rejecting the
+  helper peer as `untrusted-code-signing-identity`; this is a helper-connection blocker, not a claim
+  that the reinstalled ChatGPT application has an invalid signature. Deterministic and live
+  Playwright remain green while this runtime-specific blocker is open for M10.
 
 Commit: `Add editable cross-provider session handoff`.
 

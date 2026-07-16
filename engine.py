@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
@@ -343,6 +343,27 @@ def classify_closed_placement(session):
                        "Conversation is retained for viewing only"), "confidence": "confirmed"},
         ],
     }
+
+
+def redact_handoff_text(value, limit=30_000):
+    """Bound and remove common credential shapes from generated/user-edited handoffs."""
+    text = str(value or "").replace("\x00", "")[:limit]
+    patterns = (
+        (r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?"
+         r"-----END(?: [A-Z0-9]+)* PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"),
+        (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED AWS ACCESS KEY]"),
+        (r"(?i)\b(?:sk|sk-ant|ghp|github_pat|xox[baprs])-[-A-Za-z0-9_]{12,}\b",
+         "[REDACTED CREDENTIAL]"),
+        (r"(?i)\bauthorization\b\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+",
+         "Authorization: [REDACTED]"),
+        (r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+         r"password|secret)\b\s*[:=]\s*[^\s,;]+", "[REDACTED CREDENTIAL]"),
+        (r"(?i)([?&](?:token|key|secret|auth)=)[^&#\s]+", r"\1[REDACTED]"),
+        (r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*", "Bearer [REDACTED]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    return text.strip()
 
 # built-in commands the TUI offers (name, description). Skills + custom commands
 # are enumerated off disk per session; these have no file to read.
@@ -871,6 +892,8 @@ class Engine:
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
+        self._handoff_links_cache = None
+        self._handoff_links_version = 0
         # Claude's registry can flash `waiting` between assistant text and the
         # next tool call. Keep the transition time so an uncorroborated flash
         # remains Working instead of manufacturing a "Response needed" card.
@@ -1408,6 +1431,10 @@ class Engine:
                       flush=True)
         closed = [self.organize_closed(item) for item in self.closed_sessions()]
         closed.sort(key=lambda item: -float(item.get("activity_at") or 0))
+        links = self.handoff_link_map(
+            [item.get("session_id") for item in [*sessions, *closed]])
+        for item in [*sessions, *closed]:
+            item["handoff_links"] = links.get(str(item.get("session_id") or ""), [])
         journal_started = time.perf_counter()
         self.record_state_events([*sessions, *closed], now)
         self.last_state_journal_ms = (time.perf_counter() - journal_started) * 1000
@@ -1837,6 +1864,14 @@ class Engine:
                 evidence_json TEXT, signature TEXT NOT NULL)""")
             self.db.execute("""CREATE INDEX IF NOT EXISTS state_events_session_id
                 ON state_events(session_id, id DESC)""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS session_links(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_session_id TEXT NOT NULL, source_provider TEXT NOT NULL,
+                destination_session_id TEXT NOT NULL UNIQUE,
+                destination_provider TEXT NOT NULL, created_at REAL NOT NULL,
+                status TEXT NOT NULL, error TEXT, preview_hash TEXT NOT NULL)""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS session_links_source
+                ON session_links(source_session_id, id DESC)""")
             self.db.commit()
         return self.db
 
@@ -2223,6 +2258,206 @@ class Engine:
         return {"ok": True, "session_id": sid, "current": current,
                 "events": events,
                 "next_cursor": events[-1]["id"] if more and events else None}
+
+    def _record_handoff_link(self, source_sid, source_provider, destination_sid,
+                             destination_provider, status, preview_hash, error=None):
+        """Persist identity/status only. The edited handoff body is never retained."""
+        now = time.time()
+        self.ensure_db()
+        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        try:
+            db.execute("""INSERT INTO session_links(
+                source_session_id,source_provider,destination_session_id,
+                destination_provider,created_at,status,error,preview_hash)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(destination_session_id) DO UPDATE SET
+                  status=excluded.status,error=excluded.error,
+                  preview_hash=excluded.preview_hash""", (
+                str(source_sid), str(source_provider), str(destination_sid),
+                str(destination_provider), now, str(status),
+                str(error)[:1000] if error else None, str(preview_hash)))
+            db.commit()
+        finally:
+            db.close()
+        with self.lock:
+            self._handoff_links_version += 1
+            self._handoff_links_cache = None
+
+    def _handoff_link(self, source_sid, destination_sid):
+        self.ensure_db()
+        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        try:
+            row = db.execute("""SELECT source_session_id,source_provider,
+                destination_session_id,destination_provider,created_at,status,error,preview_hash
+                FROM session_links WHERE source_session_id=? AND destination_session_id=?""",
+                (str(source_sid), str(destination_sid))).fetchone()
+        finally:
+            db.close()
+        if not row:
+            return None
+        keys = ("source_session_id", "source_provider", "destination_session_id",
+                "destination_provider", "created_at", "status", "error", "preview_hash")
+        return dict(zip(keys, row))
+
+    def handoff_link_map(self, session_ids):
+        ids = {str(sid) for sid in session_ids if sid}
+        if not ids:
+            return {}
+        with self.lock:
+            cached = self._handoff_links_cache
+            version = self._handoff_links_version
+        if cached and cached[0] == version:
+            rows = cached[1]
+        else:
+            self.ensure_db()
+            db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+            try:
+                rows = db.execute("""SELECT source_session_id,source_provider,
+                    destination_session_id,destination_provider,created_at,status,error
+                    FROM session_links ORDER BY id DESC""").fetchall()
+            finally:
+                db.close()
+            with self.lock:
+                if version == self._handoff_links_version:
+                    self._handoff_links_cache = (version, rows)
+        out = {sid: [] for sid in ids}
+        for source_sid, source_provider, destination_sid, destination_provider, created_at, status, error in rows:
+            if source_sid in ids:
+                out[source_sid].append({"direction": "from", "session_id": destination_sid,
+                    "provider": destination_provider, "status": status,
+                    "created_at": created_at, "error": error})
+            if destination_sid in ids:
+                out[destination_sid].append({"direction": "to", "session_id": source_sid,
+                    "provider": source_provider, "status": status,
+                    "created_at": created_at, "error": error})
+        return {sid: links for sid, links in out.items() if links}
+
+    def _find_handoff_source(self, sid):
+        sid = str(sid or "")
+        if not sid or len(sid) > 300 or any(ord(char) < 32 for char in sid):
+            return None
+        with self.lock:
+            records = (list(self.snapshot_cache.get("sessions") or []) +
+                       list(self.snapshot_cache.get("closed") or []))
+        return next((dict(item) for item in records
+                     if str(item.get("session_id") or "") == sid), None)
+
+    @staticmethod
+    def _handoff_artifact_section(artifacts):
+        if not artifacts:
+            return "[Selected artifact references]\n(none)\n[End artifact references]"
+        lines = ["[Selected artifact references]"]
+        for artifact in artifacts[:20]:
+            caption = str(artifact.get("caption") or "").strip()
+            suffix = f" — {caption}" if caption else ""
+            lines.append(f"- {artifact.get('path')}{suffix}")
+        lines.append("[End artifact references]")
+        return "\n".join(lines)
+
+    def handoff_preview(self, sid, target_provider):
+        target = str(target_provider or "").strip().lower()
+        if target not in ("claude", "codex"):
+            return {"ok": False, "error": "provider must be claude or codex"}
+        source = self._find_handoff_source(sid)
+        if not source:
+            return {"ok": False, "error": "session is unavailable"}
+        source_provider = str(source.get("provider") or "claude")
+        closed = bool(source.get("closed_at") is not None or
+                      source.get("normalized_state") == "closed")
+        context = self.closed_context(sid) if closed else self.session_context(sid)
+        indexed = None
+        search = getattr(self, "search", None)
+        if search and hasattr(search, "handoff_material"):
+            try:
+                candidate = search.handoff_material(sid, 8)
+                if candidate.get("ok"):
+                    indexed = candidate
+            except Exception as exc:
+                print(f"handoff index fallback for {sid}: {exc}", file=sys.stderr,
+                      flush=True)
+        messages = (indexed or {}).get("recent") or (context.get("messages") or [])[-8:]
+        objective = str((indexed or {}).get("first_user") or "").strip()
+        if not objective:
+            objective = next((str(item.get("text") or "").strip()
+                              for item in (context.get("messages") or [])
+                              if item.get("role") == "user" and item.get("text")), "")
+        objective = objective or source.get("title") or source.get("project") or "Continue the work"
+        recent = []
+        for item in messages[-8:]:
+            role = str(item.get("role") or "event")
+            text = str(item.get("text") or item.get("detail") or "").strip()
+            if role not in ("user", "assistant") or not text:
+                continue
+            recent.append(f"{role.title()}: {text[:4000]}")
+        unresolved = []
+        pending = source.get("pending") or {}
+        if pending.get("kind") == "question":
+            unresolved.extend(str(q.get("question") or q.get("header") or "").strip()
+                               for q in (pending.get("questions") or []))
+        elif pending:
+            unresolved.append(str(pending.get("input_summary") or
+                                  pending.get("tool") or pending.get("kind") or ""))
+        if source.get("error"):
+            unresolved.append(str(source.get("error")))
+        unresolved.extend((indexed or {}).get("todos") or [])
+        if source.get("reply_requested"):
+            unresolved.append("The source session requested a user reply.")
+        artifacts, seen = [], set()
+        candidates = list((indexed or {}).get("artifacts") or [])
+        candidates.extend(context.get("files") or [])
+        for item in candidates:
+            path = os.path.realpath(os.path.expanduser(str(item.get("path") or "")))
+            if not path or path in seen or not path.startswith(os.path.realpath(HOME) + os.sep):
+                continue
+            seen.add(path)
+            artifacts.append({"path": path, "name": os.path.basename(path),
+                              "caption": str(item.get("caption") or "")[:300],
+                              "missing": not os.path.isfile(path)})
+        cwd = str(source.get("cwd") or "")
+        identity = self.workstream_identity(cwd) if cwd else {}
+        unresolved_text = "\n".join(f"- {text[:800]}" for text in unresolved if text) or "- None recorded"
+        recent_text = "\n\n".join(recent) or "No recent prose was available."
+        preview = f"""Continue this work in a new, independent {target.title()} coding session.
+
+Source session: {source_provider} · {sid}
+Repository: {source.get('project') or os.path.basename(cwd) or 'unknown'}
+Working directory: {cwd or 'unknown'}
+Branch: {source.get('branch') or 'unknown'}
+
+Objective
+{objective[:6000]}
+
+Recent conversation
+{recent_text}
+
+Unresolved work
+{unresolved_text}
+
+Repository evidence
+- Canonical repository: {identity.get('root') or cwd or 'unknown'}
+- Changed files: not observed yet
+- Tests: not observed yet
+- Pull request: not observed yet
+
+{self._handoff_artifact_section(artifacts)}
+
+Treat this as an independent session. Verify the repository state before changing files, and do not assume the source session has stopped."""
+        default_model = source.get("model") if target == source_provider else ""
+        if target == "claude" and default_model not in self.MODELS:
+            family = model_family(default_model)
+            default_model = family if family in self.MODELS else ""
+        default_effort = source.get("effort") if target == source_provider else ""
+        if target == "claude" and default_effort not in self.EFFORTS:
+            default_effort = ""
+        defaults = {"cwd": cwd, "model": default_model,
+                    "effort": default_effort,
+                    "mode": (source.get("collaboration_mode") or "plan") if target == "codex" else None,
+                    "worktree": False, "worktree_name": ""}
+        return {"ok": True, "source": {key: source.get(key) for key in
+                ("session_id", "provider", "title", "project", "cwd", "branch", "model",
+                 "effort", "collaboration_mode")}, "target_provider": target,
+                "preview": redact_handoff_text(preview), "artifacts": artifacts,
+                "defaults": defaults, "independent_session": True}
 
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
@@ -2821,6 +3056,8 @@ class Engine:
         {type:'text', session_id, text:'...'}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if action.get("type") == "handoff":
+            return self.execute_handoff(action)
         if str(action.get("session_id") or "").startswith("codex:") \
            and action.get("type") == "focus":
             return self.attach_codex_terminal(action)
@@ -2987,8 +3224,9 @@ class Engine:
                           f"{f' — “{desc}”' if desc else ''}] {body} "
                           f"(forward it with SendMessage; if that agent can't be "
                           f"resumed, say so instead of acting on this yourself)", True)]
-            elif typ == "text":
-                txt = str(action.get("text", ""))[:2000].strip()
+            elif typ in ("text", "handoff_text"):
+                limit = 30_000 if typ == "handoff_text" else 2000
+                txt = str(action.get("text", ""))[:limit].strip()
                 if not txt:
                     return {"ok": False, "error": "empty text"}
                 # a leading "/" opens the TUI's OWN command popup, where Enter fires
@@ -3016,11 +3254,166 @@ class Engine:
         # (digits/arrows/CR need a render between them, or keys get dropped — invariant
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
-        fast = typ in ("text", "relay", "focus", "interrupt", "noop")
+        fast = typ in ("text", "handoff_text", "relay", "focus", "interrupt", "noop")
         return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
     EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+    def _create_codex_worktree(self, cwd, requested_name=""):
+        identity = self.workstream_identity(cwd)
+        root = identity.get("root") if identity.get("kind") == "git" else None
+        if not root or not os.path.isdir(root):
+            return {"ok": False, "error": "new worktree requires a Git repository"}
+        name = str(requested_name or "").strip() or f"handoff-{secrets.token_hex(4)}"
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
+            return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
+        repo_key = hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:12]
+        parent = os.path.join(HOME, ".claude", "fleet-dash-worktrees", repo_key)
+        path = os.path.join(parent, name)
+        if os.path.lexists(path):
+            return {"ok": False, "error": "that managed worktree path already exists"}
+        os.makedirs(parent, exist_ok=True)
+        branch = f"fleet/{name}"
+        try:
+            process = subprocess.run(
+                ["git", "-C", root, "worktree", "add", "-b", branch, path, "HEAD"],
+                capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return {"ok": False, "error": f"could not create worktree: {exc}"}
+        if process.returncode:
+            detail = (process.stderr or process.stdout or "git worktree add failed").strip()
+            return {"ok": False, "error": detail[:1000]}
+        return {"ok": True, "cwd": path, "root": root, "branch": branch,
+                "worktree_name": name, "created": True}
+
+    def _remove_failed_codex_worktree(self, created):
+        if not created or not created.get("created"):
+            return None
+        try:
+            process = subprocess.run(
+                ["git", "-C", created["root"], "worktree", "remove", created["cwd"]],
+                capture_output=True, text=True, timeout=30)
+            if process.returncode:
+                return (process.stderr or process.stdout or
+                        "created worktree could not be removed").strip()[:1000]
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    def _deliver_existing_handoff(self, link, preview):
+        destination_sid = link["destination_session_id"]
+        if link["destination_provider"] == "codex":
+            return self.codex.act({"type": "text", "session_id": destination_sid,
+                                   "text": preview})
+        return self.act({"type": "handoff_text", "session_id": destination_sid,
+                         "text": preview})
+
+    def execute_handoff(self, action):
+        source_sid = str(action.get("session_id") or "")
+        source = self._find_handoff_source(source_sid)
+        if not source:
+            return {"ok": False, "error": "source session is unavailable"}
+        target = str(action.get("provider") or "").strip().lower()
+        if target not in ("claude", "codex"):
+            return {"ok": False, "error": "provider must be claude or codex"}
+        raw_preview = str(action.get("preview") or "")
+        if not raw_preview.strip():
+            return {"ok": False, "error": "handoff message is empty"}
+        if len(raw_preview) > 30_000:
+            return {"ok": False, "error": "handoff message is too long (30,000 characters max)"}
+        preview = redact_handoff_text(raw_preview)
+        preview_hash = hashlib.sha256(preview.encode()).hexdigest()
+        retry_sid = str(action.get("destination_session_id") or "")
+        if retry_sid:
+            link = self._handoff_link(source_sid, retry_sid)
+            if not link or link.get("destination_provider") != target:
+                return {"ok": False, "error": "stale or mismatched handoff destination"}
+            result = self._deliver_existing_handoff(link, preview)
+            status = "delivered" if result.get("ok") else "delivery_failed"
+            self._record_handoff_link(source_sid, source.get("provider") or "claude",
+                retry_sid, target, status, preview_hash, result.get("error"))
+            return {**result, "source_session_id": source_sid,
+                    "destination_session_id": retry_sid, "provider": target,
+                    "created": False, "retryable": not result.get("ok")}
+
+        cwd = os.path.realpath(os.path.expanduser(
+            str(action.get("cwd") or source.get("cwd") or "").strip()))
+        home = os.path.realpath(HOME)
+        if not cwd or not os.path.isdir(cwd):
+            return {"ok": False, "error": "no such directory"}
+        if cwd != home and not cwd.startswith(home + os.sep):
+            return {"ok": False, "error": "directory must be under your home folder"}
+        mode = str(action.get("mode") or "plan") if target == "codex" else None
+        if target == "codex" and mode not in ("plan", "default"):
+            return {"ok": False, "error": "mode must be plan or default"}
+        worktree_created = None
+        if bool(action.get("worktree")) and target == "codex":
+            worktree_created = self._create_codex_worktree(
+                cwd, action.get("worktree_name"))
+            if not worktree_created.get("ok"):
+                return worktree_created
+            cwd = worktree_created["cwd"]
+
+        if target == "codex":
+            try:
+                thread = self.codex.start_thread(
+                    cwd, str(action.get("model") or "").strip() or None,
+                    str(action.get("effort") or "").strip() or None, mode,
+                    initial_text="hi\n\n" + preview)
+            except Exception as exc:
+                cleanup_error = self._remove_failed_codex_worktree(worktree_created)
+                result = {"ok": False, "error": str(exc)}
+                if cleanup_error:
+                    result["cleanup_error"] = cleanup_error
+                return result
+            tid = thread.get("id")
+            if not tid:
+                cleanup_error = self._remove_failed_codex_worktree(worktree_created)
+                result = {"ok": False, "error": "Codex did not return a thread id"}
+                if cleanup_error:
+                    result["cleanup_error"] = cleanup_error
+                return result
+            destination_sid = self.codex.key(tid)
+            self._record_handoff_link(source_sid, source.get("provider") or "claude",
+                destination_sid, target, "delivered", preview_hash)
+            return {"ok": True, "source_session_id": source_sid,
+                    "destination_session_id": destination_sid, "session_id": destination_sid,
+                    "provider": target, "cwd": cwd, "created": True,
+                    "worktree": worktree_created}
+
+        if not self.is_trusted(cwd):
+            return {"ok": False, "error": "Claude has not trusted this directory yet; open it locally once first"}
+        destination_sid = str(uuid.uuid4())
+        spawn = self.spawn_session({**action, "cwd": cwd}, reserved_sid=destination_sid)
+        if not spawn.get("ok"):
+            return spawn
+        self._record_handoff_link(source_sid, source.get("provider") or "claude",
+            destination_sid, target, "spawning", preview_hash)
+        deadline = time.monotonic() + 30
+        reg = None
+        while time.monotonic() < deadline:
+            reg = next((item for item in self.live_sessions()
+                        if item.get("sessionId") == destination_sid), None)
+            if reg:
+                break
+            time.sleep(.1)
+        if not reg:
+            error = "Claude session was created but did not become attachable within 30 seconds"
+            self._record_handoff_link(source_sid, source.get("provider") or "claude",
+                destination_sid, target, "delivery_failed", preview_hash, error)
+            return {"ok": False, "error": error, "source_session_id": source_sid,
+                    "destination_session_id": destination_sid, "provider": target,
+                    "created": True, "retryable": True}
+        delivered = self.act({"type": "handoff_text", "session_id": destination_sid,
+                              "text": preview})
+        status = "delivered" if delivered.get("ok") else "delivery_failed"
+        self._record_handoff_link(source_sid, source.get("provider") or "claude",
+            destination_sid, target, status, preview_hash, delivered.get("error"))
+        return {**delivered, "source_session_id": source_sid,
+                "destination_session_id": destination_sid, "session_id": destination_sid,
+                "provider": target, "cwd": cwd, "created": True,
+                "retryable": not delivered.get("ok")}
 
     def attach_codex_terminal(self, action):
         """Open a TUI client on the same App Server; never resume a copy."""
@@ -3063,7 +3456,7 @@ class Engine:
                 "provider": "codex", "cwd": cwd,
                 "initial_message": "hi" if tid else None}
 
-    def spawn_session(self, action):
+    def spawn_session(self, action, reserved_sid=None):
         """Start a NEW Claude Code session in a fresh iTerm tab.
 
         Every value that reaches the shell is allowlisted or quoted: the model and
@@ -3093,7 +3486,13 @@ class Engine:
             if not os.path.isfile(os.path.join(cwd, ".git")):
                 return {"ok": False, "error": "not a git repo — can't make a worktree"}
 
-        cmd = f"cd {shlex.quote(cwd)} && claude"
+        session_id = str(reserved_sid or uuid.uuid4())
+        try:
+            session_id = str(uuid.UUID(session_id))
+        except (ValueError, TypeError, AttributeError):
+            return {"ok": False, "error": "invalid Claude session id"}
+        cmd = (f"cd {shlex.quote(cwd)} && claude --session-id "
+               f"{shlex.quote(session_id)}")
         if model:
             cmd += f" --model {model}"
         if effort:
@@ -3105,6 +3504,8 @@ class Engine:
             print(f"spawn: {cmd}", file=sys.stderr, flush=True)
             r["command"] = cmd
             r["cwd"] = cwd
+            r["session_id"] = session_id
+            r["provider"] = "claude"
             # an untrusted dir stops at "do you trust the files in this folder?",
             # which only the Mac can answer — say so instead of leaving the phone
             # waiting for a session that never starts

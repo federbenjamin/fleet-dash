@@ -5,6 +5,7 @@ GET /            dashboard.html (re-read per request, edit without restart)
 GET /api/fleet   latest fleet snapshot JSON
 GET /api/workstreams lazy repository/project rollup
 GET /api/evidence durable session placement history
+GET /api/handoff authenticated editable provider-handoff preview
 """
 import json, os, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
@@ -84,11 +85,17 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"ok": False, "error": "search index is temporarily unavailable"}
             print("search: rebuild requested", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
-        if action.get("type") != "ping":    # audit trail: exactly what was requested
-            print(f"act: {json.dumps(action)[:300]}", file=sys.stderr, flush=True)
+        audit = dict(action)
+        if action.get("type") != "ping":
+            # Keep the action/identity audit trail without persisting message or
+            # handoff bodies in the daemon log. Provider transcripts own that text.
+            for key in ("text", "preview"):
+                if key in audit:
+                    audit[key] = f"[{len(str(audit[key] or ''))} chars omitted]"
+            print(f"act: {json.dumps(audit)[:500]}", file=sys.stderr, flush=True)
         result = self.eng.act(action)
         if not result.get("ok"):
-            print(f"act failed: {json.dumps(action)[:200]} -> {result.get('error')}",
+            print(f"act failed: {json.dumps(audit)[:300]} -> {result.get('error')}",
                   file=sys.stderr, flush=True)
         self.reply(200, "application/json", json.dumps(result).encode())
 
@@ -97,10 +104,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = self.path.split("?", 1)[0]
-        if route in ("/api/search", "/api/search/status", "/api/search/context"):
+        if route in ("/api/search", "/api/search/status", "/api/search/context",
+                     "/api/handoff"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
+            if route == "/api/handoff":
+                out = self.eng.handoff_preview(self.query("sid"), self.query("provider"))
+                return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:
                 return self.reply(503, "application/json",

@@ -119,6 +119,13 @@ class SearchIndexTest(unittest.TestCase):
         self.assertTrue(context["ok"])
         self.assertTrue(any(item["hit"] for item in context["messages"]))
         self.assertEqual(context["source"]["session_id"], CLAUDE_SID)
+        handoff = self.index.handoff_material(CLAUDE_SID)
+        self.assertTrue(handoff["ok"])
+        self.assertEqual(handoff["first_user"], "Find the unique parser regression")
+        self.assertEqual([item["role"] for item in handoff["recent"]],
+                         ["user", "assistant"])
+        self.assertEqual(handoff["artifacts"][0]["path"], os.path.realpath(artifact))
+        self.assertFalse(self.index.handoff_material("bad\nvalue")["ok"])
 
     def test_partial_malformed_append_restart_replace_and_delete(self):
         path = self.main_path()

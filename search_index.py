@@ -920,6 +920,69 @@ class SearchIndex:
         return {"ok": True, "document_id": document_id, "source": source,
                 "messages": messages}
 
+    def handoff_material(self, session_id, recent_limit=8):
+        """Return bounded indexed context for an explicit provider handoff."""
+        self._signal_reader()
+        session_id = str(session_id or "")
+        if not session_id or len(session_id) > 300 or any(ord(char) < 32 for char in session_id):
+            return {"ok": False, "error": "invalid session id"}
+        try:
+            recent_limit = max(2, min(16, int(recent_limit)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid handoff context limit"}
+        with self.read_lock:
+            db = self._read_db()
+            source = db.execute("""SELECT id,provider,session_id,project,cwd,branch,model,title
+                FROM sources WHERE session_id=? AND source_kind='session'
+                ORDER BY COALESCE(last_ts,indexed_at,0) DESC,id DESC LIMIT 1""",
+                                (session_id,)).fetchone()
+            if source is None:
+                return {"ok": False, "error": "session is not indexed yet"}
+            first = db.execute("""SELECT text,timestamp FROM documents
+                WHERE source_id=? AND role='user' AND kind='message' AND trim(text)!=''
+                ORDER BY position,id LIMIT 1""", (source["id"],)).fetchone()
+            recent = db.execute("""SELECT role,text,timestamp,position FROM documents
+                WHERE source_id=? AND role IN ('user','assistant') AND kind='message'
+                AND trim(text)!='' ORDER BY position DESC,id DESC LIMIT ?""",
+                                (source["id"], recent_limit)).fetchall()
+            artifact_rows = db.execute("""SELECT d.artifact_path,d.title,d.text,s.title source_title
+                FROM documents d JOIN sources s ON s.id=d.source_id
+                WHERE s.session_id=? AND d.kind='artifact' AND d.artifact_path IS NOT NULL
+                ORDER BY COALESCE(d.timestamp_epoch,0) DESC,d.id DESC LIMIT 30""",
+                                       (session_id,)).fetchall()
+        recent_items = []
+        for row in reversed(recent):
+            recent_items.append({"role": row["role"], "timestamp": row["timestamp"],
+                                 "text": str(row["text"] or "")[:4000]})
+        todo_lines = []
+        for item in reversed(recent_items):
+            if item["role"] != "assistant":
+                continue
+            for line in str(item["text"]).splitlines():
+                clean = re.sub(r"\s+", " ", line).strip(" -*\t")
+                if clean and re.search(
+                        r"(?i)\b(todo|remaining|next step|still need|need to|blocked|follow[- ]?up)\b",
+                        clean):
+                    todo_lines.append(clean[:500])
+                if len(todo_lines) >= 8:
+                    break
+            if len(todo_lines) >= 8:
+                break
+        artifacts, seen = [], set()
+        for row in artifact_rows:
+            path = str(row["artifact_path"] or "")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            artifacts.append({"path": path,
+                              "name": os.path.basename(path) or row["title"] or
+                                      row["source_title"] or "artifact",
+                              "caption": str(row["title"] or row["source_title"] or "")[:300]})
+        return {"ok": True, "source": {key: source[key] for key in
+                ("provider", "session_id", "project", "cwd", "branch", "model", "title")},
+                "first_user": str(first["text"] or "")[:6000] if first else "",
+                "recent": recent_items, "todos": todo_lines, "artifacts": artifacts}
+
     def status(self):
         with self.read_lock:
             db = self._read_db()

@@ -54,6 +54,7 @@ def base_session(provider, sid, title):
             "access": "interactive", "access_label": "Interactive",
             "external": False, "provider_stale": False,
             "reply_requested": False, "new_response": False,
+            "handoff_links": [],
             "activity_at": time.time() - 3, "pinned": False,
             "normalized_state": "idle", "winning_rule": "placement.default.available",
             "suppressed_rules": [], "state_confidence": "confirmed",
@@ -400,6 +401,8 @@ def set_scenario(name):
                                "text": preview[:499] + "…"}
     elif name == "send-failure":
         STATE["fail_text"] = True
+    elif name == "handoff-failure":
+        STATE["fail_handoff_once"] = True
     elif name == "reply-requested":
         session.update(state="turn_done", reg_status="idle", reply_requested=True,
                        convo_v="reply:1", quiet_s=12,
@@ -474,9 +477,34 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
         query = parse_qs(urlparse(self.path).query)
         with LOCK:
-            if route in ("/api/search", "/api/search/status", "/api/search/context"):
+            if route in ("/api/search", "/api/search/status", "/api/search/context",
+                         "/api/handoff"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                if route == "/api/handoff":
+                    sid = (query.get("sid") or [""])[0]
+                    provider = (query.get("provider") or [""])[0]
+                    source = next((item for item in STATE["sessions"] + STATE["closed"]
+                                   if item.get("session_id") == sid), None)
+                    if not source and sid == "codex:closed":
+                        source = {"session_id": sid, "provider": "codex",
+                            "title": "Closed Codex", "project": "fleet-dash",
+                            "cwd": "/Users/test/fleet-dash", "branch": "old",
+                            "model": "gpt-5.4"}
+                    if not source or provider not in ("claude", "codex"):
+                        return self.json_reply({"ok": False, "error": "session unavailable"})
+                    return self.json_reply({"ok": True, "source": {
+                        key: source.get(key) for key in ("session_id", "provider", "title",
+                            "project", "cwd", "branch", "model", "effort", "collaboration_mode")},
+                        "target_provider": provider, "independent_session": True,
+                        "preview": f"Continue this work in a new, independent {provider.title()} coding session.\n\nSource session: {source.get('provider')} · {sid}\n\nObjective\nAudit parity\n\nRecent conversation\nAssistant: Working through the matrix.\n\nUnresolved work\n- Verify browser handoff\n\n[Selected artifact references]\n- /fixture/artifact.md — Codex updated this file\n[End artifact references]\n\nTreat this as an independent session.",
+                        "artifacts": [{"name": "artifact.md", "path": "/fixture/artifact.md",
+                            "caption": "Codex updated this file", "missing": False}],
+                        "defaults": {"cwd": source.get("cwd"), "model":
+                            (source.get("model") if source.get("provider") == provider else ""),
+                            "effort": (source.get("effort") if source.get("provider") == provider else ""),
+                            "mode": "plan" if provider == "codex" else None,
+                            "worktree": False, "worktree_name": ""}})
                 if route == "/api/search/status":
                     return self.json_reply({"ok": True, "state": "idle", "sources": 4,
                         "complete_sources": 4, "documents": 37, "bytes_total": 4096,
@@ -711,8 +739,55 @@ class Handler(BaseHTTPRequestHandler):
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == payload.get("session_id")), None)
                 if payload.get("type") == "spawn":
-                    return self.json_reply({"ok": True, "session_id": "codex:new",
+                    exact = "codex:new" if payload.get("provider") == "codex" else "claude-new"
+                    STATE["sessions"].append(base_session(payload.get("provider") or "claude",
+                                                          exact, "New coding session"))
+                    return self.json_reply({"ok": True, "session_id": exact,
                                             "cwd": payload.get("cwd")})
+                if payload.get("type") == "handoff":
+                    source = next((item for item in STATE["sessions"] + STATE["closed"]
+                                   if item.get("session_id") == payload.get("session_id")), None)
+                    if not source and payload.get("session_id") == "codex:closed":
+                        source = {"session_id": "codex:closed", "provider": "codex",
+                            "title": "Closed Codex", "project": "fleet-dash",
+                            "cwd": "/Users/test/fleet-dash", "branch": "old",
+                            "model": "gpt-5.4", "handoff_links": []}
+                    if not source:
+                        return self.json_reply({"ok": False, "error": "source unavailable"})
+                    provider = payload.get("provider")
+                    destination = payload.get("destination_session_id")
+                    created = False
+                    if destination:
+                        target = next((item for item in STATE["sessions"]
+                                       if item.get("session_id") == destination), None)
+                        if not target:
+                            return self.json_reply({"ok": False,
+                                "error": "stale or mismatched handoff destination"})
+                    else:
+                        destination = ("codex:" if provider == "codex" else "") + "handoff-1"
+                        target = base_session(provider, destination,
+                            f"Continued from {source.get('title') or 'session'}")
+                        target.update(cwd=payload.get("cwd") or source.get("cwd"),
+                                      model=payload.get("model") or target.get("model"),
+                                      effort=payload.get("effort") or target.get("effort"),
+                                      collaboration_mode=payload.get("mode") if provider == "codex" else None)
+                        STATE["sessions"].append(target);created=True
+                        STATE.setdefault("contexts", {})[destination] = [
+                            {"role": "user", "text": payload.get("preview") or ""}]
+                    status = "delivery_failed" if STATE.pop("fail_handoff_once", False) else "delivered"
+                    source["handoff_links"] = [{"direction": "from", "session_id": destination,
+                        "provider": provider, "status": status, "created_at": time.time(),
+                        "error": "fixture delivery failure" if status == "delivery_failed" else None}]
+                    target["handoff_links"] = [{"direction": "to",
+                        "session_id": source.get("session_id"), "provider": source.get("provider"),
+                        "status": status, "created_at": time.time(),
+                        "error": "fixture delivery failure" if status == "delivery_failed" else None}]
+                    if status == "delivery_failed":
+                        return self.json_reply({"ok": False, "error": "fixture delivery failure",
+                            "destination_session_id": destination, "created": created,
+                            "retryable": True})
+                    return self.json_reply({"ok": True, "destination_session_id": destination,
+                        "session_id": destination, "provider": provider, "created": created})
                 if payload.get("type") == "reopen":
                     closed = next((item for item in STATE["closed"]
                                    if item["session_id"] == payload.get("session_id")), None)

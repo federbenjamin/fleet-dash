@@ -108,3 +108,39 @@ test('running Fleet Dash searches indexed transcripts with exact context', async
   await page.screenshot({ path: testInfo.outputPath('running-search.png'), fullPage: true });
   expect(failures).toEqual([]);
 });
+
+test('running Fleet Dash builds an editable authenticated handoff without sending it', async ({ page }, testInfo) => {
+  const target = authenticatedLiveURL();
+  test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
+  const failures = [];
+  page.on('pageerror', error => failures.push(`page: ${error}`));
+  page.on('console', message => {
+    if (message.type() === 'error') failures.push(`console: ${message.text()}`);
+  });
+  page.on('requestfailed', request => failures.push(
+    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  await page.goto(target, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => tick());
+  await expect.poll(() => page.evaluate(() =>
+    (last?.sessions || []).length + (last?.closed || []).length)).toBeGreaterThan(0);
+  const source = await page.evaluate(() => {
+    const live = (last?.sessions || [])[0];
+    if (live) { openSession(live.session_id); return { provider: live.provider, closed: false }; }
+    const closed = (last?.closed || [])[0];
+    if (closed) { openClosed(closed.session_id); return { provider: closed.provider, closed: true }; }
+    return null;
+  });
+  expect(source).not.toBeNull();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sctrl .ovbtn').click();
+  const targetProvider = source.provider === 'claude' ? 'Codex' : 'Claude';
+  await page.getByRole('menuitem', { name: new RegExp(`Continue in ${targetProvider}`) }).click();
+  await expect(page.locator('#handoffview')).toBeVisible();
+  await expect(page.locator('#handoffpreview')).toHaveValue(/Independent|independent/);
+  await expect(page.locator('.handoffsubmit')).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath('running-handoff-preview.png'), fullPage: true });
+  await page.locator('#handoffclose').click();
+  await expect(page.locator('#handoffview')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  expect(failures).toEqual([]);
+});
