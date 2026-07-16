@@ -28,9 +28,31 @@ def capabilities(**overrides):
     return out
 
 
+def fixture_status_line(provider, frozen=False):
+    common = {"branch": "status-strip", "worktree": "/Users/test/fleet-dash",
+        "worktree_label": "fleet-dash", "ahead": 3, "behind": 10,
+        "git_observed_at": time.time(), "effort": "high", "frozen": frozen}
+    if provider == "codex":
+        return {**common, "model": "GPT-5.4", "context_tokens": 1200,
+            "context_window": 10000, "context_pct": 12, "compact_remaining": None,
+            "cost_scope": "unavailable", "cost_label": "tree",
+            "cost_breakdown": [], "cost_breakdown_omitted": 0}
+    history = [500 + (index % 8) * 900 for index in range(50)]
+    return {**common, "model": "Opus 4.8", "context_tokens": 470000,
+        "context_window": 1000000, "context_pct": 47, "compact_remaining": 174000,
+        "cache_read_pct": 99, "cache_write": 855,
+        "cache_write_history": history, "cache_write_spikes": 9,
+        "cache_write_peak": 278000, "turn_cost": .254,
+        "session_cost": 80.0, "agent_cost": 4.12, "tree_cost": 84.12,
+        "cost_scope": "estimated", "cost_label": "tree",
+        "cost_breakdown": [{"kind": "main", "label": "Main session", "cost": 80.0},
+            {"kind": "agent", "label": "Review protocol mapping", "cost": 4.12}],
+        "cost_breakdown_omitted": 0}
+
+
 def base_session(provider, sid, title):
     codex = provider == "codex"
-    return {"session_id": sid, "native_session_id": sid.split(":")[-1],
+    session = {"session_id": sid, "native_session_id": sid.split(":")[-1],
             "provider": provider, "pid": None if codex else 4242,
             "name": title, "title": title, "project": "fleet-dash",
             "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
@@ -73,6 +95,8 @@ def base_session(provider, sid, title):
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
                 measured_throughput=not codex, change_permission_mode=not codex)}
+    session["status_line"] = fixture_status_line(provider)
+    return session
 
 
 def fresh_state():
@@ -529,6 +553,10 @@ def set_scenario(name):
                        last_msg=None, ctx_tokens=None, ctx_pct=None,
                        total_tokens=None, cost=None, cost_source="unavailable",
                        convo_v="starting:4242:idle")
+        session["status_line"] = {"model": "claude", "effort": "high",
+            "context_tokens": None, "context_window": None, "context_pct": None,
+            "compact_remaining": None, "cache_read_pct": None, "cache_write": None,
+            "tree_cost": None, "cost_scope": "unavailable", "frozen": False}
         STATE["contexts"]["claude-one"] = []
     elif name in ("mobile-needs-you", "mobile-needs-you-missing-action"):
         session.update(title="Get 429 into a mergable state", name="hazy-hatching-curry-d8",
@@ -952,7 +980,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply({"ok": True, **page, "info": {"agent_id": "child-one",
                     "agent_type": "reviewer", "description": "Review protocol mapping",
                     "model": "gpt-5.4", "effort": "high", "tokens": {},
-                    "total_tokens": None, "cost": None}})
+                    "total_tokens": None, "cost": None, "state": "done",
+                    "status_line": {**fixture_status_line("codex", frozen=True),
+                        "model": "GPT-5.4", "cost_label": "agent"}}})
             if route == "/api/closed_context":
                 messages = ([{"role": "assistant", "text": f"Closed report {index:03d}"}
                             for index in range(205)] if STATE["scenario"] == "large-conversation" else
@@ -962,7 +992,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
                 return self.json_reply({"ok": True, "closed": True, **page,
-                    "info": {"project": "fleet-dash", "branch": "old"}})
+                    "info": {"project": "fleet-dash", "branch": "old",
+                        "status_line": fixture_status_line("claude", frozen=True)}})
             if route == "/api/commands":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)

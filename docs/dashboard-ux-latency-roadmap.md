@@ -1,6 +1,6 @@
 # Dashboard UX and latency roadmap
 
-Status: Active  
+Status: Complete · 2026-07-16
 Branch: `feat/dashboard-ux-latency`  
 Base: `f75567f` (`main`, 2026-07-16)  
 Scope: Fleet Dash desktop and mobile interaction quality, session controls, and full-screen
@@ -38,6 +38,8 @@ verified. Provider completion time is measured separately from Fleet's own respo
   it opens that subagent directly.
 - Active means every child not in the existing authoritative `done` or `ended` states. This includes
   a stalled child because it still requires supervision.
+- Pinned sessions keep persisted pin order regardless of urgency or activity changes. A newly pinned
+  session appends at the bottom; unpinning and pinning it again makes it a new bottom entry.
 - Now remains an action queue. These filters change presentation only and do not alter
   `Engine.organize_session` state semantics.
 
@@ -152,6 +154,7 @@ CW ▁▁▁▂▁▁▃▁…
 | NOW-001 | Fleet Briefing renders before Pinned at desktop and mobile widths, including empty states. | M1 |
 | NOW-002 | State totals leave the standalone header and appear in All/Needs you/Working/Available chips; Needs you equals distinct visible sessions. | M1 |
 | NOW-003 | Subagents chip count and flat active-child cards use authoritative lifecycle states and open the correct child. | M1 |
+| NOW-004 | Pinned sessions render in persisted insertion order; urgency/activity never reorders them and new pins append at the bottom. | M5 |
 | USE-001 | Usage is a command-bar chip; full detail opens as popover/sheet; only the worst selected account/window appears at 70%/90% warning. | M1 |
 | USE-002 | Each selected Claude account shows its provider-reported Fable weekly percentage and reset; it participates in the worst-quota warning. | M3 |
 | SHELL-001 | Navigation rail supports per-device left/right placement on desktop without changing mobile navigation. | M1 |
@@ -180,7 +183,7 @@ Fleet-local completion. Async provider/network completion is a third measurement
 | Surface | Flows that must be measured and receive waiting/failure UI |
 | --- | --- |
 | Navigation | Every destination, browser back, mobile More, saved views, left/right rail change |
-| Now | Text/state filters, subagent filter, Briefing, Pinned, queue/card expansion, peek expansion |
+| Now | Text/state filters, subagent filter, Briefing, stable pin/unpin/long-press order and recovery, queue/card expansion, peek expansion |
 | Session chat | Open/close, pagination, evidence, overflow, theme, files, commands, composer, send, restore, stop, attach/focus/reopen |
 | Native requests | Question answers, permissions, approval/elicitation decisions, dismiss, relay, interrupt |
 | Session lifecycle | New form open, provider/model/effort/worktree choice, forecast, start, provisional reconciliation, close/archive, worktree cleanup |
@@ -201,7 +204,7 @@ Debounce is allowed only where the user already sees the updated local value imm
 
 ### M0 — Baseline and plan
 
-Status: In progress
+Status: Complete · 2026-07-16
 
 Recorded unchanged-branch live baseline on 2026-07-16:
 
@@ -298,7 +301,7 @@ sessions/worktrees; branches and primary worktrees survive.
 
 ### M4 — Adaptive operational status strip
 
-Status: Pending
+Status: Complete · 2026-07-16
 
 - Implement `STAT-001`–`STAT-002` with bounded incremental telemetry for both providers.
 - Reuse the established Claude cache-write graph and spike calculations. Keep Codex/closed views
@@ -309,9 +312,18 @@ Exit gate: deterministic token/cache/cost/Git fixtures cover missing, partial, l
 multi-agent, completed, and closed states at both viewports. No transcript scan or Git fetch appears
 in request profiling.
 
+Implemented bounded Claude cache/turn telemetry, cached fixed-argv `origin/main...HEAD` comparison,
+explicit-settings compaction headroom, main-tree/child cost ownership, Codex partial-field omission,
+closed-session persistence, and responsive main/subagent/closed rendering. Full chat headers now keep
+only the title and controls. The same batch fixed newer Claude background-task terminal notifications:
+`completed`/`killed`/`failed` ends the matching child unless later transcript output proves it resumed.
+The exact reported `Gate-script hardening batch` agent changed from `stalled` to `ended` after daemon
+restart. Python passed 181/181; deterministic Playwright passed all 104 applicable desktop/mobile
+tests (12 live-only tests skipped by design); `git diff --check` passed.
+
 ### M5 — Full responsiveness audit and release gate
 
-Status: Pending
+Status: Complete · 2026-07-16
 
 - Execute `LAT-001`–`LAT-003` across the full inventory, not only the changed features.
 - Remove avoidable blocking work and render churn. Add immediate local state or the shared spinner to
@@ -319,6 +331,32 @@ Status: Pending
 - Compare baseline and final p50/p95 on the same fixture/live corpus. Treat a regression in an
   unrelated flow as a failure of this pass.
 - Reconcile `README.md`, `CLAUDE.md`, `docs/platform-roadmap.md`, and this ledger.
+
+Implemented immediate/busy/failure UI for Outbox, native requests, relay, Terminal, provider mode,
+Settings, search/History pagination, slash commands, files, Briefing, and stable pinning. Poll,
+Insights, forecast, History, and command responses are sequence/cancellation guarded. Main,
+subagent, and closed conversations retain their DOM and scroll state when their revision is
+unchanged. Live context reads use immutable snapshots published by the scan loop instead of waiting
+behind its stateful Tail-fold lock. Repeated ledger/journal writes are suppressed, and Git refresh
+work uses a bounded two-worker queue.
+
+Pinned sessions now render from the persisted ID sequence, including mixed live/closed rows. New
+pins append at the bottom; unpin/re-pin moves to the bottom; urgency/activity never changes order.
+Mobile long-press paints immediately, concurrent pin requests collapse to one, and a failed save
+restores the exact prior order with inline retry.
+
+Final same-corpus live p50/p95 was 5.247/11.107 ms for `/api/fleet`, 2.358/4.864 ms for
+main context, 2.966/3.580 ms for subagent context, 4.084/5.533 ms for History, 1.062/1.556 ms for
+Search, and 0.658/0.962 ms for the authenticated no-op action path. The baseline main-context p95
+was 884.342 ms. A 16-sample browser run
+measured first-useful-render p95 at 236.828 ms desktop and 241.110 ms mobile, render p95 at 5.2/5.9
+ms, and poll p95 at 60.7/59.7 ms. Every contract gate passed.
+
+Verification reached 185/185 Python tests, 112/112 deterministic desktop/mobile browser tests, 12/12
+authenticated live browser tests, the 120-request concurrent refresh soak, every deterministic
+search benchmark gate, and the disposable restart-during-turn recovery check. Intentional
+`ERR_ABORTED` events from stale-request cancellation are excluded from the live outage assertion;
+all other browser request failures remain fatal.
 
 Exit gate: all deterministic tests pass; safe live API/browser/refresh/restart checks pass; disposable
 Claude/Codex/worktree tests pass; `git diff --check` is clean; every catalogue ID has current source
@@ -330,7 +368,7 @@ Run proportionally after each milestone and in full at M5:
 
 ```text
 python3 -m unittest discover -s tests -p 'test_*.py'
-npx playwright test tests/browser/fleet.spec.js
+npx playwright test tests/browser/fleet.spec.js tests/browser/latency.spec.js
 python3 tests/search_benchmark.py
 python3 tests/perf_baseline.py --samples 40 --context-samples 10 --history-samples 20 \
   --search-samples 40 --search-query fleet --local-action-auth --skip-corpus
@@ -351,9 +389,9 @@ injects into an existing user session.
 
 | Milestone | State | Evidence |
 | --- | --- | --- |
-| M0 | In progress | Roadmap created; live API/browser baseline recorded; interaction harness pending |
+| M0 | Complete | Roadmap, live/API/browser baseline, interaction catalogue, and timing harness recorded |
 | M1 | Complete | Focused M1 desktop/mobile checks passed; affected legacy flows passed; Python 173/173 |
 | M2 | Complete | 8 focused desktop/mobile checks: composer, delayed spawn, race, recovery; <100 ms provisional feedback |
-| M3 | Pending | — |
-| M4 | Pending | — |
-| M5 | Pending | — |
+| M3 | Complete | Native permission controls, bypass warning, safe close/cleanup, Fable usage; Python 176/176 |
+| M4 | Complete | Status strip + terminal-notification fix; Python 181/181; browser 104/104 applicable |
+| M5 | Complete | Python 185/185; deterministic browser 112/112; live browser 12/12; all API/browser/search/restart gates passed |

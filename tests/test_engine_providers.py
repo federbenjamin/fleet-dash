@@ -92,6 +92,7 @@ class EngineProviderTest(unittest.TestCase):
         self.claude_usage = os.path.join(self.base, "usage.json")
         self.claude_stats = os.path.join(self.tmp.name, "stats-cache.json")
         self.claude_history = os.path.join(self.tmp.name, "history.jsonl")
+        self.claude_settings = os.path.join(self.tmp.name, "settings.json")
         self.claude_usage_prefs = os.path.join(self.tmp.name, "claude-usage.plist")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
@@ -105,6 +106,7 @@ class EngineProviderTest(unittest.TestCase):
             mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
             mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
             mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
+            mock.patch.object(engine_module, "CLAUDE_SETTINGS", self.claude_settings),
             mock.patch.object(engine_module, "CLAUDE_USAGE_PREFS",
                               self.claude_usage_prefs),
         ]
@@ -175,6 +177,58 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(session["cost"])
         self.assertEqual(self.engine.session_context("same"), {
             "ok": True, "messages": [], "files": [], "starting": True})
+
+    def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
+        fleet = self.engine.scan()
+        revision = next(item["convo_v"] for item in fleet["sessions"]
+                        if item["session_id"] == "same")
+
+        class RefuseLock:
+            def __enter__(self):
+                raise AssertionError("routine context read waited for scan_lock")
+
+            def __exit__(self, *_):
+                return False
+
+        self.engine.scan_lock = RefuseLock()
+        context = self.engine.session_context("same")
+        self.assertTrue(context["ok"])
+        self.assertEqual(self.engine._claude_context_snapshots["same"]["revision"],
+                         revision)
+        self.assertEqual(context["messages"][-1]["text"], "hi")
+
+    def test_live_agent_context_uses_parent_scoped_snapshot_without_scan_lock(self):
+        subdir = os.path.join(os.path.dirname(self.transcript), "same", "subagents")
+        os.makedirs(subdir)
+        aid = "agent-shared123"
+        with open(os.path.join(subdir, aid + ".meta.json"), "w") as handle:
+            json.dump({"agentType": "quick-build", "description": "Scoped child",
+                       "spawnDepth": 1, "toolUseId": "tool-child"}, handle)
+        with open(os.path.join(subdir, aid + ".jsonl"), "w") as handle:
+            handle.write(json.dumps({"type": "assistant",
+                "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                    "role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 100,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 700, "output_tokens": 5},
+                    "content": [{"type": "text", "text": "child complete"}]}}) + "\n")
+        fleet = self.engine.scan()
+        parent = next(item for item in fleet["sessions"] if item["session_id"] == "same")
+        self.assertEqual(parent["agents"][0]["agent_id"], aid)
+
+        class RefuseLock:
+            def __enter__(self):
+                raise AssertionError("routine agent context read waited for scan_lock")
+
+            def __exit__(self, *_):
+                return False
+
+        self.engine.scan_lock = RefuseLock()
+        context = self.engine.agent_context("same", aid)
+        self.assertTrue(context["ok"])
+        self.assertEqual(context["messages"][-1]["text"], "child complete")
+        self.assertEqual(context["info"]["status_line"]["cache_write"], 200)
+        self.assertIn(("same", aid), self.engine._claude_agent_context_snapshots)
 
     def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
         with open(self.claude_account, "w") as handle:
@@ -1086,6 +1140,17 @@ class EngineProviderTest(unittest.TestCase):
         pinned = self.engine.update_settings({"pin_session": "codex:same",
                                               "pinned": True})
         self.assertEqual(pinned["pinned_sessions"], ["codex:same"])
+        pinned = self.engine.update_settings({"pin_session": "claude:second",
+                                              "pinned": True})
+        self.assertEqual(pinned["pinned_sessions"],
+                         ["codex:same", "claude:second"])
+        pinned = self.engine.update_settings({"pin_session": "codex:same",
+                                              "pinned": False})
+        self.assertEqual(pinned["pinned_sessions"], ["claude:second"])
+        pinned = self.engine.update_settings({"pin_session": "codex:same",
+                                              "pinned": True})
+        self.assertEqual(pinned["pinned_sessions"],
+                         ["claude:second", "codex:same"])
         dismissed = self.engine.update_settings({
             "mark_available_session": "codex:same", "revision": "reply:2"})
         self.assertEqual(dismissed["reply_available"]["codex:same"], "reply:2")
@@ -1095,7 +1160,7 @@ class EngineProviderTest(unittest.TestCase):
 
         with open(os.path.join(self.base, "config.json")) as handle:
             saved = json.load(handle)
-        self.assertEqual(saved["pinned_sessions"], ["codex:same"])
+        self.assertEqual(saved["pinned_sessions"], ["claude:second", "codex:same"])
         self.assertEqual(saved["reply_available"]["codex:same"], "reply:2")
         self.assertEqual(saved["read_sessions"]["codex:same"], "response:3")
 
@@ -1506,6 +1571,102 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(records[0]["test_outcome"]["command"],
                          "python3 -m unittest")
 
+    def test_status_metrics_are_bounded_and_context_excludes_output(self):
+        tail = Tail(os.path.join(self.tmp.name, "status.jsonl"))
+        for index in range(52):
+            tail._status_cache_track({"cache_creation_input_tokens": index * 1000},
+                                     f"2026-07-16T00:00:{index % 60:02d}Z")
+        self.assertEqual(len(tail.cache_write_history), 50)
+        self.assertEqual((tail.cache_write_history[0], tail.cache_write_history[-1]),
+                         (2000, 51000))
+        self.assertEqual(tail.cache_write_spikes, 31)
+        self.assertEqual(tail.cache_write_peak, 51000)
+        tail.last_usage = {"input_tokens": 100, "cache_creation_input_tokens": 200,
+                           "cache_read_input_tokens": 700, "output_tokens": 9000}
+        self.assertEqual(tail.context_tokens(), 1000)
+        metrics = tail.status_metrics(self.engine.cfg)
+        self.assertEqual(metrics["cache_read_pct"], 70)
+        self.assertEqual(metrics["cache_write"], 200)
+
+    def test_compaction_headroom_requires_explicit_valid_settings(self):
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000",
+                               "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"}}, handle)
+        self.assertEqual(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000),
+                         170000)
+        self.engine._compact_settings_cache.clear()
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "2000000",
+                               "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"}}, handle)
+        self.assertEqual(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000),
+                         330000)
+        self.engine._compact_settings_cache.clear()
+        with open(self.claude_settings, "w") as handle:
+            json.dump({"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "invalid"}}, handle)
+        self.assertIsNone(self.engine.claude_compact_headroom(self.cwd, 470000, 1000000))
+        self.assertIsNone(self.engine.claude_compact_headroom(self.cwd, None, 1000000))
+
+    def test_operational_git_uses_cached_origin_main_comparison(self):
+        calls = []
+        self.engine._bounded_process = lambda argv, **kwargs: (
+            calls.append((argv, kwargs)) or {"ok": True, "stdout": "10 3\n"})
+        worktree = os.path.realpath(self.cwd)
+        self.engine._operational_git_probe(worktree, worktree)
+        with mock.patch.object(self.engine, "workstream_identity", return_value={
+                "kind": "git", "root": worktree, "worktree": worktree,
+                "missing": False}):
+            status = self.engine.operational_git(worktree)
+        self.assertEqual((status["ahead"], status["behind"]), (3, 10))
+        self.assertEqual(calls[0][0], ["git", "-C", worktree, "rev-list",
+            "--left-right", "--count", "refs/remotes/origin/main...HEAD"])
+        self.assertNotIn("fetch", calls[0][0])
+        self.assertEqual(calls[0][1]["timeout"], 4)
+        with mock.patch.object(self.engine, "workstream_identity", return_value={
+                "kind": "folder", "root": worktree, "worktree": worktree,
+                "missing": False}):
+            nongit = self.engine.operational_git(worktree)
+        self.assertIsNone(nongit["worktree_label"])
+        self.assertIsNone(nongit["ahead"])
+
+    def test_status_tree_cost_breakdown_and_closed_snapshot_are_preserved(self):
+        session = codex_session()
+        session.update(provider="claude", session_id="status-session", name="Status",
+                       title="Status", cwd=self.cwd, cost=.25, agent_cost=.75,
+                       agents_total=2, bridge_url=None, agents=[
+                           {"agent_type": "review", "description": "Review one", "cost": .3},
+                           {"agent_type": "test", "description": "Test two", "cost": .45}])
+        with mock.patch.object(self.engine, "operational_git", return_value={
+                "worktree": self.cwd, "worktree_label": "repo", "ahead": 3,
+                "behind": 10, "git_observed_at": 1}), \
+             mock.patch.object(self.engine, "claude_compact_headroom", return_value=None):
+            status = self.engine.session_status_line(session)
+        self.assertEqual(status["tree_cost"], 1.0)
+        self.assertEqual([item["cost"] for item in status["cost_breakdown"]],
+                         [.25, .3, .45])
+        session["status_line"] = status
+        self.engine.record_sessions([session], 100)
+        self.engine.record_sessions([], 101)
+        self.engine._closed_sessions_cache = None
+        closed = next(item for item in self.engine.closed_sessions()
+                      if item["session_id"] == "status-session")
+        self.assertEqual(closed["status_line"]["tree_cost"], 1.0)
+        self.assertTrue(closed["status_line"]["frozen"])
+
+    def test_unchanged_session_ledger_projection_skips_mutating_sql(self):
+        session = codex_session()
+        session.update(status_line={"ahead": 2, "git_observed_at": 1},
+                       name="Codex", title="Codex")
+        self.engine.record_sessions([session], 100)
+        statements = []
+        self.engine.ensure_db().set_trace_callback(statements.append)
+        refreshed = copy.deepcopy(session)
+        refreshed["status_line"]["git_observed_at"] = 2
+        self.engine.record_sessions([refreshed], 102)
+        mutations = [statement for statement in statements
+                     if statement.lstrip().upper().startswith(
+                         ("INSERT", "UPDATE", "DELETE", "REPLACE", "COMMIT"))]
+        self.assertEqual(mutations, [])
+
     def test_claude_peek_preserves_markdown_blocks(self):
         tail = Tail(self.transcript)
         text = "### Default width\n\nUse **Fit the screen**."
@@ -1516,6 +1677,81 @@ class EngineProviderTest(unittest.TestCase):
         preview = tail.last_message(500)["text"]
         self.assertEqual(len(preview), 500)
         self.assertTrue(preview.endswith("…"))
+
+    def test_task_notification_ends_killed_agent_but_not_a_resumed_agent(self):
+        subdir = os.path.join(self.tmp.name, "agent-parent", "subagents")
+        os.makedirs(subdir)
+
+        def write_agent(agent_id, rows):
+            with open(os.path.join(subdir, agent_id + ".meta.json"), "w") as handle:
+                json.dump({"agentType": "quick-build", "description": "Gate batch",
+                           "toolUseId": "tool-" + agent_id}, handle)
+            with open(os.path.join(subdir, agent_id + ".jsonl"), "w") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+        killed_id = "agent-killed123"
+        resumed_id = "agent-resumed123"
+        write_agent(killed_id, [{"type": "user", "timestamp": "2026-07-16T20:39:44.478Z",
+            "message": {"role": "user", "content": [{"type": "text",
+                "text": "[Request interrupted by user]"}]}}])
+        write_agent(resumed_id, [{"type": "assistant",
+            "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                "role": "assistant", "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "id": "still-running",
+                             "name": "Bash", "input": {}}]}}])
+
+        parent_path = os.path.join(self.tmp.name, "agent-parent.jsonl")
+        with open(parent_path, "w") as handle:
+            for agent_id in (killed_id, resumed_id):
+                bare_id = agent_id.removeprefix("agent-")
+                prompt = ("<task-notification>\n"
+                          f"<task-id>{bare_id}</task-id>\n"
+                          "<status>killed</status>\n"
+                          "</task-notification>")
+                handle.write(json.dumps({"type": "attachment",
+                    "timestamp": "2026-07-16T20:39:44.480Z",
+                    "attachment": {"type": "queued_command",
+                                   "commandMode": "task-notification",
+                                   "prompt": prompt}}) + "\n")
+        parent = Tail(parent_path)
+        self.assertTrue(parent.poll())
+
+        states = {agent["agent_id"]: agent["state"] for agent in
+                  self.engine.scan_agents(subdir, time.time(), parent=parent)}
+        self.assertEqual(states[killed_id], "ended")
+        self.assertEqual(states[resumed_id], "running")
+
+    def test_agent_finalization_dedupe_is_scoped_to_parent(self):
+        aid = "agent-collision123"
+
+        def make_parent(name):
+            subdir = os.path.join(self.tmp.name, name, "subagents")
+            os.makedirs(subdir)
+            with open(os.path.join(subdir, aid + ".meta.json"), "w") as handle:
+                json.dump({"agentType": "review", "description": name}, handle)
+            transcript = os.path.join(subdir, aid + ".jsonl")
+            with open(transcript, "w") as handle:
+                handle.write(json.dumps({"type": "assistant",
+                    "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+                        "role": "assistant", "model": "claude-sonnet",
+                        "stop_reason": "end_turn", "usage": {"input_tokens": 1,
+                            "output_tokens": 1}, "content": [{"type": "text",
+                                                               "text": "done"}]}}) + "\n")
+            old = time.time() - 60
+            os.utime(transcript, (old, old))
+            return subdir
+
+        subdirs = [make_parent("parent-one"), make_parent("parent-two")]
+        finalized = []
+        self.engine.ledger_finalize = lambda subdir, agent_id, meta, tail: (
+            finalized.append((subdir, agent_id)))
+        for subdir in subdirs:
+            self.engine.scan_agents(subdir, time.time())
+        self.assertEqual(finalized, [(subdirs[0], aid), (subdirs[1], aid)])
+        for subdir in subdirs:
+            self.engine.scan_agents(subdir, time.time())
+        self.assertEqual(len(finalized), 2)
 
     def test_tail_tracks_only_known_claude_permission_modes(self):
         path = os.path.join(self.tmp.name, "permission-mode.jsonl")

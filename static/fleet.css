@@ -718,6 +718,29 @@ td.r,th.r{text-align:right}
    two full-screen surfaces stop looking like the same screen */
 #sact .stripbox,#vact .stripbox{margin:0 0 8px}
 #sact .freetext,#vact .freetext{margin-top:8px}
+.statusstrip{margin:8px 0 0;padding:7px 9px;border:1px solid var(--line);border-radius:9px;
+  background:#0c1117;color:var(--dim);font:10.5px/1.45 "SF Mono",Menlo,monospace}
+.statusstrip.frozen{border-style:dashed}.statusstrip>div,.status-details>div{min-width:0}
+.status-primary,.status-secondary,.status-cache{display:flex;align-items:center;gap:7px;min-height:18px;
+  overflow:hidden;white-space:nowrap}
+.status-primary{color:var(--fg)}.status-secondary{color:var(--dim)}
+.status-primary span,.status-secondary span,.status-cache>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.statusstrip em{color:var(--line2);font-style:normal;flex:0 0 auto}
+.status-details{display:block}.status-cache{color:var(--faint)}
+.status-cache .good,.status-graph .cool{color:var(--green)}
+.status-cache .warn,.status-graph .warn{color:var(--amber)}
+.status-cache .warm,.status-graph .warm{color:#e88337}.status-cache .hot,.status-graph .hot{color:var(--red)}
+.status-graph{display:flex;align-items:center;gap:0;min-height:18px;overflow:hidden;white-space:nowrap;
+  color:var(--green)}
+.status-graph b{flex:0 0 auto;width:25px;color:var(--faint);font-weight:500}
+.status-graph i{font-style:normal;flex:0 1 auto;min-width:3px}
+.status-expand{display:none}.status-cost{min-width:0}.status-cost summary{cursor:pointer;list-style:none;
+  color:var(--dim);overflow:hidden;text-overflow:ellipsis}.status-cost summary::-webkit-details-marker{display:none}
+.status-cost summary::before{content:'▸ ';color:var(--faint)}.status-cost[open] summary::before{content:'▾ '}
+.status-cost-breakdown{display:grid;gap:3px;margin:5px 0 2px;padding:6px 7px;border-left:2px solid var(--line)}
+.status-cost-breakdown span{display:flex;justify-content:space-between;gap:12px;min-width:0}
+.status-cost-breakdown span:not(b){overflow:hidden;text-overflow:ellipsis}.status-cost-breakdown b{color:var(--fg);font-weight:500}
+.status-cost-breakdown small{color:var(--faint)}
 /* Editable cross-provider handoff. It stacks over the source conversation so
    one back-swipe returns to the exact place the user came from. */
 #handoffview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:61;flex-direction:column}
@@ -944,7 +967,7 @@ td.r,th.r{text-align:right}
         font:inherit;font-size:14px;padding:5px 12px;cursor:pointer}
 #abody{flex:1;overflow:auto;padding:14px;overscroll-behavior:contain}
 #aact{border-top:1px solid var(--line);background:var(--card);
-      padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+      padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
 #aact .dfold{margin-top:10px}
 .aconvo{width:100%;max-width:none;margin-inline:auto}
 .relaynote{font-size:11px;color:var(--dim);background:#12161c;border:1px solid var(--line);
@@ -957,12 +980,13 @@ td.r,th.r{text-align:right}
   opacity:.55;filter:grayscale(1);flex:0 0 auto}
 .shead .spin:hover,.historymain .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
 .shead .spin.on,.historymain .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
+.shead.pinpress{box-shadow:inset 3px 0 0 var(--blue);background:rgba(88,166,255,.09)}
 .card.pinned{box-shadow:0 0 0 1px rgba(88,166,255,.35);opacity:1}
 /* global pinned-sessions block, directly below Fleet Briefing */
 #pinned{margin-bottom:18px}
 #pinned.empty{display:none}
 .pinhdr{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);padding:5px 8px 4px}
-#pinned .card:last-child{margin-bottom:0}
+#pinned .pinslot:last-child .card{margin-bottom:0}
 /* min-height:0 + a CAPPED bar: without the cap an open question grows #vact
    without limit and squeezes the document to a few px, leaving a scrollbar with
    nowhere to scroll (the "third scrollbar") */
@@ -1116,6 +1140,11 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
     padding:13px 13px calc(18px + env(safe-area-inset-bottom))}
   .activeagentcard{grid-template-columns:12px minmax(0,1fr) 14px;padding:10px;gap:8px}
   .activeagentmeta{grid-column:2;align-items:flex-start}.activeagentcard>.aopen{grid-column:3;grid-row:1/3}
+  .statusstrip{padding:7px 8px}.status-details{display:none}.statusstrip.expanded .status-details{display:block}
+  .status-expand{display:flex;width:100%;align-items:center;justify-content:flex-start;border:0;
+    border-top:1px solid var(--line);margin:4px 0 0;padding:5px 0 1px;background:transparent;
+    color:var(--faint);font:9.5px/1.2 "SF Mono",Menlo,monospace;cursor:pointer}
+  .status-primary,.status-secondary,.status-cache{gap:5px}.status-graph{max-width:100%}
   #sevidence{position:absolute;inset:0;z-index:24;width:100%;max-width:none;border-left:0;padding-bottom:24px}
   .evidencebtn span{display:none}.evidencebtn{width:38px;justify-content:center;padding:0;font-size:15px}
   #handoffbody{padding:10px 10px calc(16px + env(safe-area-inset-bottom))}

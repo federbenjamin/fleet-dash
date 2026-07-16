@@ -181,6 +181,13 @@ the provider without affecting Claude sessions.
   `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
   included** — so it is a liveness signal (is it moving?), not output speed; a big context makes
   it large.
+- **Full-chat status strip** directly above the main or subagent composer. Desktop shows branch
+  versus the last-fetched `origin/main`, worktree, model/effort, context and explicit compaction
+  headroom, cache-read hit rate, CacheWrite/spikes/peak, session-tree or child cost, turn cost, and
+  the last 50 changed CacheWrite values. Mobile starts with the two identity/context rows and
+  expands usage details on tap. Missing provider data is omitted; completed agents and closed
+  sessions keep their last known values. Tapping a main tree total opens the main-plus-children
+  breakdown. No Git fetch or transcript rescan occurs when the strip opens.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
@@ -191,11 +198,13 @@ the provider without affecting Claude sessions.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards sort by action urgency,
-  then newest activity, and are relocated rather than duplicated. On **desktop**, use the
+  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards keep the order in which
+  they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
+  Cards are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
-  **mobile**, **long-press** the header (a short tap still opens
-  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. Pinning an
+  **mobile**, **long-press** the header (it highlights immediately; a short tap still opens
+  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. A failed
+  pin restores the prior order and stays visible with Retry. Pinning an
   external Codex thread also opts it into read-only local lifecycle/message observation; it does not
   make the thread interactive.
 - **Tap any agent row — running or completed — for its own full-screen chat view:** the
@@ -401,7 +410,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
-| `pinned_sessions` | [] | persisted session ids relocated into the Pinned section |
+| `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
 | `reply_available` | {} | session id → conversation revision explicitly marked available |
 | `read_sessions` | {} | session id → opened conversation revision for the New response badge |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
@@ -450,7 +459,9 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
   stop_reason-less text row. So "done" is judged by whether anything is in flight (a tool call
   awaiting its result), not by `stop_reason`; "stalled" means frozen mid-tool. A background
   agent's `tool_result` in the parent arrives at *spawn* ("Async agent launched successfully"),
-  so it can't be used as a completion signal either.
+  so it can't be used as a completion signal either. Explicit task notifications with terminal
+  `completed`/`killed`/`failed` status are used when present, but only until newer child output
+  proves that task id resumed.
 - The input-needed Notification (~6s after a question) must not clobber the question capture.
 - launchd-context osascript **hangs forever** on the TCC check (can't show the dialog) → applet.
 - TUI keys: digits toggle; **Enter toggles the focused row in multi-select** (does NOT submit);

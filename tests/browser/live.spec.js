@@ -24,6 +24,16 @@ async function goTo(page, route) {
   else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
+function recordUnexpectedRequestFailures(page, failures) {
+  page.on('requestfailed', request => {
+    const error = request.failure()?.errorText || '';
+    // Fleet aborts stale polls/forecasts when a newer request supersedes them.
+    // That cancellation is the expected race-safety path, not an outage.
+    if (error === 'net::ERR_ABORTED') return;
+    failures.push(`network: ${request.method()} ${request.url()} ${error}`);
+  });
+}
+
 test('running Fleet Dash renders both providers without console or network failures', async ({ page }, testInfo) => {
   test.skip(!liveURL, 'set FLEET_DASH_LIVE_URL for the opt-in running-daemon check');
   const failures = [];
@@ -37,8 +47,7 @@ test('running Fleet Dash renders both providers without console or network failu
       failures.push(`console: ${message.text()}`);
     }
   });
-  page.on('requestfailed', request => failures.push(
-    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(liveURL, { waitUntil: 'domcontentloaded' });
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
@@ -95,7 +104,7 @@ test('running Fleet Dash opens the authenticated Outbox without dispatching work
   const failures = [];
   page.on('pageerror', error => failures.push(`page: ${error}`));
   page.on('console', message => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
-  page.on('requestfailed', request => failures.push(`network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await page.locator('#outboxchip').click();
   await expect(page.locator('#outboxview')).toBeVisible();
@@ -110,7 +119,7 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   const failures = [];
   page.on('pageerror', error => failures.push(`page: ${error}`));
   page.on('console', message => { if (message.type() === 'error') failures.push(`console: ${message.text()}`); });
-  page.on('requestfailed', request => failures.push(`network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   const briefing = await (await page.request.get('/api/briefing?device=playwright-live')).json();
   expect(briefing.ok).toBe(true);
@@ -147,8 +156,7 @@ test('running Fleet Dash searches indexed transcripts with exact context', async
   page.on('console', message => {
     if (message.type() === 'error') failures.push(`console: ${message.text()}`);
   });
-  page.on('requestfailed', request => failures.push(
-    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await goTo(page, 'search');
   await expect(page.locator('#searchstatus')).toContainText(/Checking|Indexing|Indexed/);
@@ -171,8 +179,7 @@ test('running Fleet Dash builds an editable authenticated handoff without sendin
   page.on('console', message => {
     if (message.type() === 'error') failures.push(`console: ${message.text()}`);
   });
-  page.on('requestfailed', request => failures.push(
-    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => tick());
   await expect.poll(() => page.evaluate(() =>
@@ -207,8 +214,7 @@ test('running Fleet Dash reads an authenticated repository outcome without mutat
   page.on('console', message => {
     if (message.type() === 'error') failures.push(`console: ${message.text()}`);
   });
-  page.on('requestfailed', request => failures.push(
-    `network: ${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`));
+  recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await goTo(page, 'workstreams');
   const git = page.locator('#workstreams .workstream').filter({ has: page.getByRole('button', { name: 'Repository' }) }).first();

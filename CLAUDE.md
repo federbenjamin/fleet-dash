@@ -92,18 +92,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    immediately; a bare waiting flag must persist for `WAITING_CONFIRM_SECONDS` because Claude
    can flash it between progress prose and the next tool; idle → turn_done if fresh end_turn
    else idle; busy → running/stalled).
-   **CANCELLED is separate, authoritative and immediate:** the parent's `tool_result` for that
-   Agent tool_use comes back `is_error: true` ("The user doesn't want to proceed with this tool
-   use"). `Tail.errored_tools` collects those ids; `scan_agents` flips any agent whose
-   `meta.toolUseId` is among them to `ended` with no timing heuristic. This is NOT optional: a
-   killed agent's own transcript ends on a USER row (the rejection), so the assistant-last
-   `settled` rule structurally cannot see it and it would sit "running" → red "stalled" forever
-   (verified 2026-07-14 on session b5996cb1).
-   Two non-signals, both checked and rejected 2026-07-14: the *presence* of the parent's
-   `tool_result` proves nothing about completion (a background agent gets one at SPAWN —
-   "Async agent launched successfully"; only its `is_error` flag is meaningful); and the
-   `task-notification` rows carrying a real `<status>completed</status>` aren't written while
-   the parent is mid-turn, so they lag exactly when you need them.
+   **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
+   parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
+   ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/
+   attached `<task-notification>` with `<status>killed</status>` after `TaskStop` (verified
+   2026-07-16 on session `9e8b990e`, agent `agent-a9f377…`). `Tail.agent_terminals` retains bounded
+   `completed`/`killed`/`failed` notices and `scan_agents` maps them to `done`/`ended` immediately.
+   A task id can resume, so a terminal notice applies only when its timestamp is at or after the
+   child transcript's newest row; later child output supersedes it. The *presence* of the parent's
+   ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
 8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
    daemon start. Spend pushes fire only on the highest crossed multiple.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
@@ -250,9 +247,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 28. **Pinned sessions are server-persisted and live in a GLOBAL block.**
     `pinnedSessions` mirrors `/api/fleet.settings.pinned_sessions`; `toggleSessionPin` writes
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
-    Fleet Briefing) in urgency order, then newest activity. Pinned cards are relocated, never duplicated.
+    Fleet Briefing) in persisted insertion order. Fleet urgency/activity changes never reorder it; a
+    new pin appends at the bottom. Pinned cards are relocated, never duplicated.
     Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
-    `sessionTap` swallows the following click so pinning does not also open the chat.
+    the hold paints immediately and `sessionTap` swallows the following click so pinning does not
+    also open the chat. `pinActions` suppresses duplicate writes; failure restores the exact prior
+    order and renders inline retry instead of a blocking alert.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
     `openClosed`) forces `#sbody` to `scrollHeight` on the first render regardless of prior
     scrollTop (a tall cached convo starts at 0 → the sticky-bottom test would otherwise keep the
@@ -360,6 +360,21 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     the ticket may `cleanup_closed_worktree` re-probe the revision and run fixed argv
     `git -C <root> worktree remove [--force] <worktree>`. Never delete the branch. A close/cleanup
     partial failure is reported as session closed with the worktree preserved; never retry silently.
+42. **Full-chat operational status is bounded, cached, and provider-honest.** `status_line` is the
+    only payload for the strip directly above the main/subagent composer. Claude `Tail` retains the
+    latest usage, turn cost, and at most 50 changed CacheWrite values; writes above 20k increment the
+    spike ledger. Context excludes output tokens. Git comparison is fixed to
+    `refs/remotes/origin/main...HEAD`, runs via fixed argv on a background cache refresh, and never
+    fetches or blocks an HTTP/render path. Main cost is the session tree with a bounded breakdown;
+    subagent cost is child-only. Unknown Codex/starting fields are omitted, never rendered as zero.
+    `session_runs.status_line_json` freezes the final bounded payload for closed sessions; completed
+    child payloads freeze with the child. Full-chat headers contain the title and controls only.
+43. **Routine Claude conversation reads never wait for the fleet-wide Tail fold.** `_scan` publishes
+    immutable bounded main snapshots keyed by session and subagent snapshots keyed by
+    `(parent_session_id, agent_id)`; `/api/context`, `/api/agent_context`, and `/api/file` read those
+    projections without `scan_lock`. The locked `Tail.poll()` path is startup/fallback only, before a
+    completed scan has published that exact conversation. Keep the parent in the child key because
+    different sessions can reuse an agent ID. Snapshot pruning follows the live registry/child set.
 
 ## Dev workflow
 

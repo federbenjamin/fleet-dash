@@ -13,8 +13,10 @@ function perfSummary(){
       p95:Math.round(pct(values,.95)*1000)/1000,last:values.at(-1)||0}]));
 }
 fleetPerf.summary=perfSummary;
-function recordInputFeedback(started){
-  perfRecord('input_feedback_ms',performance.now()-started);
+function recordInputFeedback(started,flow='input'){
+  const elapsed=performance.now()-started;
+  perfRecord('input_feedback_ms',elapsed);
+  perfRecord(`feedback_${String(flow).replace(/[^a-z0-9_]+/gi,'_').toLowerCase()}_ms`,elapsed);
 }
 (()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
   if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
@@ -77,9 +79,9 @@ function navigateTo(route,push=true){
   applyRouteNav(route);
   if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
   if(route==='insights'){loadInsights();loadBudgets();}
-  if(route==='search'){loadSearchStatus(true);runSearch(true);}
-  if(route==='workstreams')loadWorkstreams(true);
-  if(route==='history')loadHistory(true);
+  if(route==='search'){loadSearchStatus();runSearch(true);}
+  if(route==='workstreams')loadWorkstreams();
+  if(route==='history')loadHistory(!(historyData.items||[]).length);
   window.scrollTo({top:0,behavior:'auto'});
 }
 function setNowFilter(value){nowFilter=value;render(last,true);}
@@ -191,18 +193,20 @@ function searchWhen(value){
 }
 function renderSearchResults(){
   const el=$('#searchresults'),more=$('#searchmore');if(!el||!more)return;
-  if(searchError){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)}</div>`;more.hidden=true;return;}
+  if(searchError&&!searchItems.length){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)} <button onclick="runSearch(true)">retry</button></div>`;more.hidden=true;return;}
   if(searchBusy&&!searchItems.length){el.innerHTML='<div class="searchempty">Searching…</div>';more.hidden=true;return;}
   if(!searchItems.length){el.innerHTML=`<div class="searchempty">${searchHasCriteria()?
     'No indexed conversation matches these filters.':'Type a search or choose a filter.'}</div>`;more.hidden=true;return;}
-  el.innerHTML=searchItems.map(item=>`<button class="searchresult" onclick="openSearchContext(${Number(item.id)})">
+  el.innerHTML=(searchError?`<div class="searchempty searcherror">${esc(searchError)} <button onclick="runSearch(false)">retry page</button></div>`:'')+searchItems.map(item=>`<button class="searchresult" onclick="openSearchContext(${Number(item.id)})">
     <span class="searchprovider ${item.provider==='claude'?'claude':'codex'}">${item.provider==='claude'?'C':'X'}</span>
     <span class="searchcopy"><span class="searchtitle"><b>${esc(item.title||item.project||'Conversation')}</b>
       <span class="searchbadge">${esc(item.source_kind==='subagent'?'subagent':item.kind||'message')}</span></span>
       <span class="searchmeta">${esc([item.provider,item.project,item.branch,item.agent_id].filter(Boolean).join(' · '))}</span>
       <span class="searchsnippet">${esc(item.snippet||'')}</span></span>
     <span class="searchtime">${esc(searchWhen(item.timestamp||item.timestamp_epoch*1000))}</span></button>`).join('');
-  more.hidden=searchCursor==null;
+  more.hidden=searchCursor==null&&!searchBusy;
+  more.disabled=searchBusy;
+  more.textContent=searchBusy?'Loading more…':'Load more';
 }
 function updateSearchProjects(projects){
   searchProjects=projects||searchProjects;const select=$('#searchproject');if(!select)return;
@@ -230,7 +234,8 @@ async function runSearch(reset=true){
     searchCursor=d.next_cursor;updateSearchProjects(d.projects||[]);
   }catch(e){
     if(e.name==='AbortError')return;
-    searchItems=[];searchCursor=null;searchError=String(e.message||e);
+    if(reset)searchItems=[];
+    searchCursor=cursor;searchError=String(e.message||e);
   }finally{if(searchAbort===controller){searchBusy=false;searchAbort=null;renderSearchResults();}}
 }
 function searchContextMessage(item,provider){
@@ -468,6 +473,7 @@ function md(src){
 // ---- durable message Outbox -----------------------------------------------
 let outboxData={ok:true,items:[],summary:{pending:0,attention:0},usage_options:[]};
 let outboxLoading=false,outboxLoadPromise=null,outboxLoadedAt=0,outboxAccess='unknown',outboxFilter='current',scheduleView=null;
+const outboxActions=new Map();
 const outboxPending=new Set(['scheduled','waiting_availability','waiting_usage_reset','spawning','sending']);
 const outboxAttention=new Set(['blocked','failed','confirmation_unknown']);
 function outboxWhen(item){
@@ -503,7 +509,9 @@ function renderOutboxCompact(){
     <span><b>Message Outbox</b><small>${summary.attention?`${summary.attention} need review · `:''}${summary.pending||0} waiting to send</small></span><b class="outboxcount">Open →</b></button>${rows}</section>`;
 }
 function openOutbox(){
+  const feedbackStarted=performance.now();
   $('#outboxview').style.display='flex';syncOverlayHistory();renderOutboxFull();loadOutbox(true);
+  recordInputFeedback(feedbackStarted,'outbox_open');
 }
 function closeOutbox(){$('#outboxview').style.display='none';$('#outboxbody').innerHTML='';}
 function setOutboxFilter(value){outboxFilter=value;renderOutboxFull();}
@@ -516,14 +524,16 @@ function visibleOutboxItems(){
   return items.filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
 }
 function outboxRow(item){
-  const error=item.error||item.blocked_reason;
+  const action=outboxActions.get(item.id)||{};
+  const error=action.error||item.error||item.blocked_reason;
   const canEdit=item.editable,canRetry=item.retryable;
   return`<article class="outboxrow ${esc(item.state)}"><div class="outboxtop"><span class="outboxstate">${esc(item.state_label||item.state)}</span>
     <span class="outboxtime">${esc(outboxWhen(item))}</span></div><div class="outboxmessage">${esc(item.message||'')}</div>
     <div class="outboxmeta">${esc(outboxTarget(item))} · ${esc(String(item.kind||'').replaceAll('_',' '))}${item.created_zone?` · ${esc(item.created_zone)}`:''}</div>
-    ${error?`<div class="outboxerror">${esc(error)}</div>`:''}<div class="outboxactions">
-      ${canEdit?`<button onclick="editOutbox('${item.id}')">Edit</button><button class="primary" onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
-      ${canRetry?`<button class="primary" onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
+    ${error?`<div class="outboxerror" role="alert">${esc(error)}</div>`:''}<div class="outboxactions">
+      ${action.busy?'<span class="outboxworking" role="status"><span class="delivery sending" aria-hidden="true">◌</span> working…</span>':''}
+      ${canEdit?`<button ${action.busy?'disabled':''} onclick="editOutbox('${item.id}')">Edit</button><button class="primary" ${action.busy?'disabled':''} onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button ${action.busy?'disabled':''} onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
+      ${canRetry?`<button class="primary" ${action.busy?'disabled':''} onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
     </div></article>`;
 }
 function renderOutboxFull(){
@@ -543,11 +553,23 @@ function mergeOutboxResult(result){
   renderOutboxCompact();renderOutboxFull();
 }
 async function outboxAction(id,type,payload={}){
-  const result=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({type,outbox_id:id,...payload})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
-  if(!result.ok){alert(result.error||'Outbox action failed');return result;}
-  mergeOutboxResult(result);
-  await loadOutbox(true);return result;
+  if(outboxActions.get(id)?.busy)return{ok:false,error:'Outbox action already running'};
+  const feedbackStarted=performance.now();
+  outboxActions.set(id,{busy:true,error:''});renderOutboxFull();
+  recordInputFeedback(feedbackStarted,'outbox_action');
+  try{
+    const response=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type,outbox_id:id,...payload})});
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw new Error(result.error||'Outbox action failed');
+    mergeOutboxResult(result);
+    await loadOutbox(true);
+    outboxActions.delete(id);renderOutboxFull();return result;
+  }catch(error){
+    const message=String(error.message||error);
+    outboxActions.set(id,{busy:false,error:message});renderOutboxFull();
+    return{ok:false,error:message};
+  }
 }
 function confirmCancelOutbox(id){askConfirm('Cancel this scheduled message?',
   'It will remain in the Outbox audit trail and will never be sent.','cancel message',()=>outboxAction(id,'outbox_cancel'));}
@@ -564,7 +586,8 @@ function scheduleButton(sid,inputId,agentId=''){
   return`<button class="pbtn sendoption" title="schedule or wait to send" aria-label="delivery options" onclick="openSchedule('${sid}','${inputId}','${agentId}')">⌄</button>`;
 }
 async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,message=''){
-  await loadOutbox();
+  const feedbackStarted=performance.now();
+  const loading=loadOutbox();
   const input=inputId?document.getElementById(inputId):null;
   const source=existing||{};
   const zone=source.created_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
@@ -580,6 +603,10 @@ async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,
     scheduleView.kind==='new_session'?'Schedule new coding session':'Schedule message';
   if(stacked){schedulePushed=true;history.pushState({fdSchedule:1},'');}else syncOverlayHistory();
   renderSchedule();
+  recordInputFeedback(feedbackStarted,'schedule_open');
+  const view=scheduleView;
+  await loading;
+  if(scheduleView===view)renderSchedule();
 }
 function editOutbox(id,operation=null){
   const item=(outboxData.items||[]).find(row=>row.id===id);if(!item)return;
@@ -644,11 +671,11 @@ const briefingDevice=(()=>{let value=localStorage.getItem(BRIEF_DEVICE_KEY);
   if(!value){value=(crypto.randomUUID?crypto.randomUUID():`device-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     localStorage.setItem(BRIEF_DEVICE_KEY,value);}return value;})();
 let briefingData={ok:true,sections:{attention:[],completed:[],slow:[],outcomes:[],budgets:[],measurements:[],reviewed:[]},unread:0};
-let briefingLoading=false,briefingLoadPromise=null,briefingLoadedAt=0,briefingOpen=false,briefingReviewing=false;
+let briefingLoading=false,briefingLoadPromise=null,briefingLoadedAt=0,briefingOpen=false,briefingReviewing=false,briefingReviewError='';
 async function loadBriefing(force=false){
   if(briefingLoading)return briefingLoadPromise;
   if(!force&&Date.now()-briefingLoadedAt<4000)return;
-  briefingLoading=true;briefingLoadPromise=(async()=>{try{
+  briefingLoading=true;renderBriefing();briefingLoadPromise=(async()=>{try{
     const r=await fetch(`/api/briefing?device=${encodeURIComponent(briefingDevice)}&limit=120`,{cache:'no-store'}),data=await r.json();
     if(!r.ok||!data.ok)throw new Error(data.error||'Briefing unavailable');
     briefingData=data;briefingLoadedAt=Date.now();
@@ -680,10 +707,11 @@ function openBriefingSource(kind,id){
 }
 async function markBriefingReviewed(){
   const cursor=briefingData.next_cursor;if(!cursor||cursor<=briefingData.review_cursor||briefingReviewing)return;
-  briefingReviewing=true;try{const data=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
+  briefingReviewing=true;briefingReviewError='';try{const data=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({type:'briefing_review',device_id:briefingDevice,cursor})}).then(r=>r.json());
-    if(data.ok)briefingData.review_cursor=data.cursor;
-  }catch(_){}finally{briefingReviewing=false;}
+    if(!data.ok)throw new Error(data.error||'Review marker failed');briefingData.review_cursor=data.cursor;
+  }catch(error){briefingReviewError=String(error.message||error);renderBriefing();}
+  finally{briefingReviewing=false;}
 }
 async function toggleBriefing(){briefingOpen=!briefingOpen;renderBriefing();if(briefingOpen){await loadBriefing(true);setTimeout(markBriefingReviewed,600);}}
 function renderBriefing(){
@@ -691,14 +719,15 @@ function renderBriefing(){
   const current=(s.attention?.length||0)+(s.slow?.length||0)+(s.budgets||[]).filter(x=>['warning','exceeded','unavailable'].includes(x.status)).length;
   const unread=(s.completed?.length||0)+(s.outcomes?.length||0)+(s.measurements?.length||0);
   const reviewed=s.reviewed?.length||0;
-  if(!current&&!unread&&!reviewed&&!d.error){el.innerHTML='';return;}
-  const status=d.error?'Briefing unavailable':`${current} current · ${unread} since review${reviewed?` · ${reviewed} recently reviewed`:''}${d.muted_omitted?` · ${d.muted_omitted} muted from push`:''}`;
+  const empty=!current&&!unread&&!reviewed&&!d.error;
+  const status=d.error?'Briefing unavailable':empty?`Nothing to review${briefingLoading?' · refreshing…':''}`:
+    `${current} current · ${unread} since review${reviewed?` · ${reviewed} recently reviewed`:''}${d.muted_omitted?` · ${d.muted_omitted} muted from push`:''}${briefingLoading?' · refreshing…':''}`;
   el.innerHTML=`<section class="briefingpanel"><button class="briefhead" onclick="toggleBriefing()"><span><b>Fleet briefing</b><small>${esc(status)}</small></span><b>${briefingOpen?'Hide':'Review'} ${briefingOpen?'↑':'→'}</b></button>
-    ${briefingOpen?`<div class="briefbody">${d.error?`<div class="provideralert">${esc(d.error)}</div>`:''}
+    ${briefingOpen?`<div class="briefbody">${briefingLoading?'<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> Refreshing briefing…</div>':''}${d.error?`<div class="provideralert">${esc(d.error)} <button onclick="loadBriefing(true)">retry</button></div>`:''}${briefingReviewError?`<div class="provideralert">${esc(briefingReviewError)} <button onclick="markBriefingReviewed()">retry review</button></div>`:''}
       ${briefingGroup('Needs attention now',s.attention)}${briefingGroup('Completed since last review',s.completed)}
       ${briefingGroup('Still working unusually slowly',s.slow)}${briefingGroup('Outcomes and artifacts',s.outcomes)}
       ${briefingGroup('Budgets and measurement',(s.budgets||[]).filter(x=>x.status!=='ok'),briefingBudget)}
-      ${briefingGroup('Unavailable measurements',s.measurements)}${briefingGroup('Recently reviewed',s.reviewed)}</div>`:''}</section>`;
+      ${briefingGroup('Unavailable measurements',s.measurements)}${briefingGroup('Recently reviewed',s.reviewed)}${empty&&!briefingLoading?'<div class="destinationempty"><b>Nothing needs review</b><p>New completions and attention items will appear here.</p></div>':''}</div>`:''}</section>`;
 }
 
 // Compact Markdown for card peeks. Preserve headings/emphasis/lists while
@@ -770,7 +799,8 @@ const modelLabel=s=>esc(s.model||s.family||'?')+(s.effort?` · ${esc(s.effort)}`
 const CLAUDE_PERMISSION_LABELS={default:'Manual',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto',
   dontAsk:"Don't ask",bypassPermissions:'Bypass permissions'};
 const claudePermissionLabel=mode=>CLAUDE_PERMISSION_LABELS[mode]||'Detecting…';
-function claudePermissionLocked(s){return !s?.capabilities?.change_permission_mode;}
+const providerModeActions=new Map();
+function claudePermissionLocked(s){return !s?.capabilities?.change_permission_mode||providerModeActions.has(s?.session_id);}
 function claudePermissionSelect(s,pre='msg'){
   if(!s||s.provider!=='claude')return'';
   const current=s.permission_mode||'';const available=new Set(s.permission_modes||[]);
@@ -791,7 +821,7 @@ function claudePermissionSelect(s,pre='msg'){
 function modeSelect(s,pre='msg'){
   if(!s||s.provider!=='codex')return'';
   const mode=s.collaboration_mode||'default';
-  const locked=!s.capabilities?.submit||['running','needs_you','stalled'].includes(s.state);
+  const locked=!s.capabilities?.submit||['running','needs_you','stalled'].includes(s.state)||providerModeActions.has(s.session_id);
   return`<select class="modesel" title="Codex collaboration mode — Plan enables structured questions; Default executes work"
     onclick="event.stopPropagation()" onchange="setSessionMode('${s.session_id}',this.value,'${pre}')" ${locked?'disabled':''}>
     <option value="plan" ${mode==='plan'?'selected':''}>Plan</option>
@@ -819,6 +849,15 @@ function eventRow(m,provider='claude'){
 const optimisticMessages=new Map();
 let optimisticSequence=0;
 const quickResponses=new Map();
+const nativeRequestLocks=new Set();
+const nativeRequestKey=(sid,nonce)=>String(sid)+'\0'+String(nonce||'');
+function nativeRequestLocked(sid,nonce){return nativeRequestLocks.has(nativeRequestKey(sid,nonce));}
+async function withNativeRequestLock(sid,nonce,work){
+  const key=nativeRequestKey(sid,nonce);if(nativeRequestLocks.has(key))return{ok:false,duplicate:true};
+  nativeRequestLocks.add(key);uiRefresh();
+  try{return await work();}
+  finally{nativeRequestLocks.delete(key);uiRefresh();}
+}
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
 function optimisticList(sid){
   if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
@@ -847,11 +886,11 @@ function addOptimistic(sid,text,kind='text'){
   if(openConvo){
     openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
     $('#sbody').scrollTop=$('#sbody').scrollHeight;
-    recordInputFeedback(feedbackStarted);
+    recordInputFeedback(feedbackStarted,'send');
     requestAnimationFrame(()=>render(last,true));
   }else{
     uiRefresh();
-    recordInputFeedback(feedbackStarted);
+    recordInputFeedback(feedbackStarted,'send');
   }
   return item.id;
 }
@@ -909,7 +948,7 @@ function beginQuickResponse(sid,payload){
   const feedbackStarted=performance.now();
   const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
     status:'sending',created:Date.now()};
-  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted);return item.id;
+  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted,'quick_response');return item.id;
 }
 function finishQuickResponse(sid,id,ok,error){
   const item=quickResponses.get(sid);
@@ -1008,7 +1047,7 @@ function overflowMenu(key,s,kind='session',done=false){
   const canMode=lifecycle&&s&&s.provider==='codex';
   const canClaudeMode=lifecycle&&s&&s.provider==='claude'&&!s.provisional;
   const mode=s?.collaboration_mode||'default';
-  const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state);
+  const modeLocked=!s?.capabilities?.submit||['running','needs_you','stalled'].includes(s?.state)||providerModeActions.has(s?.session_id);
   const permissionModes=new Set(s?.permission_modes||[]);
   const permissionLocked=claudePermissionLocked(s);
   const permissionButton=(value,label,shown=true)=>shown?`<button aria-pressed="${s?.permission_mode===value}"
@@ -1322,14 +1361,16 @@ function confirmRepoDraftPr(){
 function confirmRepoReady(){const pr=repoView?.data?.pr;if(!pr)return;askConfirm('Mark pull request ready?',
   `PR <b>#${esc(String(pr.number))}</b> will leave draft state and request review. Fleet will not merge it.`,
   'mark ready',()=>runRepoAction('pr_mark_ready',{number:pr.number}));}
+const terminalActions=new Map();
 function terminalButton(s,card=false){
   if(!s)return'';
   const cls=`expandbtn termbtn${card?' deskonly':''}`;
   if(s.capabilities?.focus_terminal){
     const attach=s.capabilities?.focus_terminal_mode==='attach';
     const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
+    const action=terminalActions.get(s.session_id)||{};
     return`<button class="${cls}" title="${esc(title)}"
-      onclick="event.stopPropagation();focusSession('${s.session_id}')">${attach?'Attach':'Terminal'}</button>`;
+      ${action.busy?'disabled':''} onclick="event.stopPropagation();focusSession('${s.session_id}',this)">${action.busy?'Opening…':action.ok?'Opened ✓':attach?'Attach':'Terminal'}</button>`;
   }
   if(s.provider==='codex'){
     const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
@@ -1345,18 +1386,19 @@ function singleQBlock(s,p,pre){
   const sid=s.session_id;
   const q=p.questions[0],ms=q.multiSelect,n=(q.options||[]).length;
   const sel=multiSel[sid]=multiSel[sid]||new Set();
+  const locked=nativeRequestLocked(sid,p.nonce);
   return`<div class="ptool"><span class="ptlabel">${esc(q.header||'question')} — waiting on you</span>
-      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+      <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
     <div class="qtext">${esc(q.question)}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}"
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
         ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
+    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
       value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
       ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
-      ${ms?'':`<button class="pbtn send" onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
-    ${ms?`<div class="pbtns"><button class="pbtn send" onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
+      ${ms?'':`<button class="pbtn send" ${locked?'disabled':''} onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
+    ${ms?`<div class="pbtns"><button class="pbtn send" ${locked?'disabled':''} onclick="sendMulti('${sid}','${p.nonce}',${n},'${pre}')">submit selection</button></div>`:''}`;
 }
 // The delivered-file strip: identical markup and position (docked bar, directly
 // above the send box) in BOTH full-screen surfaces, so they read as one screen.
@@ -1418,12 +1460,11 @@ function renderViewerBar(force){
   const nw=bar.querySelector&&bar.querySelector('.vconvo');
   if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
 }
-// the chat view's title/subtitle block for a session (title on its own line,
-// project · branch · model beneath) — shared by the full chat view and the md viewer
+// Full chat headers identify the conversation. Operational metadata lives in
+// the status strip above the composer, where it can update independently.
 function sessTitleBlock(s){
   if(!s)return '<b>session</b>';
-  return `<b>${esc(s.title||s.project)}</b>
-    <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}${s.family?` · ${modelLabel(s)}`:''}</small>`;
+  return `<b>${esc(s.title||s.project||'session')}</b>`;
 }
 function viewFile(sid,ep,en,kind,ecap){
   closeSession();          // the two full-screen surfaces are mutually exclusive
@@ -1432,9 +1473,12 @@ function viewFile(sid,ep,en,kind,ecap){
   // The file viewer is a reading surface: filename and file actions only.
   $('#vtitle').innerHTML=`<span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
   $('#viewer').style.display='flex';
-  viewerSid=sid;viewerPath=path;syncOverlayHistory();renderViewerBar(true);
+  viewerSid=sid;viewerPath=path;syncOverlayHistory();
   const vb=$('#vbody');
-  if(kind==='image'){vb.innerHTML=`<img src="${url}" alt="${esc(name)}">`;return;}
+  requestAnimationFrame(()=>{if(viewerSid===sid&&viewerPath===path)renderViewerBar(true);});
+  if(kind==='image'){vb.innerHTML=`<div class="ctxload">loading image…</div><img hidden src="${url}" alt="${esc(name)}"
+    onload="this.hidden=false;this.previousElementSibling?.remove()"
+    onerror="this.previousElementSibling.textContent='✗ image unavailable';this.remove()">`;return;}
   vb.textContent='loading…';
   fetch(url,{cache:'no-store'}).then(async r=>{
     if(!r.ok){vb.textContent=(r.status===403?'read-only device — open the ?token= URL once to view files. ':'')+await r.text();return;}
@@ -1496,6 +1540,82 @@ document.addEventListener('click',e=>{
 // Same overlay shape as the subagent view, but this one is a real terminal
 // channel: send box, question block, interrupt/mute. Ids use the `sft-`/`smsg-`
 // prefixes — the card's `ft-`/`msg-` elements coexist in the DOM.
+const statusExpanded=new Set(),statusCostsOpen=new Set();
+function statusGraphPoint(value){
+  const n=Number(value)||0;
+  if(n>20000)return['█','hot'];if(n>15000)return['▇','warm'];if(n>10000)return['▆','warm'];
+  if(n>7500)return['▅','warn'];if(n>5000)return['▄','warn'];if(n>2500)return['▃','cool'];
+  if(n>1000)return['▂','cool'];return['▁','cool'];
+}
+function statusLineHtml(status,key){
+  if(!status||typeof status!=='object')return'';
+  const id=String(key||'status'),expanded=statusExpanded.has(id),costOpen=statusCostsOpen.has(id);
+  const branch=status.branch&&status.branch!=='HEAD'?String(status.branch):'';
+  const git=[];
+  if(branch){
+    let label='⎇ '+branch;
+    if(Number.isFinite(status.ahead)&&status.ahead>0)label+=` ↑${status.ahead}`;
+    if(Number.isFinite(status.behind)&&status.behind>0)label+=` ↓${status.behind}`;
+    git.push(`<span>${esc(label)}</span>`);
+  }
+  if(status.worktree_label)git.push(`<span title="${esc(status.worktree||'')}">${esc(status.worktree_label)}</span>`);
+  const model=[];
+  if(status.model)model.push(`<span>${esc(status.model)}${status.effort?` · ${esc(status.effort)}`:''}</span>`);
+  const context=[];
+  if(Number.isFinite(status.context_pct))context.push(`Ctx: ${status.context_pct}%`);
+  if(Number.isFinite(status.compact_remaining))context.push(`→${fmtTok(status.compact_remaining)}`);
+  if(context.length)model.push(`<span>${esc(context.join('  '))}</span>`);
+  const cache=[];
+  if(Number.isFinite(status.cache_read_pct)){
+    const tier=status.cache_read_pct>=90?'good':status.cache_read_pct>=75?'warn':status.cache_read_pct>=50?'warm':'hot';
+    cache.push(`<span class="${tier}">♻ ${status.cache_read_pct}%</span>`);
+  }
+  if(Number.isFinite(status.cache_write)){
+    let cw=`✎ ${fmtTok(status.cache_write)}`;
+    if(Number(status.cache_write_spikes)>0)cw+=` · spikes ${status.cache_write_spikes}`;
+    if(Number(status.cache_write_peak)>0)cw+=` · peak ${fmtTok(status.cache_write_peak)}`;
+    cache.push(`<span>${esc(cw)}</span>`);
+  }
+  const breakdown=Array.isArray(status.cost_breakdown)?status.cost_breakdown:[];
+  let cost='';
+  if(Number.isFinite(status.tree_cost)){
+    const prefix=status.cost_scope==='estimated'?'~':'';
+    const label=status.cost_label==='agent'?'agent':'tree';
+    const delta=Number.isFinite(status.turn_cost)?` · +${fmt$(status.turn_cost)}`:'';
+    const summary=`${label} ${prefix}${fmt$(status.tree_cost)}${delta}`;
+    cost=breakdown.length>1?`<details class="status-cost" ${costOpen?'open':''}
+      ontoggle="statusCostToggle('${enc(id)}',this.open)"><summary>${esc(summary)}</summary>
+      <div class="status-cost-breakdown">${breakdown.map(item=>`<span>${esc(item.label||item.kind||'Usage')}<b>${esc(prefix+fmt$(item.cost))}</b></span>`).join('')}
+      ${status.cost_breakdown_omitted?`<small>+${status.cost_breakdown_omitted} more</small>`:''}</div></details>`:
+      `<span class="status-tree-cost">${esc(summary)}</span>`;
+    cache.push(cost);
+  }
+  const history=(status.cache_write_history||[]).filter(Number.isFinite).slice(-50);
+  const graph=history.map(value=>{const [glyph,tier]=statusGraphPoint(value);return`<i class="${tier}">${glyph}</i>`;}).join('');
+  const primary=git.length?`<div class="status-primary">${git.join('<em>│</em>')}</div>`:'';
+  const secondary=model.length?`<div class="status-secondary">${model.join('<em>│</em>')}</div>`:'';
+  const details=(cache.length||graph)?`<div class="status-details">
+    ${cache.length?`<div class="status-cache">${cache.join('<em>│</em>')}</div>`:''}
+    ${graph?`<div class="status-graph" aria-label="Cache write history: ${esc(history.join(', '))}"><b>CW</b>${graph}</div>`:''}
+  </div>`:'';
+  if(!primary&&!secondary&&!details)return'';
+  return`<section class="statusstrip${expanded?' expanded':''}${status.frozen?' frozen':''}" data-status-key="${esc(id)}">
+    ${primary}${secondary}
+    ${details?`<button class="status-expand" aria-label="${expanded?'collapse':'expand'} status details" aria-expanded="${expanded}"
+      onclick="toggleStatusDetails('${enc(id)}')">${expanded?'hide usage details':'usage details'}</button>${details}`:''}
+  </section>`;
+}
+function statusCostToggle(encodedKey,isOpen){
+  const key=decodeURIComponent(encodedKey);if(isOpen)statusCostsOpen.add(key);else statusCostsOpen.delete(key);
+}
+function toggleStatusDetails(encodedKey){
+  const key=decodeURIComponent(encodedKey);if(statusExpanded.has(key))statusExpanded.delete(key);else statusExpanded.add(key);
+  if(key.startsWith('agent:'))renderAgent(true);else if(sessionView?.closed)renderClosed(true);else renderSession(true);
+}
+function refreshStatusStrip(hostSelector,status,key){
+  const current=document.querySelector(hostSelector+' .statusstrip');
+  if(current)current.outerHTML=statusLineHtml(status,key);
+}
 let sessionView=null;            // {sid, closed} of the open overlay
 let sessQOpen=true;              // the question block inside the chat view
 let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
@@ -1623,16 +1743,21 @@ function openSession(sid){
   if(session?.new_response)markRead(session);
   sessionView={sid,closed:false};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  $('#stitle2').innerHTML=sessTitleBlock(session);
+  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderSession(true);
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&!sessionView.closed)renderSession(true);});
 }
 // a closed session has no process: read its transcript, offer no controls
 function openClosed(sid){
   closeViewer();
   sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderClosed(true);
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&sessionView.closed)renderClosed(true);});
   if(!closedSession(sid))loadClosedMeta(sid);
 }
 async function loadClosedMeta(sid){
@@ -1645,7 +1770,8 @@ async function loadClosedMeta(sid){
 }
 function closeSession(){
   closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
-  $('#sview').style.display='none';$('#sbody').innerHTML='';$('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
+  $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
+  $('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
 }
 async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
@@ -1654,13 +1780,16 @@ async function renderClosed(){
   const meta=closedSession(sid)||{};
   $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',meta,'closed');
   renderEvidenceRail(meta);
-  $('#sact').innerHTML=`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
-    so there is nothing to send to. The conversation is read-only.</div>
-    ${handoffLinksHtml(meta)}
-    ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
-      onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
-      <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  const closedActions=status=>`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
+      so there is nothing to send to. The conversation is read-only.</div>
+      ${statusLineHtml(status,'closed:'+sid)}
+      ${handoffLinksHtml(meta)}
+      ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
+        onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
+        <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  $('#sact').innerHTML=closedActions(meta.status_line);
   if(!closedCtx[sid]){
+    closedCtx[sid]={fetching:true,messages:[],info:{}};
     body.innerHTML='<div class="ctxload">loading conversation…</div>';
     try{
       const r=await fetch(conversationEndpoint('closed',sid),{cache:'no-store'});
@@ -1672,14 +1801,21 @@ async function renderClosed(){
     if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
   }
   const c=closedCtx[sid],info=c.info||{};
-  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>
-    <small>${esc(info.project||meta.project||'')}${info.branch&&info.branch!=='HEAD'?` · ${esc(info.branch)}`:''} · closed</small>`;
-  if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
-  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid,true,'closed')}</div>`;
-  body.scrollTop=body.scrollHeight;
-  if(sessionOpened){sessionOpened=false;
-    requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});}
+  $('#sact').innerHTML=closedActions(info.status_line||meta.status_line);
+  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>`;
+  if(c.fetching){body.innerHTML='<div class="ctxload">loading conversation…</div>';return;}
+  const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
+  const wantBottom=sessionOpened||old.atBottom;sessionOpened=false;
+  const optimistic=visibleOptimistic(sid,c.messages||[]).map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
+  const bodyKey=`closed:${c.messages?.length??-1}:${c.next_cursor??''}:${c.olderError||''}:${c.error||''}:${optimistic}`;
+  if(body.dataset.renderKey!==bodyKey){
+    if(c.error)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
+    else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,sid,true,'closed')}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=wantBottom?body.scrollHeight:old.top;
+  }else if(wantBottom)body.scrollTop=body.scrollHeight;
+  if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
 async function reopenClosed(sid,button){
   const original=button&&button.textContent;
@@ -1716,14 +1852,23 @@ function renderSession(force){
   // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
   const wantBottom=sessionOpened||old.atBottom;
   sessionOpened=false;
-  const optimisticOnly=optimisticHtml(s.session_id,(c&&c.messages)||[]);
-  if((!c||!c.messages)&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
-  else if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
-  else if(!c.messages.length&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
-  else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
-  body.scrollTop=wantBottom?body.scrollHeight:old.top;
-  if(typing)return;                        // never replace the input being typed into
+  const optimisticItems=visibleOptimistic(s.session_id,(c&&c.messages)||[]);
+  const optimisticRevision=optimisticItems.map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
+  const bodyKey=`session:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${optimisticRevision}`;
+  if(body.dataset.renderKey!==bodyKey){
+    const optimisticOnly=optimisticItems.map(item=>optimisticItemHtml(item)).join('');
+    if((!c||!c.messages)&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
+    else if(!c||!c.messages)body.innerHTML='<div class="ctxload">loading conversation…</div>';
+    else if(!c.messages.length&&optimisticOnly)body.innerHTML=`<div class="aconvo">${optimisticOnly}</div>`;
+    else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation yet</div>';
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,s.session_id)}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=wantBottom?body.scrollHeight:old.top;
+  }else if(wantBottom)body.scrollTop=body.scrollHeight;
+  if(typing){
+    refreshStatusStrip('#sact',s.status_line,'session:'+s.session_id);
+    return;                                // never replace the input being typed into
+  }
   const p=s.pending;
   const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
   const qHtml=hasQ?`<div class="togbox waiting">
@@ -1737,6 +1882,7 @@ function renderSession(force){
     ${fileStrip(s.session_id,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+    ${statusLineHtml(s.status_line,'session:'+s.session_id)}
     ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
       onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()"></textarea>
@@ -1758,12 +1904,16 @@ function openAgent(sid,aid){
   agentView={sid,aid};
   agentInfoOpen2=false;
   $('#aview').style.display='flex';
+  $('#atitle').innerHTML='<b>subagent</b>';
+  const body=$('#abody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  delete body.dataset.renderKey;
   syncOverlayHistory();
-  renderAgent(true);
+  requestAnimationFrame(()=>{if(agentView?.sid===sid&&agentView?.aid===aid)renderAgent(true);});
 }
 function closeAgent(){
   closeOverflow();agentView=null;agentInfoOpen2=false;
-  $('#aview').style.display='none';$('#abody').innerHTML='';$('#aact').innerHTML='';$('#actrl').innerHTML='';
+  $('#aview').style.display='none';$('#abody').innerHTML='';delete $('#abody').dataset.renderKey;
+  $('#aact').innerHTML='';$('#actrl').innerHTML='';
 }
 function agentMeta(){
   if(!agentView||!last)return null;
@@ -1799,14 +1949,18 @@ function renderAgent(force){
   $('#actrl').innerHTML=overflowMenu('subagent',par,'subagent',done);
   const ae=document.activeElement;
   const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#aview').contains(ae);
-  if(!force&&(typing||touching()))return;
+  if(!force&&touching())return;
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
-  if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
-  else if(c.error){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}
-  else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
-  else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false,'agent',agentView.aid)}</div>`;
-  body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  const bodyKey=`agent:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${c?.error||''}`;
+  if(body.dataset.renderKey!==bodyKey){
+    if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
+    else if(c.error){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}
+    else if(!c.messages.length){body.innerHTML='<div class="ctxload">no conversation yet</div>';}
+    else body.innerHTML=`<div class="aconvo">${convoMsgs(c,agentView.sid,false,'agent',agentView.aid)}</div>`;
+    body.dataset.renderKey=bodyKey;
+    body.scrollTop=old.atBottom?body.scrollHeight:old.top;
+  }
   if(!typing){
     const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
     const tk=info.tokens||{};
@@ -1815,9 +1969,11 @@ function renderAgent(force){
       <div class="relaynote">${done?'this agent has finished — ':''}${codex
         ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
+      ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}
       ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
         onkeydown="composerKey(event,sendRelay)"></textarea>
         <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
+      ${agentRelayHtml(agentView.sid,agentView.aid)}
       <div class="actmsg" id="amsg"></div>
       <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
         <summary>agent info</summary>
@@ -1834,14 +1990,32 @@ function renderAgent(force){
           <span>cost</span><b>${info.cost==null?'unavailable':fmt$(info.cost)}</b>
         </div>
       </details>`;
-  }
+  }else refreshStatusStrip('#aact',info.status_line,'agent:'+agentView.sid+':'+agentView.aid);
 }
-function sendRelay(){
+const agentRelays=new Map();
+function agentRelayKey(sid,aid){return agentCacheKey(sid,aid);}
+function agentRelayHtml(sid,aid){
+  const item=agentRelays.get(agentRelayKey(sid,aid));if(!item)return'';
+  if(item.status==='failed')return`<div class="quickfeedback failed" role="alert"><span class="qfstate">Relay failed</span><span class="qftext">${esc(item.error||'Request failed')}</span><button onclick="restoreRelay()">restore</button></div>`;
+  return`<div class="quickfeedback ${item.status}" role="status"><span class="qfstate">${item.status==='sending'?'Relaying':'Relayed'}</span><span class="qftext">${esc(item.text)}</span>${item.status==='sending'?'<span class="delivery sending" aria-hidden="true">◌</span>':'<span class="delivery sent">✓</span>'}</div>`;
+}
+function restoreRelay(){
+  if(!agentView)return;const key=agentRelayKey(agentView.sid,agentView.aid),item=agentRelays.get(key);
+  agentRelays.delete(key);renderAgent(true);requestAnimationFrame(()=>{const input=$('#aft');if(input){input.value=item?.text||'';input.focus();}});
+}
+async function sendRelay(){
   if(!agentView)return;
   const inp=$('#aft'),v=(inp&&inp.value||'').trim();
   if(!v)return;
-  act(agentView.sid,{type:'relay',agent_id:agentView.aid,text:v},'amsg');
-  if(inp)inp.value='';
+  const sid=agentView.sid,aid=agentView.aid,key=agentRelayKey(sid,aid);
+  if(agentRelays.get(key)?.status==='sending')return;
+  const feedbackStarted=performance.now();
+  if(inp)inp.value='';agentRelays.set(key,{text:v,status:'sending',error:''});renderAgent(true);
+  recordInputFeedback(feedbackStarted,'relay');
+  const result=await act(sid,{type:'relay',agent_id:aid,text:v},'amsg');
+  const current=agentRelays.get(key);if(!current)return;
+  current.status=result.ok?'sent':'failed';current.error=result.error||'';renderAgent(true);
+  if(result.ok)setTimeout(()=>{if(agentRelays.get(key)===current){agentRelays.delete(key);renderAgent(true);}},5000);
 }
 function agentRow(a){
   const done=['done','ended'].includes(a.state);
@@ -1869,6 +2043,7 @@ function agentRow(a){
 // Pins are one shared server-side watchlist. Cards relocate to the top; they are
 // never duplicated in their normal action group.
 const pinnedSessions=new Set();
+const pinActions=new Map();
 function syncPinnedSessions(f){
   pinnedSessions.clear();
   (((f||{}).settings||{}).pinned_sessions||[]).forEach(sid=>pinnedSessions.add(sid));
@@ -1909,7 +2084,10 @@ function renderActiveSubagents(f){
       '<div class="queueempty">No active subagents match this filter.</div>'}</div>`;
 }
 async function toggleSessionPin(sid){
+  if(pinActions.get(sid)?.busy)return;
+  const previous=[...pinnedSessions];
   const pinned=!pinnedSessions.has(sid);
+  pinActions.set(sid,{busy:true,pinned,error:''});
   pinned?pinnedSessions.add(sid):pinnedSessions.delete(sid);
   if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
   render(last,true);
@@ -1919,21 +2097,32 @@ async function toggleSessionPin(sid){
     const d=await r.json();
     if(!d.ok)throw new Error(d.error||'failed');
     if(last?.settings)last.settings.pinned_sessions=d.pinned_sessions||[];
-    syncPinnedSessions(last);render(last,true);
+    syncPinnedSessions(last);pinActions.delete(sid);render(last,true);
   }catch(e){
-    pinned?pinnedSessions.delete(sid):pinnedSessions.add(sid);
+    pinnedSessions.clear();previous.forEach(item=>pinnedSessions.add(item));
+    pinActions.set(sid,{busy:false,pinned,error:String(e.message||e)});
     if(last?.settings)last.settings.pinned_sessions=[...pinnedSessions];
-    render(last,true);alert('pin failed: '+e);
+    render(last,true);
   }
 }
+function pinFeedbackHtml(sid){
+  const item=pinActions.get(sid);if(!item)return'';
+  if(item.busy)return`<div class="quickfeedback" role="status"><span class="qfstate">${item.pinned?'Pinning':'Unpinning'}</span><span class="delivery sending" aria-hidden="true">◌</span></div>`;
+  return`<div class="quickfeedback failed" role="alert"><span class="qfstate">Pin failed</span><span class="qftext">${esc(item.error||'Could not save pin')}</span><button onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${enc(sid)}'))">retry</button></div>`;
+}
 // mobile: long-press a session header to pin; a short tap still opens its chat
-let sessionPressTimer=null,sessionLongFired=false;
-function sessionPressStart(sid){
+let sessionPressTimer=null,sessionPressTarget=null,sessionLongFired=false;
+function sessionPressStart(sid,target){
+  sessionPressEnd();sessionPressTarget=target||null;
+  if(sessionPressTarget)sessionPressTarget.classList.add('pinpress');
   sessionLongFired=false;
   sessionPressTimer=setTimeout(()=>{sessionLongFired=true;toggleSessionPin(sid);
-    if(navigator.vibrate)navigator.vibrate(15);},500);
+    if(navigator.vibrate)navigator.vibrate(15);sessionPressEnd();},500);
 }
-function sessionPressEnd(){if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}}
+function sessionPressEnd(){
+  if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}
+  if(sessionPressTarget){sessionPressTarget.classList.remove('pinpress');sessionPressTarget=null;}
+}
 function sessionTap(e,sid){
   if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
   openSession(sid);
@@ -1945,13 +2134,28 @@ function agentTap(e,sid,aid){
 function renderPinned(f,predicate=()=>true){
   const el=$('#pinned');
   const sessions=(f&&f.sessions)||[],closed=(f&&f.closed)||[];
-  const items=sessions.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
-  const archived=closed.filter(s=>pinnedSessions.has(s.session_id)&&predicate(s));
-  if(!items.length&&!archived.length){el.className='empty';el.innerHTML='';return;}
+  const liveById=new Map(sessions.map(item=>[item.session_id,item]));
+  const closedById=new Map(closed.map(item=>[item.session_id,item]));
+  const items=[...pinnedSessions].map(sid=>liveById.get(sid)||closedById.get(sid))
+    .filter(item=>item&&predicate(item));
+  if(!items.length){el.className='empty';el.innerHTML='';return;}
   el.className='';
-  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div><div class="pinarchived"></div>';
-  reconcileCards(el.querySelector('.pinlist'),items,'');
-  el.querySelector('.pinarchived').innerHTML=archived.map(c=>historyRow(c,true)).join('');
+  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div>';
+  const list=el.querySelector('.pinlist'),seen=new Set();
+  items.forEach(item=>{
+    const sid=String(item.session_id||'');seen.add(sid);
+    let slot=[...list.children].find(child=>child.dataset.pinSid===sid);
+    if(!slot){slot=document.createElement('div');slot.className='pinslot';slot.dataset.pinSid=sid;list.appendChild(slot);}
+    const kind=liveById.has(sid)?'live':'closed';
+    if(slot.dataset.pinKind!==kind){slot.innerHTML='';slot.dataset.pinKind=kind;}
+    if(kind==='live')reconcileCards(slot,[item],'');
+    else slot.innerHTML=historyRow(item,true);
+  });
+  [...list.children].forEach(slot=>{if(!seen.has(slot.dataset.pinSid))slot.remove();});
+  items.forEach((item,index)=>{
+    const slot=[...list.children].find(child=>child.dataset.pinSid===String(item.session_id||''));
+    if(slot&&list.children[index]!==slot)list.insertBefore(slot,list.children[index]||null);
+  });
 }
 const setg=()=>((last&&last.settings)||{});
 const previewAgents=()=>!!setg().preview_agents;
@@ -1981,7 +2185,7 @@ function cardTop(s){
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
   return`<div class="shead" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
-      ontouchstart="sessionPressStart('${s.session_id}')" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
+      ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
       <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
@@ -1989,8 +2193,8 @@ function cardTop(s){
       ${s.new_response?`<span class="newbadge">new</span>`:''}
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
       ${terminalButton(s,true)}
-      <button class="spin${pinned?' on':''}" title="${pinned?'unpin session':'pin session to top'}"
-        aria-label="${pinned?'unpin session':'pin session to top'}"
+      <button class="spin${pinned?' on':''}" ${pinActions.get(s.session_id)?.busy?'disabled':''} title="${pinned?'unpin session':'pin session'}"
+        aria-label="${pinned?'unpin session':'pin session'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
     </div>
     <div class="smeta">
@@ -2008,6 +2212,7 @@ function cardTop(s){
     ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
+    ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
     ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
@@ -2127,8 +2332,7 @@ const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
 let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null;
-function uiRefresh(){render(last,true);if(viewerSid)renderViewerBar(true);
-  if(sessionView)renderSession(true);if(agentView)renderAgent(true);if(settingsOpen)renderSettings();}
+function uiRefresh(){render(last,true);if(settingsOpen)renderSettings();}
 function openSettings(){
   if(settingsOpen)return;
   const stacked=anyOverlay();
@@ -2203,57 +2407,61 @@ function renderSettings(){
     <details class="budgetsettingsfold" ${budgetSettingsOpen?'open':''} ontoggle="budgetSettingsOpen=this.open"><summary>Budgets and spawn limits</summary>${budgetSettingsHtml()}</details>
     <div class="actmsg" id="setmsg"></div></div>`;
 }
+const settingQueues=new Map(),settingIntents=new Map();
+function settingMessage(id,text){const element=document.getElementById(id);if(element)element.textContent=text;}
+function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg'){
+  const intent=(settingIntents.get(key)||0)+1;settingIntents.set(key,intent);
+  settingMessage(messageId,'saving…');
+  const prior=settingQueues.get(key)||Promise.resolve();
+  const request=prior.catch(()=>{}).then(async()=>{
+    const response=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'save failed');
+    return data;
+  });
+  settingQueues.set(key,request);
+  return request.then(data=>{
+    if(settingIntents.get(key)!==intent)return data;
+    onSuccess(data);uiRefresh();settingMessage(messageId,'saved ✓');return data;
+  }).catch(error=>{
+    if(settingIntents.get(key)===intent){onFailure();uiRefresh();settingMessage(messageId,'✗ '+String(error.message||error));}
+    return{ok:false,error:String(error.message||error)};
+  }).finally(()=>{if(settingQueues.get(key)===request)settingQueues.delete(key);});
+}
 async function setNotify(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({notify:{[k]:v}})});
-    const d=await r.json();
-    if(d.ok){if(last)last.notify=d.notify;if(msg)msg.textContent='saved ✓';}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.notify?.[k];
+  if(last){last.notify=last.notify||{};last.notify[k]=v;}uiRefresh();
+  return queueSetting('notify:'+k,{notify:{[k]:v}},d=>{if(last)last.notify=d.notify;},()=>{
+    if(last){last.notify=last.notify||{};last.notify[k]=previous;}
+  });
 }
 async function setNum(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:parseFloat(v)})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';
-      uiRefresh();}   // a peek-line change must repaint the cards, not wait for the poll
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const value=parseFloat(v),previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=value;uiRefresh();
+  return queueSetting(k,{[k]:value},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function setBool(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:v})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=v;uiRefresh();
+  return queueSetting(k,{[k]:v},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function setStr(k,v){
-  const msg=$('#setmsg');
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[k]:v})});
-    const d=await r.json();
-    if(d.ok){if(last&&last.settings)last.settings[k]=d[k];if(msg)msg.textContent='saved ✓';uiRefresh();}
-    else if(msg)msg.textContent='✗ '+(d.error||'failed');
-  }catch(e){if(msg)msg.textContent='✗ '+e;}
+  const previous=last?.settings?.[k];
+  if(last?.settings)last.settings[k]=v;uiRefresh();
+  return queueSetting(k,{[k]:v},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
+    if(last?.settings)last.settings[k]=previous;
+  });
 }
 async function toggleMute(sid,mute){
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mute_session:sid,muted:mute})});
-    const d=await r.json();
-    if(!d.ok)return alert(d.error||'failed');
-    const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);
-    if(s)s.muted=mute;
-    uiRefresh();
-  }catch(e){alert(e);}
+  const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);if(!s)return;
+  const previous=s.muted;s.muted=mute;uiRefresh();
+  return queueSetting('mute:'+sid,{mute_session:sid,muted:mute},()=>{},()=>{s.muted=previous;},
+    'msg-'+sid);
 }
 // multi-question asks: ONE question on screen at a time, ‹ › to move between them
 // (keeps a 3-question ask from swallowing the whole screen)
@@ -2270,19 +2478,20 @@ function mqBlock(s,p,pre){
   const oth=(st.other[qi]||'').trim();
   const picked=[...sel].sort().map(d=>(q.options[d-1]||{}).label)
     .concat(oth?['“'+oth+'”']:[]).join(', ');
+  const locked=nativeRequestLocked(sid,p.nonce);
   return`<div class="ptool"><span class="ptlabel">multi-part question (${qs.length}) — waiting on you</span>
-      <button class="xbtn" title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
+      <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
-    <div class="mqnav"><button class="mqarr" ${qi===0?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
+    <div class="mqnav"><button class="mqarr" ${qi===0||locked?'disabled':''} onclick="mqNav('${sid}',-1)">‹</button>
       <span class="mqpos"><b>${qi+1}</b> of ${qs.length} · ${donecnt}/${qs.length} answered</span>
-      <button class="mqarr" ${qi===qs.length-1?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
+      <button class="mqarr" ${qi===qs.length-1||locked?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
     <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}"
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
+    ${q.allowOther!==false?`<div class="freetext"><input ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
       oninput="mqOther('${sid}',${qi},this.value)"></div>`:''}
     <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
-    <div class="pbtns"><button class="pbtn send" onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
+    <div class="pbtns"><button class="pbtn send" ${locked?'disabled':''} onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
 }
 function mqToggle(sid,qi,d,multi,total){
   const st=mqSel[sid];if(!st)return;
@@ -2309,11 +2518,14 @@ function mqSend(sid,nonce,pre){
     else a.digits=digits;
     answers.push(a);
   }
-  const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
-  act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
+    return act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
+  });
 }
 function elicitationBlock(s,p,pre){
   const sid=s.session_id;
+  const locked=nativeRequestLocked(sid,p.nonce);
   const draft=elicitDraft[sid]=elicitDraft[sid]||{};
   const fields=(p.fields||[]).map((f,i)=>{
     const key=enc(f.name),value=draft[f.name];
@@ -2333,9 +2545,9 @@ function elicitationBlock(s,p,pre){
     <div class="qtext">${esc(p.message||'')}</div>${fields}
     ${safeUrl?`<a class="jump" href="${esc(p.url)}" target="_blank" rel="noopener">open request ↗</a>`:''}
     <div class="pbtns">
-      <button class="pbtn allow" onclick="sendElicitation('${sid}','${p.nonce}','accept','${pre}')">accept</button>
-      <button class="pbtn deny" onclick="sendElicitation('${sid}','${p.nonce}','decline','${pre}')">decline</button>
-      <button class="pbtn" onclick="sendElicitation('${sid}','${p.nonce}','cancel','${pre}')">cancel</button>
+      <button class="pbtn allow" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','accept','${pre}')">accept</button>
+      <button class="pbtn deny" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','decline','${pre}')">decline</button>
+      <button class="pbtn" ${locked?'disabled':''} onclick="sendElicitation('${sid}','${p.nonce}','cancel','${pre}')">cancel</button>
     </div><div class="actmsg" id="${pre}-${sid}"></div></div>`;
 }
 function elicitText(sid,key,value){(elicitDraft[sid]||(elicitDraft[sid]={}))[decodeURIComponent(key)]=value;}
@@ -2358,7 +2570,8 @@ function sendElicitation(sid,nonce,choice,pre){
     if(f.required&&(content[f.name]==null||content[f.name]===''||(Array.isArray(content[f.name])&&!content[f.name].length)))
       return alert(`${f.label||f.name} is required`);
   }
-  act(sid,{type:'elicitation',nonce,choice,content:choice==='accept'?content:undefined},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,
+    {type:'elicitation',nonce,choice,content:choice==='accept'?content:undefined},pre));
 }
 // On the CARD a question is only a SIGNAL — the option buttons, Other input and
 // per-question nav ate the fleet list. Tapping it opens the full view with the
@@ -2389,14 +2602,15 @@ function pendingBox(s,pre='msg'){
       <div class="actmsg" id="${pre}-${s.session_id}"></div></div>`;
   }
   if(p.kind==='permission'){
+    const locked=nativeRequestLocked(s.session_id,p.nonce);
     return`<div class="pend">
       <div class="ptool">permission: ${esc(p.tool)} — waiting on you</div>
       <pre>${esc(p.input_summary||'')}</pre>
       <div class="pbtns">
-        <button class="pbtn allow" onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
-        <button class="pbtn always" onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
-        <button class="pbtn deny" onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
-        ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
+        <button class="pbtn allow" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
+        <button class="pbtn always" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>
+        <button class="pbtn deny" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
+        ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
       </div>
       <div class="actmsg" id="${pre}-${s.session_id}"></div>
     </div>`;
@@ -2406,16 +2620,20 @@ function pendingBox(s,pre='msg'){
 }
 async function setSessionMode(sid,mode,pre='msg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
-  if(!s||s.provider!=='codex')return;
+  if(!s||s.provider!=='codex'||providerModeActions.has(sid))return;
   const previous=s.collaboration_mode||'default';
-  s.collaboration_mode=mode;uiRefresh();
+  providerModeActions.set(sid,{kind:'mode'});s.collaboration_mode=mode;uiRefresh();
+  const message=()=>document.getElementById(pre+'-'+sid)||document.getElementById(pre);
+  if(message())message().textContent='changing mode…';
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,type:'mode',mode})});
     const d=await r.json();
-    if(!d.ok){s.collaboration_mode=previous;uiRefresh();alert(d.error||'mode change failed');return;}
-    s.collaboration_mode=d.mode||mode;uiRefresh();
-  }catch(e){s.collaboration_mode=previous;uiRefresh();alert('mode change failed: '+e);}
+    if(!r.ok||!d.ok)throw new Error(d.error||'mode change failed');
+    s.collaboration_mode=d.mode||mode;providerModeActions.delete(sid);uiRefresh();
+    if(message())message().textContent='mode changed ✓';
+  }catch(e){s.collaboration_mode=previous;providerModeActions.delete(sid);uiRefresh();
+    if(message())message().textContent='✗ '+String(e.message||e);}
 }
 function setClaudePermissionMode(sid,mode,pre='msg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
@@ -2430,32 +2648,40 @@ function setClaudePermissionMode(sid,mode,pre='msg'){
   applyClaudePermissionMode(s,mode,pre);
 }
 async function applyClaudePermissionMode(s,mode,pre){
+  if(providerModeActions.has(s.session_id))return;
   const previous=s.permission_mode;
   if(previous===mode)return;
-  s.permission_mode=mode;uiRefresh();
+  providerModeActions.set(s.session_id,{kind:'permission'});s.permission_mode=mode;uiRefresh();
+  const message=()=>document.getElementById(pre+'-'+s.session_id)||document.getElementById(pre);
+  if(message())message().textContent='changing permissions…';
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:s.session_id,type:'permission_mode',mode})});
     const d=await r.json();
-    if(!r.ok||!d.ok){s.permission_mode=previous;uiRefresh();alert(d.error||'permission mode change failed');return;}
-    s.permission_mode=d.mode||mode;uiRefresh();
-  }catch(e){s.permission_mode=previous;uiRefresh();alert('permission mode change failed: '+e);}
+    if(!r.ok||!d.ok)throw new Error(d.error||'permission mode change failed');
+    s.permission_mode=d.mode||mode;providerModeActions.delete(s.session_id);uiRefresh();
+    if(message())message().textContent='permissions changed ✓';
+  }catch(e){s.permission_mode=previous;providerModeActions.delete(s.session_id);uiRefresh();
+    if(message())message().textContent='✗ '+String(e.message||e);}
 }
 async function act(sid,payload,pre='msg',optimisticId=null){
+  const requestStarted=performance.now();
   const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
   const quickId=isQuick?beginQuickResponse(sid,payload):null;
-  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid);
+  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid)||document.getElementById(pre);
     if(el)el.textContent=text;return el;};
   if(payload.type!=='ping')setMessage('sending…');
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,...payload})});
     const d=await r.json();
+    if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
+      performance.now()-requestStarted);
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
       d.ok&&['option','multiq'].includes(payload.type));
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
     const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
-    if(!d.ok&&!el&&quickId==null)alert(d.error||'failed');
+    if(!d.ok&&!el&&quickId==null&&payload.type!=='focus')alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
       answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
@@ -2463,10 +2689,12 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     }
     return d;
   }catch(e){
+    if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
+      performance.now()-requestStarted);
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
     if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
     const el=setMessage('✗ '+e);
-    if(!el&&quickId==null)alert('request failed: '+e);
+    if(!el&&quickId==null&&payload.type!=='focus')alert('request failed: '+e);
     return {ok:false,error:String(e)};
   }
 }
@@ -2487,8 +2715,10 @@ function answerPreview(sid,answers){
   }).join('\n');
 }
 function sendOption(sid,nonce,digits,pre){
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
-  act(sid,{type:'option',nonce,digits},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
+    return act(sid,{type:'option',nonce,digits},pre,optimisticId);
+  });
 }
 function toggleOpt(sid,d){
   const s=multiSel[sid];s.has(d)?s.delete(d):s.add(d);uiRefresh();
@@ -2497,20 +2727,36 @@ function sendMulti(sid,nonce,n,pre){
   const digits=[...(multiSel[sid]||[])].sort();
   const other=(otherDraft[sid]||'').trim();
   if(!digits.length&&!other)return alert('pick at least one option');
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
-  act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
+    return act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
+  });
 }
 function sendOther(sid,nonce,n,pre){
   const other=(otherDraft[sid]||'').trim();
   if(!other)return alert('type your answer first');
-  const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
-  act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
+  return withNativeRequestLock(sid,nonce,()=>{
+    const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
+    return act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
+  });
 }
 function sendDismiss(sid,nonce,pre){
-  act(sid,{type:'dismiss',nonce},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'dismiss',nonce},pre));
 }
 // desktop only: pointless from the phone — it focuses a tab on the Mac
-function focusSession(sid){act(sid,{type:'focus'});}
+async function focusSession(sid,button=null){
+  if(terminalActions.get(sid)?.busy)return;
+  const feedbackStarted=performance.now(),original=button?.textContent||'Terminal';
+  terminalActions.set(sid,{busy:true,ok:false,error:''});
+  if(button){button.disabled=true;button.textContent='Opening…';}
+  recordInputFeedback(feedbackStarted,'terminal');
+  const result=await act(sid,{type:'focus'});
+  terminalActions.set(sid,{busy:false,ok:!!result.ok,error:result.error||''});
+  if(button&&button.isConnected){button.disabled=false;button.textContent=result.ok?'Opened ✓':'Retry';
+    if(!result.ok)button.title=result.error||'Could not open terminal';}
+  setTimeout(()=>{const item=terminalActions.get(sid);if(item&&!item.busy){terminalActions.delete(sid);if(last)render(last,true);}},3000);
+  return result;
+}
 
 // in-app interstitial — a native confirm() is easy to dismiss by reflex on a phone,
 // and stopping a turn is destructive (the work in flight is lost)
@@ -2654,14 +2900,14 @@ function stopAgentParent(sid,pre='amsg'){
 }
 function copyTxt(ev,el){
   ev.stopPropagation();
-  if(!navigator.clipboard)return;
+  const original=el.textContent;el.textContent='copying…';
+  if(!navigator.clipboard){el.textContent='copy unavailable';setTimeout(()=>{el.textContent=original},1200);return;}
   navigator.clipboard.writeText(el.dataset.copy).then(()=>{
-    const o=el.textContent;el.textContent='copied ✓';
-    setTimeout(()=>{el.textContent=o},900);   // UX flash only
-  });
+    el.textContent='copied ✓';setTimeout(()=>{el.textContent=original},900);
+  }).catch(()=>{el.textContent='copy failed';setTimeout(()=>{el.textContent=original},1200);});
 }
 function sendPerm(sid,nonce,choice,pre='msg'){
-  act(sid,{type:'permission',nonce,choice},pre);
+  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'permission',nonce,choice},pre));
 }
 function sendText(sid,ftPre='ft',msgPre='msg'){
   const inp=document.getElementById(ftPre+'-'+sid);
@@ -2681,6 +2927,7 @@ function sendText(sid,ftPre='ft',msgPre='msg'){
 // Menu INSERTS (never sends): most skills take args, and it keeps the send path
 // — with its destructive-command confirm — as the single way anything fires.
 const cmdCache={};          // sessionId -> [{name,desc,scope,danger}]
+const cmdLoads={},cmdErrors={};
 let slashBox=null;          // id of the open menu's container, or null
 function slashClose(){
   if(!slashBox)return;
@@ -2693,21 +2940,27 @@ async function slashInput(sid,pre){
   const v=(inp&&inp.value)||'';
   // menu lives while the text is a single command/skill token; a space starts args
   if((!v.startsWith('/')&&!v.startsWith('$'))||/\s/.test(v))return slashClose();
+  const box=document.getElementById('slash-'+pre+'-'+sid);if(!box)return;
+  slashBox='slash-'+pre+'-'+sid;
   if(!cmdCache[sid]){
-    cmdCache[sid]=[];       // in-flight guard: one fetch per session
-    try{
-      const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
-      const d=await r.json();
-      cmdCache[sid]=d.commands||[];
-    }catch(e){cmdCache[sid]=[];}
+    if(!cmdLoads[sid]){
+      box.innerHTML='<div class="slashmenu"><div class="slashempty"><span class="delivery sending" aria-hidden="true">◌</span> loading commands…</div></div>';
+      cmdLoads[sid]=(async()=>{try{
+        const r=await fetch('/api/commands?sid='+encodeURIComponent(sid),{cache:'no-store'});
+        const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'commands unavailable');
+        cmdCache[sid]=d.commands||[];delete cmdErrors[sid];
+      }catch(e){cmdErrors[sid]=String(e.message||e);}
+      finally{delete cmdLoads[sid];}})();
+    }
+    await cmdLoads[sid];
+    const current=document.getElementById(pre+'-'+sid);
+    if(!current||current.value!==v)return;
   }
+  if(cmdErrors[sid]){box.innerHTML=`<div class="slashmenu"><div class="slashempty">${esc(cmdErrors[sid])} <button onclick="retryCommands('${sid}','${pre}')">retry</button></div></div>`;return;}
   const q=v.slice(1).toLowerCase();
   const hits=cmdCache[sid].filter(c=>c.name[0]===v[0]&&c.name.slice(1).toLowerCase().includes(q))
     .sort((a,b)=>(a.name.slice(1).toLowerCase().startsWith(q)?0:1)-(b.name.slice(1).toLowerCase().startsWith(q)?0:1))
     .slice(0,40);
-  const box=document.getElementById('slash-'+pre+'-'+sid);
-  if(!box)return;
-  slashBox='slash-'+pre+'-'+sid;
   box.innerHTML=hits.length?`<div class="slashmenu">${hits.map(c=>`
     <button class="slashrow" onmousedown="event.preventDefault()" onclick="slashPick('${sid}','${pre}','${enc(c.name)}')">
       <span class="scmd">${esc(c.name)}${c.danger?' <span class="sdanger">destructive</span>':''}</span>
@@ -2716,6 +2969,7 @@ async function slashInput(sid,pre){
     </button>`).join('')}</div>`
     :`<div class="slashmenu"><div class="slashempty">no command matches “${esc(v)}”</div></div>`;
 }
+function retryCommands(sid,pre){delete cmdCache[sid];delete cmdErrors[sid];slashInput(sid,pre);}
 function slashPick(sid,pre,name){
   const inp=document.getElementById(pre+'-'+sid);
   if(!inp)return;
@@ -3144,7 +3398,7 @@ async function doSpawn(){
   spawnProvisional={id,spec,status:'starting',error:'',canRetry:false,serverSessionId:null};
   spawnMsg='';newMessage='';newOpen=false;
   openSession(id);render(last,true);
-  recordInputFeedback(feedbackStarted);
+  recordInputFeedback(feedbackStarted,'spawn');
   await startSpawn(spec,spawnProvisional);
 }
 async function startSpawn(spec,provisional){
@@ -3222,9 +3476,11 @@ function historyCount(f){
   return`${total} session${total===1?'':'s'}`;
 }
 function historyRows(items){
-  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':esc(historyData.error||'history unavailable')}</div>`;
+  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':
+    `${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(true)">retry</button>`}</div>`;
   return items.map(item=>historyRow(item)).join('')+
     (historyLoading?'<div class="ctxload">loading history…</div>':'')+
+    (!historyLoading&&!historyData.ok?`<div class="ctxload searcherror">✗ ${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(${items.length?'false':'true'})">retry</button></div>`:'')+
     (!historyLoading&&historyData.next_cursor!=null?`<button class="newbtn" onclick="loadHistory(false)">
       show ${Math.min(100,Math.max(0,historyData.total-(historyData.items||[]).length))} more</button>`:'');
 }
@@ -3246,10 +3502,11 @@ function historyRow(item,pinnedView=false){
       ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
         ${canReopen?`<button class="historyaction" onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">Reopen</button>`:''}`
         :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(action)}</button>`}
-      <button class="spin${pinnedSessions.has(sid)?' on':''}" aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
-        title="${pinnedSessions.has(sid)?'unpin session':'pin session to top'}"
+      <button class="spin${pinnedSessions.has(sid)?' on':''}" ${pinActions.get(sid)?.busy?'disabled':''} aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
+        title="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
         onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${encoded}'))">📌</button>
     </div>
+    ${pinFeedbackHtml(sid)}
     ${open?`<div class="historydetail"><div class="kv">
       <span>session</span>${cpb(sid)}
       <span>provider</span><b>${esc(provider)}</b>
@@ -3398,14 +3655,21 @@ function spawnForecastHtml(){const f=spawnForecast;if(!f)return'<div class="spaw
 
 let insightsDays=7;
 const insightsCache={};   // days -> {t, data, fetching}
+let insightsSequence=0;
 function loadInsights(force){
-  const c=insightsCache[insightsDays];
+  const days=insightsDays,c=insightsCache[days];
   if(!force&&c&&(c.fetching||(c.data&&Date.now()-c.t<60000)))return;
-  insightsCache[insightsDays]={...(c||{}),fetching:true};
-  fetch('/api/insights?days='+insightsDays,{cache:'no-store'}).then(r=>r.json()).then(d=>{
-    insightsCache[insightsDays]={t:Date.now(),data:d};
-    render(last,true);
-  }).catch(()=>{delete insightsCache[insightsDays];});
+  const sequence=++insightsSequence;
+  insightsCache[days]={...(c||{}),fetching:true,error:''};
+  fetch('/api/insights?days='+days,{cache:'no-store'}).then(async r=>{
+    const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Insights unavailable');return d;
+  }).then(d=>{
+    insightsCache[days]={t:Date.now(),data:d,fetching:false,error:''};
+    if(insightsDays===days&&sequence===insightsSequence)render(last,true);
+  }).catch(error=>{
+    insightsCache[days]={...(insightsCache[days]||{}),fetching:false,error:String(error.message||error)};
+    if(insightsDays===days&&sequence===insightsSequence)render(last,true);
+  });
 }
 function setInsightsDays(n){insightsDays=n;render(last,true);loadInsights();}
 function insTable(heads,rows){
@@ -3452,11 +3716,13 @@ function insightsSection(){
       +insFold('topsess','top sessions (lifetime $)',
         insTable([['session'],['project'],['$',1]],
           d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
-  }else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
+  }else if(c?.error){body=`<div class="ctxload" role="alert">✗ ${esc(c.error)} <button onclick="loadInsights(true)">retry</button></div>`;}
+  else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
   return`<div class="insightspanel">${body}</div>`;
 }
 
 let last=null;
+let pollSequence=0,pollApplied=0,pollController=null;
 function render(f,force){
   if(!f||!f.sessions)return;
   const renderStarted=performance.now();
@@ -3531,12 +3797,16 @@ function render(f,force){
 }
 
 async function tick(){
-  const pollStarted=performance.now();
+  const pollStarted=performance.now(),sequence=++pollSequence;
+  if(pollController)pollController.abort();
+  const controller=new AbortController();pollController=controller;
   try{
-    const r=await fetch('/api/fleet',{cache:'no-store'});
+    const r=await fetch('/api/fleet',{cache:'no-store',signal:controller.signal});
     const payload=Number(r.headers.get('X-Fleet-Payload-Bytes')||r.headers.get('Content-Length'));
     if(Number.isFinite(payload))perfRecord('poll_payload_bytes',payload);
-    last=await r.json();
+    const next=await r.json();
+    if(sequence<pollApplied||sequence!==pollSequence)return;
+    pollApplied=sequence;last=next;
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
     $('#stale').style.display='none';
     render(last);
@@ -3544,8 +3814,8 @@ async function tick(){
     if(currentRoute==='now')loadBriefing();
     if(currentRoute==='insights')loadBudgets();
     if(currentRoute==='history'&&Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
-  }catch(e){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}
-  finally{perfRecord('poll_ms',performance.now()-pollStarted);}
+  }catch(e){if(e.name!=='AbortError'&&sequence===pollSequence){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}}
+  finally{if(pollController===controller)pollController=null;if(sequence===pollSequence)perfRecord('poll_ms',performance.now()-pollStarted);}
 }
 navigateTo(currentRoute,false);
 tick();setInterval(tick,2000);

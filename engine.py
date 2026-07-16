@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, datetime as dt
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, datetime as dt
 from collections import deque
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
@@ -27,6 +27,7 @@ CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
 CLAUDE_USAGE = os.path.join(BASE, "usage.json")
 CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
 CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
+CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 CLAUDE_USAGE_PREFS = os.path.join(
     HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
 
@@ -46,7 +47,7 @@ DEFAULT_CONFIG = {
     "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
     "digest_schedule_zone": "UTC",
     "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
-    "pinned_sessions": [],               # shared watchlist, ordered by UI urgency
+    "pinned_sessions": [],               # shared watchlist, stable insertion order
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
@@ -444,6 +445,16 @@ class Tail:
         self.active_skill = None        # skill turn-cost attribution (most recent wins)
         self.active_command = None       # slash command running this turn (/implement, …)
         self.prev_usage = None          # (epoch, model, cache_read+cache_write) of last API call
+        # Bounded operational-status state. CacheWrite is recorded only when the
+        # value changes, matching Claude's statusline approximation of one point
+        # per turn while avoiding duplicate renders of the same usage payload.
+        self.cache_write_history = deque(maxlen=50)
+        self.cache_write_previous = None
+        self.cache_write_spikes = 0
+        self.cache_write_peak = 0
+        self.cache_write_last_spike_at = None
+        self.cache_write_last_spike_value = None
+        self.turn_usage = [0, 0, 0, 0]  # input, cache write, cache read, output
         self.saw_compaction = False     # compaction marker since last API call
         self.skill_since_usage = None   # Skill invoked since last API call (bust suspect)
         self.last_compact_ep = 0        # epoch of the newest compact_boundary seen
@@ -452,6 +463,11 @@ class Tail:
         # the CANCELLATION record ("The user doesn't want to proceed with this tool
         # use"), and the only place a killed subagent is unambiguously marked
         self.errored_tools = set()
+        # Newer Claude builds also emit a task-notification when a background
+        # agent completes or is killed. Keep only the newest terminal notice per
+        # agent. scan_agents compares its timestamp with the child transcript so
+        # a later SendMessage/resume is never hidden by a stale notification.
+        self.agent_terminals = {}
 
     def poll(self):
         try:
@@ -496,11 +512,17 @@ class Tail:
         if o.get("type") == "system":
             self._system_event(o, ts)
             return
+        if o.get("type") == "queue-operation":
+            self._agent_terminal_event(o.get("content"), ts)
+            return
         if o.get("type") == "attachment":
             # mid-turn user messages never become user rows — they arrive as
             # queued_command attachments (plus transient queue-operation rows,
             # which we ignore so each message folds exactly once)
             a = o.get("attachment") or {}
+            if a.get("commandMode") == "task-notification":
+                self._agent_terminal_event(a.get("prompt"), ts)
+                return
             txt = ""
             if a.get("type") == "queued_command" \
                and (a.get("origin") or {}).get("kind") == "human":
@@ -537,6 +559,11 @@ class Tail:
                 self.to += u.get("output_tokens", 0)
                 self.last_usage = u
                 self.model = m.get("model") or self.model
+                self.turn_usage[0] += u.get("input_tokens", 0)
+                self.turn_usage[1] += u.get("cache_creation_input_tokens", 0)
+                self.turn_usage[2] += u.get("cache_read_input_tokens", 0)
+                self.turn_usage[3] += u.get("output_tokens", 0)
+                self._status_cache_track(u, ts)
                 self._cache_track(u, ts, m.get("model") or self.model)
                 if self.active_skill:   # attribute this turn's spend to the running skill
                     st = self._stat((self._day(ts), "skill", self.active_skill))
@@ -595,6 +622,7 @@ class Tail:
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
                 self.active_skill = self.active_command = None
+                self.turn_usage = [0, 0, 0, 0]
                 if not o.get("isMeta"):
                     if isinstance(content, str):
                         utxt = content
@@ -611,6 +639,26 @@ class Tail:
                                                      "[SYSTEM NOTIFICATION", "<task-notification")):
                         self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
+
+    def _agent_terminal_event(self, raw, ts):
+        """Fold Claude's bounded task-notification XML into terminal agent state."""
+        if not isinstance(raw, str) or len(raw) > 100_000 \
+           or "<task-notification>" not in raw:
+            return
+        task = re.search(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>", raw)
+        status = re.search(r"<status>(completed|killed|failed)</status>", raw,
+                           flags=re.I)
+        if not task or not status:
+            return
+        agent_id = task.group(1)
+        if not agent_id.startswith("agent-"):
+            agent_id = "agent-" + agent_id
+        current = self.agent_terminals.get(agent_id)
+        if current and (iso_epoch(current.get("ts")) or 0) > (iso_epoch(ts) or 0):
+            return
+        self.agent_terminals[agent_id] = {
+            "status": status.group(1).lower(), "ts": ts,
+        }
 
     def _tool_add(self, b, ts):
         name, inp = b.get("name"), b.get("input") or {}
@@ -821,6 +869,51 @@ class Tail:
         self.saw_compaction = False
         self.skill_since_usage = None
 
+    def _status_cache_track(self, usage, ts):
+        """Keep the bounded CacheWrite graph/spike ledger used by full chat."""
+        try:
+            value = max(0, int(usage.get("cache_creation_input_tokens", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            value = 0
+        if value == self.cache_write_previous:
+            return
+        self.cache_write_previous = value
+        self.cache_write_history.append(value)
+        self.cache_write_peak = max(self.cache_write_peak, value)
+        if value > 20_000:
+            self.cache_write_spikes += 1
+            self.cache_write_last_spike_at = iso_epoch(ts)
+            self.cache_write_last_spike_value = value
+
+    def status_metrics(self, cfg):
+        """Bounded provider telemetry for a session or subagent status strip."""
+        usage = self.last_usage or {}
+
+        def token(name):
+            try:
+                return max(0, int(usage.get(name, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        uncached = token("input_tokens")
+        cache_write = token("cache_creation_input_tokens")
+        cache_read = token("cache_read_input_tokens")
+        denominator = uncached + cache_write + cache_read
+        turn_cost = (usd(cfg, model_family(self.model), *self.turn_usage)
+                     if any(self.turn_usage) else None)
+        return {
+            "cache_read_pct": (round(100 * cache_read / denominator)
+                               if denominator else None),
+            "cache_write": cache_write if self.last_usage is not None else None,
+            "cache_write_history": list(self.cache_write_history),
+            "cache_write_spikes": self.cache_write_spikes,
+            "cache_write_peak": (self.cache_write_peak
+                                 if self.cache_write_history else None),
+            "cache_write_last_spike_at": self.cache_write_last_spike_at,
+            "cache_write_last_spike_value": self.cache_write_last_spike_value,
+            "turn_cost": round(turn_cost, 4) if turn_cost is not None else None,
+        }
+
     def _day(self, ts):
         return str(ts)[:10] if ts else time.strftime("%Y-%m-%d")
 
@@ -911,6 +1004,15 @@ class Engine:
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
+        # Read-only HTTP context/file requests consume immutable bounded
+        # projections from the last completed scan. They must not wait behind
+        # unrelated ledger/history/status work under scan_lock.
+        self._claude_context_snapshots = {}
+        self._claude_agent_context_snapshots = {}
+        self._finalized_agent_revisions = {}
+        self._session_ledger_signatures = {}
+        self._session_ledger_written_at = {}
+        self._session_ledger_live_ids = None
         self.scan_timings_ms = deque(maxlen=240)
         self.scan_wait_timings_ms = deque(maxlen=240)
         self.last_state_journal_ms = 0.0
@@ -918,6 +1020,12 @@ class Engine:
         self._workstream_cache = {}       # canonical cwd -> (expires_at, identity)
         self._workstreams_snapshot_cache = None
         self._closed_sessions_cache = None
+        self._compact_settings_cache = {}
+        self._operational_git_cache = {}
+        self._operational_git_pending = set()
+        self._operational_git_lock = threading.Lock()
+        self._operational_git_queue = queue.Queue(maxsize=300)
+        self._operational_git_workers_started = False
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         ledger_path = os.path.join(BASE, "ledger.db")
         self.ledger_status = self._prepare_ledger(ledger_path)
@@ -1248,8 +1356,236 @@ class Engine:
             key.encode("utf-8")).hexdigest()[:20]
         self._workstream_cache[canonical] = (now + 30, dict(identity))
         if len(self._workstream_cache) > 2000:
-            self._workstream_cache = {canonical: self._workstream_cache[canonical]}
+            while len(self._workstream_cache) > 2000:
+                self._workstream_cache.pop(next(iter(self._workstream_cache)))
         return identity
+
+    @staticmethod
+    def _settings_signature(paths):
+        out = []
+        for path in paths:
+            try:
+                stat = os.stat(path)
+                out.append((path, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                out.append((path, None, None))
+        return tuple(out)
+
+    def claude_compact_headroom(self, cwd, context_tokens, context_window, identity=None):
+        """Return explicit Claude auto-compact headroom, or None when unknown.
+
+        Project/user settings may contain credentials. Read and cache only the
+        two compact env values plus the enable flag; never retain or return the
+        raw settings object.
+        """
+        try:
+            context_tokens = max(0, int(context_tokens))
+            context_window = max(1, int(context_window))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not str(cwd or "").strip():
+            return None
+        cwd = os.path.realpath(str(cwd))
+        identity = identity or self.workstream_identity(cwd)
+        root = identity.get("root") if identity.get("kind") == "git" else cwd
+        dirs = []
+        for path in (root, cwd):
+            if path and path not in dirs:
+                dirs.append(path)
+        paths = [CLAUDE_SETTINGS]
+        for directory in dirs:
+            paths.extend((os.path.join(directory, ".claude", "settings.json"),
+                          os.path.join(directory, ".claude", "settings.local.json")))
+        signature = self._settings_signature(paths)
+        key = (cwd, signature)
+        if key in self._compact_settings_cache:
+            threshold = self._compact_settings_cache[key]
+        else:
+            enabled = True
+            raw_window = raw_pct = None
+            explicit = False
+            for path in paths:
+                try:
+                    with open(path) as handle:
+                        settings = json.load(handle)
+                except (OSError, ValueError, TypeError):
+                    continue
+                if not isinstance(settings, dict):
+                    continue
+                if settings.get("autoCompactEnabled") is False:
+                    enabled = False
+                env = settings.get("env") or {}
+                if not isinstance(env, dict):
+                    continue
+                if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in env:
+                    raw_window = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+                    explicit = True
+                if "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" in env:
+                    raw_pct = env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+                    explicit = True
+            threshold = None
+            if enabled and explicit:
+                try:
+                    window = int(raw_window) if raw_window is not None else context_window
+                    pct = float(raw_pct) if raw_pct is not None else 100.0
+                    if window > 0 and 0 < pct <= 100:
+                        threshold = round(min(window, context_window) * pct / 100)
+                except (TypeError, ValueError, OverflowError):
+                    threshold = None
+            self._compact_settings_cache[key] = threshold
+            if len(self._compact_settings_cache) > 300:
+                while len(self._compact_settings_cache) > 300:
+                    self._compact_settings_cache.pop(next(iter(self._compact_settings_cache)))
+        return max(0, threshold - context_tokens) if threshold is not None else None
+
+    def _operational_git_worker(self):
+        while True:
+            root, worktree = self._operational_git_queue.get()
+            try:
+                self._operational_git_probe(root, worktree)
+            finally:
+                self._operational_git_queue.task_done()
+
+    def _operational_git_probe(self, root, worktree):
+        data = {"root": root, "worktree": worktree, "ahead": None,
+                "behind": None, "observed_at": time.time()}
+        try:
+            result = self._bounded_process(
+                ["git", "-C", worktree, "rev-list", "--left-right", "--count",
+                 "refs/remotes/origin/main...HEAD"], timeout=4, max_output=4096)
+            if result.get("ok"):
+                values = result.get("stdout", "").strip().split()
+                if len(values) >= 2 and all(value.isdigit() for value in values[:2]):
+                    data["behind"], data["ahead"] = map(int, values[:2])
+        except Exception:
+            pass
+        finally:
+            with self._operational_git_lock:
+                self._operational_git_cache[worktree] = (
+                    time.monotonic() + 8, data)
+                self._operational_git_pending.discard(worktree)
+                if len(self._operational_git_cache) > 300:
+                    while len(self._operational_git_cache) > 300:
+                        self._operational_git_cache.pop(
+                            next(iter(self._operational_git_cache)))
+
+    def operational_git(self, cwd, identity=None):
+        """Return cached Git identity and refresh it off the scan/request path."""
+        if not str(cwd or "").strip():
+            return {"worktree": None, "worktree_label": None, "ahead": None,
+                    "behind": None, "git_observed_at": None}
+        identity = identity or self.workstream_identity(cwd)
+        worktree = identity.get("worktree") or os.path.realpath(str(cwd or ""))
+        out = {"worktree": worktree,
+               "worktree_label": os.path.basename(worktree.rstrip(os.sep)) or worktree,
+               "ahead": None, "behind": None, "git_observed_at": None}
+        if identity.get("kind") != "git" or identity.get("missing"):
+            return {"worktree": None, "worktree_label": None, "ahead": None,
+                    "behind": None, "git_observed_at": None}
+        now = time.monotonic()
+        with self._operational_git_lock:
+            cached = self._operational_git_cache.get(worktree)
+            if cached:
+                data = cached[1]
+                out.update(ahead=data.get("ahead"), behind=data.get("behind"),
+                           git_observed_at=data.get("observed_at"))
+            if (not cached or cached[0] <= now) and worktree not in self._operational_git_pending:
+                if not self._operational_git_workers_started:
+                    self._operational_git_workers_started = True
+                    for index in range(2):
+                        threading.Thread(target=self._operational_git_worker, daemon=True,
+                            name=f"fleet-git-status-{index + 1}").start()
+                self._operational_git_pending.add(worktree)
+                try:
+                    self._operational_git_queue.put_nowait(
+                        (identity.get("root"), worktree))
+                except queue.Full:
+                    self._operational_git_pending.discard(worktree)
+        return out
+
+    def session_status_line(self, session, tail=None):
+        context_tokens = session.get("ctx_tokens")
+        context_window = session.get("ctx_window")
+        cwd = session.get("cwd")
+        identity = self.workstream_identity(cwd) if str(cwd or "").strip() else None
+        compact_remaining = None
+        if session.get("provider", "claude") == "claude":
+            compact_remaining = self.claude_compact_headroom(
+                cwd, context_tokens, context_window, identity=identity)
+        metrics = tail.status_metrics(self.cfg) if tail else {}
+        session_cost = session.get("cost")
+        agent_cost = session.get("agent_cost")
+        tree_cost = (round(float(session_cost) + float(agent_cost), 4)
+                     if isinstance(session_cost, (int, float)) and
+                        isinstance(agent_cost, (int, float)) else None)
+        cost_breakdown = []
+        if isinstance(session_cost, (int, float)):
+            cost_breakdown.append({"kind": "main", "label": "Main session",
+                                   "cost": round(float(session_cost), 4)})
+            for agent in (session.get("agents") or [])[:100]:
+                if not isinstance(agent, dict) or not isinstance(agent.get("cost"),
+                                                                  (int, float)):
+                    continue
+                cost_breakdown.append({
+                    "kind": "agent",
+                    "label": str(agent.get("description") or
+                                 agent.get("agent_type") or "Subagent")[:160],
+                    "cost": round(float(agent["cost"]), 4),
+                })
+        return {
+            **self.operational_git(cwd, identity=identity),
+            "branch": session.get("branch"),
+            "model": session.get("model"), "effort": session.get("effort"),
+            "context_tokens": context_tokens, "context_window": context_window,
+            "context_pct": session.get("ctx_pct"),
+            "compact_remaining": compact_remaining,
+            **metrics,
+            "session_cost": session_cost, "agent_cost": agent_cost,
+            "tree_cost": tree_cost,
+            "cost_breakdown": cost_breakdown,
+            "cost_breakdown_omitted": max(0, len(session.get("agents") or []) - 100),
+            "cost_scope": ("estimated" if tree_cost is not None else "unavailable"),
+            "cost_label": "tree",
+            "frozen": False,
+        }
+
+    def agent_status_line(self, parent, info, tail=None, metrics=None):
+        context_tokens = (tail.context_tokens() if tail else info.get("ctx_tokens"))
+        if parent.get("provider", "claude") == "claude":
+            family = model_family(info.get("model"))
+            context_window = self.cfg["context_windows"].get(
+                family, self.cfg["context_windows"]["default"])
+        else:
+            context_window = info.get("ctx_window")
+        context_pct = info.get("ctx_pct")
+        if context_pct is None and context_tokens is not None and context_window:
+            context_pct = round(100 * context_tokens / context_window, 1)
+        compact_remaining = None
+        cwd = parent.get("cwd")
+        identity = self.workstream_identity(cwd) if str(cwd or "").strip() else None
+        if parent.get("provider", "claude") == "claude":
+            compact_remaining = self.claude_compact_headroom(
+                cwd, context_tokens, context_window, identity=identity)
+        cost = info.get("cost")
+        return {
+            **self.operational_git(cwd, identity=identity),
+            "branch": parent.get("branch"), "model": info.get("model"),
+            "effort": info.get("effort"), "context_tokens": context_tokens,
+            "context_window": context_window, "context_pct": context_pct,
+            "compact_remaining": compact_remaining,
+            **(tail.status_metrics(self.cfg) if tail else (metrics or {})),
+            "session_cost": cost, "agent_cost": None, "tree_cost": cost,
+            "cost_scope": ("estimated" if isinstance(cost, (int, float))
+                           else "unavailable"),
+            "cost_label": "agent",
+            "cost_breakdown": ([{"kind": "agent",
+                                  "label": str(info.get("description") or
+                                               info.get("agent_type") or "Subagent")[:160],
+                                  "cost": round(float(cost), 4)}]
+                               if isinstance(cost, (int, float)) else []),
+            "cost_breakdown_omitted": 0,
+            "frozen": info.get("state") in ("done", "ended", "closed"),
+        }
 
     def workstream_records(self, sessions, closed):
         """Group live and historical sessions by canonical repository/project."""
@@ -1388,6 +1724,7 @@ class Engine:
             phase_started = current
 
         sessions = []
+        claude_tails = {}
         live_claude_ids = set()
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
@@ -1409,7 +1746,8 @@ class Engine:
                     "permission_modes": ["default", "acceptEdits", "plan"],
                     "last_msg": None, "_latest_prose": None, "repo_outcome": None,
                     "state": state, "reg_status": reg_status, "quiet_s": 0,
-                    "ctx_tokens": None, "ctx_pct": None, "total_tokens": None,
+                    "ctx_tokens": None, "ctx_window": None, "ctx_pct": None,
+                    "total_tokens": None,
                     "cost": None, "cost_source": "unavailable",
                     "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
                                    if reg.get("bridgeSessionId") else None),
@@ -1429,6 +1767,12 @@ class Engine:
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
+            claude_tails[sid] = mt
+            self._claude_context_snapshots[sid] = {
+                "revision": mt.convo_rev,
+                "messages": copy.deepcopy(list(mt.convo)),
+                "files": copy.deepcopy(list(mt.files)),
+            }
             self.drain_stats(mt)
             mtime = os.path.getmtime(main_path)
             quiet = now - mtime
@@ -1531,7 +1875,8 @@ class Engine:
                 "state": state,
                 "reg_status": reg_status,
                 "quiet_s": round(quiet),
-                "ctx_tokens": ctx, "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
+                "ctx_tokens": ctx, "ctx_window": cw,
+                "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
                 "total_tokens": mt.total_tokens,
                 "cost": round(mt.cost(cfg), 4),
                 "bridge_url": (f"https://claude.ai/code/{reg['bridgeSessionId']}"
@@ -1562,6 +1907,19 @@ class Engine:
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
         }
+        self._claude_context_snapshots = {
+            sid: value for sid, value in self._claude_context_snapshots.items()
+            if sid in live_claude_ids
+        }
+        live_agent_keys = {
+            (str(session.get("session_id") or ""), str(agent.get("agent_id") or ""))
+            for session in sessions if session.get("provider") == "claude"
+            for agent in (session.get("agents") or [])
+        }
+        self._claude_agent_context_snapshots = {
+            key: value for key, value in self._claude_agent_context_snapshots.items()
+            if key in live_agent_keys
+        }
         live_pids = {int(session.get("pid") or 0) for session in sessions
                      if session.get("provider") == "claude"}
         self._claude_command_cache = {
@@ -1591,6 +1949,8 @@ class Engine:
         phase("codex")
         muted = self.cfg.get("muted_sessions") or {}
         for session in sessions:
+            session["status_line"] = self.session_status_line(
+                session, claude_tails.get(session.get("session_id")))
             session["muted"] = session["session_id"] in muted
             self.organize_session(session, now)
         group_order = {"needs_you": 0, "working": 1, "available": 2, "history": 3}
@@ -2180,18 +2540,27 @@ class Engine:
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):
         out = []
         cfg = self.cfg
+        parent_sid = os.path.basename(os.path.dirname(subdir))
         killed = parent.errored_tools if parent else set()
+        terminal = parent.agent_terminals if parent else {}
         for meta_path in glob.glob(os.path.join(subdir, "*.meta.json")):
             agent_id = os.path.basename(meta_path)[:-len(".meta.json")]
             jl = os.path.join(subdir, agent_id + ".jsonl")
             if not os.path.isfile(jl):
                 continue
             try:
-                meta = json.load(open(meta_path))
+                with open(meta_path) as handle:
+                    meta = json.load(handle)
             except Exception:
                 meta = {}
             t = self.tail_for(jl)
             grew = t.poll()
+            self._claude_agent_context_snapshots[(parent_sid, agent_id)] = {
+                "revision": t.convo_rev,
+                "messages": copy.deepcopy(list(t.convo)),
+                "context_tokens": t.context_tokens(),
+                "status_metrics": copy.deepcopy(t.status_metrics(cfg)),
+            }
             self.drain_stats(t)
             mtime = os.path.getmtime(jl)
             quiet = now - mtime
@@ -2218,6 +2587,15 @@ class Engine:
             # 2026-07-14 on session b5996cb1: two agents rejected mid-flight.)
             if meta.get("toolUseId") in killed:
                 state, done = "ended", True
+            elif agent_id in terminal:
+                notice = terminal[agent_id]
+                notice_ep = iso_epoch(notice.get("ts"))
+                child_ep = iso_epoch(t.last_ts)
+                # A task id can be resumed. Only a notice at or after the newest
+                # child row is terminal; later child output supersedes it.
+                if notice_ep is not None and (child_ep is None or notice_ep >= child_ep):
+                    state = "done" if notice.get("status") == "completed" else "ended"
+                    done = True
             elif not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
                 state = "ended"         # canceled/interrupted: no end_turn will ever come
                 done = True             # finalize its spend in the ledger
@@ -2251,7 +2629,14 @@ class Engine:
                              if cfg.get("preview_agents") and not done else None),
             })
             if done:
-                self.ledger_finalize(subdir, agent_id, meta, t)
+                final_revision = (t.convo_rev, t.last_ts, state)
+                final_key = (subdir, agent_id)
+                if self._finalized_agent_revisions.get(final_key) != final_revision:
+                    self.ledger_finalize(subdir, agent_id, meta, t)
+                    self._finalized_agent_revisions[final_key] = final_revision
+                    if len(self._finalized_agent_revisions) > 5000:
+                        self._finalized_agent_revisions.pop(
+                            next(iter(self._finalized_agent_revisions)))
         out.sort(key=lambda a: (a["state"] in ("done", "ended"), a["started"] or ""))
         return out
 
@@ -2282,6 +2667,10 @@ class Engine:
                 pass
             try:
                 self.db.execute("ALTER TABLE session_runs ADD COLUMN transcript_path TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.db.execute("ALTER TABLE session_runs ADD COLUMN status_line_json TEXT")
             except sqlite3.OperationalError:
                 pass
             # rows are CUMULATIVE per transcript (path) — see Tail.stats
@@ -2539,11 +2928,28 @@ class Engine:
     def record_sessions(self, sessions, now):
         try:
             db = self.ensure_db()
+            dirty = False
             for s in sessions:
+                status_line_json = json.dumps(
+                    s.get("status_line") or {}, separators=(",", ":"))
+                if len(status_line_json) > 100_000:
+                    status_line_json = None
+                status_signature = dict(s.get("status_line") or {})
+                status_signature.pop("git_observed_at", None)
+                signature = (
+                    s.get("name"), s.get("project"), s.get("cwd"), s.get("branch"),
+                    s.get("model"), s.get("cost"), s.get("agent_cost"),
+                    s.get("agents_total"), s.get("bridge_url"), s.get("title"),
+                    s.get("provider", "claude"), json.dumps(
+                        status_signature, separators=(",", ":")))
+                sid = s["session_id"]
+                due = now - self._session_ledger_written_at.get(sid, 0) >= 30
+                if self._session_ledger_signatures.get(sid) == signature and not due:
+                    continue
                 db.execute("""INSERT INTO session_runs(session_id,name,project,cwd,branch,
                     model,cost,agent_cost,agents_total,bridge_url,first_seen,last_seen,
-                    closed_at,title,provider,transcript_path)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)
+                    closed_at,title,provider,transcript_path,status_line_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)
                     ON CONFLICT(session_id) DO UPDATE SET
                     name=excluded.name, project=excluded.project, branch=excluded.branch,
                     model=excluded.model, cost=excluded.cost, agent_cost=excluded.agent_cost,
@@ -2551,20 +2957,34 @@ class Engine:
                     last_seen=excluded.last_seen, closed_at=NULL, title=excluded.title,
                     provider=excluded.provider,
                     transcript_path=COALESCE(excluded.transcript_path,
-                                             session_runs.transcript_path)""",
+                                             session_runs.transcript_path),
+                    status_line_json=COALESCE(excluded.status_line_json,
+                                              session_runs.status_line_json)""",
                     (s["session_id"], s["name"], s["project"], s["cwd"], s["branch"],
                      s["model"], s["cost"], s["agent_cost"], s["agents_total"],
                      s["bridge_url"], int(now), int(now), s["title"],
                      s.get("provider", "claude"),
                      (os.path.join(cwd_to_project_dir(s.get("cwd") or ""),
                                    f"{s['session_id']}.jsonl")
-                      if s.get("provider", "claude") == "claude" else None)))
-            live = [s["session_id"] for s in sessions]
-            marks = ",".join("?" * len(live)) or "''"
-            db.execute(f"""UPDATE session_runs SET closed_at=?
-                           WHERE closed_at IS NULL AND session_id NOT IN ({marks})""",
-                       [int(now)] + live)
-            db.commit()
+                     if s.get("provider", "claude") == "claude" else None),
+                     status_line_json))
+                self._session_ledger_signatures[sid] = signature
+                self._session_ledger_written_at[sid] = now
+                dirty = True
+            live = {s["session_id"] for s in sessions}
+            if self._session_ledger_live_ids is None or live != self._session_ledger_live_ids:
+                ordered = sorted(live)
+                marks = ",".join("?" * len(ordered)) or "''"
+                db.execute(f"""UPDATE session_runs SET closed_at=?
+                               WHERE closed_at IS NULL AND session_id NOT IN ({marks})""",
+                           [int(now)] + ordered)
+                self._session_ledger_live_ids = live
+                dirty = True
+            for sid in set(self._session_ledger_signatures) - live:
+                self._session_ledger_signatures.pop(sid, None)
+                self._session_ledger_written_at.pop(sid, None)
+            if dirty:
+                db.commit()
         except Exception as e:
             print(f"session ledger error: {e}", file=sys.stderr, flush=True)
 
@@ -2625,6 +3045,7 @@ class Engine:
                 self._state_event_signatures = {
                     sid: (signature, normalized_state)
                     for sid, signature, normalized_state in rows}
+            dirty = False
             for session in sessions:
                 sid = str(session.get("session_id") or "")
                 previous = self._state_event_signatures.get(sid)
@@ -2655,7 +3076,9 @@ class Engine:
                     record["signature"]))
                 self._state_event_signatures[record["session_id"]] = (
                     record["signature"], record["normalized_state"])
-            db.commit()
+                dirty = True
+            if dirty:
+                db.commit()
         except Exception as exc:
             print(f"state journal error: {exc}", file=sys.stderr, flush=True)
 
@@ -2917,7 +3340,7 @@ Treat this as an independent session. Verify the repository state before changin
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
-                "closed_at", "title", "provider", "transcript_path")
+                "closed_at", "title", "provider", "transcript_path", "status_line_json")
         db = None
         try:
             db = self.ledger_reader()
@@ -2932,6 +3355,13 @@ Treat this as an independent session. Verify the repository state before changin
                     WHERE closed_at IS NOT NULL ORDER BY closed_at DESC""").fetchall()
             out = [dict(zip(cols, r)) for r in rows]
             for row in out:
+                try:
+                    status_line = json.loads(row.pop("status_line_json") or "{}")
+                except (TypeError, ValueError):
+                    status_line = {}
+                if isinstance(status_line, dict) and status_line:
+                    status_line["frozen"] = True
+                    row["status_line"] = status_line
                 row["can_reopen"] = bool(
                     row.get("provider") == "claude" and
                     self._safe_claude_transcript(row.get("session_id"),
@@ -2948,14 +3378,13 @@ Treat this as an independent session. Verify the repository state before changin
     def closed_context(self, sid):
         """Conversation of a CLOSED session: its process is gone, so the registry
         can't resolve it — the ledger's cwd is the only path back to the file."""
-        if str(sid).startswith("codex:"):
-            return self.codex.context(sid)
         row = None
         db = None
         try:
             db = self.ledger_reader()
             row = db.execute(
-                "SELECT cwd, model, cost, title, project, branch, transcript_path "
+                "SELECT cwd, model, cost, title, project, branch, transcript_path, "
+                "status_line_json "
                 "FROM session_runs "
                 "WHERE session_id = ?", (sid,)).fetchone()
         except Exception:
@@ -2963,8 +3392,23 @@ Treat this as an independent session. Verify the repository state before changin
         finally:
             if db is not None:
                 db.close()
+        if not row and str(sid).startswith("codex:"):
+            return self.codex.context(sid)
         if not row:
             return {"ok": False, "error": "unknown session"}
+        try:
+            status_line = json.loads(row[7] or "{}")
+        except (TypeError, ValueError):
+            status_line = {}
+        if isinstance(status_line, dict) and status_line:
+            status_line["frozen"] = True
+        else:
+            status_line = None
+        if str(sid).startswith("codex:"):
+            result = self.codex.context(sid)
+            if result.get("ok"):
+                result.setdefault("info", {})["status_line"] = status_line
+            return result
         fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
         path = self._safe_claude_transcript(sid, row[6] or fallback)
         if not path:
@@ -2982,6 +3426,7 @@ Treat this as an independent session. Verify the repository state before changin
                 "info": {"session_id": sid, "cwd": row[0], "model": row[1],
                          "cost": row[2], "title": row[3], "project": row[4],
                          "branch": row[5],
+                         "status_line": status_line,
                          "can_reopen": bool(self._safe_reopen_cwd(row[0]))}}
 
     @staticmethod
@@ -3345,11 +3790,18 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "session not live"}
         if not os.path.isfile(path):
             return {"ok": True, "messages": [], "files": [], "starting": True}
-        with self.scan_lock:
-            mt = self.tail_for(path)
-            mt.poll()
-            msgs = [dict(m) for m in mt.convo]
-            files = [dict(f) for f in mt.files]
+        snapshot = self._claude_context_snapshots.get(sid)
+        if snapshot is not None:
+            msgs = copy.deepcopy(snapshot.get("messages") or [])
+            files = copy.deepcopy(snapshot.get("files") or [])
+        else:
+            # Startup/test fallback before the first completed scan publishes
+            # this session. Stateful folding remains serialized.
+            with self.scan_lock:
+                mt = self.tail_for(path)
+                mt.poll()
+                msgs = [dict(m) for m in mt.convo]
+                files = [dict(f) for f in mt.files]
         def fmeta(p):
             return {"name": os.path.basename(p), "path": p,
                     "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
@@ -3378,15 +3830,48 @@ Treat this as an independent session. Verify the repository state before changin
 
     def agent_context(self, sid, aid):
         """Conversation + info for ONE subagent (same fold as a session)."""
+        with self.lock:
+            parent = next((dict(item) for item in
+                           self.snapshot_cache.get("sessions") or []
+                           if item.get("session_id") == sid), None)
         if str(sid).startswith("codex:"):
-            return self.codex.agent_context(sid, aid)
+            result = self.codex.agent_context(sid, aid)
+            if result.get("ok") and parent:
+                agent = next((dict(item) for item in parent.get("agents") or []
+                              if item.get("agent_id") == aid), {})
+                info = result.setdefault("info", {})
+                for key in ("agent_type", "description", "model", "family", "effort",
+                            "state", "cost", "cost_source"):
+                    if agent.get(key) is not None and not info.get(key):
+                        info[key] = agent[key]
+                info["state"] = agent.get("state") or info.get("state")
+                info["status_line"] = self.agent_status_line(parent, info)
+            return result
         jl, meta_path = self._agent_paths(sid, aid)
         if not jl:
             return {"ok": False, "error": "no such subagent"}
         try:
-            meta = json.load(open(meta_path))
+            with open(meta_path) as handle:
+                meta = json.load(handle)
         except Exception:
             meta = {}
+        agent = next((dict(item) for item in (parent or {}).get("agents") or []
+                      if item.get("agent_id") == aid), {})
+        snapshot = self._claude_agent_context_snapshots.get((sid, aid))
+        if snapshot is not None:
+            info = {**agent,
+                    "agent_id": aid,
+                    "agent_type": agent.get("agent_type") or meta.get("agentType", "?"),
+                    "description": (agent.get("description") or
+                                    meta.get("description", "")),
+                    "depth": agent.get("depth", meta.get("spawnDepth", 0)),
+                    "ctx_tokens": snapshot.get("context_tokens")}
+            if parent:
+                info["status_line"] = self.agent_status_line(
+                    parent, info, metrics=snapshot.get("status_metrics") or {})
+            return {"ok": True,
+                    "messages": copy.deepcopy(snapshot.get("messages") or []),
+                    "info": info}
         with self.scan_lock:
             t = self.tail_for(jl)
             t.poll()
@@ -3404,6 +3889,9 @@ Treat this as an independent session. Verify the repository state before changin
                                "cache_read": t.tr, "out": t.to},
                     "total_tokens": t.total_tokens, "cost": round(t.cost(self.cfg), 4),
                     "started": t.first_ts, "last": t.last_ts}
+            info["state"] = agent.get("state")
+            if parent:
+                info["status_line"] = self.agent_status_line(parent, info, t)
         return {"ok": True, "messages": msgs, "info": info}
 
     def file_content(self, sid, fpath):
@@ -3414,13 +3902,20 @@ Treat this as an independent session. Verify the repository state before changin
         reg, path = self._reg_main_path(sid)
         if not reg:
             return None, None, "session not live"
-        with self.scan_lock:
-            mt = self.tail_for(path)
-            mt.poll()
-            allowed = {f["path"] for f in mt.files}
-            for m in mt.convo:          # inline chips can outlive the files deque
-                if m.get("role") == "tool":
-                    allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
+        snapshot = self._claude_context_snapshots.get(sid)
+        if snapshot is not None:
+            files = snapshot.get("files") or []
+            messages = snapshot.get("messages") or []
+        else:
+            with self.scan_lock:
+                mt = self.tail_for(path)
+                mt.poll()
+                files = list(mt.files)
+                messages = list(mt.convo)
+        allowed = {f["path"] for f in files}
+        for m in messages:              # inline chips can outlive the files deque
+            if m.get("role") == "tool":
+                allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
         if fpath not in allowed:
             return None, None, "not a file this session delivered"
         try:
