@@ -6,8 +6,13 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/benjaminfeder/.claude/fleet-dash/server.py</string>
+    <string>/Users/benjaminfeder/.claude/fleet-dash-prod/server.py</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FLEET_DASH_INSTANCE</key><string>production</string>
+    <key>FLEET_DASH_STATE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/Users/benjaminfeder/.claude/fleet-dash/fleet-dash.log</string>

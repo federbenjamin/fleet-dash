@@ -538,6 +538,21 @@ def organize_session(session):
 
 def fleet():
     sessions = [organize_session(item) for item in copy.deepcopy(STATE["sessions"])]
+    if STATE.get("scenario") == "staging":
+        for session in sessions:
+            owned = session["session_id"] == "codex:thread-one"
+            session["staging_owned"] = owned
+            session["staging_observer"] = not owned
+            if not owned:
+                session.update(read_only=True, access="view_only", access_label="View only",
+                               primary_action="view", primary_action_label="View",
+                               read_only_reason=
+                               "Production session; staging can observe but not control it")
+                for key in ("submit", "interrupt", "close", "compact", "review",
+                            "focus_terminal", "answer_structured", "decide_approval",
+                            "spawn_agent", "relay_agent", "relay_agent_direct",
+                            "change_permission_mode"):
+                    session["capabilities"][key] = False
     closed = [{**item, "ui_group": "history", "reason_label": "Closed",
         "primary_action": "reopen" if item.get("can_reopen") else "view",
         "primary_action_label": "Reopen" if item.get("can_reopen") else "View",
@@ -563,7 +578,16 @@ def fleet():
         ("blocked", "failed", "confirmation_unknown"))
     budget_evaluations = fixture_budget_evaluations(sessions + closed)
     actions = fixture_actions(sessions) + fixture_budget_actions(budget_evaluations)
+    if STATE.get("scenario") == "staging":
+        actions = [item for item in actions
+                   if item.get("session_id") == "codex:thread-one"]
     return {"t": time.time(), "sessions": sessions, "actions": actions,
+            "instance": ({"mode": "staging", "name": "Fleet Staging",
+                "controls": "staging_owned_only", "owned_sessions": 1,
+                "source_root": "/Users/test/fleet-dash"}
+                if STATE.get("scenario") == "staging" else
+                {"mode": "production", "name": "Fleet Dash", "controls": "production",
+                 "owned_sessions": None, "source_root": None}),
             "outbox_summary": {"pending": outbox_pending, "attention": outbox_attention,
                                "states": outbox_states},
             "budget_summary": {"configured": len(budget_evaluations),

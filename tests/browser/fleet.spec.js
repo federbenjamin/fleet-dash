@@ -52,6 +52,23 @@ test.afterEach(async ({ page }) => {
   expect(page.__failures, 'browser console/runtime errors').toEqual([]);
 });
 
+test('staging is unmistakable and controls only staging-owned sessions', async ({ page }) => {
+  await reset(page, 'staging');
+  await expect(page.locator('#instancebanner')).toBeVisible();
+  await expect(page.locator('#instancebanner')).toContainText('STAGING');
+  await expect(page).toHaveTitle(/Fleet Staging/);
+  await expect(page.locator('[data-sid="claude-one"] .accessbadge')).toHaveText('view only');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sact .composer')).toHaveCount(0);
+  await page.locator('#sclose').click();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(page.locator('#sact .composer')).toBeVisible();
+  await page.locator('#sclose').click();
+  await page.locator('.newbtn').click();
+  await expect(page.locator('#newsess')).toContainText('Isolated staging worktree');
+  await expect(page.locator('#newsess input[data-draft-key="new:directory"]')).toHaveCount(0);
+});
+
 test('responsive application shell routes, filters, and follows browser back', async ({ page }, testInfo) => {
   await reset(page);
   const mobile = testInfo.project.name.startsWith('mobile');

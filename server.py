@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine import Engine, load_config, BASE, PROJECTS  # noqa: E402
 from search_index import SearchIndex  # noqa: E402
 
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 STATIC_FILES = {
     "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8", "no-cache", {}),
@@ -431,8 +432,8 @@ class Handler(BaseHTTPRequestHandler):
             # is fetched only while the History page or a closed overlay needs it.
             snap["closed"] = [item for item in closed if item.get("pinned")]
             try:  # page version: lets stale tabs self-reload on dashboard.html changes
-                assets = [os.path.join(BASE, "dashboard.html")]
-                assets.extend(os.path.join(BASE, spec[0]) for spec in STATIC_FILES.values())
+                assets = [os.path.join(APP_ROOT, "dashboard.html")]
+                assets.extend(os.path.join(APP_ROOT, spec[0]) for spec in STATIC_FILES.values())
                 snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
             except OSError:
                 pass
@@ -440,14 +441,21 @@ class Handler(BaseHTTPRequestHandler):
         elif route in STATIC_FILES:
             try:
                 path, content_type, cache_control, headers = STATIC_FILES[route]
-                with open(os.path.join(BASE, path), "rb") as f:
-                    self.reply(200, content_type, f.read(), cache_control=cache_control,
+                with open(os.path.join(APP_ROOT, path), "rb") as f:
+                    body = f.read()
+                    if route == "/static/manifest.webmanifest" and \
+                       self.eng.cfg.get("instance_mode") == "staging":
+                        manifest = json.loads(body)
+                        manifest.update(name="Fleet Staging", short_name="Staging",
+                                        description="Isolated Fleet Dash staging app")
+                        body = json.dumps(manifest).encode()
+                    self.reply(200, content_type, body, cache_control=cache_control,
                                extra_headers=headers)
             except FileNotFoundError:
                 self.reply(404, "text/plain", b"asset missing")
         elif route == "/" or route.startswith("/index"):
             try:
-                with open(os.path.join(BASE, "dashboard.html"), "rb") as f:
+                with open(os.path.join(APP_ROOT, "dashboard.html"), "rb") as f:
                     self.reply(200, "text/html; charset=utf-8", f.read())
             except FileNotFoundError:
                 self.reply(500, "text/plain", b"dashboard.html missing")

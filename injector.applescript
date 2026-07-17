@@ -1,3 +1,6 @@
+use AppleScript version "2.4"
+use scripting additions
+
 -- FleetDashInjector: reads ~/.claude/fleet-dash/inject-request.txt and types the
 -- requested keystrokes into the iTerm session owning the requested tty.
 -- Request format (plain text lines):

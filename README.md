@@ -432,6 +432,37 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 4. Act token loaded once per device by opening `http://127.0.0.1:8377/?token=<act_token>`
    (token lives in `config.json`; yellow "read-only" banner = this device has no token).
 
+## Production and staging
+
+Fleet runs two deliberately separate app instances:
+
+| Instance | Code | Local URL | Runtime state | Purpose |
+|---|---|---|---|---|
+| Production | `~/.claude/fleet-dash-prod` | `http://127.0.0.1:8377` | `~/.claude/fleet-dash` | Stable app tracking `main` |
+| Staging | `~/.claude/fleet-dash` | `http://127.0.0.1:8378` | `~/.claude/fleet-dash-staging` | Development branches and live verification |
+
+Staging has its own config/token, ledger, search index, uploads, logs, Codex App Server socket,
+injector applet, browser origin, service worker, drafts, offline queue, and push subscriptions. It
+reads the shared Claude/Codex registries and transcripts so real production sessions are visible,
+but the server removes their mutation capabilities and rejects forged action requests. Only exact
+session IDs created by staging are controllable. Every staging-created session is forced into a new
+`fleet-staging/*` branch and managed worktree under `~/.claude/fleet-dash-staging/workspaces`.
+
+The staging launch agent is `com.benjaminfeder.fleet-dash.staging`; its mobile-installable HTTPS
+origin is `https://macbook-pro.tail24da27.ts.net:8443`. The purple **STAGING** banner must always be
+visible there. Production remains at the default Tailscale HTTPS origin.
+
+Restart one instance without touching the other:
+
+```
+launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash
+launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging
+```
+
+Promote a merged release by fast-forwarding `~/.claude/fleet-dash-prod` on `main`, testing it, and
+then restarting only the production launch agent. Never point production at the development
+checkout.
+
 ## Enabling phone use
 
 1. Install **Tailscale** on the Mac and phone, sign both into your tailnet.
@@ -511,6 +542,11 @@ plutil -insert CFBundleIdentifier -string com.benjaminfeder.fleet-dash.injector 
 codesign --force --sign - FleetDashInjector.app
 ```
 A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
+
+`scripts/build-injector.sh staging ~/.claude/fleet-dash-staging/FleetDashInjector.app` compiles the
+same source with staging's private request directory and bundle ID
+`com.benjaminfeder.fleet-dash.staging.injector`. The two resident applets therefore cannot race the
+same request/result files. The staging applet receives its own one-time iTerm automation approval.
 
 ## Hard-won platform facts baked into the design
 

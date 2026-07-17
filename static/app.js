@@ -1661,7 +1661,7 @@ function overflowMenu(key,s,kind='session',done=false){
     ? Boolean(!done&&s?.capabilities?.interrupt)
     : Boolean(s?.capabilities?.interrupt);
   const canClose=Boolean(lifecycle&&s?.capabilities?.close);
-  const canHandoff=Boolean(s?.session_id&&['session','viewer','closed'].includes(kind));
+  const canHandoff=Boolean(!s?.staging_observer&&s?.session_id&&['session','viewer','closed'].includes(kind));
   return`<span class="ovwrap">
     <button class="ovbtn" aria-label="${label}" aria-haspopup="menu" aria-expanded="${open?'true':'false'}"
       onclick="toggleOverflow(event,'${key}')">⋮</button>
@@ -3130,6 +3130,9 @@ function sendElicitation(sid,nonce,choice,pre){
 function cardPending(s){
   const p=s.pending;
   if(!p||(p.nonce&&answered[s.session_id]===p.nonce))return'';
+  if(s.staging_observer)return`<div class="pend qsignal stagingreadonly" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
+    <div class="ptool"><span class="ptlabel">production request · view only in staging</span></div>
+    <button class="pbtn" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">view ⤢</button></div>`;
   if(p.kind==='permission')return pendingBox(s,'msg');
   if(p.kind==='elicitation')return`<div class="pend qsignal" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
     <div class="ptool"><span class="ptlabel">${esc(p.server||'MCP')} request — waiting on you</span></div>
@@ -3144,9 +3147,22 @@ function cardPending(s){
   </div>`;
 }
 function openSessionQ(sid){sessQOpen=true;openSession(sid);}
+function stagingPendingBox(s,p){
+  if(p.kind==='question')return`<div class="pend stagingreadonly">
+    <div class="ptool"><span class="ptlabel">production question · view only in staging</span></div>
+    ${(p.questions||[]).map(q=>`<div class="qtext"><b>${esc(q.header||'Question')}</b> ${esc(q.question||'')}</div>
+      ${(q.options||[]).map(option=>`<div class="optbtn" aria-disabled="true">${esc(option.label||'')}${option.description?`<small>${esc(option.description)}</small>`:''}</div>`).join('')}`).join('')}
+    <div class="actmsg">Answer this request in production.</div></div>`;
+  if(p.kind==='permission')return`<div class="pend stagingreadonly">
+    <div class="ptool"><span class="ptlabel">production permission request · view only in staging</span></div>
+    <pre>${esc(p.input_summary||'')}</pre><div class="actmsg">Decide this request in production.</div></div>`;
+  return`<div class="pend stagingreadonly"><div class="ptool"><span class="ptlabel">production request · view only in staging</span></div>
+    <div class="qtext">${esc(p.message||'This request can only be changed in production.')}</div></div>`;
+}
 function pendingBox(s,pre='msg'){
   const p=s.pending; if(!p)return'';
   if(p.nonce&&answered[s.session_id]===p.nonce)return'';   // sent: dismiss instantly
+  if(s.staging_observer)return stagingPendingBox(s,p);
   if(p.kind==='question'){
     if(!p.questions||!p.questions.length)return'';
     return`<div class="pend">${p.questions.length>1?mqBlock(s,p,pre):singleQBlock(s,p,pre)}
@@ -4027,6 +4043,8 @@ function changeNewDirectory(value){newDir=value;setDraft('new:directory',value);
 function changeNewModel(value){newModel=value;queueSpawnForecast(0);}
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
+  const staging=last?.instance?.mode==='staging',stagingSource=last?.instance?.source_root||'';
+  if(staging&&stagingSource)newDir=stagingSource;
   if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
   const catalog=(((last&&last.models_by_provider)||{})[newProvider])||[];
   const models=catalog.length?catalog.map(m=>m.id):
@@ -4040,7 +4058,7 @@ function newSection(){
       ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
       <div class="dsep"></div>`;
   const cur=dirs.find(d=>d.path===newDir);
-  const untrusted=newDir&&(!cur||!cur.trusted);
+  const untrusted=!staging&&newDir&&(!cur||!cur.trusted);
   return`<div class="newform">
     <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
     <label class="nflab">provider</label>
@@ -4048,13 +4066,14 @@ function newSection(){
       <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
       <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
     </select>
+    ${staging?`<div class="nfwarn"><b>Isolated staging worktree</b><br>Fleet will create a new disposable branch and worktree from the staging checkout. Production sessions remain view only.</div>`:`
     <label class="nflab">directory</label>
     <select class="nfsel" onchange="changeNewDirectory(this.value)">
       <option value="">— pick a recent directory —</option>
       ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
     </select>
     <input class="nfin" data-draft-key="new:directory" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
-      oninput="changeNewDirectory(this.value)" autocomplete="off">
+      oninput="changeNewDirectory(this.value)" autocomplete="off">`}
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
     <div class="nfrow">
@@ -4082,7 +4101,7 @@ function newSection(){
           <optgroup label="Advanced"><option value="dontAsk" ${newPermissionMode==='dontAsk'?'selected':''}>Don't ask</option></optgroup>
         </select></div>`:''}
     </div>
-    ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
+    ${newProvider==='claude'&&!staging?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
       onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
     ${newWt?`<input class="nfin" data-draft-key="new:worktree" placeholder="worktree name (optional)" value="${esc(newWtName)}"
       oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
@@ -4120,6 +4139,8 @@ async function startSpawn(spec,provisional){
     if(!r.ok||!d.ok){provisional.status='failed';provisional.error=d.error||'Session could not be started';
       provisional.canRetry=true;render(last,true);return;}
     clearDraft('new:directory','new:worktree','new:message');newMessage='';
+    if(d.staging_workspace?.cwd)provisional.spec={...provisional.spec,cwd:d.staging_workspace.cwd,
+      worktree:true,worktree_name:d.staging_workspace.worktree_name||''};
     provisional.serverSessionId=d.session_id;provisional.status='discovering';provisional.trustPrompt=!!d.trust_prompt;
     // Both providers return the exact native session identity. Never guess by cwd:
     // a sibling session in the same repo must not be opened by mistake.
@@ -4431,6 +4452,16 @@ function insightsSection(){
 let last=null;
 let pollSequence=0,pollApplied=0,pollController=null;
 let fleetOffline=false;
+function applyInstance(instance){
+  const staging=instance?.mode==='staging',name=instance?.name||(staging?'Fleet Staging':'Fleet Dash');
+  document.documentElement.dataset.instance=staging?'staging':'production';
+  const banner=$('#instancebanner');
+  if(banner){banner.hidden=!staging;banner.textContent=staging?
+    'STAGING · production sessions are view only · controls work only on staging test sessions':'';}
+  const brand=document.querySelector('.brand b');if(brand)brand.textContent=name;
+  const apple=document.querySelector('meta[name="apple-mobile-web-app-title"]');if(apple)apple.content=name;
+  return name;
+}
 function setFleetOffline(offline){
   fleetOffline=Boolean(offline);document.documentElement.dataset.offline=fleetOffline?'true':'false';
   const stale=$('#stale');if(!stale)return;
@@ -4442,6 +4473,7 @@ function setFleetOffline(offline){
 function render(f,force){
   if(!f||!f.sessions)return;
   const renderStarted=performance.now();
+  const instanceName=applyInstance(f.instance);
   closedIds=new Set(f.closed_ids||[]);
   reconcileQuickResponses(f);
   applyReaderWidth();
@@ -4509,7 +4541,7 @@ function render(f,force){
   schedulePeekOverflow();
   applyRouteNav(settingsOpen?'settings':currentRoute);
   const titleCount=Math.max(Number(t.needs_me)||0,Number(notificationData.active)||0,Number(notificationData.unread)||0);
-  document.title=(titleCount?`(${titleCount}) `:'')+'Fleet Dash';
+  document.title=(titleCount?`(${titleCount}) `:'')+instanceName;
   perfRecord('render_ms',performance.now()-renderStarted);
 }
 
