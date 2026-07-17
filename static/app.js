@@ -3551,8 +3551,12 @@ function renderActionInbox(f){
           <span class="actionmeta"><strong>${esc(action.reason||'Needs review')}</strong> · ${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${fmtAge(age)} ago</span></span>
           <span class="actiondelivery">${esc(action.delivery_state||'Review')}</span></button>
         <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label||'Review')}</button>
+        ${session?`<button class="spin actionpin" ${pinActions.get(session.session_id)?.busy?'disabled':''}
+          title="pin session" aria-label="pin session"
+          onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${enc(session.session_id)}'))">📌</button>`:''}
         ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
         ${session?cardResponseFeedback(session):''}
+        ${session?pinFeedbackHtml(session.session_id):''}
       </div>`;}).join(''):`<div class="actionempty">No ${esc(actionKind==='all'?'matching':actionKind)} actions.</div>`}</div>`;
   return visibleSessionIds;
 }

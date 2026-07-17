@@ -214,10 +214,10 @@ the provider without affecting Claude sessions.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
   **📌 pinned sessions** block at the top of Now. Pinned cards keep the order in which
   they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
-  Cards are relocated rather than duplicated. On **desktop**, use the
-  contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
-  **mobile**, **long-press** the header (it highlights immediately; a short tap still opens
-  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. A failed
+  Cards are relocated rather than duplicated. The visible 📌 button appears in session headers and
+  Needs-you Action Inbox rows on desktop and mobile. Mobile also supports **long-pressing** a session
+  header as a shortcut (it highlights immediately; a short tap still opens its chat). Pins persist
+  in server settings across reloads, daemon restarts, and devices. A failed
   pin restores the prior order and stays visible with Retry. Pinning an
   external Codex thread also opts it into read-only local lifecycle/message observation; it does not
   make the thread interactive.

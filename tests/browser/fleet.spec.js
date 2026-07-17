@@ -1544,6 +1544,17 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   await expect(action).toContainText('hazy-hatching-curry');
   await expect(action.getByText('Question waiting', { exact: true })).toBeVisible();
   await expect(action.getByRole('button', { name: 'Respond' })).toBeVisible();
+  const actionPin = action.getByRole('button', { name: 'pin session' });
+  await expect(actionPin).toBeVisible();
+  await actionPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual(['claude-one']);
+  const pinnedPin = page.locator('#pinned [data-sid="claude-one"]')
+    .getByRole('button', { name: 'unpin session' });
+  await expect(pinnedPin).toBeVisible();
+  await pinnedPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual([]);
   await expect(page.locator('#needsyou [data-sid="claude-one"]')).toHaveCount(0);
   await expect(page.locator('[data-action-sid="claude-one"], #needsyou [data-sid="claude-one"]')).toHaveCount(1);
 
@@ -2006,6 +2017,18 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
   await reset(page, 'single-question');
+  const cardPin=page.locator('[data-sid="claude-one"] .shead')
+    .getByRole('button', { name: 'pin session' });
+  await expect(cardPin).toBeVisible();
+  await cardPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual(['claude-one']);
+  const pinnedPin=page.locator('#pinned [data-sid="claude-one"]')
+    .getByRole('button', { name: 'unpin session' });
+  await expect(pinnedPin).toBeVisible();
+  await pinnedPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual([]);
   const heldHeader=page.locator('[data-sid="claude-one"] .shead');
   await heldHeader.dispatchEvent('touchstart');
   await expect(heldHeader).toHaveClass(/pinpress/);

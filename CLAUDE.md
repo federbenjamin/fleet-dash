@@ -257,9 +257,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
     Fleet Briefing) in persisted insertion order. Fleet urgency/activity changes never reorder it; a
     new pin appends at the bottom. Pinned cards are relocated, never duplicated.
-    Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
-    the hold paints immediately and `sessionTap` swallows the following click so pinning does not
-    also open the chat. `pinActions` suppresses duplicate writes; failure restores the exact prior
+    Desktop and mobile expose `.spin` 📌 buttons in session headers and Action Inbox rows. Mobile
+    also supports long-pressing a session header; the hold paints immediately and `sessionTap`
+    swallows the following click so pinning does not also open the chat. `pinActions` suppresses
+    duplicate writes; failure restores the exact prior
     order and renders inline retry instead of a blocking alert.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
     `openClosed`) forces `#sbody` to `scrollHeight` on the first render regardless of prior

@@ -399,7 +399,7 @@ details.insfold>summary:hover{color:var(--fg)}
   background:#19170f;overflow-x:auto}.bulkbar b,.bulkbar span{font-size:10px;color:var(--dim);white-space:nowrap}
 .bulkbar button{flex:0 0 auto;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--fg);
   font:inherit;font-size:10.5px;padding:5px 8px;cursor:pointer}.bulkbar button:hover{border-color:var(--blue);color:var(--blue)}
-.actionrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto auto;align-items:center;gap:6px;
+.actionrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto auto auto;align-items:center;gap:6px;
   min-height:66px;padding:6px 9px;border-bottom:1px solid #302817}.actionrow:last-child{border-bottom:0}
 .actionrow:hover{background:#19170f}.actioncheck{display:flex;align-items:center;justify-content:center;align-self:stretch;cursor:pointer}
 .actionopen{min-width:0;display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:center;gap:9px;
@@ -634,7 +634,6 @@ td.r,th.r{text-align:right}
      the model (throughput, sparkline, tokens, cost). The agent view has it all. */
   .squiet{display:none}
   .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
-  .shead .spin{display:none}
 }
 @media (max-width:600px){
   .shead>.m[title="session provider"]{display:none}
@@ -1076,12 +1075,12 @@ button.notificationrow:hover,button.notificationrow:focus-visible{background:var
   border-radius:8px;padding:6px 9px;margin-bottom:8px;line-height:1.45}
 .relaynote b{color:var(--amber)}
 .arow .aopen{color:var(--faint);font-size:14px;padding-left:2px}
-/* session pin control (desktop; touch screens use a long press on the header) */
-.shead .spin,.historymain .spin{background:var(--card);border:1px solid var(--line);border-radius:8px;
+/* visible session pin control; touch screens also keep long-press as a shortcut */
+.shead .spin,.historymain .spin,.actionrow .spin{background:var(--card);border:1px solid var(--line);border-radius:8px;
   color:var(--fg);cursor:pointer;font-size:13px;line-height:1;padding:8px 10px;
   opacity:.55;filter:grayscale(1);flex:0 0 auto}
-.shead .spin:hover,.historymain .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
-.shead .spin.on,.historymain .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
+.shead .spin:hover,.historymain .spin:hover,.actionrow .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
+.shead .spin.on,.historymain .spin.on,.actionrow .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
 .shead.pinpress{box-shadow:inset 3px 0 0 var(--blue);background:rgba(88,166,255,.09)}
 .card.pinned{box-shadow:0 0 0 1px rgba(88,166,255,.35);opacity:1}
 /* global pinned-sessions block, directly below Fleet Briefing */
@@ -1246,10 +1245,10 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .historyage{display:none}
   .commandchips .saveview{margin-left:0}
   .actionhead{align-items:flex-start;flex-direction:column}.actionfilters{width:100%}
-  .actionrow{grid-template-columns:22px minmax(0,1fr) auto;padding:7px 7px}
+  .actionrow{grid-template-columns:22px minmax(0,1fr) auto auto;padding:7px 7px}
   .actionopen{grid-template-columns:25px minmax(0,1fr)}
   .actiondelivery{grid-column:2;justify-self:start;margin-top:2px}
-  .actionrow>.primarybtn{grid-column:3;grid-row:1}.actionmuted{display:none}
+  .actionrow>.primarybtn{grid-column:3;grid-row:1}.actionrow>.actionpin{grid-column:4;grid-row:1}.actionmuted{display:none}
   .actionrow>.quickfeedback{grid-column:2/-1}
   .actioncontext{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .workhead{grid-template-columns:32px minmax(0,1fr) 18px}.workcounts{grid-column:2;justify-content:flex-start;margin-top:4px}
