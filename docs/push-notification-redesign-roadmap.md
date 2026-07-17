@@ -434,7 +434,7 @@ demand.
 
 ### N0 — Compatibility prototype and baseline
 
-Status: N0a complete · N0b pending real-device path
+Status: Complete · N0a/N0b · 2026-07-16/17
 
 - Capture current notification trigger/delivery counts and scan/API latency.
 - Add a disposable standalone manifest/service-worker prototype under test fixtures.
@@ -450,6 +450,14 @@ the disposable probe constructs an encrypted minimal request; no production push
 
 Exit N0b, required before N5: real-device proof exists for installed iPhone and macOS delivery,
 exact deep link, app-closed behavior, badge, and action fallback.
+
+Evidence N0b: two installed devices registered with granted permission and healthy redacted state.
+With both Fleet apps fully closed, Apple acknowledged fresh encrypted deliveries and the user
+confirmed the expected minimal title/body plus nonzero app-icon badge on macOS and iPhone. Tapping
+each system notification launched its installed app directly into the exact resolved Notification
+Center event. The live run exposed and fixed two transport/install blockers before the gate passed:
+Node 24 requires the `all:true` DNS callback record-array shape, and installed PWAs needed
+network-first unhashed shell assets plus a new cache generation to escape the pre-N4 router.
 
 ### N1 — Canonical event and device stores
 
@@ -474,7 +482,7 @@ The live canonical projection measured 1.756 ms p95, below the 5 ms scan-budget 
 
 ### N2 — Installable Fleet PWA and device registration
 
-Status: Complete (deterministic) · 2026-07-16/17 · real-device proof remains N0b
+Status: Complete · deterministic + real-device N0b · 2026-07-16/17
 
 - Add manifest, icons, secure service worker, install guidance, permission flow, subscription repair,
   redacted device APIs, and per-device settings.
@@ -561,8 +569,8 @@ inventory passed on desktop in 1.1 minutes and mobile in 1.2 minutes with every 
 below 100 ms. Workstreams and the Subagents filter now commit a visible destination/selection state
 before their heavier render runs on the next animation frame. After a native launchd restart, the
 authenticated Notification/API/PWA smokes passed with the Web Push helper ready, six install assets,
-redacted delivery/device state, and the live Notifications → Briefing flow. No push device is
-registered, so real app-closed device proof remains N0b before N5.
+redacted delivery/device state, and the live Notifications → Briefing flow. No push device was
+registered at N4 completion; N0b subsequently passed on installed macOS and iPhone apps before N5.
 
 ### N5 — Production policy, deep links, and reversible push actions
 
