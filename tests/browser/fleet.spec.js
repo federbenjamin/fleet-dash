@@ -829,6 +829,18 @@ test('session card surfaces distinguish active, available, and expanded informat
   const idle = page.locator('[data-sid="codex:thread-one"]');
   await expect.poll(async () => (await cardStyle(idle)).background).toBe(surfaces.card);
   expect((await cardStyle(idle)).opacity).toBe('1');
+  const peekFrame = await idle.evaluate(card => {
+    const peek = card.querySelector('.sessionpeek');
+    const more = card.querySelector('.morebtn');
+    const body = peek.querySelector('.peekbody');
+    const peekRect = peek.getBoundingClientRect();
+    return {gap: more.getBoundingClientRect().top - peekRect.bottom,
+      peekHeight: peekRect.height,
+      bodyBottomGap: peekRect.bottom - body.getBoundingClientRect().bottom};
+  });
+  expect(peekFrame.gap).toBeLessThan(1);
+  expect(peekFrame.peekHeight).toBeGreaterThan(40);
+  expect(peekFrame.bodyBottomGap).toBeLessThan(8);
 
   await reset(page, 'subagent');
   surfaces = await themeSurfaces();

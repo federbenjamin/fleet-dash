@@ -531,6 +531,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Double-underscore request keys are stripped before policy checks, so a client cannot claim the
     internal prepared-worktree marker. Notification projection in staging receives staging-owned
     sessions only; production requests/provider failures must never leak into staging pushes.
+57. **A fixed card's session peek owns its whole allocated middle frame.** `.sessionpeek` grows from
+    the metadata row to the More button and its `.peekbody` stretches with it. Keep message content
+    top-aligned and the truncated `...` control bottom-anchored. Do not return the unused height to
+    `.morebtn` as a strip of card background.
 
 ## Dev workflow
 
@@ -539,9 +543,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Staging changes are restarted independently with
   `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging`, then probe
   `http://127.0.0.1:8378/api/fleet`. Development edits belong in the staging checkout; production
-  is promoted only from merged `main` in `~/.claude/fleet-dash-prod`. Run `npm ci --omit=dev` in the
-  production checkout on every promotion; its isolated Web Push worker must have its own installed
-  `web-push` dependency rather than reaching into staging's `node_modules`.
+  is promoted only from merged `origin/main` with `scripts/deploy-production.sh`. The script keeps
+  the checkout detached at the exact release, installs its private production dependencies, restarts
+  only production, and verifies the API identity plus Web Push readiness.
   `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
   self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
 - Log: `~/.claude/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get
@@ -659,6 +663,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   inputs focusable underneath.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
+- `scripts/deploy-production.sh` — fail-fast merged-release promotion and production-only relaunch.
 - `com.benjaminfeder.fleet-dash.plist` + `com.benjaminfeder.fleet-dash.staging.plist` — isolated
   production/staging launchd copies (live copies in `~/Library/LaunchAgents`).
 - Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`,

@@ -279,6 +279,8 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#sethead
    Actionable/open/explicitly-expanded cards omit .fixedpeek and fit content. */
 .card.fixedpeek{height:calc(117px + var(--session-card-lines,2) * 17.4px)}
 .card.fixedpeek>.ctop{display:flex;flex-direction:column;height:100%;min-height:0}
+.card.fixedpeek .sessionpeek{flex:1 1 auto;min-height:0}
+.card.fixedpeek .sessionpeek>.peekbody{align-self:stretch}
 .card.fixedpeek>.ctop>.morebtn{margin-top:auto}
 .card.needs{border-color:var(--amber)}
 .card.stalled{border-color:var(--red)}
