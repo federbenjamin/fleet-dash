@@ -531,10 +531,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Double-underscore request keys are stripped before policy checks, so a client cannot claim the
     internal prepared-worktree marker. Notification projection in staging receives staging-owned
     sessions only; production requests/provider failures must never leak into staging pushes.
-57. **A fixed card's session peek owns its whole allocated middle frame.** `.sessionpeek` grows from
-    the metadata row to the More button and its `.peekbody` stretches with it. Keep message content
-    top-aligned and the truncated `...` control bottom-anchored. Do not return the unused height to
-    `.morebtn` as a strip of card background.
+57. **Every collapsed session peek owns its configured line area.** On `.fixedpeek` cards,
+    `.sessionpeek` grows from the metadata row to the More button and its `.peekbody` stretches with
+    it. A non-fixed card that grows for running subagents or another visible control still gives a
+    short `.sessionpeek` the configured `preview_session_lines` minimum before stacking those rows
+    below it. Keep message content top-aligned and the truncated `...` control bottom-anchored; never
+    return unused preview height as a strip of card background.
 
 ## Dev workflow
 
