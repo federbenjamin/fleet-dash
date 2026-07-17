@@ -539,7 +539,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Staging changes are restarted independently with
   `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging`, then probe
   `http://127.0.0.1:8378/api/fleet`. Development edits belong in the staging checkout; production
-  is promoted only from merged `main` in `~/.claude/fleet-dash-prod`.
+  is promoted only from merged `main` in `~/.claude/fleet-dash-prod`. Run `npm ci --omit=dev` in the
+  production checkout on every promotion; its isolated Web Push worker must have its own installed
+  `web-push` dependency rather than reaching into staging's `node_modules`.
   `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
   self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
 - Log: `~/.claude/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get

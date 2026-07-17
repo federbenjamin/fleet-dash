@@ -459,9 +459,10 @@ launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash
 launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging
 ```
 
-Promote a merged release by fast-forwarding `~/.claude/fleet-dash-prod` on `main`, testing it, and
-then restarting only the production launch agent. Never point production at the development
-checkout.
+Promote a merged release by fast-forwarding `~/.claude/fleet-dash-prod` on `main`, running
+`npm ci --omit=dev` there so the Web Push helper has its production dependency, testing it, and then
+restarting only the production launch agent. Never point production at the development checkout or
+share its `node_modules` directory with staging.
 
 ## Enabling phone use
 
