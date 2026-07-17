@@ -9,12 +9,15 @@ GET /api/handoff authenticated editable provider-handoff preview
 GET /api/repo authenticated repository outcome/action preview
 GET /api/outbox authenticated scheduled-message list and audit trail
 GET /api/briefing deterministic operational briefing and per-device cursor
+GET /api/notifications authenticated canonical notification event stream
+GET /api/push/config authenticated PWA/Web Push capability and current-device health
+GET /api/push/devices authenticated redacted registered-device list
 GET /api/budgets measured budget state and forecasts
 GET /api/history paginated closed-session metadata
 GET /api/diagnostics authenticated latency, payload, and memory measurements
 """
 from collections import defaultdict, deque
-import json, os, resource, subprocess, sys, time, threading, secrets
+import hashlib, json, os, resource, subprocess, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -25,8 +28,20 @@ from search_index import SearchIndex  # noqa: E402
 
 
 STATIC_FILES = {
-    "/static/fleet.css": "text/css; charset=utf-8",
-    "/static/app.js": "text/javascript; charset=utf-8",
+    "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8", "no-cache", {}),
+    "/static/app.js": ("static/app.js", "text/javascript; charset=utf-8", "no-cache", {}),
+    "/static/manifest.webmanifest": ("static/manifest.webmanifest",
+        "application/manifest+json; charset=utf-8", "no-cache", {}),
+    "/static/offline.html": ("static/offline.html", "text/html; charset=utf-8", "no-cache", {}),
+    "/static/icons/fleet.svg": ("static/icons/fleet.svg", "image/svg+xml", "public, max-age=86400", {}),
+    "/static/icons/fleet-192.png": ("static/icons/fleet-192.png", "image/png",
+        "public, max-age=86400", {}),
+    "/static/icons/fleet-512.png": ("static/icons/fleet-512.png", "image/png",
+        "public, max-age=86400", {}),
+    "/static/icons/fleet-maskable-512.png": ("static/icons/fleet-maskable-512.png", "image/png",
+        "public, max-age=86400", {}),
+    "/sw.js": ("static/sw.js", "text/javascript; charset=utf-8", "no-cache",
+               {"Service-Worker-Allowed": "/"}),
 }
 
 
@@ -36,8 +51,7 @@ def poll_loop(eng):
             search = getattr(eng, "search", None)
             if search:
                 search.ensure_process()
-            fleet = eng.scan()
-            eng.check_notifications(fleet)
+            eng.scan()
         except Exception as e:
             print(f"poll error: {e}", file=sys.stderr, flush=True)
         time.sleep(eng.cfg["poll_seconds"])
@@ -124,13 +138,60 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         route = self.path.split("?", 1)[0]
-        if route not in ("/api/act", "/api/settings", "/api/search/rebuild"):
+        if route not in ("/api/act", "/api/upload-image", "/api/settings", "/api/search/rebuild",
+                         "/api/notifications/read", "/api/notifications/snooze",
+                         "/api/notifications/wake", "/api/notifications/mute",
+                         "/api/notifications/retry", "/api/push/subscription",
+                         "/api/push/test", "/api/push/device-settings",
+                         "/api/push/capability-action", "/api/legacy-ntfy/test"):
             return self.reply(404, "text/plain", b"not found")
+        if route == "/api/push/capability-action":
+            if self.headers.get("Transfer-Encoding") or \
+               self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() \
+               != "application/json":
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "notification capability is unavailable"}')
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                if n <= 0 or n > 4096:
+                    raise ValueError("invalid capability body")
+                self.connection.settimeout(5)
+                action = json.loads(self.rfile.read(n))
+                if (not isinstance(action, dict) or set(action) != {"capability"} or
+                        not isinstance(action.get("capability"), str)):
+                    raise ValueError("invalid capability body")
+            except Exception:
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "notification capability is unavailable"}')
+            result = self.eng.push_capability_action(action)
+            status = 200 if result.get("ok") else 409
+            return self.reply(status, "application/json", json.dumps(result).encode())
         if not self.token_ok():
             print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
                   file=sys.stderr, flush=True)
             return self.reply(403, "application/json",
                               b'{"ok": false, "error": "bad or missing act token"}')
+        if route == "/api/upload-image":
+            if self.headers.get("Transfer-Encoding"):
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "chunked uploads are unsupported"}')
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = 0
+            if n <= 0 or n > 10 * 1024 * 1024:
+                return self.reply(413, "application/json",
+                                  b'{"ok": false, "error": "image must be 10 MB or smaller"}')
+            self.connection.settimeout(20)
+            data = self.rfile.read(n)
+            if len(data) != n:
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "incomplete image upload"}')
+            result = self.eng.store_image_upload(
+                self.query("sid"), self.query("id"), self.query("name"),
+                self.headers.get("Content-Type", ""), data)
+            status = 200 if result.get("ok") else 400
+            return self.reply(status, "application/json", json.dumps(result).encode())
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n < 0 or n > 65536:
@@ -144,11 +205,42 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
         if route == "/api/settings":
             result = self.eng.update_settings(action)
-            audit = dict(action)
-            if audit.get("dashboard_url"):
-                audit["dashboard_url"] = "[URL omitted]"
+            audit = {"ok": bool(result.get("ok")), "field_count": min(len(action), 1000)}
             print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/read":
+            result = self.eng.notifications_mark_read(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/snooze":
+            result = self.eng.notifications_snooze(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/wake":
+            result = self.eng.notifications_wake(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/mute":
+            result = self.eng.notifications_mute(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/retry":
+            result = self.eng.notifications_retry(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/subscription":
+            result = self.eng.push_subscription(action)
+            device_ref = hashlib.sha256(
+                str(action.get("device_id") or "").encode()).hexdigest()[:12]
+            audit = {"ok": bool(result.get("ok")), "device_ref": device_ref,
+                     "operation": "remove" if action.get("remove") else "register"}
+            print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/device-settings":
+            result = self.eng.push_device_settings(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/test":
+            result = self.eng.push_test(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/legacy-ntfy/test":
+            result = self.eng.legacy_ntfy_test()
+            status = 200 if result.get("ok") else 409
+            return self.reply(status, "application/json", json.dumps(result).encode())
         if route == "/api/search/rebuild":
             search = getattr(self.eng, "search", None)
             try:
@@ -205,7 +297,8 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics"):
+                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics",
+                     "/api/notifications", "/api/push/config", "/api/push/devices"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -221,6 +314,21 @@ class Handler(BaseHTTPRequestHandler):
                 out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
                                                self.query("limit") or 100)
                 return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/notifications":
+                states = [item for item in self.query("state").split(",") if item]
+                kinds = [item for item in self.query("kind").split(",") if item]
+                out = self.eng.notifications_snapshot(
+                    self.query("device") or "default", self.query("cursor") or None,
+                    self.query("limit") or 100, states, kinds, self.query("id") or None)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/push/config":
+                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+                out = self.eng.push_config(device)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/push/devices":
+                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+                out = self.eng.push_devices(device)
+                return self.reply(200, "application/json", json.dumps(out).encode())
             if route == "/api/diagnostics":
                 out = self.diagnostics()
                 with self.eng.lock:
@@ -232,6 +340,12 @@ class Handler(BaseHTTPRequestHandler):
                         out["search"] = search.status()
                     except Exception as exc:
                         out["search"] = {"ok": False, "error": str(exc)}
+                push_diagnostics = getattr(self.eng, "push_diagnostics", None)
+                if push_diagnostics:
+                    out["web_push"] = push_diagnostics()
+                legacy_diagnostics = getattr(self.eng, "legacy_ntfy_diagnostics", None)
+                if legacy_diagnostics:
+                    out["legacy_ntfy"] = legacy_diagnostics()
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:
@@ -318,16 +432,17 @@ class Handler(BaseHTTPRequestHandler):
             snap["closed"] = [item for item in closed if item.get("pinned")]
             try:  # page version: lets stale tabs self-reload on dashboard.html changes
                 assets = [os.path.join(BASE, "dashboard.html")]
-                assets.extend(os.path.join(BASE, route.removeprefix("/"))
-                              for route in STATIC_FILES)
+                assets.extend(os.path.join(BASE, spec[0]) for spec in STATIC_FILES.values())
                 snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
             except OSError:
                 pass
             self.reply(200, "application/json", json.dumps(snap).encode())
         elif route in STATIC_FILES:
             try:
-                with open(os.path.join(BASE, route.removeprefix("/")), "rb") as f:
-                    self.reply(200, STATIC_FILES[route], f.read())
+                path, content_type, cache_control, headers = STATIC_FILES[route]
+                with open(os.path.join(BASE, path), "rb") as f:
+                    self.reply(200, content_type, f.read(), cache_control=cache_control,
+                               extra_headers=headers)
             except FileNotFoundError:
                 self.reply(404, "text/plain", b"asset missing")
         elif route == "/" or route.startswith("/index"):
@@ -345,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, "application/json", body)
         return self.reply(500, "text/plain; charset=utf-8", b"request failed")
 
-    def reply(self, code, ctype, body):
+    def reply(self, code, ctype, body, *, cache_control="no-store", extra_headers=None):
         elapsed_ms = ((time.perf_counter() - getattr(self, "_request_started",
                                                      time.perf_counter())) * 1000)
         route = getattr(self, "_request_route", self.path.split("?", 1)[0])
@@ -360,7 +475,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
             self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache_control)
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -376,18 +493,20 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     cfg = load_config()
     eng = Engine(cfg)
-    eng.scan()
+    eng.start_web_push()
     if cfg.get("search_enabled", True):
         eng.search = SearchIndex(os.path.join(BASE, "search.db"), PROJECTS,
                                  os.path.expanduser("~/.codex/sessions"),
                                  discover_seconds=cfg.get("search_discover_seconds", 2),
                                  batch_rows=cfg.get("search_batch_rows", 250))
         eng.search.start_process()
-    threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
-    threading.Thread(target=outbox_loop, args=(eng,), daemon=True).start()
     Handler.eng = eng
     srv = ThreadingHTTPServer((cfg["bind"], cfg["port"]), Handler)
     print(f"fleet-dash on http://{cfg['bind']}:{cfg['port']}", flush=True)
+    # Bind before the first provider scan. One slow or malformed session must
+    # never make the dashboard's HTTP server disappear during startup.
+    threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
+    threading.Thread(target=outbox_loop, args=(eng,), daemon=True).start()
     srv.serve_forever()
 
 

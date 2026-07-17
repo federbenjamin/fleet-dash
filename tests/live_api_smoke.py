@@ -25,7 +25,8 @@ def main():
     assert status == 200 and kind == "text/html"
     assert b'<div id="appshell">' in html
     assert b'<div id="outboxview">' in html
-    assert b'<div id="briefing">' in html
+    assert b'id="route-notifications"' in html
+    assert b'data-notification-section="briefing"' in html
     assert b'<div id="budgets">' in html
     assert b'<script src="/static/app.js"></script>' in html
 
@@ -65,9 +66,11 @@ def main():
     assert set(budgets["measurement_labels"]) == {
         "exact", "partial", "token_only", "unavailable"}
     assert "budget_summary" in fleet
-    assert "scheduled_digest" in fleet["notify"]
-    assert "digest_schedule_time" in fleet["settings"]
-    assert "digest_schedule_zone" in fleet["settings"]
+    assert "notify" not in fleet
+    assert fleet["settings"]["legacy_ntfy_enabled"] in (True, False)
+    assert fleet["settings"]["legacy_ntfy_configured"] in (True, False)
+    for retired in ("dashboard_url", "digest_schedule_time", "digest_schedule_zone"):
+        assert retired not in fleet["settings"]
     for action in fleet.get("actions") or []:
         if action.get("kind") == "budget":
             assert action.get("primary_action") == "view_budget"

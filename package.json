@@ -2,9 +2,13 @@
   "name": "fleet-dash-browser-tests",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:push": "node --test tests/web_push_worker.test.js tests/service_worker.test.js"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1"
+  },
+  "dependencies": {
+    "web-push": "3.6.7"
   }
 }

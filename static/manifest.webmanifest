@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "Fleet Dash",
+  "short_name": "Fleet",
+  "description": "Local coding-agent operations",
+  "start_url": "/#now",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "categories": ["productivity", "developer tools"],
+  "icons": [
+    {
+      "src": "/static/icons/fleet-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/fleet-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/fleet-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

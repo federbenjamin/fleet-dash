@@ -5,7 +5,14 @@
 <!-- maximum-scale=1 only disables iOS's AUTO-zoom on input focus; pinch zoom
      still works (iOS ignores it for user gestures since iOS 10) -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<title>Fleet View</title>
+<meta name="theme-color" content="#0a0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Fleet Dash">
+<title>Fleet Dash</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icons/fleet.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icons/fleet-192.png">
 <link rel="stylesheet" href="/static/fleet.css">
 </head>
 <body>
@@ -14,6 +21,7 @@
     <div class="brand"><span class="brandmark">F</span><span><b>Fleet Dash</b><small>local operations</small></span></div>
     <nav class="navlist">
       <button data-route="now" onclick="navigateTo('now')"><span class="navicon">⌂</span><span>Now</span><b id="nav-now-count"></b></button>
+      <button data-route="notifications" onclick="navigateTo('notifications')"><span class="navicon">◉</span><span>Notifications</span><b id="nav-notification-count"></b></button>
       <button data-route="search" onclick="navigateTo('search')"><span class="navicon">⌕</span><span>Search</span></button>
       <button data-route="workstreams" onclick="navigateTo('workstreams')"><span class="navicon">⌘</span><span>Workstreams</span></button>
       <button data-route="history" onclick="navigateTo('history')"><span class="navicon">↺</span><span>History</span></button>
@@ -29,7 +37,7 @@
       <div class="desthead"><div><h1>Now</h1><p>What needs attention and what is moving.</p></div>
         <button class="headprimary" onclick="newOpen=true;render(last,true);document.getElementById('newsess').scrollIntoView({behavior:'smooth'})">+ New session</button></div>
       <div class="commandbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="nowfilter" placeholder="Filter sessions" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="nowfilter" data-draft-key="filter:now" placeholder="Filter sessions" autocomplete="off"
           oninput="setNowFilter(this.value)"></label>
         <div class="commandchips" aria-label="Session state filter">
           <button data-now-filter="all" onclick="setNowState('all')">All</button>
@@ -43,7 +51,6 @@
           <button class="saveview" onclick="saveCurrentView('now')" title="Save this filter">＋ Save view</button>
         </div>
       </div>
-      <div id="briefing"></div>
       <div id="pinned"></div>
       <div id="stale">server unreachable — showing last snapshot</div>
       <div id="providerstate"></div>
@@ -56,11 +63,29 @@
       <div id="sessions"></div>
       <div id="newsess"></div>
     </section>
+    <section class="destination" id="route-notifications" data-destination="notifications" hidden>
+      <div class="desthead"><div><h1>Notifications</h1><p>Durable requests, updates, problems, and review history.</p></div>
+        <button class="headsecondary" onclick="markNotificationsRead()">Mark all read</button></div>
+      <div class="notificationbar" aria-label="Notification sections">
+        <button data-notification-section="needs" onclick="setNotificationSection('needs')">Needs action</button>
+        <button data-notification-section="updates" onclick="setNotificationSection('updates')">Updates</button>
+        <button data-notification-section="snoozed" onclick="setNotificationSection('snoozed')">Snoozed</button>
+        <button data-notification-section="problems" onclick="setNotificationSection('problems')">Problems</button>
+        <button data-notification-section="briefing" onclick="setNotificationSection('briefing')">Briefing</button>
+        <button data-notification-section="history" onclick="setNotificationSection('history')">History</button>
+      </div>
+      <div id="notificationstatus" aria-live="polite"></div>
+      <div id="notificationlayout">
+        <div><div id="notifications" aria-live="polite"></div>
+          <button id="notificationmore" class="searchmore" onclick="loadNotifications(false)" hidden>Load older</button></div>
+        <aside id="notificationdetail" aria-label="Notification detail"></aside>
+      </div>
+    </section>
     <section class="destination" id="route-search" data-destination="search" hidden>
       <div class="desthead"><div><h1>Search</h1><p>Claude, Codex, subagents, and delivered artifacts on this Mac.</p></div>
         <button class="headsecondary" id="search-rebuild" onclick="rebuildSearch()">Rebuild index</button></div>
       <div class="searchbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="searchquery" placeholder="Search every transcript" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="searchquery" data-draft-key="filter:search" placeholder="Search every transcript" autocomplete="off"
           oninput="queueSearch(true)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
         <div class="searchfilters">
           <label><span>Provider</span><select id="searchprovider" onchange="runSearch(true)">
@@ -79,7 +104,7 @@
     <section class="destination" id="route-workstreams" data-destination="workstreams" hidden>
       <div class="desthead"><div><h1>Workstreams</h1><p>Sessions grouped by repository and project.</p></div></div>
       <div class="commandbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="workfilter" placeholder="Filter repositories, branches, providers, or sessions" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="workfilter" data-draft-key="filter:workstreams" placeholder="Filter repositories, branches, providers, or sessions" autocomplete="off"
           oninput="setWorkFilter(this.value)"></label>
         <div class="commandchips" aria-label="Workstream state filter">
           <button data-work-filter="all" onclick="setWorkState('all')">All</button>
@@ -105,12 +130,13 @@
 </div>
 <nav id="bottomnav" aria-label="Fleet mobile navigation">
   <button data-route="now" onclick="navigateTo('now')"><span>⌂</span><small>Now</small></button>
+  <button data-route="notifications" onclick="navigateTo('notifications')"><span>◉</span><small>Notifications</small><b id="mobile-notification-count"></b></button>
   <button data-route="search" onclick="navigateTo('search')"><span>⌕</span><small>Search</small></button>
   <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>⌘</span><small>Work</small></button>
-  <button data-route="history" onclick="navigateTo('history')"><span>↺</span><small>History</small></button>
   <button data-route="more" onclick="toggleMobileMore()"><span>•••</span><small>More</small></button>
 </nav>
 <div id="mobilemore" role="menu">
+  <button role="menuitem" onclick="navigateTo('history')">↺ <span>History</span></button>
   <button role="menuitem" onclick="navigateTo('insights')">⌁ <span>Insights</span></button>
   <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
 </div>
@@ -134,7 +160,7 @@
 <div id="sview">
   <div id="shead2"><button id="sclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="stitle2"></span>
     <span id="sctrl"></span></div>
-  <div id="sworkspace"><div id="sbody"></div><aside id="sevidence" aria-label="Session state evidence"></aside></div>
+  <div id="sworkspace"><div id="schat"><div id="sbody"></div><div id="sactivity"></div></div><aside id="sevidence" aria-label="Session state evidence"></aside></div>
   <div id="sact"></div>
 </div>
 <div id="handoffview">
@@ -142,11 +168,6 @@
     onclick="dismissOverlay()">←</button><span id="handofftitle"><b>Continue in another session</b>
     <small>Independent session · exact destination</small></span></div>
   <div id="handoffbody"></div>
-</div>
-<div id="repoview">
-  <div id="repohead"><button id="repoclose" aria-label="back" onclick="dismissOverlay()">←</button>
-    <span id="repotitle"><b>Repository outcome</b><small>Git, tests, and pull requests</small></span></div>
-  <div id="repobody"></div>
 </div>
 <div id="outboxview">
   <div id="outboxhead"><button aria-label="back" onclick="dismissOverlay()">←</button>

@@ -81,13 +81,42 @@ class ServerHandlerTest(unittest.TestCase):
         Handler._do_POST(handler)
         self.assertEqual(replies[0][0], 413)
 
-    def test_settings_audit_does_not_log_action_urls(self):
+    def test_image_upload_is_token_gated_bounded_and_keeps_binary_out_of_json(self):
+        calls, timeouts, replies = [], [], []
+        data = b"\x89PNG\r\n\x1a\nprivate-binary"
+        handler = self.handler(
+            "/api/upload-image?sid=codex%3Aone&id=opaque_1&name=phone%20photo.png")
+        handler.connection = SimpleNamespace(settimeout=lambda seconds: timeouts.append(seconds))
+        handler.eng = SimpleNamespace(cfg={"act_token": "token"},
+            store_image_upload=lambda *args: calls.append(args) or
+                {"ok": True, "upload_id": "opaque_1"})
+        handler.headers = {"Content-Type": "image/png", "Content-Length": str(len(data))}
+        handler.rfile = io.BytesIO(data)
+        handler.reply = lambda code, ctype, body: replies.append((code, json.loads(body)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers["X-Act-Token"] = "token"
+        handler.rfile = io.BytesIO(data)
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True, "upload_id": "opaque_1"})])
+        self.assertEqual(calls, [("codex:one", "opaque_1", "phone photo.png",
+                                  "image/png", data)])
+        self.assertEqual(timeouts, [20])
+
+        handler.headers["Transfer-Encoding"] = "chunked"
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 400)
+
+    def test_settings_audit_logs_only_field_names(self):
         handler = self.handler("/api/settings")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
         handler.eng = SimpleNamespace(cfg={"act_token": "token"},
                                       update_settings=lambda action: {"ok": True})
-        payload = json.dumps({"dashboard_url":
-                              "http://127.0.0.1:8377/?token=secret-value"}).encode()
+        payload = json.dumps({"reader_width": "secret-value"}).encode()
         handler.headers = {"X-Act-Token": "token",
                            "Content-Length": str(len(payload))}
         handler.rfile = io.BytesIO(payload)
@@ -95,8 +124,164 @@ class ServerHandlerTest(unittest.TestCase):
         audit = io.StringIO()
         with redirect_stderr(audit):
             Handler._do_POST(handler)
-        self.assertIn("[URL omitted]", audit.getvalue())
+        self.assertIn("field_count", audit.getvalue())
         self.assertNotIn("secret-value", audit.getvalue())
+
+    def test_notifications_route_requires_auth_and_forwards_bounded_query(self):
+        calls = []
+        handler = self.handler(
+            "/api/notifications?device=phone-1&cursor=42&limit=20&state=active,snoozed"
+            "&kind=question,approval&id=evt-1")
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "token"},
+            notifications_snapshot=lambda *args: calls.append(args) or
+            {"ok": True, "events": []})
+        replies = []
+        handler.reply = lambda code, ctype, body: replies.append(
+            (code, ctype, json.loads(body)))
+
+        Handler._do_GET(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers = {"X-Act-Token": "token"}
+        replies.clear()
+        Handler._do_GET(handler)
+        self.assertEqual(replies[0][0], 200)
+        self.assertEqual(calls, [("phone-1", "42", "20",
+                                  ["active", "snoozed"],
+                                  ["question", "approval"], "evt-1")])
+
+    def test_push_get_routes_require_auth_and_return_only_engine_projection(self):
+        calls = []
+        for route, method in (("/api/push/config?device=phone-1", "push_config"),
+                              ("/api/push/devices?device=phone-1", "push_devices")):
+            handler = self.handler(route)
+            handler.eng = SimpleNamespace(cfg={"act_token": "token"}, **{
+                method: lambda device, method=method: calls.append((method, device)) or
+                    {"ok": True, "current_device": {"id": device}}})
+            replies = []
+            handler.reply = lambda code, ctype, body: replies.append(
+                (code, json.loads(body)))
+            Handler._do_GET(handler)
+            self.assertEqual(replies[0][0], 403)
+            handler.headers = {"X-Act-Token": "token"}
+            replies.clear()
+            Handler._do_GET(handler)
+            self.assertEqual(replies[0][1]["current_device"]["id"], "phone-1")
+        self.assertEqual(calls, [("push_config", "phone-1"),
+                                 ("push_devices", "phone-1")])
+
+    def test_notification_mutation_routes_are_token_gated_and_dispatch_exact_payload(self):
+        routes = {
+            "/api/notifications/read": "notifications_mark_read",
+            "/api/notifications/snooze": "notifications_snooze",
+            "/api/notifications/wake": "notifications_wake",
+            "/api/notifications/mute": "notifications_mute",
+            "/api/notifications/retry": "notifications_retry",
+        }
+        payload = {"device_id": "phone-1", "event_id": "evt-1",
+                   "source_revision": "rev-1", "cursor": 3,
+                   "until": time.time() + 900, "muted": True,
+                   "delivery_id": "delivery-1"}
+        for route, method in routes.items():
+            with self.subTest(route=route):
+                calls = []
+                handler = self.handler(route)
+                handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+                handler.eng = SimpleNamespace(cfg={"act_token": "token"}, **{
+                    method: lambda action, method=method: calls.append((method, action)) or
+                        {"ok": True}})
+                body = json.dumps(payload).encode()
+                handler.headers = {"Content-Length": str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                replies = []
+                handler.reply = lambda code, ctype, data: replies.append(
+                    (code, json.loads(data)))
+                Handler._do_POST(handler)
+                self.assertEqual(replies[0][0], 403)
+                self.assertEqual(calls, [])
+
+                handler.headers["X-Act-Token"] = "token"
+                handler.rfile = io.BytesIO(body)
+                replies.clear()
+                Handler._do_POST(handler)
+                self.assertEqual(replies[0], (200, {"ok": True}))
+                self.assertEqual(calls, [(method, payload)])
+
+    def test_push_capability_route_ignores_act_token_and_accepts_only_capability_body(self):
+        calls = []
+        handler = self.handler("/api/push/capability-action")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "secret"},
+            push_capability_action=lambda action: calls.append(action) or {"ok": True})
+        payload = json.dumps({"capability": "signed-token"}).encode()
+        handler.headers = {"X-Act-Token": "wrong", "Content-Type": "application/json",
+                           "Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        replies = []
+        handler.reply = lambda code, ctype, data: replies.append((code, json.loads(data)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True})])
+        self.assertEqual(calls, [{"capability": "signed-token"}])
+
+        bad = json.dumps({"capability": "signed-token", "event_id": "evt-forged"}).encode()
+        handler.headers["Content-Length"] = str(len(bad))
+        handler.rfile = io.BytesIO(bad)
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 400)
+        self.assertEqual(calls, [{"capability": "signed-token"}])
+
+    def test_legacy_ntfy_test_is_token_gated_and_has_no_client_payload(self):
+        handler = self.handler("/api/legacy-ntfy/test")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        calls = []
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "secret"},
+            legacy_ntfy_test=lambda: calls.append(True) or {"ok": True, "queued": True})
+        handler.headers = {"Content-Length": "2"}
+        handler.rfile = io.BytesIO(b"{}")
+        replies = []
+        handler.reply = lambda code, ctype, data: replies.append((code, json.loads(data)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers["X-Act-Token"] = "secret"
+        handler.rfile = io.BytesIO(b"{}")
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True, "queued": True})])
+        self.assertEqual(calls, [True])
+
+    def test_push_subscription_post_never_logs_subscription_material(self):
+        handler = self.handler("/api/push/subscription")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        captured = []
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "token"},
+            push_subscription=lambda payload: captured.append(payload) or
+                {"ok": True, "device": {"id": payload["device_id"]}})
+        payload = json.dumps({"device_id": "secret-device-sentinel",
+            "permission_state": "secret-permission-sentinel", "subscription": {
+            "endpoint": "https://web.push.apple.com/private-endpoint",
+            "keys": {"p256dh": "private-key", "auth": "private-auth"}}}).encode()
+        handler.headers = {"X-Act-Token": "token", "Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        replies = []
+        handler.reply = lambda code, ctype, body: replies.append(json.loads(body))
+        audit = io.StringIO()
+        with redirect_stderr(audit):
+            Handler._do_POST(handler)
+        self.assertTrue(replies[0]["ok"])
+        self.assertEqual(captured[0]["subscription"]["keys"]["auth"], "private-auth")
+        self.assertNotIn("private-endpoint", audit.getvalue())
+        self.assertNotIn("private-key", audit.getvalue())
+        self.assertNotIn("private-auth", audit.getvalue())
+        self.assertNotIn("secret-device-sentinel", audit.getvalue())
+        self.assertNotIn("secret-permission-sentinel", audit.getvalue())
 
 
 if __name__ == "__main__":

@@ -3,7 +3,9 @@ import json
 import os
 import plistlib
 import sqlite3
+import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -12,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail,
+from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, load_config,
                     classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
@@ -165,6 +167,23 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(second["diagnostics"]["scan_samples"], 2)
         self.assertGreaterEqual(second["diagnostics"]["scan_p95_ms"], 0)
 
+    def test_stall_default_migrates_exact_old_default_once(self):
+        migration_base = os.path.join(self.tmp.name, "migration")
+        os.makedirs(migration_base)
+        path = os.path.join(migration_base, "config.json")
+        with open(path, "w") as handle:
+            json.dump({"stall_seconds": 240, "act_token": "existing"}, handle)
+        with mock.patch.object(engine_module, "BASE", migration_base):
+            migrated = load_config()
+        self.assertEqual(migrated["stall_seconds"], 600)
+        self.assertTrue(migrated["_stall_default_v2"])
+
+        with open(path, "w") as handle:
+            json.dump({"stall_seconds": 900, "act_token": "existing"}, handle)
+        with mock.patch.object(engine_module, "BASE", migration_base):
+            custom = load_config()
+        self.assertEqual(custom["stall_seconds"], 900)
+
     def test_new_claude_registry_session_is_interactive_before_first_transcript(self):
         os.unlink(self.transcript)
         fleet = self.engine.scan()
@@ -177,6 +196,86 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(session["cost"])
         self.assertEqual(self.engine.session_context("same"), {
             "ok": True, "messages": [], "files": [], "starting": True})
+
+    def test_private_image_upload_is_normalized_scoped_and_resolved_server_side(self):
+        private = b"camera=private;gps=private"
+        fake_jpeg = (b"\xff\xd8\xff\xe1" + (len(private) + 2).to_bytes(2, "big") +
+                     private + b"\xff\xda\x00\x02\xff\xd9")
+        self.assertNotIn(private, self.engine._strip_jpeg_metadata(fake_jpeg))
+        self.engine.scan()
+        image_path = os.path.join(os.path.dirname(__file__), "..", "static", "icons",
+                                  "fleet-192.png")
+        with open(image_path, "rb") as handle:
+            data = handle.read()
+        uploaded = self.engine.store_image_upload(
+            "codex:same", "opaque_image_1", "../../phone.png", "image/png", data)
+        self.assertTrue(uploaded["ok"], uploaded)
+        self.assertEqual(uploaded["name"], "phone.png")
+        paths, error = self.engine._resolve_image_uploads(
+            "codex:same", ["opaque_image_1"])
+        self.assertIsNone(error)
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].startswith(os.path.join(self.base, "uploads") + os.sep))
+        self.assertEqual(stat.S_IMODE(os.stat(paths[0]).st_mode), 0o600)
+        denied, error = self.engine._resolve_image_uploads("same", ["opaque_image_1"])
+        self.assertIsNone(denied)
+        self.assertIn("another session", error)
+
+        result = self.engine.act({"type": "image_text", "session_id": "codex:same",
+                                  "text": "Inspect", "upload_ids": ["opaque_image_1"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.codex.actions[-1]["image_paths"], paths)
+        claude_upload = self.engine.store_image_upload(
+            "same", "opaque_image_3", "phone.png", "image/png", data)
+        self.assertTrue(claude_upload["ok"], claude_upload)
+        writes = []
+        self.engine._tty_cache[os.getpid()] = "ttys999"
+        with mock.patch.object(self.engine, "_iterm_write",
+                               side_effect=lambda tty, steps, step_delay=None:
+                               writes.append((tty, steps, step_delay)) or {"ok": True}):
+            claude_result = self.engine.act({"type": "image_text", "session_id": "same",
+                "text": "Inspect in Claude", "upload_ids": ["opaque_image_3"]})
+        self.assertTrue(claude_result["ok"])
+        self.assertIn("Inspect in Claude", writes[0][1][0][0])
+        self.assertIn(os.path.join(self.base, "uploads", "opaque_image_3.jpg"),
+                      writes[0][1][0][0])
+        mismatch = self.engine.store_image_upload(
+            "codex:same", "opaque_image_2", "fake.jpg", "image/jpeg", data)
+        self.assertFalse(mismatch["ok"])
+
+    def test_large_nul_path_probe_keeps_only_a_bounded_sample(self):
+        probe = self.engine._bounded_nul_paths([
+            sys.executable, "-c",
+            "import sys; sys.stdout.buffer.write(b\"ignored\\0\" * 70000)"],
+            max_input=1_000_000, keep=3)
+        self.assertTrue(probe["ok"])
+        self.assertEqual(probe["count"], 70000)
+        self.assertEqual(probe["paths"], ["ignored", "ignored", "ignored"])
+        self.assertEqual(len(probe["digest"]), 64)
+
+    def test_claude_shell_status_defers_to_a_completed_transcript_turn(self):
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "shell", "name": "Claude", "startedAt": 1}, handle)
+        settled = next(item for item in self.engine.scan()["sessions"]
+                       if item["provider"] == "claude")
+        self.assertEqual((settled["state"], settled["ui_group"],
+                          settled["capabilities"]["interrupt"]),
+                         ("turn_done", "available", False))
+
+        with open(self.transcript, "a") as handle:
+            handle.write(json.dumps({
+                "type": "assistant", "timestamp": "2026-07-17T07:40:00Z",
+                "message": {"role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "tool_use", "content": [{"type": "tool_use",
+                        "id": "shell-active", "name": "Bash", "input": {}}]},
+            }) + "\n")
+        active = next(item for item in self.engine.scan()["sessions"]
+                      if item["provider"] == "claude")
+        self.assertEqual((active["state"], active["ui_group"],
+                          active["capabilities"]["interrupt"]),
+                         ("running", "working", True))
 
     def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
         fleet = self.engine.scan()
@@ -313,6 +412,8 @@ class EngineProviderTest(unittest.TestCase):
                          {"b": 0, "c": 1, "a": 2})
         with open(os.path.join(self.base, "config.json")) as handle:
             stored = json.load(handle)
+        self.assertEqual(os.stat(os.path.join(self.base, "config.json")).st_mode & 0o777,
+                         0o600)
         self.assertEqual(stored["working_order"], ["b", "c", "a"])
         self.assertTrue(self.engine.update_settings({"preview_agents": True})["ok"])
         with open(os.path.join(self.base, "config.json")) as handle:
@@ -557,39 +658,26 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("not a file this session delivered", error)
 
-    def test_notifications_skip_unknown_codex_cost_and_muted_sessions(self):
+    def test_legacy_ntfy_is_manual_generic_and_disabled_by_default(self):
+        self.engine.cfg["ntfy_topic"] = "private-topic"
+        self.engine.cfg["ntfy_server"] = "https://ntfy.example.test"
         sent = []
-        self.engine.once = lambda *args: sent.append(args)
-        session = codex_session()
-        session.update(state="needs_you", quiet_s=1000, muted=True,
-                       pending={"kind": "permission", "tool": "command"})
-        fleet = {"sessions": [session], "totals": {"busy": 0, "agents_running": 0,
-                                                     "sessions": 1}}
-        self.engine.check_notifications(fleet)
+        self.engine._send_legacy_ntfy_test = lambda key: sent.append(key)
+        self.assertFalse(self.engine.legacy_ntfy_test()["ok"])
         self.assertEqual(sent, [])
-
-    def test_scheduled_digest_dispatches_after_restart_due_time_and_dedupes(self):
-        self.engine.cfg["notify"] = {**self.engine.cfg["notify"],
-                                      "scheduled_digest": True,
-                                      "fleet_quiet": False}
-        self.engine.cfg["digest_schedule_time"] = "00:00"
-        self.engine.cfg["digest_schedule_zone"] = "UTC"
-        sent = []
-        self.engine.ntfy = lambda *args, **kwargs: sent.append(args)
-        snapshot = {"sessions": [], "totals": {"busy": 0, "agents_running": 0,
-                                                  "sessions": 0}}
-        self.engine.check_notifications(snapshot)
+        enabled = self.engine.update_settings({"legacy_ntfy_enabled": True})
+        self.assertEqual(enabled, {"ok": True, "legacy_ntfy_enabled": True})
+        queued = self.engine.legacy_ntfy_test()
+        self.assertTrue(queued["ok"])
         self.assertEqual(len(sent), 1)
-        self.assertTrue(sent[0][0].startswith("digest:UTC:"))
-
-        restarted = Engine(dict(self.engine.cfg))
-        restarted.codex = self.codex
-        duplicate = []
-        restarted.ntfy = lambda *args, **kwargs: duplicate.append(args)
-        restarted.check_notifications(snapshot)
-        self.assertEqual(duplicate, [])
-        if restarted.db:
-            restarted.db.close()
+        self.assertTrue(sent[0].startswith("legacy-test:"))
+        self.assertEqual(self.engine.operations.legacy_notification_diagnostics()
+                         ["statuses"]["queued"], 1)
+        fleet = self.engine.scan()
+        self.assertTrue(fleet["settings"]["legacy_ntfy_enabled"])
+        self.assertTrue(fleet["settings"]["legacy_ntfy_configured"])
+        self.assertNotIn("notify", fleet)
+        self.assertNotIn("dashboard_url", fleet["settings"])
 
     def test_token_cookie_requires_exact_cookie_name_and_value(self):
         def check(cookie="", header=""):
@@ -607,7 +695,7 @@ class EngineProviderTest(unittest.TestCase):
                "status": "idle", "name": "Claude"}
         self.engine.live_sessions = lambda: [reg]
         self.engine._tty_cache[os.getpid()] = "ttys-test"
-        tail = SimpleNamespace(pending={}, poll=lambda: None)
+        tail = SimpleNamespace(pending={}, poll=lambda: None, turn_state=lambda: "running")
         self.engine.tail_for = lambda path: tail
         writes = []
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
@@ -624,6 +712,12 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(self.engine.act({"type": "interrupt",
                                          "session_id": "same"})["ok"])
         self.assertEqual(writes[-1][1], [("\x1b", False)])
+        reg["status"] = "shell"
+        self.assertTrue(self.engine.act({"type": "interrupt",
+                                         "session_id": "same"})["ok"])
+        tail.turn_state = lambda: "awaiting_input"
+        self.assertIn("finished", self.engine.act({"type": "interrupt",
+            "session_id": "same"})["error"])
         reg["status"] = "waiting"
         self.engine.hook_pending = lambda sid, status: {
             "kind": "question", "nonce": "q1", "questions": []}
@@ -706,6 +800,25 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.05)])
         kill.assert_called_once_with(pid, engine_module.signal.SIGTERM)
 
+    def test_claude_close_interrupts_an_active_shell_before_termination(self):
+        pid = 424244
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "shell", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        process = SimpleNamespace(stdout="/usr/local/bin/claude --model sonnet")
+        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
+             mock.patch.object(engine_module.os, "kill") as kill, \
+             mock.patch.object(engine_module.time, "sleep"):
+            result = self.engine.act({"type": "close", "session_id": "same"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["interrupted"])
+        self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.05)])
+        kill.assert_called_once_with(pid, engine_module.signal.SIGTERM)
+
     def test_claude_close_refuses_reused_non_claude_pid(self):
         pid = 424243
         self.engine.live_sessions = lambda: [{"sessionId": "same", "pid": pid,
@@ -758,18 +871,19 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(self.engine.cfg["reader_width"], "centered")
 
     def test_settings_validation_is_atomic_strict_and_concurrency_safe(self):
-        before_notify = copy.deepcopy(self.engine.cfg["notify"])
+        before_notify = copy.deepcopy(self.engine.cfg.get("notify"))
         rejected = self.engine.update_settings({
             "notify": {"needs_you": False}, "reader_width": "left"})
         self.assertFalse(rejected["ok"])
-        self.assertEqual(self.engine.cfg["notify"], before_notify)
+        self.assertEqual(self.engine.cfg.get("notify"), before_notify)
         config_path = os.path.join(self.base, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as handle:
                 self.assertNotEqual((json.load(handle).get("notify") or {}).get("needs_you"), False)
 
         for patch in ({"preview_agents": "false"},
-                      {"notify": {"needs_you": "false"}},
+                      {"notify": {"needs_you": False}},
+                      {"legacy_ntfy_enabled": "true"},
                       {"mute_session": "same", "muted": 1},
                       {"pin_session": "same", "pinned": "yes"},
                       {"unknown_setting": True},
@@ -1093,6 +1207,10 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual((provider_error["ui_group"], provider_error["reason_label"],
                           provider_error["winning_rule"]),
                          ("needs_you", "Fix needed", "placement.provider.error"))
+        provider_limit = organized(state="blocked", error="Usage limit reached")
+        self.assertEqual((provider_limit["ui_group"], provider_limit["reason_label"],
+                          provider_limit["winning_rule"]),
+                         ("needs_you", "Limit reached", "placement.provider.limit"))
 
         reply = organized(state="turn_done", _latest_prose={"role": "assistant",
                            "text": "Which layout should I use?"})
@@ -1172,40 +1290,60 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(organized["ui_group"], "available")
         self.assertTrue(organized["pinned"])
 
-    def test_digest_and_budget_settings_persist_without_copying_budgets_to_config(self):
-        self.engine.cfg["notify"] = {"needs_you": True}
-        migrated = self.engine.scan()["notify"]
-        self.assertFalse(migrated["scheduled_digest"])
-        self.assertTrue(migrated["stall"])
+    def test_budget_settings_persist_without_copying_budgets_to_config(self):
         saved = self.engine.update_settings({
-            "notify": {"scheduled_digest": True},
-            "digest_schedule_time": "08:30",
-            "digest_schedule_zone": "America/New_York",
+            "legacy_ntfy_enabled": True,
             "budgets": [{"id": "fleet-token", "scope_type": "fleet",
                          "metric": "tokens", "limit_value": 50000,
                          "block_spawns": False}],
         })
         self.assertTrue(saved["ok"])
-        self.assertTrue(saved["notify"]["scheduled_digest"])
         self.assertEqual(saved["budgets"][0]["id"], "fleet-token")
         with open(os.path.join(self.base, "config.json")) as handle:
             config = json.load(handle)
-        self.assertEqual(config["digest_schedule_time"], "08:30")
-        self.assertEqual(config["digest_schedule_zone"], "America/New_York")
         self.assertNotIn("budgets", config)
         self.engine.scan()
         budget = self.engine.budgets_snapshot()["budgets"][0]
         self.assertEqual((budget["metric"], budget["measurement_scope"]),
                          ("tokens", "partial"))
 
-        invalid = self.engine.update_settings({"digest_schedule_zone": "Not/AZone"})
-        self.assertFalse(invalid["ok"])
-        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
-        overlong = self.engine.update_settings({"digest_schedule_zone": "A" * 121})
-        self.assertFalse(overlong["ok"])
-        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
+        for retired in ({"digest_schedule_zone": "America/New_York"},
+                        {"dashboard_url": "https://fleet.test/?token=private"},
+                        {"spend_threshold_usd": 10}):
+            self.assertFalse(self.engine.update_settings(retired)["ok"])
         self.assertFalse(self.engine.update_settings(
             {"mute_session": "", "muted": True})["ok"])
+
+    def test_engine_start_scrubs_known_secrets_from_runtime_log(self):
+        log_path = os.path.join(self.base, "fleet-dash.log")
+        secret_path = os.path.join(self.base, "push-secrets.json")
+        values = {
+            "vapid_private_key": "private-vapid-material-1234567890",
+            "action_secret": "private-action-material-1234567890",
+        }
+        with open(secret_path, "w") as handle:
+            json.dump(values, handle)
+        os.chmod(secret_path, 0o600)
+        config = dict(self.engine.cfg)
+        config.update({"act_token": "private-act-token-1234",
+                       "dashboard_url": "https://fleet.example/private-token"})
+        with open(log_path, "wb") as handle:
+            handle.write(("before private-act-token-1234 "
+                          "https://fleet.example/private-token "
+                          "private-vapid-material-1234567890 "
+                          "private-action-material-1234567890 after\n").encode())
+        replacement = Engine(config)
+        try:
+            with open(log_path, "rb") as handle:
+                scrubbed = handle.read()
+            self.assertIn(b"before", scrubbed)
+            self.assertIn(b"after", scrubbed)
+            for secret in (config["act_token"], config["dashboard_url"], *values.values()):
+                self.assertNotIn(secret.encode(), scrubbed)
+            self.assertEqual(stat.S_IMODE(os.lstat(log_path).st_mode), 0o600)
+        finally:
+            if replacement.db:
+                replacement.db.close()
 
     def test_explicit_hard_budget_blocks_new_spawns_but_not_existing_work(self):
         self.engine.update_settings({"budgets": [{
@@ -1384,6 +1522,39 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(clean_removed["ok"])
         self.assertFalse(os.path.exists(clean))
         self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/clean").returncode, 0)
+
+        locked = os.path.join(self.tmp.name, "close-claude-locked")
+        git("worktree", "add", "-b", "feature/claude-locked", locked)
+        lock_reason = "claude session close-claude-locked (pid 424242 start now)"
+        git("worktree", "lock", "--reason", lock_reason, locked)
+        locked_session = {"session_id": "same", "provider": "claude", "cwd": locked,
+                          "pid": 424242}
+        locked_preview = self.engine.close_worktree_preview(locked_session)
+        self.assertTrue(locked_preview["inspect_ok"])
+        self.assertTrue(locked_preview["owned_lock"])
+        self.assertTrue(locked_preview["remove_allowed"])
+        self.engine._mark_cleanup_ticket_closed(locked_preview["cleanup_ticket"], "same")
+        real_run = subprocess.run
+        def closed_process(argv, *args, **kwargs):
+            if argv[:2] == ["ps", "-p"]:
+                return SimpleNamespace(stdout="")
+            return real_run(argv, *args, **kwargs)
+        with mock.patch.object(engine_module.subprocess, "run", side_effect=closed_process):
+            locked_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+                "cleanup_ticket": locked_preview["cleanup_ticket"], "force": False})
+        self.assertTrue(locked_removed["ok"], locked_removed)
+        self.assertFalse(os.path.exists(locked))
+        self.assertEqual(git("show-ref", "--verify",
+            "refs/heads/feature/claude-locked").returncode, 0)
+
+        foreign_locked = os.path.join(self.tmp.name, "close-foreign-locked")
+        git("worktree", "add", "-b", "feature/foreign-locked", foreign_locked)
+        git("worktree", "lock", "--reason", "maintenance", foreign_locked)
+        foreign_preview = self.engine.close_worktree_preview({
+            "session_id": "same", "provider": "claude", "cwd": foreign_locked,
+            "pid": 424242})
+        self.assertFalse(foreign_preview["inspect_ok"])
+        self.assertFalse(foreign_preview["remove_allowed"])
 
         stale = os.path.join(self.tmp.name, "close-stale")
         git("worktree", "add", "-b", "feature/stale", stale)

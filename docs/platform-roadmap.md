@@ -1,6 +1,6 @@
 # Fleet Dash platform roadmap
 
-Status: approved for sequential implementation on `codex-integration`.
+Status: M0–M12 complete on `design/push-notification-redesign`.
 
 ## Implementation progress
 
@@ -12,15 +12,18 @@ Status: approved for sequential implementation on `codex-integration`.
 | M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
 | M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
 | M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
-| M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
+| M6 — Repository outcome center | Complete · 2026-07-16; in-app center retired · 2026-07-17 | Cached argv-only Git evidence and transcript-derived outcomes remain available to Workstreams. GitHub now opens externally; duplicated GitHub/Git/PR pages and action forms were removed from Fleet. |
 | M7 — Message Outbox and light automations | Complete · 2026-07-16 | Durable SQLite outbox, four one-time send modes, atomic claim/lease recovery, exact target/account/session validation, central responsive UI, 139 Python tests, 70 deterministic browser checks, 10 safe running-daemon checks, and a real create/cancel smoke with no message dispatched. |
 | M8 — Briefings, budgets, and forecasts | Complete · 2026-07-16 | Durable per-device briefings, reviewed history, source links, mute-aware quiet/scheduled digests, persistent notification failures, scoped cumulative budgets, optional fail-closed future-spawn limits, honest mixed-provider measurement, action-inbox alerts, 156 Python tests, 74 deterministic browser checks, and 12 live checks. |
 | M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 | M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
+| M12 — Notification Center and Web Push | Complete · N0–N6 · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center; installed macOS/iPhone app-closed delivery, badges, exact deep links, production policy, bounded reminders, Snooze/Mute capabilities, minimal lock-screen payloads, manual-only legacy ntfy, restart/saturation/privacy gates, and live p95 contracts. |
 
-Completion here records the milestone gate, not proof by assertion. M10 reopened the catalogue rows,
-verified the current implementation and tests, and recorded the final source/runtime limitations.
+Completion here records the milestone gate, not proof by assertion. M10 reopened the M0–M10
+catalogue rows, verified the current implementation and tests, and recorded the source/runtime
+limitations. M12 completion records its dedicated deterministic, live, real-device, privacy, and
+latency evidence rather than treating roadmap status as proof.
 
 This roadmap turns Fleet Dash from a session list into a local operations desk for supervising
 Claude Code and Codex work. It preserves one shared application, provider-independent sessions,
@@ -36,10 +39,11 @@ every existing control, and the current safe-action boundaries.
 - Provider handoff opens an editable preview that can be accepted unchanged with one primary action.
 - Git/GitHub supports status, commit, push, draft-PR creation, and an explicitly confirmed
   ready-for-review action. Fleet never merges a PR.
-- Briefings appear in the app. Immediate blocker pushes and one fleet-quiet completion digest may
-  use ntfy. Scheduled push digests default off.
-- Desktop uses a per-device left/right navigation rail. Mobile uses bottom navigation. The destinations are Now,
-  Search, Workstreams, History, Insights, and Settings.
+- Notification Center owns durable events and Briefing history. Standards-based Web Push is the only
+  automatic external transport; ntfy remains manual legacy only. Push is selective, minimal, and
+  limited to Open, Snooze, and Mute, with one 15-minute reminder at most.
+- Desktop uses a per-device left/right navigation rail. Mobile uses bottom navigation. M12 adds
+  Notifications as a primary destination and moves History under More on mobile.
 - Workstreams are lightweight repository/project groupings, not a new task-management system.
 - Light automations are one-time outgoing messages, not a general recurring automation system. They
   support send at a time, send when an existing session/agent is next available, send when a selected
@@ -67,7 +71,7 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-003 | Search all local Claude/Codex main and saved-subagent transcripts, Fleet-known artifact text, and session metadata, including sessions Fleet did not create. Never crawl arbitrary repository files. | M2 |
 | DEC-004 | Provider handoff always shows an editable preview with a one-action accept-unchanged path and clearly creates an independent session. | M5 |
 | DEC-005 | Git actions stop at commit, push, draft PR, and explicitly confirmed mark-ready. Fleet never merges. | M6 |
-| DEC-006 | Briefings live in Fleet. ntfy is optional for immediate blockers and one fleet-quiet digest; scheduled push digests default off. | M7 |
+| DEC-006 | Before M12, Briefings live in Fleet and ntfy is optional for immediate blockers and one fleet-quiet digest. DEC-020 supersedes this delivery policy when M12 ships. | M7/M12 |
 | DEC-007 | Desktop navigation is a per-device left/right rail. Mobile navigation is a bottom bar with overflow for Insights and Settings. | M1/M11 |
 | DEC-008 | Workstreams are lightweight repo/project groupings, not tasks, kanban, ownership, or dependencies. | M3 |
 | DEC-009 | Every new interaction works at 390×844 and desktop size without overloading Now. Split destinations when density warrants it. | All |
@@ -81,12 +85,19 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-017 | Scheduled new sessions snapshot every New Session field, including provider, project/cwd, model, effort, mode, and optional worktree, and remain editable until dispatch. | M7 |
 | DEC-018 | Pinned sessions use persisted insertion order. New pins append at the bottom; urgency/activity sorting never changes the pinned list. | M11 |
 | DEC-019 | Full-chat operational telemetry is bounded, incrementally maintained, and provider-honest. Missing context, cache, Git, or currency data is omitted rather than inferred. | M11 |
+| DEC-020 | Fleet Notification Center is the notification source of truth. Standards-based Web Push is the only automatic external transport; ntfy is manual legacy only and never a fallback or duplicate destination. | M12 |
+| DEC-021 | External notifications disclose only generic state and elapsed time. Push may Open Fleet or directly Snooze the exact event/Mute the exact session; every consequential action opens Fleet for current-state review. | M12 |
+| DEC-022 | Only confirmed Needs-you requests, approvals, provider/delivery failures, and prolonged stalls push. One unresolved reminder after 15 minutes is the maximum; session mute persists across devices until manual unmute. | M12 |
+| DEC-023 | One provider usage/rate/context limit blocks only its session. It never prevents the HTTP server from starting or labels the whole dashboard unreachable. | M10 |
+| DEC-024 | GitHub information opens the canonical external GitHub URL. Fleet does not duplicate a repository or pull-request page. | M6 |
+| DEC-025 | Non-secret text drafts remain device-local until send/manual deletion. Ordinary messages sent while Fleet is known offline queue locally and flush FIFO only after a live reconnect; unknown delivery outcomes never auto-retry. | M1/M10 |
+| DEC-026 | Full-chat image attachments support Claude and Codex. Device blobs and server-normalized copies are private, session-scoped, metadata-stripped, and expire after 24 hours; pre-dispatch uploads may retry, but unknown provider delivery never does. | M1/M10 |
 
 ### Navigation, presentation, and interaction
 
 | ID | Requirement and acceptance condition | Owner |
 | --- | --- | --- |
-| UX-001 | Provide Now, Search, Workstreams, History, Insights, and Settings as navigable destinations; deep links, refresh, browser history, and native back/swipe preserve the expected destination. | M1 |
+| UX-001 | Provide Now, Notifications, Search, Workstreams, History, Insights, and Settings as navigable destinations; deep links, refresh, browser history, and native back/swipe preserve the expected destination. | M1/M12 |
 | UX-002 | Keep pinned sessions above Needs you. Now then presents Needs you, Working, and Available in that order; History owns external inactive, dormant, reopenable, and closed sessions. | M1 |
 | UX-003 | Use one canonical card hierarchy: identity/outcome first, reason and access second, metadata/details on demand. Expanded cards preserve contrast without changing semantic state. | M1 |
 | UX-004 | Render state, reason, access, and provider as separate fields. Color is never the only distinction and counters use consistent typography/color. | M1 |
@@ -100,10 +111,14 @@ the current source and running app; a checked box or this document's prose is no
 | UX-012 | Session close/stop controls live in the full-chat overflow menu with confirmation. Stop affects the current turn; Claude close may terminate its terminal, while provider capability text remains explicit. | M1 |
 | UX-013 | Every message composer groups Send now, Schedule, When available, and When usage resets without making the common Send now path slower. New Session offers Schedule session alongside Start session. | M7 |
 | UX-014 | The Outbox is reachable from Now and the sticky command bar, has a pending-count badge, and supports edit, send now, retarget, retry, and cancel where state permits. | M7 |
-| UX-015 | Now puts counts in its All/Needs you/Working/Available/Subagents filters, keeps Fleet Briefing above Pinned, and moves detailed provider usage behind a warning-aware Usage chip. | M11 |
+| UX-015 | Now puts counts in its All/Needs you/Working/Available/Subagents filters and moves detailed provider usage behind a warning-aware Usage chip. M11's Briefing-above-Pinned placement was intentionally superseded by UX-019 when N4 moved Briefing into Notifications. | M11/M12 |
 | UX-016 | Every composer is multiline: Return inserts a newline, modified Return or the explicit button sends, and optimistic startup/sending states retain exact text on failure. | M11 |
 | UX-017 | Full chat and subagent chat expose an adaptive operational status strip; Markdown and chat headers avoid duplicated metadata; nested overlays always stack above chat evidence. | M11 |
 | UX-018 | Every asynchronous control paints a pressed/optimistic/loading state immediately, rejects duplicate submissions, ignores stale responses, and keeps an inline restore/retry path on failure. | M11 |
+| UX-019 | Notifications provides Needs action, Updates, Snoozed, Problems, Briefing, and History with an unread badge, exact event deep links, responsive navigation, and per-device read state. Now retains only the live Action Inbox. | M12 |
+| UX-020 | Fleet is an installable mobile/desktop PWA with explicit install, permission, subscription, test-delivery, reconnect, unsupported, and delivery-health states. It caches only the token-free shell and last exact `/api/fleet` snapshot; every other private API and transcript response remains network-only. | M12 |
+| UX-021 | Every non-secret text field restores its local draft after navigation/reload. Known-offline ordinary messages show a durable queued receipt and flush in order after a live reconnect; commands remain unsent drafts. | M1/M10 |
+| UX-022 | The full-chat composer opens the mobile camera/photo library or desktop image picker, keeps up to four 10 MB image drafts across reloads, shows attached-image receipts, and flushes image messages after reconnect without duplicating provider dispatch. | M1/M10 |
 
 ### Intelligent global search
 
@@ -158,8 +173,8 @@ the current source and running app; a checked box or this document's prose is no
 | --- | --- | --- |
 | REPO-001 | Cache bounded, timed, argv-only probes for branch/worktree, dirty state, diffstat, upstream/ahead/behind, commits, PR/check/review state, and observed test/build results. | M6 |
 | REPO-002 | Distinguish observed passing/failing/stale/not observed. GitHub/provider/network failure never turns an unknown into success and never blocks the fleet. | M6 |
-| REPO-003 | Commit shows files and editable message then confirms; push shows remote/branch/ahead then confirms; draft PR shows editable title/body/base; mark-ready re-reads state and separately confirms. | M6 |
-| REPO-004 | All mutations require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, retry/error UI, and no free-form shell. | M6 |
+| REPO-003 | Workstreams show bounded local outcome evidence and one validated external GitHub link. Fleet exposes no in-app repository/PR detail page or duplicate commit/push/PR forms. | M6 |
+| REPO-004 | Retained compatibility mutation endpoints require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, and no free-form shell; no current UI exposes them. | M6 |
 | REPO-005 | Never offer or execute merge, automatic commit/push/PR readiness, or history rewrite. | M6 |
 
 ### Message Outbox and light automations
@@ -185,7 +200,7 @@ the current source and running app; a checked box or this document's prose is no
 | --- | --- | --- |
 | BRIEF-001 | Build deterministic in-app sections for attention, reviewed/unreviewed completion, slow work, Git/test/artifact outcomes, budget warnings, and unavailable measurements. | M8 |
 | BRIEF-002 | Persist a per-device review cursor without deleting evidence/history; deduplicate events across poll/restart and preserve source links. | M8 |
-| BRIEF-003 | Respect persistent session mute across providers. Immediate blocker pushes and one quiet-episode digest are optional; scheduled pushes are off by default and failures are visible. | M8 |
+| BRIEF-003 | Preserve the M8 ntfy behavior until M12 switches transport. M12 then removes quiet/scheduled external digests, keeps failures visible in Notification Center, and makes session mute suppress Web Push until manual unmute. | M8/M12 |
 | BUD-001 | Configure alert-only budgets by session, workstream, provider, or fleet for exact USD, tokens, runtime, and concurrency, with optional explicit blocking of future spawns only. | M8 |
 | BUD-002 | Label exact, partial, token-only, and unavailable measurement. Never convert Codex quota tokens into API spend or display fabricated zero cost/throughput. | M8 |
 | BUD-003 | Forecast from recent measured burn and provider/model/project history, showing sample size/confidence and “not enough history”; never interrupt active work automatically. | M8 |
@@ -198,7 +213,7 @@ the current source and running app; a checked box or this document's prose is no
 | QUAL-001 | Every new read/mutation route validates auth, IDs, enums, lengths, cursors, and canonical paths; outputs are escaped and paginated/bounded. | All |
 | QUAL-002 | Unit, fake-provider/protocol, engine/API, Playwright desktop/mobile, safe-path, auth/read-only, crash/restart, and opt-in live tests cover each requirement's success and failure paths. | All/M10 |
 | QUAL-003 | Capture baseline and final p50/p95 latency, payload, index lag, render/input latency, and memory on the same corpus; optimize only with before/after evidence. | M0/M9 |
-| QUAL-004 | Each milestone is a focused append-only commit pushed to `codex-integration`; unrelated user work is preserved and `main` is never changed. | All |
+| QUAL-004 | Each milestone is a focused append-only commit pushed to its approved feature branch; unrelated user work is preserved and `main` is never changed. | All |
 | QUAL-005 | Final audit cites current `file:line` implementation and test evidence for every catalogue ID, reloads the daemon, checks HTTP/browser console/network state, and lists any exact provider limitation. | M10 |
 | QUAL-006 | Input-to-visible-feedback is <100 ms p95 and routine Fleet-local completion is <250 ms p95 on desktop and 390×844 mobile; named interaction surfaces retain repeatable latency gates. | M11 |
 
@@ -485,16 +500,12 @@ roots, and a TTL cache. They collect:
 
 Provider or GitHub failure marks the cached result stale and leaves the other provider operational.
 
-### Actions
+### Presentation and compatibility actions
 
-- Commit: preview changed files and editable message, then confirm.
-- Push: show destination remote/branch and ahead count, then confirm.
-- Create draft PR: editable title/body/base, always draft.
-- Mark ready: separate explicit confirmation after current PR state is re-read.
-- Merge: never offered.
-
-Actions require authentication, run only inside the canonical repository, stream bounded progress,
-record outcomes, and cannot accept free-form shell commands.
+Workstreams retain the bounded local summary and expose one validated external **GitHub ↗** link.
+Fleet no longer renders repository/PR detail pages or commit, push, draft-PR, and mark-ready forms.
+The authenticated argv-only mutation endpoints remain temporarily for compatibility; no current UI
+calls them. Merge remains unavailable.
 
 ## Message Outbox and light automations
 
@@ -574,23 +585,19 @@ disagree about Sending, Sent, or failure.
 
 ## Briefings and digests
 
-Briefings are deterministic selections from state transitions, Git outcomes, delivery events, and
-budget alerts. They do not claim model-generated conclusions that the underlying evidence cannot
+Briefings remain deterministic selections from state transitions, Git outcomes, delivery events,
+and budget alerts. They do not claim model-generated conclusions that the underlying evidence cannot
 support.
 
-The in-app Briefing on Now contains:
+M12 moves Briefing from Now into Notification Center as an on-demand summary over the canonical
+event stream. The same durable records power Needs action, Updates, Snoozed, Problems, Briefing, and
+History; reading advances only the current device's cursor and never deletes evidence.
 
-- Needs attention now.
-- Completed since last review.
-- Still working and unusually slow.
-- Commits, PRs, test/build results, and artifacts delivered.
-- Budget warnings and unavailable measurements.
-
-Reading a briefing advances a per-device cursor; events remain available in evidence/history. The
-existing immediate blocker notification remains. When the fleet transitions from active to quiet,
-one optional ntfy digest summarizes the episode. Scheduled ntfy digests are configurable but off by
-default. Muted sessions stay out of per-session pushes and identify their omission in the in-app
-briefing.
+Web Push interrupts only for the selected actionable/failure policy in DEC-022. Fleet quiet,
+completion, spend, budget, artifact, and routine repository outcomes remain in Notification Center.
+ntfy becomes an explicitly enabled fixed-copy manual test and never receives automatic fallback or
+duplicate delivery. Muted sessions keep their in-app events but suppress external delivery until
+manual unmute.
 
 ## Budgets and forecasts
 
@@ -771,6 +778,10 @@ wrong-session protection, and mobile acceptance tests pass.
 - Add cached Git/GitHub/test outcome probes and Workstream/session presentation.
 - Add confirmed commit, push, draft-PR, and mark-ready actions.
 
+Current amendment (2026-07-17): the in-app Repository outcome page and mutation forms were retired.
+Workstreams keep bounded local evidence and open GitHub externally. The verification below records
+the historical M6 gate, not the current UI contract.
+
 Verification:
 
 - `python3 -m unittest discover -s tests -p 'test_*.py'` — 121 passed, including clean/dirty,
@@ -789,7 +800,7 @@ Verification:
 - Live after restart: `/api/workstreams` returned in 0.011 s from the repository cache; an explicit
   `federbenjamin/fleet-dash` GitHub detail lookup returned in 0.702 s and honestly reported that the
   current branch has no PR. The bulk Workstreams route deliberately skips per-repository GitHub
-  network calls; opening Repository outcome performs the bounded full lookup.
+  network calls. The former Repository outcome UI that performed the full lookup is now retired.
 
 Commit: `Add repository and pull-request outcome center`.
 
@@ -1067,9 +1078,44 @@ Verification:
 Exit: all M11 catalogue rows and the detailed dashboard catalogue have implementation, failure-path,
 responsive, deterministic, and live evidence. The daemon is running the M11 engine.
 
+### M12 — Notification Center and Web Push
+
+Implemented 2026-07-16/17; N0a/N0b and N1–N6 are complete. The
+approved implementation contract, requirements catalogue, migration order, and release gates live in
+[`docs/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
+
+- **N0a/N0b — Compatibility prototype and baseline (complete):** runtime/latency and encrypted-
+  request evidence passed, followed by installed iPhone/macOS app-closed delivery, icon badges,
+  and exact event deep links before N5 changes production triggers.
+- **N1 — Canonical event and device stores:** replace truncated/time-bucket identities with durable
+  event lifecycle, device, read, snooze, mute, and leased-delivery records.
+- **N2 — Installable Fleet PWA:** add the manifest, private-data-safe service worker, permission and
+  subscription repair flows, per-device setup, and honest health states.
+- **N3 — Persistent Web Push delivery:** add the supervised fixed-protocol Node helper, VAPID,
+  endpoint confinement, durable retry, expired-subscription handling, and redacted diagnostics.
+- **N4 — Notification Center consolidation (complete):** desktop/mobile Notifications owns exact
+  canonical event detail, per-device read state, snooze/wake/mute/retry controls, delivery problems,
+  badges, filters/history, and Briefing; Now retains its live Action Inbox.
+- **N5 — Production policy and actions (complete):** enabled the selected event policy, one
+  reminder, minimal payloads, exact deep links, and one-use Snooze/Mute capabilities; deterministic
+  privacy/replay gates and installed macOS/iPhone production delivery passed.
+- **N6 — Legacy retirement and release (complete):** ntfy is fixed-copy manual-test-only; migration,
+  diagnostics, docs, restart/saturation/privacy/latency gates, and real app-closed delivery passed.
+
+Exit: Web Push is Fleet's only automatic external transport; Notification Center is the canonical
+durable inbox; no push discloses work content or performs a consequential action; real iPhone and
+macOS app-closed delivery, exact deep links, restart recovery, privacy, and latency gates pass.
+
+Final N6 evidence: 223 Python and 11 Node tests; ten targeted desktop/mobile notification and named
+latency checks; live API/Notification/push/privacy smokes; `/api/fleet` 26.143 ms p95, Notification
+reads 4.981 ms p95, no-op actions 1.532 ms p95, canonical projection 2.202 ms p95, and enqueue
+2.063 ms p95. Installed iPhone/macOS delivery and final native interaction were user-confirmed.
+
 ## Verification matrix
 
-Each milestone runs the relevant subset; M9 and M10 run all of it.
+Each completed milestone ran its relevant subset; M9 and M10 ran the full pre-M12 matrix. M12 uses
+the expanded deterministic, restart, saturation, privacy, latency, and real-device matrix in its
+dedicated roadmap.
 
 - Python unit and provider-fixture suite.
 - Protocol/failure harnesses and index parser fixtures.

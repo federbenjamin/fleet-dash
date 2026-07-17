@@ -66,7 +66,7 @@ test('responsive application shell routes, filters, and follows browser back', a
   await nowControl.focus();
   await expect(nowControl).toBeFocused();
   await page.keyboard.press('Tab');
-  expect(await page.evaluate(() => document.activeElement?.dataset?.route)).toBe('search');
+  expect(await page.evaluate(() => document.activeElement?.dataset?.route)).toBe('notifications');
 
   await goTo(page, 'search');
   await expect(page).toHaveURL(/#search$/);
@@ -294,8 +294,8 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
 
 test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
   await reset(page);
-  expect(await page.evaluate(() => Boolean(document.querySelector('#briefing')
-    .compareDocumentPosition(document.querySelector('#pinned')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(page.locator('#route-now #briefing')).toHaveCount(0);
+  await expect(page.locator('#pinned')).toHaveCount(1);
   await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
   await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
   await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
@@ -319,6 +319,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await expect(page.locator('#usagepanel')).toBeHidden();
 
   await reset(page, 'subagent');
+  await expect(page.locator('[data-sid="codex:thread-one"]')).not.toHaveClass(/fixedpeek/);
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 1');
   await page.locator('[data-now-filter="subagents"]').click();
   const child = page.locator('#subagents .activeagentcard');
@@ -517,15 +518,17 @@ test('transcript search is action-token protected', async ({ page }) => {
   page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
 });
 
-test('repository details and actions are action-token protected', async ({ page }) => {
+test('GitHub repository links stay external without an action token', async ({ page }) => {
   await reset(page, 'workstreams');
   await page.context().clearCookies();
   await page.goto('/');
   await goTo(page, 'workstreams');
   await expect(page.locator('#workstreams')).not.toContainText('repo_center.py');
-  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
-  await expect(page.locator('#repobody')).toContainText('needs Fleet’s action token');
-  await expect(page.locator('#repobody .repoaction')).toHaveCount(0);
+  const github=page.locator('[data-workstream-id="ws-fleet"] a.repoopen');
+  await expect(github).toHaveText('GitHub ↗');
+  await expect(github).toHaveAttribute('href','https://github.com/federbenjamin/fleet-dash');
+  await expect(github).toHaveAttribute('target','_blank');
+  await expect(page.locator('#repoview')).toHaveCount(0);
   page.__failures = page.__failures.filter(message => !message.includes('403 (Forbidden)'));
 });
 
@@ -643,6 +646,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
+  await expect(card).toHaveClass(/fixedpeek/);
   await expand.click();
   await expect(peekRow).toHaveClass(/expanded/);
   await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
@@ -654,6 +658,14 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
   await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
   await expect(peekRow).toHaveClass(/truncated/);
+  await expect(card).toHaveClass(/fixedpeek/);
+  const collapsedHeight = await card.evaluate(el => el.getBoundingClientRect().height);
+  await page.evaluate(() => setNum('preview_session_lines', 5));
+  await expect.poll(async () => card.evaluate(el => el.getBoundingClientRect().height))
+    .toBeGreaterThan(collapsedHeight + 45);
+  const fiveLineHeight = await card.evaluate(el => el.getBoundingClientRect().height);
+  expect(fiveLineHeight - collapsedHeight).toBeLessThan(60);
+  await page.screenshot({ path: testInfo.outputPath('markdown-peek-fixed.png'), fullPage: true });
 
   const gauge = await card.locator('.ctxbar').evaluate(el => ({
     background: getComputedStyle(el).backgroundColor,
@@ -839,6 +851,27 @@ test('quiet in-flight subagents use an uncertain amber signal, not stopped red',
     return { actual: getComputedStyle(el).backgroundColor, expected };
   });
   expect(colors.actual).toBe(colors.expected);
+});
+
+test('full chat keeps main and subagent work visible in a sticky activity footer', async ({ page }) => {
+  await reset(page, 'subagent');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const activity = page.locator('#sactivity');
+  await expect(activity).toBeVisible();
+  await expect(activity).toContainText('Main session working');
+  await expect(activity).toContainText('1 active subagent');
+  await activity.locator('summary').click();
+  await expect(activity).toContainText('Review protocol mapping');
+  await expect(activity.locator('details')).toHaveAttribute('open', '');
+
+  await reset(page, 'cross-client-active');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(activity).toContainText('Main session working');
+  await expect(activity).not.toContainText('active subagent');
+
+  await reset(page, 'base');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(activity).toBeHidden();
 });
 
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
@@ -1216,6 +1249,89 @@ test('message composers use Return for newlines and an explicit modified Return 
     type: 'relay', text: 'Relay line\nMore detail' });
 });
 
+test('phone images persist across reload and send through the owning provider', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const image={name:'phone-photo.png',mimeType:'image/png',
+    buffer:Buffer.from([137,80,78,71,13,10,26,10,0,0,0,0])};
+  await page.locator('#sact input[type="file"]').setInputFiles(image);
+  await expect(page.locator('#sact .image-draft')).toContainText('phone-photo.png');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fleet.imageDrafts.v1')||'{}')
+    ['codex:thread-one']?.length)).toBe(1);
+
+  await page.reload();
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sact .image-draft')).toContainText('phone-photo.png');
+  await page.locator('#sft-codex\\:thread-one').fill('Inspect the mobile screenshot');
+  await page.locator('#sact').getByRole('button',{name:'send'}).click();
+  await expect(page.locator('#sbody .image-receipt')).toContainText('1 image');
+  await expect.poll(async () => (await fixtureState(page)).uploads.length).toBe(1);
+  await expect.poll(async () => (await fixtureState(page)).actions.find(action=>
+    action.type==='image_text')).toMatchObject({session_id:'codex:thread-one',
+      text:'Inspect the mobile screenshot'});
+  expect((await fixtureState(page)).actions.find(action=>action.type==='image_text').upload_ids)
+    .toHaveLength(1);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('fleet.imageDrafts.v1')))
+    .toBeNull();
+});
+
+test('images selected offline survive reload and flush exactly once after reconnection', async ({ page,context }) => {
+  await reset(page);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await expect.poll(() => page.evaluate(async () => Boolean(await caches.match('/api/fleet')))).toBe(true);
+  await page.reload();
+  await context.setOffline(true);
+  try{
+    await page.evaluate(() => openSession('claude-one'));
+    await page.locator('#sact input[type="file"]').setInputFiles({name:'offline-photo.jpg',
+      mimeType:'image/jpeg',buffer:Buffer.from([255,216,255,224,0,16,74,70,73,70])});
+    await page.locator('#sft-claude-one').fill('Review this offline photo');
+    await page.locator('#sact').getByRole('button',{name:'send'}).click();
+    await expect(page.locator('#sbody [aria-label="queued offline"]')).toBeVisible();
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fleet.offlineMessages.v1')||'[]')[0]
+      .imageIds.length)).toBe(1);
+    await page.reload({waitUntil:'domcontentloaded'});
+    await page.evaluate(() => openSession('claude-one'));
+    await expect(page.locator('#sbody [aria-label="queued offline"]')).toBeVisible();
+
+    await context.setOffline(false);
+    await expect.poll(async () => (await fixtureState(page)).uploads.length).toBe(1);
+    await expect.poll(async () => (await fixtureState(page)).actions.filter(action=>
+      action.type==='image_text'&&action.session_id==='claude-one').length).toBe(1);
+    await page.waitForTimeout(2200);
+    expect((await fixtureState(page)).uploads).toHaveLength(1);
+    expect((await fixtureState(page)).actions.filter(action=>
+      action.type==='image_text'&&action.session_id==='claude-one')).toHaveLength(1);
+    page.__failures=page.__failures.filter(message=>
+      !/ERR_INTERNET_DISCONNECTED|net::ERR_FAILED|Failed to fetch/i.test(message));
+  }finally{await context.setOffline(false);}
+});
+
+test('unsent text drafts survive rerenders and reloads until sent or manually deleted', async ({ page }) => {
+  await reset(page, 'base');
+  await page.locator('#nowfilter').fill('codex');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.locator('#sft-codex\\:thread-one').fill('unsent composer draft');
+  await page.reload();
+  await expect(page.locator('#nowfilter')).toHaveValue('codex');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const composer=page.locator('#sft-codex\\:thread-one');
+  await expect(composer).toHaveValue('unsent composer draft');
+  await composer.fill('');
+  await page.reload();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(page.locator('#sft-codex\\:thread-one')).toHaveValue('');
+
+  await page.locator('#sclose').click();
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  await page.locator('.newform input[data-draft-key="new:directory"]').fill('/Users/test/custom');
+  await page.locator('.newform textarea[data-draft-key="new:message"]').fill('persistent new-session draft');
+  await page.reload();
+  await page.getByRole('button', { name: '+ new coding session' }).click();
+  await expect(page.locator('.newform input[data-draft-key="new:directory"]')).toHaveValue('/Users/test/custom');
+  await expect(page.locator('.newform textarea[data-draft-key="new:message"]')).toHaveValue('persistent new-session draft');
+});
+
 test('new sessions open a provisional card and chat before native startup returns', async ({ page }) => {
   await reset(page, 'spawn-slow');
   await page.getByRole('button', { name: '+ new coding session' }).click();
@@ -1534,6 +1650,17 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   await expect(action).toContainText('hazy-hatching-curry');
   await expect(action.getByText('Question waiting', { exact: true })).toBeVisible();
   await expect(action.getByRole('button', { name: 'Respond' })).toBeVisible();
+  const actionPin = action.getByRole('button', { name: 'pin session' });
+  await expect(actionPin).toBeVisible();
+  await actionPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual(['claude-one']);
+  const pinnedPin = page.locator('#pinned [data-sid="claude-one"]')
+    .getByRole('button', { name: 'unpin session' });
+  await expect(pinnedPin).toBeVisible();
+  await pinnedPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual([]);
   await expect(page.locator('#needsyou [data-sid="claude-one"]')).toHaveCount(0);
   await expect(page.locator('[data-action-sid="claude-one"], #needsyou [data-sid="claude-one"]')).toHaveCount(1);
 
@@ -1648,67 +1775,28 @@ test('workstreams roll repositories, worktrees, providers, honest evidence, and 
   await page.screenshot({ path: testInfo.outputPath('workstreams.png'), fullPage: true });
 });
 
-test('repository outcome center previews and confirms commit push draft PR and ready', async ({ page }, testInfo) => {
+test('workstreams deep-link to GitHub instead of duplicating repository details', async ({ page }) => {
   await reset(page, 'workstreams');
   await goTo(page, 'workstreams');
-  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
-  const repo = page.locator('#repoview');
-  await expect(repo).toBeVisible();
-  await expect(repo).toContainText('codex-integration');
-  await expect(repo).toContainText('passed');
-  await expect(repo.locator('.repofiles input')).toHaveCount(2);
-  await repo.locator('#repocommit').fill('Add repository outcome center');
-  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
-  await expect(page.locator('#confirm')).toContainText('2 files');
-  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
-  await expect(repo).toContainText('Working tree is clean');
-  await expect.poll(async () => (await fixtureState(page)).repo_actions.map(item => item.type))
-    .toContain('git_commit');
-
-  await repo.getByRole('button', { name: 'Push', exact: true }).click();
-  await expect(page.locator('#confirm')).toContainText('No force push');
-  await page.locator('#confirm').getByRole('button', { name: 'push' }).click();
-  await expect.poll(async () => (await fixtureState(page)).repo.ahead).toBe(0);
-
-  await repo.locator('#reprtitle').fill('Repository outcomes');
-  await repo.locator('#reprbody').fill('Adds bounded Git and GitHub evidence.');
-  await repo.getByRole('button', { name: 'Create draft PR' }).click();
-  await expect(page.locator('#confirm')).toContainText('Creates a draft');
-  await page.locator('#confirm').getByRole('button', { name: 'create draft' }).click();
-  await expect(repo).toContainText('#7 · draft');
-
-  await repo.getByRole('button', { name: 'Mark ready' }).click();
-  await expect(page.locator('#confirm')).toContainText('will not merge');
-  await page.locator('#confirm').getByRole('button', { name: 'mark ready' }).click();
-  await expect(repo).toContainText('#7 · ready');
-  await expect.poll(async () => (await fixtureState(page)).repo_actions.map(item => item.type))
-    .toEqual(['git_commit', 'git_push', 'pr_create_draft', 'pr_mark_ready']);
-  await page.screenshot({ path: testInfo.outputPath('repository-outcome.png'), fullPage: true });
+  const github=page.locator('[data-workstream-id="ws-fleet"] a.repoopen');
+  await expect(github).toHaveAttribute('href','https://github.com/federbenjamin/fleet-dash');
+  await expect(github).toHaveAttribute('rel','noopener');
+  await expect(page.locator('#repoview')).toHaveCount(0);
 });
 
-test('session action menu opens the same repository outcome center', async ({ page }) => {
+test('session action menu does not duplicate GitHub repository content', async ({ page }) => {
   await reset(page, 'base');
   await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sctrl .ovbtn').click();
-  await page.locator('#sctrl').getByRole('menuitem', { name: /Repository outcome/ }).click();
-  await expect(page.locator('#repoview')).toBeVisible();
-  await page.locator('#repoclose').click();
-  await expect(page.locator('#repoview')).toBeHidden();
+  await expect(page.locator('#sctrl').getByRole('menuitem', { name: /Repository outcome/ })).toHaveCount(0);
   await expect(page.locator('#sview')).toBeVisible();
 });
 
-test('failed repository actions stay visible and retry against the same preview', async ({ page }) => {
+test('repository action failures do not recreate an in-app GitHub page', async ({ page }) => {
   await reset(page, 'repo-action-failure');
   await goTo(page, 'workstreams');
-  await page.locator('[data-workstream-id="ws-fleet"]').getByRole('button', { name: 'Repository' }).click();
-  const repo = page.locator('#repoview');
-  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
-  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
-  await expect(repo.locator('.reporesult.bad')).toContainText('commit hook rejected');
-  await expect(repo.locator('.repofiles input')).toHaveCount(2);
-  await repo.getByRole('button', { name: 'Commit 2 files' }).click();
-  await page.locator('#confirm').getByRole('button', { name: 'commit' }).click();
-  await expect(repo).toContainText('Working tree is clean');
+  await expect(page.locator('[data-workstream-id="ws-fleet"] a.repoopen')).toBeVisible();
+  await expect(page.locator('#repoview')).toHaveCount(0);
 });
 
 test('message Outbox schedules exact session delivery and exposes durable central controls', async ({ page }, testInfo) => {
@@ -1776,9 +1864,10 @@ test('usage-reset and scheduled-new-session forms keep full target configuration
 
 test('fleet briefing separates current attention from completed outcomes and persists review', async ({ page }, testInfo) => {
   await reset(page, 'base');
-  await expect(page.locator('#briefing')).toContainText('Fleet briefing');
-  await expect(page.locator('#briefing')).toContainText('2 since review');
-  await page.locator('.briefhead').click();
+  await goTo(page, 'notifications');
+  await page.getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications')).toContainText('Fleet briefing');
+  await expect(page.locator('#notifications')).toContainText('2 since review');
   await expect(page.locator('.briefbody')).toContainText('Completed since last review');
   await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
   await expect(page.locator('.briefbody')).toContainText('Artifacts delivered');
@@ -1786,13 +1875,207 @@ test('fleet briefing separates current attention from completed outcomes and per
   await page.screenshot({ path: testInfo.outputPath('fleet-briefing.png'), fullPage: true });
 
   await page.reload();
-  await expect(page.locator('#briefing')).toContainText('2 recently reviewed');
-  await page.locator('.briefhead').click();
+  await page.getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications')).toContainText('2 recently reviewed');
   await expect(page.locator('.briefbody')).toContainText('Recently reviewed');
   await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
 });
 
-test('budget editor, scheduled digest, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
+test('Notification Center keeps durable state, exact detail routes, and delivery recovery together', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await goTo(page, 'notifications');
+  await expect(page.locator('#notificationstatus')).toContainText('3 active');
+  await expect(page.locator('#notificationstatus')).toContainText('3 unread');
+  await expect(page.getByRole('button', { name: /^Needs action/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Updates/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Problems/ })).toContainText('· 3');
+
+  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  await expect(page).toHaveURL(/#notifications\/evt-6-question$/);
+  await expect(page.locator('#notificationdetail')).toContainText('Claude needs one answer');
+  await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
+  if (testInfo.project.name.startsWith('mobile')) {
+    await expect(page.locator('#notificationdetail')).toBeVisible();
+    expect(await page.locator('#notificationdetail').evaluate(element => getComputedStyle(element).position)).toBe('fixed');
+  }
+  await expect.poll(async () => (await fixtureState(page)).notification_read_cursors).not.toEqual({});
+  await expect(page.locator('#notificationstatus')).toContainText('0 unread');
+
+  await page.getByRole('button', { name: 'Snooze 15m' }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Snoozed until');
+  await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 2');
+  await page.getByRole('button', { name: 'Wake now' }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Moved back to Needs action');
+  await page.getByRole('button', { name: 'Mute session' }).click();
+  await expect(page.getByRole('button', { name: 'Unmute session' })).toBeVisible();
+  await expect.poll(async () => (await fixtureState(page)).muted_notification_sessions).toContain('claude-one');
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#notificationdetail')).not.toHaveClass(/open/);
+  await page.locator('.notificationbar').getByRole('button', { name: /^Problems/ }).click();
+  await expect(page.locator('.deliveryproblem')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.locator('.deliveryproblem')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Reconnect' })).toBeVisible();
+
+  await page.locator('.notificationbar').getByRole('button', { name: /^History/ }).click();
+  await page.locator('.notificationsearch input').fill('artifact');
+  await page.getByLabel('notification workstream').selectOption('ws-fleet');
+  await page.getByLabel('notification session').selectOption('codex:thread-one');
+  await page.getByLabel('notification age').selectOption('604800');
+  await expect(page.locator('#notifications .notificationrow')).toHaveCount(1);
+  await expect(page.locator('#notifications')).toContainText('Artifact delivered');
+
+  await page.goto('/#notifications/evt-5-failure');
+  await expect(page.locator('#notificationdetail')).toContainText('Codex connection interrupted');
+  await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
+  await page.screenshot({ path: testInfo.outputPath('notification-center.png'), fullPage: true });
+
+  await reset(page, 'notification-request');
+  await goTo(page, 'notifications');
+  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Respond here');
+  await expect(page.locator('#notificationdetail')).toContainText('Which release target should Fleet use?');
+  await page.locator('#notificationdetail').getByRole('button', { name: /Staging/ }).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.some(action =>
+    action.type === 'option' && action.session_id === 'claude-one' && action.nonce === 'rev-6')).toBe(true);
+});
+
+test('push fallback opens exact current state and direct close stays inside Notifications', async ({ page }) => {
+  await reset(page, 'base');
+  await page.goto('/?push_action=snooze#notifications/evt-6-question');
+  await expect(page).toHaveURL(/\/#notifications\/evt-6-question$/);
+  await expect(page.locator('#notificationdetail')).toContainText('Claude needs one answer');
+  await expect(page.locator('#notificationdetail')).toContainText(
+    'Snooze from the notification did not complete');
+  await expect(page.getByRole('button', {name: 'Snooze 15m'})).toBeVisible();
+  await page.getByRole('button', {name: 'close notification detail'}).click();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#notificationdetail')).not.toHaveClass(/open/);
+});
+
+test('PWA caches the local shell and fleet snapshot without credentials', async ({ page }) => {
+  await reset(page, 'base');
+  const manifest = await (await page.request.get('/static/manifest.webmanifest')).json();
+  expect(manifest).toMatchObject({id: '/', start_url: '/#now', scope: '/', display: 'standalone'});
+  expect(manifest.icons.map(icon => icon.sizes)).toEqual(['192x192', '512x512', '512x512']);
+
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await expect.poll(() => page.evaluate(async () => {
+    const entries = [];
+    for (const key of await caches.keys()) {
+      for (const request of await (await caches.open(key)).keys()) entries.push(request.url);
+    }
+    return entries.some(url => url.endsWith('/api/fleet'));
+  })).toBe(true);
+  const cached = await page.evaluate(async () => {
+    const entries=[];for(const key of await caches.keys())for(const request of await (await caches.open(key)).keys())entries.push(request.url);
+    return entries;
+  });
+  expect(cached.some(url => url.endsWith('/api/fleet'))).toBe(true);
+  expect(cached.some(url => url.includes('token='))).toBe(false);
+  expect(cached.some(url => new URL(url).pathname === '/')).toBe(true);
+  expect(cached.some(url => url.endsWith('/static/offline.html'))).toBe(true);
+
+  await goTo(page, 'settings');
+  const setup = page.locator('.pushsetup');
+  await expect(setup).toContainText('Fleet app & Web Push');
+  await expect(setup).toContainText(/Not requested|Blocked/);
+  await expect(setup).toContainText('Not connected');
+
+  const deviceId = await page.evaluate(() => localStorage.getItem('fleet.briefingDevice.v1'));
+  await page.request.post('/api/push/subscription', {data: {device_id: deviceId,
+    display_name: 'Fixture Mac', platform: 'macOS', permission_state: 'granted',
+    subscription: {endpoint: 'https://fcm.googleapis.com/fcm/send/private',
+      keys: {p256dh: 'private-p256dh', auth: 'private-auth'}}}});
+  await page.evaluate(() => window.__fleetPush.loadPushState(true));
+  const name = setup.locator('.pushdevice input').first();
+  await expect(name).toHaveValue('Fixture Mac');
+  await name.fill('Studio Mac');
+  await name.press('Tab');
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].display_name)
+    .toBe('Studio Mac');
+  await setup.getByRole('button', { name: 'Send test' }).click();
+  await expect(setup.locator('.pushnotice')).toContainText('Test queued');
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].health)
+    .toBe('healthy');
+  await setup.locator('.pushswitch input').uncheck();
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].enabled)
+    .toBe(false);
+  const state = await fixtureState(page);
+  expect(JSON.stringify(state.push_devices)).not.toContain('private-p256dh');
+  expect(JSON.stringify(state.push_devices)).not.toContain('private-auth');
+  expect(JSON.stringify(state.push_devices)).not.toContain('fcm.googleapis.com');
+  const privacy = await page.evaluate(async () => {
+    const cacheEntries = [];
+    for (const key of await caches.keys()) {
+      const cache = await caches.open(key);
+      for (const request of await cache.keys()) {
+        const response = await cache.match(request);
+        cacheEntries.push({url: request.url, body: await response.text()});
+      }
+    }
+    return {url: location.href, dom: document.documentElement.innerHTML,
+      local: Object.fromEntries(Object.entries(localStorage)),
+      session: Object.fromEntries(Object.entries(sessionStorage)),
+      indexedDb: indexedDB.databases ? (await indexedDB.databases()).map(item => item.name) : [],
+      cacheEntries};
+  });
+  const retained = JSON.stringify(privacy);
+  for (const secret of ['abcdef123456', 'private-p256dh', 'private-auth',
+    'fcm.googleapis.com/fcm/send/private']) expect(retained).not.toContain(secret);
+  expect(privacy.session).toEqual({});
+  expect(privacy.indexedDb).toEqual([]);
+});
+
+test('connection loss reloads the cached dashboard, keeps drafts, and flushes queued messages once', async ({ page, context }) => {
+  await reset(page, 'base');
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await expect.poll(() => page.evaluate(async () => Boolean(await caches.match('/api/fleet')))).toBe(true);
+  await page.reload();
+  await context.setOffline(true);
+  try {
+    await page.reload({waitUntil:'domcontentloaded'});
+    await expect(page.locator('#route-now')).toBeVisible();
+    await expect(page.locator('#stale')).toContainText('offline — showing the last local snapshot');
+    await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+    await page.locator('#nowfilter').fill('offline draft');
+    await page.reload({waitUntil:'domcontentloaded'});
+    await expect(page.locator('#nowfilter')).toHaveValue('offline draft');
+    await page.locator('#nowfilter').fill('');
+    await page.evaluate(() => openSession('codex:thread-one'));
+    const composer = page.locator('textarea[data-draft-key="composer:codex:thread-one"]');
+    await expect(composer).toBeVisible();
+    await composer.fill('Send this when Fleet reconnects');
+    await page.locator('#sact').getByRole('button', {name: 'send'}).click();
+    await expect(composer).toHaveValue('');
+    await expect(page.locator('#sbody [aria-label="queued offline"]')).toBeVisible();
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fleet.offlineMessages.v1') || '[]')
+      .map(item => ({sid:item.sid,text:item.text})))).toEqual([
+        {sid:'codex:thread-one',text:'Send this when Fleet reconnects'}]);
+    await page.reload({waitUntil:'domcontentloaded'});
+    await expect(page.locator('[data-sid="codex:thread-one"] .quickfeedback')).toContainText('Queued offline');
+
+    await context.setOffline(false);
+    await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
+      action.type === 'text' && action.session_id === 'codex:thread-one' &&
+      action.text === 'Send this when Fleet reconnects').length).toBe(1);
+    await page.evaluate(() => tick());
+    await page.waitForTimeout(2200);
+    expect((await fixtureState(page)).actions.filter(action =>
+      action.type === 'text' && action.session_id === 'codex:thread-one' &&
+      action.text === 'Send this when Fleet reconnects')).toHaveLength(1);
+    expect(await page.evaluate(() => localStorage.getItem('fleet.offlineMessages.v1'))).toBeNull();
+    page.__failures = page.__failures.filter(message =>
+      !/ERR_INTERNET_DISCONNECTED|net::ERR_FAILED|Failed to fetch/i.test(message));
+  } finally {
+    await context.setOffline(false);
+  }
+});
+
+test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
   await reset(page, 'base');
   await goTo(page, 'settings');
   await page.locator('.budgetsettingsfold summary').click();
@@ -1808,10 +2091,13 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
   await providerBudget.locator('select').nth(1).selectOption('codex');
   await providerBudget.locator('select').nth(2).selectOption('tokens');
   await providerBudget.locator('input[type="number"]').fill('50000');
-  await page.locator('.setrow:has-text("daily briefing push") input[type="checkbox"]').check();
-  await page.locator('.digestsettings input[type="time"]').fill('08:30');
-  await page.locator('.digestsettings input:not([type="time"])').fill('America/New_York');
-  await page.locator('.digestsettings input:not([type="time"])').press('Tab');
+  await expect(page.locator('#settings')).not.toContainText('waiting on you');
+  await expect(page.locator('#settings')).not.toContainText('daily briefing push');
+  await page.getByLabel('Enable manual legacy tests').check();
+  await expect.poll(async () => (await fixtureState(page)).settings.legacy_ntfy_enabled)
+    .toBe(true);
+  await page.getByRole('button', { name: 'Send legacy test' }).click();
+  await expect(page.locator('#settings')).toContainText('Legacy test queued');
   await page.getByRole('button', { name: 'Save budgets' }).click();
   await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
   const state = await fixtureState(page);
@@ -1819,9 +2105,7 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
     limit_value: 10000, block_spawns: true});
   expect(state.budgets[1]).toMatchObject({scope_type: 'provider', scope_id: 'codex',
     metric: 'tokens', limit_value: 50000, block_spawns: false});
-  expect(state.notify.scheduled_digest).toBe(true);
-  expect(state.settings.digest_schedule_time).toBe('08:30');
-  expect(state.settings.digest_schedule_zone).toBe('America/New_York');
+  expect(state.actions.some(item => item.type === 'legacy_ntfy_test')).toBe(true);
 
   await page.locator('#setclose').click();
   await goTo(page, 'now');
@@ -1849,6 +2133,18 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
   await reset(page, 'single-question');
+  const cardPin=page.locator('[data-sid="claude-one"] .shead')
+    .getByRole('button', { name: 'pin session' });
+  await expect(cardPin).toBeVisible();
+  await cardPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual(['claude-one']);
+  const pinnedPin=page.locator('#pinned [data-sid="claude-one"]')
+    .getByRole('button', { name: 'unpin session' });
+  await expect(pinnedPin).toBeVisible();
+  await pinnedPin.click();
+  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
+    .toEqual([]);
   const heldHeader=page.locator('[data-sid="claude-one"] .shead');
   await heldHeader.dispatchEvent('touchstart');
   await expect(heldHeader).toHaveClass(/pinpress/);

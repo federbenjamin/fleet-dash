@@ -6,7 +6,7 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
 ## Architecture (data flow)
 
 ```
-~/.claude/sessions/<pid>.json      CLI live registry: sessionId, cwd, status busy/idle/waiting,
+~/.claude/sessions/<pid>.json      CLI live registry: sessionId, cwd, status busy/shell/idle/waiting,
                                    name, bridgeSessionId (claude.ai deep link). PID-liveness
                                    filters stale files (they're deleted on clean exit only).
 ~/.claude/projects/<proj>/<sid>.jsonl            main transcript  ─┐ incremental byte-offset
@@ -25,6 +25,8 @@ Claude/Codex JSONL ─ search_index.py --worker (nice 10) ─ search.db WAL/FTS5
                                       └ server.py separate reader ─ authenticated
                                         /api/search, /api/search/status, /api/search/context
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
+           notification_events/devices/deliveries ─ web_push.py background lease worker
+                                                    └ fixed web_push_worker.js Node protocol
 ```
 
 The launchd parent has HTTP threads + one provider poll thread. It owns one low-priority child
@@ -76,7 +78,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    the ghost question renders, but the session sits at its main input and injected digits
    would type (and send) as a message. hook_pending also hides a question pending >5s old on a
    non-waiting session for the same reason. `interrupt` (Esc mid-turn) has the mirror gate: it
-   requires status `busy`, so an Esc can never land in an idle session's input box.
+   requires status `busy`, or `shell` plus a freshly re-polled mid-tool transcript, so an Esc can
+   never land in an idle session's input box. Close also interrupts an active shell before SIGTERM.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
 7. **Agent state semantics: "stalled" means frozen mid-TOOL, nothing else.** An agent is
    working only while something is in flight — a `tool_use` awaiting its result, or a
@@ -91,7 +94,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    `status` is authoritative after corroboration (hook-captured waiting → needs_you
    immediately; a bare waiting flag must persist for `WAITING_CONFIRM_SECONDS` because Claude
    can flash it between progress prose and the next tool; idle → turn_done if fresh end_turn
-   else idle; busy → running/stalled).
+   else idle; busy → running/stalled). Claude's `shell` registry state is active while the
+   transcript remains mid-tool, but a completed `end_turn` wins over a stale detached shell child
+   and returns the session to turn_done/idle.
    **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
    parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
    ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/
@@ -101,8 +106,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    A task id can resume, so a terminal notice applies only when its timestamp is at or after the
    child transcript's newest row; later child output supersedes it. The *presence* of the parent's
    ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
-8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
-   daemon start. Spend pushes fire only on the highest crossed multiple.
+8. **Legacy ntfy is manual-test-only.** Provider scans and daemon startup never dispatch ntfy.
+   The single token-gated test route emits fixed generic copy only when the explicit legacy switch
+   and topic are configured; it has no click URL, automatic category, fallback, or duplicate path.
+   The M12 migration keeps historical ntfy claims in `notification_deliveries_legacy` and writes
+   canonical lifecycle rows to `notification_events`; the two identities must not be conflated.
+   Canonical identities use the full provider/session/native revision, never truncated session IDs,
+   transcript mtimes, or repeat buckets. Informational events are resolved observations; per-device
+   cursors, not lifecycle state, decide whether they are unread.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
    protocol below. The auto-mode classifier blocks self-injection from the building session.
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
@@ -249,9 +260,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
     Fleet Briefing) in persisted insertion order. Fleet urgency/activity changes never reorder it; a
     new pin appends at the bottom. Pinned cards are relocated, never duplicated.
-    Desktop uses the header `.spin` 📌 button. Mobile hides it and long-presses the session header;
-    the hold paints immediately and `sessionTap` swallows the following click so pinning does not
-    also open the chat. `pinActions` suppresses duplicate writes; failure restores the exact prior
+    Desktop and mobile expose `.spin` 📌 buttons in session headers and Action Inbox rows. Mobile
+    also supports long-pressing a session header; the hold paints immediately and `sessionTap`
+    swallows the following click so pinning does not also open the chat. `pinActions` suppresses
+    duplicate writes; failure restores the exact prior
     order and renders inline retry instead of a blocking alert.
 29. **Full chat view lands at the bottom on open.** `sessionOpened` (set in `openSession`/
     `openClosed`) forces `#sbody` to `scrollHeight` on the first render regardless of prior
@@ -353,7 +365,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Claude's folder-trust or bypass warning on the user's behalf.
 41. **Secondary-worktree cleanup is preview-ticketed and happens after provider close.**
     `close_worktree_preview` resolves the canonical workstream identity, refuses primary/unregistered/
-    locked/prunable worktrees, and returns bounded porcelain-v2 dirty plus ignored-file evidence.
+    prunable worktrees and unrelated Git locks, and returns bounded porcelain-v2 dirty plus
+    ignored-file evidence. A `claude session … (pid <same pid> …)` lock is the narrow exception:
+    it remains locked during preview and is released only after that exact Claude process closes.
+    Ignored paths can number in the millions: stream their NUL output into an exact count, full
+    digest, and first 40 paths under a fixed byte/time cap; never buffer the whole list.
     Its opaque five-minute ticket binds session/provider/root/worktree and the exact status revision.
     Normal removal requires clean status and no ignored files; force requires the explicit dirty path;
     either is refused while another live Fleet session uses the exact worktree. Only after close marks
@@ -375,6 +391,132 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     projections without `scan_lock`. The locked `Tail.poll()` path is startup/fallback only, before a
     completed scan has published that exact conversation. Keep the parent in the child key because
     different sessions can reuse an agent ID. Snapshot pruning follows the live registry/child set.
+44. **Web Push subscriptions are write-only outbound credentials.** `/api/push/subscription`
+    accepts only action-token-authenticated HTTPS subscriptions whose endpoint is port 443 on a
+    built-in push-service origin (or an exact operator-configured origin), with no credentials,
+    fragment, IP literal, oversized URL, or malformed P-256/auth material. The server derives the
+    origin; it never trusts a client origin field. Device/config/list projections expose only ID,
+    display name, platform, permission, enabled/read state, bounded preferences, health, and
+    timestamps—never endpoint, origin, subscription JSON, keys, or raw failure details. The PWA
+    reuses `fleet.briefingDevice.v1`; re-registration preserves its read cursor and preferences.
+    `FleetOperations` keeps the shared ledger mode 0600 because it now holds encrypted-push
+    subscription credentials.
+    `/sw.js` has root scope. Navigations and shell assets are network-first; the worker caches the
+    token-free root shell plus the explicit versioned assets. The only cached API response is the last
+    successful exact `/api/fleet` snapshot, stored under a fixed key on that device. Offline fallback
+    adds `X-Fleet-Offline: 1`; the client renders the snapshot read-only, preserves drafts, and never
+    mistakes it for current provider state. Never make unhashed shell assets cache-first. Bump
+    `SHELL_CACHE` for structural shell changes. All other `/api/*` responses—including actions,
+    conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
+45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
+    card uses the measured fixed frame `117px + preview_session_lines × 17.4px` (or zero preview
+    rows when session peeks are disabled), with its More control anchored at the bottom. Never put
+    `.fixedpeek` on an open card, an explicitly expanded peek, or a card showing a pending request,
+    error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
+    to keep every action visible. Keep the height inputs synchronized with the header/meta/peek/
+    More CSS measurements if their typography or padding changes.
+46. **Web Push delivery is isolated, durable, and secret-redacted.** VAPID/action material exists
+    only in ignored `push-secrets.json`: it must be a same-owner regular file with mode 0600, and
+    malformed or weak-permission content disables delivery instead of regenerating keys. The Python
+    supervisor resolves a fixed Node 18+ executable without a shell, strips proxy environment, and
+    speaks bounded JSONL to one restart/backoff-managed `web_push_worker.js`. The worker validates a
+    fixed/exact push-origin allowlist, resolves only global addresses, pins the chosen address into a
+    TLS-verified HTTPS request, permits no redirect/proxy/custom client headers, and uses
+    `web-push.generateRequestDetails` rather than its network sender. The pinning lookup callback
+    supports both the legacy single-address form and Node 24's `all:true` record-array form. When a
+    host is dual-stack, prefer a validated IPv4 record because this Mac may have AAAA DNS answers
+    without an IPv6 route; retain the validated IPv6 fallback for IPv6-only networks. HTTP actions
+    and provider scans
+    only persist/coalesce jobs; the background thread claims SQLite leases and applies bounded
+    jittered retry for timeout/429/5xx, Retry-After, and helper failure. A 404/410 or revoked
+    permission scrubs the subscription and disables the device. Authenticated status contains only the
+    VAPID public key, helper state/restart count, and queue aggregates; endpoint, subscription keys,
+    private keys, and raw errors never cross a read API. A successful Settings test qualifies that
+    exact subscription; changing the subscription clears qualification until a new test succeeds.
+    Startup forces config/log/database sidecars to 0600 and scrubs known current/legacy action,
+    VAPID, token, topic, and dashboard secrets from the existing log in place; replacing the log
+    inode would strand launchd's open file descriptor and is not equivalent.
+47. **Notification Center owns durable interruption history; Now owns live actions.** The old Now
+    Briefing block must not return: Briefing is an on-demand section beside Needs action, Updates,
+    Snoozed, Problems, and History. `GET /api/notifications` is action-token protected and projects
+    canonical event counts, per-device unread state, session mute state, and redacted delivery
+    problems. A browser identity needs no push registration: its first successful snapshot seeds a
+    durable read cursor at the current edge, later reads are monotonic, and a future push
+    registration inherits that cursor. Exact `#notifications/<opaque-id>` routes load the current
+    event successfully before marking through its sequence; browser/native back closes the detail.
+    Snooze, Wake, Mute/Unmute, and Retry are separate token-gated POST routes and event mutations
+    require the exact source revision. Badges count canonical active/unread events, never delivery
+    attempts. Desktop is a list/detail split; mobile detail is a fixed drawer above the bottom bar.
+    Delivery failures may expose bounded device name/platform/status/timestamps and retryability,
+    never endpoint, origin, subscription material, keys, or raw errors. Canonical reconciliation is
+    incremental: its signature contains only push-relevant actions, mutes, eligible stalls, provider
+    failures, and the in-process Briefing generation. An unchanged signature performs no projection
+    I/O; a provider failure bypasses the cache until corroborated, and daemon restart always runs one
+    full reconciliation.
+48. **Production Web Push is purpose-bounded and capability-authenticated.** The policy sweep runs in
+    the same short transaction as canonical event reconciliation and may enqueue only `question`,
+    `approval`, `form`, `reply`, confirmed `failure`, or threshold-crossed `stall` events. A target
+    device must be enabled, permission-granted, subscription-present, explicitly test-qualified,
+    healthy, preference-eligible, and behind the event's sequence; informational/completion/spend/
+    budget/fleet-quiet events never push. Delivery rows persist an explicit `initial`, `reminder`,
+    `snooze_wake`, `manual_retry`, or `test` purpose plus source revision. An event gets one initial
+    per eligible device and one global reminder wave 15 minutes after the first successful initial;
+    stalls never remind. Snooze suppresses queued initial/reminder work, consumes the reminder, and
+    permits one wake wave. Mute is session-wide and must update both `muted_sessions` config and the
+    notification DB before future claims. Every schedule, claim, retry, and mutation revalidates
+    current event/device/mute state. The encrypted payload is generic, uses a hashed tag and exact
+    `#notifications/<event>` link, and carries only Open plus optional Snooze/Mute capabilities.
+    Capabilities are HMAC-signed for one event/device/action, expire after ten minutes, persist only a
+    consumed JTI hash, and are accepted solely by credential-omitting
+    `/api/push/capability-action`; that route ignores `act_token` and returns one generic rejection
+    for malformed, expired, replayed, or stale tokens. A failed shortcut keeps the system
+    notification visible and opens current Fleet detail without putting the capability in a URL.
+    The separate legacy flag enables only one manually invoked generic ntfy test route; provider
+    scans never dispatch it and it is never a Web Push fallback or duplicate path.
+49. **One provider limit blocks one session, never the dashboard.** App Server error payloads are
+    string-or-object; normalize them to bounded scalar text before storing or rendering. Recognized
+    rate/usage/quota/context limits set only that thread to `blocked`, disable its submit capability,
+    and place it in Needs you as **Limit reached**. A client render exception is a display error, not
+    “server unreachable.” The HTTP server binds before the first provider scan so one slow/malformed
+    session cannot remove the dashboard during startup.
+50. **Non-secret text drafts are device-local and send-cleared.** `fleet.drafts.v1` stores bounded
+    composer, relay, handoff, schedule, new-session, request-Other/form, and filter text. Poll renders,
+    overlays, navigation, and reloads must restore it. Empty input deletes its key immediately;
+    successful send/schedule/handoff/spawn/request acceptance clears the owning key/prefix. Failed or
+    failed delivery preserves/restores the text. Never attach a draft key to a password or provider-
+    declared secret field, and never put drafts in a server API.
+51. **GitHub is an external destination, not a Fleet detail page.** Repository observation projects a
+    validated canonical HTTPS `github_url`. Workstreams render it as a normal external link so the OS
+    may open the GitHub app or website. Briefing repository links use the same URL. Do not restore the
+    `#repoview` overlay, session-menu Repository outcome entry, or duplicated GitHub/Git/PR form UI.
+52. **Known-offline ordinary messages use a device-local queue.** `fleet.offlineMessages.v1` stores at
+    most 100 bounded messages and renders a persistent **Queued offline** receipt. A successful,
+    non-cached `/api/fleet` poll is the only reconnect signal that may start the FIFO flush. Slash
+    commands and skills stay as drafts because their semantics may be destructive. Remove a queue row
+    after provider acceptance or a known rejection. If the connection drops after dispatch begins,
+    remove it from automatic retry and show a manual restore failure: delivery is unknown and an
+    automatic retry could duplicate the message. Never send from the service worker.
+53. **Full-chat work activity is independent of transcript output.** `#sactivity` is a non-overlay
+    footer below the `#sbody` scroll area, so it remains visible without covering messages. Show the
+    main indicator for session `running`/`stalled`, and a separate count for every child not in
+    `done`/`ended`; either signal may appear alone. The expandable detail names active children and
+    labels stalled work as slow, not stopped. Preserve the native `<details>` open state across polls
+    by replacing its HTML only when the main/child state signature changes.
+54. **Phone images are private, scoped attachments—not client paths.** The full-chat composer stores
+    at most four 10 MB JPEG/PNG/GIF/WebP/HEIC/HEIF blobs in lazy IndexedDB and keeps only opaque draft/
+    queue ids in localStorage. `/api/upload-image` is token-gated, rejects chunked or oversized bodies,
+    validates magic bytes, ignores the client filename for path construction, normalizes through fixed-
+    argv `sips`, and removes every JPEG APP/COM metadata segment (including EXIF GPS/XMP). Files and
+    0600 metadata live under the 0700 `fleet-dash/uploads` directory, are bound to one live interactive
+    session, and expire after 24 hours. `image_text` resolves ids server-side: Codex receives native
+    `localImage` inputs; Claude receives only Fleet-managed absolute paths in injected text. Image
+    uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
+    service worker never caches image bytes.
+55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
+    existing loading-spinner pattern before building the full settings tree. History navigation must
+    reveal the already-rendered destination before starting its fetch/render in the next animation
+    frame. Keep both deferrals: synchronously rebuilding these surfaces produced 265–947 ms desktop
+    first-feedback outliers even though their network work was asynchronous.
 
 ## Dev workflow
 
@@ -405,31 +547,34 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 ## File map (repo)
 
 - `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
-  counters), Engine (scan/state/ledger/ntfy/act/hook_pending/session_context/file_content/
+  counters), Engine (scan/state/ledger/manual legacy-ntfy test/act/hook_pending/session_context/file_content/
   insights/commands/compacting_secs), spend CLI (`spend --cwd|--session`, used by the global
   `/subagent-spend` command). GET `/api/insights?days=N` aggregates agent_runs + session_runs
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
+- `web_push.py` + `web_push_worker.js` — private key store, asynchronous durable-lease supervisor,
+  bounded helper protocol, Web Push encryption/request construction, endpoint/DNS confinement, and
+  retry/result mapping. No provider scan or HTTP handler performs remote delivery.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
-  + token-gated `/api/search`, `/api/search/status`, and `/api/search/context`; POST
-  `/api/act` + `/api/settings` + `/api/search/rebuild` are token-gated. Settings persists the
-  `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
-  the stalled STATE, not just the push), `muted_sessions` (sid → ts, pruned at 30d),
+  + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
+  `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/upload-image` + `/api/settings` +
+  `/api/search/rebuild` + notification read/snooze/wake/mute/retry and
+  device/subscription/test routes are token-gated.
+  Settings persists the manual `legacy_ntfy_enabled` switch, range-validated UI/session thresholds
+  (`stall_seconds` also drives the stalled STATE), `muted_sessions` (sid → ts, persists until manual unmute),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
-  `Engine.update_settings`. Muted sessions skip all per-session pushes.
-  Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
-  transition (`Engine.quiet_since`), not on a time-bucket dedupe).
+  `Engine.update_settings`. Muted sessions skip all per-session Web Push deliveries.
 - `search_index.py` — isolated incremental Claude/Codex transcript and saved-subagent parser,
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
 - `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a per-device left/right rail;
-  mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
+  mobile navigation is a bottom bar with History/Insights/Settings under More. Destinations are URL-hash
   routed, participate in browser/native back, and keep History/Insights out of Now.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
   motion/mobile rules.
@@ -439,6 +584,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
   (`open`/`infoOpen`/`doneOpen`/`filesOpen` plus route/filter globals) re-applied at render —
   a full innerHTML re-render destroys native `<details>` state otherwise.
+- `static/manifest.webmanifest` + `static/sw.js` + `static/offline.html` + `static/icons/` — stable
+  install identity, root-scoped network/private-data boundary, cached last-fleet offline view, and
+  regular/maskable PWA artwork. Bump the service-worker cache name when changing its shell contract.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
   `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
   header/meta/peek/pending/running-agents/more-btn, in a `.ctop` wrapper rebuilt every poll,
@@ -492,7 +640,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
-- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `ledger.db`, `search.db*`, `pending/`,
+- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`,
+  `ledger.db`, `search.db*`, `pending/`,
   `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
 
 ## Outside-repo touchpoints (document changes to these here)
@@ -505,7 +654,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
   per variant; deny=Esc chosen because it cancels every variant).
 - Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
-- Tailscale serve + phone onboarding (user-side), ntfy topic subscribe.
+- Tailscale serve + installed-PWA onboarding remain user-side.
 - Fable pricing placeholder in `config.json` rates.
 - Claude VS Code sessions: no tty → view-only by design. ChatGPT Desktop/Codex VS Code transcripts
   are also view-only because their App Server is separate from Fleet's canonical Codex daemon.

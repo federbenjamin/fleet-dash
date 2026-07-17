@@ -95,6 +95,8 @@ def main():
                         help="read Fleet's local action token without printing it")
     parser.add_argument("--action-samples", type=int, default=10,
                         help="authenticated, non-mutating ping samples")
+    parser.add_argument("--notification-samples", type=int, default=10,
+                        help="authenticated Notification Center read samples")
     parser.add_argument("--assert-contract", action="store_true",
                         help="fail when routine local p95 exceeds 250 ms")
     parser.add_argument("--skip-corpus", action="store_true")
@@ -170,12 +172,19 @@ def main():
             diagnostics = {"ok": False, "error": str(exc)}
 
     action_times, action_server_times = [], []
+    notification_times, notification_server_times, notification_sizes = [], [], []
     if headers:
         for _ in range(max(0, args.action_samples)):
             _, elapsed, _, response_headers = request_json(
                 base + "/api/act", headers=headers, payload={"type": "ping"})
             action_times.append(elapsed)
             action_server_times.append(server_duration(response_headers))
+        for _ in range(max(0, args.notification_samples)):
+            _, elapsed, size, response_headers = request_json(
+                base + "/api/notifications?device=perf-baseline&limit=20", headers=headers)
+            notification_times.append(elapsed)
+            notification_server_times.append(server_duration(response_headers))
+            notification_sizes.append(size)
 
     out = {
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -213,6 +222,12 @@ def main():
                               "p50_ms": percentile(action_times, .50),
                               "p95_ms": percentile(action_times, .95),
                               "server_p95_ms": percentile(action_server_times, .95)}
+    if notification_times:
+        out["notifications"] = {"samples": len(notification_times),
+            "p50_ms": percentile(notification_times, .50),
+            "p95_ms": percentile(notification_times, .95),
+            "server_p95_ms": percentile(notification_server_times, .95),
+            "response_bytes_p50": percentile(notification_sizes, .50)}
     if search_times:
         out["search"] = {"query": args.search_query, "samples": len(search_times),
                          "p50_ms": percentile(search_times, .50),
@@ -223,17 +238,33 @@ def main():
     if not args.skip_corpus:
         out["corpus"] = corpus(["~/.claude/projects", "~/.codex/sessions"])
     contract = {}
-    for name in ("fleet", "context", "agent_context", "history", "search", "action_ping"):
+    for name in ("fleet", "context", "agent_context", "history", "search", "action_ping",
+                 "notifications"):
         measurement = out.get(name)
         if measurement and measurement.get("p95_ms") is not None:
             contract[name] = {"budget_ms": 250,
                               "p95_ms": measurement["p95_ms"],
                               "pass": measurement["p95_ms"] < 250}
+    operations = (out.get("engine") or {}).get("operations_db") or {}
+    contract["notification_projection"] = {
+        "budget_ms": 5,
+        "p95_ms": operations.get("notification_projection_p95_ms"),
+        "samples": operations.get("notification_projection_samples", 0),
+        "pass": operations.get("notification_projection_samples", 0) > 0
+                and operations.get("notification_projection_p95_ms") is not None
+                and operations.get("notification_projection_p95_ms") < 5}
+    contract["notification_enqueue"] = {
+        "budget_ms": 25,
+        "p95_ms": operations.get("notification_enqueue_p95_ms"),
+        "samples": operations.get("notification_enqueue_samples", 0),
+        "pass": operations.get("notification_enqueue_samples", 0) > 0
+                and operations.get("notification_enqueue_p95_ms") is not None
+                and operations.get("notification_enqueue_p95_ms") < 25}
     out["contract"] = contract
     print(json.dumps(out, indent=2, sort_keys=True))
     if args.assert_contract:
-        undersampled = [name for name, measurement in out.items()
-                        if name in contract and measurement.get("samples", 0) < 10]
+        undersampled = [name for name, result in contract.items()
+                        if name in out and out[name].get("samples", 0) < 10]
         failed = [name for name, result in contract.items() if not result["pass"]]
         if undersampled or failed:
             raise SystemExit("latency contract failed: " + "; ".join(filter(None, [

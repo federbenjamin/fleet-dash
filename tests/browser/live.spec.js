@@ -125,11 +125,9 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   expect(briefing.ok).toBe(true);
   const budgets = await (await page.request.get('/api/budgets')).json();
   expect(budgets.ok).toBe(true);
-  await page.evaluate(() => loadBriefing(true));
-  if (await page.locator('#briefing .briefhead').isVisible()) {
-    await page.locator('#briefing .briefhead').click();
-    await expect(page.locator('#briefing .briefbody')).toBeVisible();
-  }
+  await goTo(page, 'notifications');
+  await page.locator('.notificationbar').getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications .briefbody')).toBeVisible();
   await goTo(page, 'settings');
   await expect(page.locator('.setrow:has-text("daily briefing push")')).toBeVisible();
   await expect(page.locator('.digestsettings input[type="time"]')).toBeVisible();
@@ -206,7 +204,7 @@ test('running Fleet Dash builds an editable authenticated handoff without sendin
   expect(failures).toEqual([]);
 });
 
-test('running Fleet Dash reads an authenticated repository outcome without mutating it', async ({ page }, testInfo) => {
+test('running Fleet Dash exposes an external GitHub repository link', async ({ page }) => {
   const target = authenticatedLiveURL();
   test.skip(!target, 'set FLEET_DASH_LIVE_URL and FLEET_DASH_LIVE_AUTH=1');
   const failures = [];
@@ -217,12 +215,9 @@ test('running Fleet Dash reads an authenticated repository outcome without mutat
   recordUnexpectedRequestFailures(page, failures);
   await page.goto(target, { waitUntil: 'domcontentloaded' });
   await goTo(page, 'workstreams');
-  const git = page.locator('#workstreams .workstream').filter({ has: page.getByRole('button', { name: 'Repository' }) }).first();
+  const git = page.locator('#workstreams .workstream').filter({ has: page.getByRole('link', { name: 'GitHub ↗' }) }).first();
   await expect(git).toBeVisible({ timeout: 15_000 });
-  await git.getByRole('button', { name: 'Repository' }).click();
-  await expect(page.locator('#repoview')).toBeVisible();
-  await expect(page.locator('#repobody .repostatus')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('#repobody')).toContainText('never merges');
-  await page.screenshot({ path: testInfo.outputPath('running-repository-outcome.png'), fullPage: true });
+  await expect(git.getByRole('link', { name: 'GitHub ↗' })).toHaveAttribute('href',/^https:\/\//);
+  await expect(page.locator('#repoview')).toHaveCount(0);
   expect(failures).toEqual([]);
 });

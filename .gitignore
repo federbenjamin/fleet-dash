@@ -8,6 +8,7 @@ inject-request.txt
 inject-result.txt
 FleetDashInjector.app/
 config.json
+push-secrets.json
 __pycache__/
 effort/
 usage.json

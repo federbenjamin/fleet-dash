@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fleet-dash engine: scans live Claude Code sessions + their subagent
-transcripts into a fleet snapshot; maintains the spend ledger; fires ntfy.
+transcripts into a fleet snapshot; maintains the spend ledger and notifications.
 
 Data sources (all local, read-only):
   ~/.claude/sessions/<pid>.json          live-session registry (CLI-maintained)
@@ -10,14 +10,14 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, datetime as dt
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, mmap, stat
 from collections import deque
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
 from outbox import OutboxError, OutboxManager
 from briefing import FleetOperations, OperationsError
+from web_push import WebPushService
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -33,20 +33,13 @@ CLAUDE_USAGE_PREFS = os.path.join(
 
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
-    "stall_seconds": 240,
-    "awaiting_input_notify_seconds": 180,
+    "stall_seconds": 600,
     "dormant_seconds": 7200,
     "turn_done_window_seconds": 900,
     "agent_done_quiet_seconds": 5,
     "agent_idle_done_seconds": 30,      # settled-but-no-end_turn agent: done after this
-    "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
-    "notify": {"needs_you": True, "stall": True, "spend": True,
-               "fleet_quiet": True, "scheduled_digest": False},
-    "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
-    "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
-    "digest_schedule_zone": "UTC",
-    "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
+    "muted_sessions": {},               # session_id -> mute ts; persists until manual unmute
     "pinned_sessions": [],               # shared watchlist, stable insertion order
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
@@ -62,7 +55,10 @@ DEFAULT_CONFIG = {
     "search_batch_rows": 250,
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
-    "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
+    "legacy_ntfy_enabled": False,
+    "web_push_allowed_origins": [],      # explicit exact HTTPS push-service origins
+    "web_push_node_command": "",        # optional absolute Node >=18 executable
+    "web_push_subject": "",             # optional HTTPS URL or mailto VAPID contact
     # last-message peeks: on/off + how many lines each is allowed
     "preview_sessions": True,
     "preview_session_lines": 2,
@@ -83,6 +79,96 @@ DEFAULT_CONFIG = {
 }
 
 
+def _write_private_json(path, payload):
+    """Atomically replace a secret-bearing JSON file with owner-only permissions."""
+    temp_path = f"{path}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(temp_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            fd = -1
+            json.dump(payload, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600, follow_symlinks=False)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _scrub_private_log(path, values):
+    """Redact known runtime secrets in place without replacing launchd's open inode."""
+    secrets_to_remove = []
+    for value in values:
+        if isinstance(value, str) and len(value) >= 8:
+            encoded = value.encode("utf-8")
+            if encoded not in secrets_to_remove:
+                secrets_to_remove.append(encoded)
+    if not secrets_to_remove:
+        return
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                return
+            if opened.st_size:
+                with mmap.mmap(fd, 0, access=mmap.ACCESS_WRITE) as mapped:
+                    changed = False
+                    for secret in secrets_to_remove:
+                        offset = 0
+                        while True:
+                            offset = mapped.find(secret, offset)
+                            if offset < 0:
+                                break
+                            mapped[offset:offset + len(secret)] = b"*" * len(secret)
+                            offset += len(secret)
+                            changed = True
+                    if changed:
+                        mapped.flush()
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return
+
+
+def _runtime_log_secrets(cfg):
+    values = [cfg.get("act_token"), cfg.get("ntfy_topic"), cfg.get("dashboard_url"),
+              cfg.get("web_push_subject")]
+    secret_path = os.path.join(BASE, "push-secrets.json")
+    try:
+        info = os.lstat(secret_path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32768:
+            return values
+        fd = os.open(secret_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or
+                    not stat.S_ISREG(opened.st_mode)):
+                return values
+            stored = json.loads(os.read(fd, 32769).decode("utf-8"))
+        finally:
+            os.close(fd)
+        if isinstance(stored, dict):
+            values.extend((stored.get("vapid_private_key"), stored.get("action_secret")))
+    except (OSError, ValueError, TypeError):
+        pass
+    return values
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     path = os.path.join(BASE, "config.json")
@@ -97,10 +183,16 @@ def load_config():
         return cfg
     if not raw.get("act_token"):        # device token for the remote act endpoint
         raw["act_token"] = secrets.token_hex(16)
+    # The former shipped default was four minutes. Move existing installs that
+    # still carry that exact value to the new ten-minute default once; preserve
+    # every other user-selected threshold.
+    if not raw.get("_stall_default_v2"):
+        if raw.get("stall_seconds", 240) == 240:
+            raw["stall_seconds"] = 600
+        raw["_stall_default_v2"] = True
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
-    with open(path, "w") as f:
-        json.dump(merged, f, indent=2)
+    _write_private_json(path, merged)
     return merged
 
 
@@ -126,6 +218,13 @@ def cwd_to_project_dir(cwd):
 KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 WAITING_CONFIRM_SECONDS = 3.0
+IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+IMAGE_UPLOAD_TTL_SECONDS = 24 * 60 * 60
+IMAGE_UPLOAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+IMAGE_UPLOAD_MIMES = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+    "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif",
+}
 
 # slash commands that destroy conversation state — the page confirms before sending
 DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
@@ -220,6 +319,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
         candidates.append((rule, "needs_you", reason, primary, "confirmed"))
     if raw_state == "error":
         candidates.append(("placement.provider.error", "needs_you", "Fix needed",
+                           "open", "confirmed"))
+    if raw_state == "blocked":
+        candidates.append(("placement.provider.limit", "needs_you", "Limit reached",
                            "open", "confirmed"))
     if state == "stalled_or_prompt":
         candidates.append(("placement.state.stalled_or_prompt", "needs_you",
@@ -987,6 +1089,14 @@ class Tail:
 class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
+        _scrub_private_log(os.path.join(BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
+        for runtime_name in ("config.json", "fleet-dash.log"):
+            runtime_path = os.path.join(BASE, runtime_name)
+            try:
+                if not os.path.islink(runtime_path):
+                    os.chmod(runtime_path, 0o600, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
         self.tails = {}                 # path -> Tail
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
@@ -994,11 +1104,11 @@ class Engine:
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
         self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
         self._cleanup_lock = threading.Lock()
+        self._image_upload_lock = threading.RLock()
+        self._image_cleanup_due = 0.0
+        self._image_cleanup_running = False
         self.db = None
-        self.notified = {}              # dedupe keys -> t
-        self.seeded = False             # first pass registers pre-existing states silently
-        self.prev_fleet_busy = None
-        self.quiet_since = None         # when the fleet last went fully idle
+        self.pending_seen = {}          # pending nonce -> first-observed timestamp
         self.lock = threading.Lock()
         self.config_lock = threading.RLock()
         self.db_lock = threading.RLock()
@@ -1031,6 +1141,8 @@ class Engine:
         self.ledger_status = self._prepare_ledger(ledger_path)
         self.outbox = OutboxManager(ledger_path)
         self.operations = FleetOperations(ledger_path)
+        self.web_push = None
+        self.web_push_lock = threading.RLock()
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -1110,6 +1222,207 @@ class Engine:
                 continue
             out.append(d)
         return out
+
+    @staticmethod
+    def _image_kind(data):
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in {
+                b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "image/heic"
+        return None
+
+    @staticmethod
+    def _strip_jpeg_metadata(data):
+        """Drop JPEG APP/COM segments (EXIF GPS, XMP, camera data, comments)."""
+        if not isinstance(data, bytes) or not data.startswith(b"\xff\xd8"):
+            return None
+        out = bytearray(data[:2])
+        pos = 2
+        while pos < len(data):
+            marker_start = pos
+            if data[pos] != 0xff:
+                return None
+            while pos < len(data) and data[pos] == 0xff:
+                pos += 1
+            if pos >= len(data):
+                return None
+            marker = data[pos]
+            pos += 1
+            if marker == 0xda:  # scan data has byte-stuffing, so preserve the rest verbatim
+                out.extend(data[marker_start:])
+                return bytes(out)
+            if marker in tuple(range(0xd0, 0xda)) + (0x01,):
+                out.extend(data[marker_start:pos])
+                continue
+            if pos + 2 > len(data):
+                return None
+            length = int.from_bytes(data[pos:pos + 2], "big")
+            end = pos + length
+            if length < 2 or end > len(data):
+                return None
+            if not (0xe0 <= marker <= 0xef or marker == 0xfe):
+                out.extend(data[marker_start:end])
+            pos = end
+        return bytes(out) if data.endswith(b"\xff\xd9") else None
+
+    @staticmethod
+    def _image_upload_paths(upload_id):
+        root = os.path.join(BASE, "uploads")
+        return root, os.path.join(root, upload_id + ".jpg"), os.path.join(root, upload_id + ".json")
+
+    def _cleanup_image_uploads(self, now=None):
+        with self._image_upload_lock:
+            now = float(now or time.time())
+            root = os.path.join(BASE, "uploads")
+            try:
+                names = os.listdir(root)[:2000]
+            except FileNotFoundError:
+                return
+            for name in names:
+                if not name.endswith(".json") or not IMAGE_UPLOAD_ID_RE.fullmatch(name[:-5]):
+                    continue
+                upload_id = name[:-5]
+                _, image_path, meta_path = self._image_upload_paths(upload_id)
+                expired = False
+                try:
+                    info = os.lstat(meta_path)
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                        expired = True
+                    else:
+                        with open(meta_path) as handle:
+                            meta = json.load(handle)
+                        expired = float(meta.get("expires_at") or 0) <= now
+                except Exception:
+                    expired = True
+                if expired:
+                    for path in (image_path, meta_path):
+                        try:
+                            if stat.S_ISREG(os.lstat(path).st_mode):
+                                os.unlink(path)
+                        except FileNotFoundError:
+                            pass
+                        except OSError:
+                            pass
+
+    def _schedule_image_cleanup(self):
+        now = time.time()
+        with self._image_upload_lock:
+            if self._image_cleanup_running or now < self._image_cleanup_due:
+                return
+            self._image_cleanup_running = True
+            self._image_cleanup_due = now + 3600
+
+        def clean():
+            try:
+                self._cleanup_image_uploads()
+            finally:
+                with self._image_upload_lock:
+                    self._image_cleanup_running = False
+        threading.Thread(target=clean, name="fleet-image-cleanup", daemon=True).start()
+
+    def store_image_upload(self, sid, upload_id, display_name, content_type, data):
+        """Validate and normalize one private image for an interactive live session."""
+        sid = str(sid or "")
+        upload_id = str(upload_id or "")
+        content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+        if not IMAGE_UPLOAD_ID_RE.fullmatch(upload_id):
+            return {"ok": False, "error": "invalid image ID"}
+        if not isinstance(data, bytes) or not 1 <= len(data) <= IMAGE_UPLOAD_BYTES:
+            return {"ok": False, "error": "image must be between 1 byte and 10 MB"}
+        detected = self._image_kind(data)
+        if content_type not in IMAGE_UPLOAD_MIMES or detected != content_type and not (
+                content_type == "image/heif" and detected == "image/heic"):
+            return {"ok": False, "error": "image type does not match its contents"}
+        with self.lock:
+            session = next((copy.deepcopy(item) for item in
+                self.snapshot_cache.get("sessions") or [] if item.get("session_id") == sid), None)
+        if not session or not (session.get("capabilities") or {}).get("submit"):
+            return {"ok": False, "error": "session is not available for image messages"}
+        root, image_path, meta_path = self._image_upload_paths(upload_id)
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        os.chmod(root, 0o700, follow_symlinks=False)
+        source_path = os.path.join(root, "." + upload_id + IMAGE_UPLOAD_MIMES[content_type])
+        output_path = os.path.join(root, "." + upload_id + "-normalized.jpg")
+        safe_name = os.path.basename(str(display_name or "image"))[:120]
+        with self._image_upload_lock:
+            self._cleanup_image_uploads()
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(source_path, flags, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                converted = subprocess.run([
+                    "/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "85",
+                    source_path, "--out", output_path], capture_output=True, text=True, timeout=30)
+                if converted.returncode != 0:
+                    return {"ok": False, "error": "image could not be normalized"}
+                with open(output_path, "rb") as stream:
+                    scrubbed = self._strip_jpeg_metadata(stream.read(IMAGE_UPLOAD_BYTES + 1))
+                if not scrubbed or len(scrubbed) > IMAGE_UPLOAD_BYTES:
+                    return {"ok": False, "error": "image metadata could not be removed"}
+                flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(output_path, flags)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(scrubbed)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                info = os.lstat(output_path)
+                if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= IMAGE_UPLOAD_BYTES:
+                    return {"ok": False, "error": "normalized image exceeds 10 MB"}
+                os.chmod(output_path, 0o600, follow_symlinks=False)
+                os.replace(output_path, image_path)
+                created = time.time()
+                _write_private_json(meta_path, {"version": 1, "upload_id": upload_id,
+                    "session_id": sid, "display_name": safe_name, "content_type": "image/jpeg",
+                    "size": info.st_size, "created_at": created,
+                    "expires_at": created + IMAGE_UPLOAD_TTL_SECONDS})
+                return {"ok": True, "upload_id": upload_id, "name": safe_name,
+                        "content_type": "image/jpeg", "size": info.st_size,
+                        "expires_at": created + IMAGE_UPLOAD_TTL_SECONDS}
+            except (OSError, subprocess.SubprocessError):
+                return {"ok": False, "error": "image upload failed"}
+            finally:
+                for path in (source_path, output_path):
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        pass
+
+    def _resolve_image_uploads(self, sid, upload_ids):
+        if not isinstance(upload_ids, list) or not 1 <= len(upload_ids) <= 4:
+            return None, "attach between 1 and 4 images"
+        paths = []
+        now = time.time()
+        with self._image_upload_lock:
+            self._cleanup_image_uploads(now)
+            for upload_id in upload_ids:
+                upload_id = str(upload_id or "")
+                if not IMAGE_UPLOAD_ID_RE.fullmatch(upload_id):
+                    return None, "invalid image ID"
+                _, image_path, meta_path = self._image_upload_paths(upload_id)
+                try:
+                    image_info, meta_info = os.lstat(image_path), os.lstat(meta_path)
+                    if not stat.S_ISREG(image_info.st_mode) or not stat.S_ISREG(meta_info.st_mode):
+                        raise ValueError
+                    with open(meta_path) as handle:
+                        meta = json.load(handle)
+                    if meta.get("session_id") != sid or float(meta.get("expires_at") or 0) <= now:
+                        raise ValueError
+                    if image_info.st_size != int(meta.get("size") or -1):
+                        raise ValueError
+                except Exception:
+                    return None, "image upload is missing, expired, or belongs to another session"
+                paths.append(image_path)
+        return paths, None
 
     def tail_for(self, path):
         t = self.tails.get(path)
@@ -1215,7 +1528,8 @@ class Engine:
                 kind, request, delivery = "reply", "Reply requested", "Awaiting response"
                 safe_bulk.append("mark_available")
             elif session.get("ui_group") == "needs_you":
-                kind = "problem" if session.get("state") in ("error", "stalled_or_prompt") \
+                kind = "problem" if session.get("state") in \
+                    ("blocked", "error", "stalled_or_prompt") \
                     else "attention"
                 request = session.get("error") or session.get("reason_label") or "Session needs attention"
                 delivery = "Intervention needed"
@@ -1684,6 +1998,7 @@ class Engine:
         with self.scan_lock:
             acquired = time.perf_counter()
             fleet = self._scan()
+        self._schedule_image_cleanup()
         elapsed = (time.perf_counter() - started) * 1000
         wait_ms = (acquired - started) * 1000
         self.scan_timings_ms.append(elapsed)
@@ -1734,7 +2049,7 @@ class Engine:
             main_path = os.path.join(proj_dir, f"{sid}.jsonl")
             if not os.path.isfile(main_path):
                 reg_status = reg.get("status")
-                state = "running" if reg_status == "busy" else "idle"
+                state = "running" if reg_status in ("busy", "shell") else "idle"
                 sessions.append({
                     "session_id": sid, "native_session_id": sid,
                     "provider": "claude", "pid": reg.get("pid"),
@@ -1777,7 +2092,7 @@ class Engine:
             mtime = os.path.getmtime(main_path)
             quiet = now - mtime
 
-            reg_status = reg.get("status")  # 'busy' | 'idle' | 'waiting' | None
+            reg_status = reg.get("status")  # 'busy' | 'shell' | 'idle' | 'waiting' | None
             # Hooks are positive evidence. The bare registry flag is debounced:
             # Claude briefly reports `waiting` between assistant prose and its
             # next tool call even though the turn is still progressing.
@@ -1798,7 +2113,8 @@ class Engine:
             turn = mt.turn_state()
             if confirmed_waiting:
                 state = "needs_you"         # blocked mid-turn: question or permission prompt
-            elif reg_status == "idle" or (reg_status is None and turn == "awaiting_input"):
+            elif reg_status == "idle" or (reg_status in (None, "shell") and
+                                          turn == "awaiting_input"):
                 # at the prompt: only actionable if a work turn finished recently
                 if turn == "awaiting_input" and quiet < cfg["turn_done_window_seconds"]:
                     state = "turn_done"
@@ -1837,8 +2153,10 @@ class Engine:
                 paired = self._paired_files(mt, q_ts)
                 if paired:
                     pending["files"] = paired
-            if pending and pending["nonce"] not in self.notified:
-                self.notified[pending["nonce"]] = now
+            if pending and pending["nonce"] not in self.pending_seen:
+                self.pending_seen[pending["nonce"]] = now
+                if len(self.pending_seen) > 5000:
+                    self.pending_seen = dict(list(self.pending_seen.items())[-2500:])
                 print(f"pending first seen: {sid[:8]} {pending['kind']} nonce={pending['nonce'][:24]}",
                       file=sys.stderr, flush=True)
 
@@ -2032,15 +2350,14 @@ class Engine:
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(self.codex_scan_error or self.codex.error),
                                     "error": self.codex_scan_error or self.codex.error}},
-            "notify": {**DEFAULT_CONFIG["notify"], **(self.cfg.get("notify") or {})},
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
-                         ("awaiting_input_notify_seconds", "stall_seconds",
-                          "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
-                          "digest_schedule_time", "digest_schedule_zone",
-                          "preview_sessions", "preview_session_lines",
+                         ("stall_seconds", "preview_sessions", "preview_session_lines",
                           "preview_agents", "preview_agent_lines", "reader_width",
-                          "pinned_sessions", "dismissed_actions")},
+                          "pinned_sessions", "dismissed_actions",
+                          "legacy_ntfy_enabled")},
         }
+        fleet["settings"]["legacy_ntfy_configured"] = bool(
+            self.cfg.get("ntfy_topic") and self.cfg.get("ntfy_server"))
         try:
             fleet["outbox_summary"] = self.outbox.counts()
         except Exception as exc:
@@ -2157,7 +2474,8 @@ class Engine:
                 include_github=False)
             group["repository"] = {key: repo.get(key) for key in
                                    ("ok", "state", "worktree", "observed_at",
-                                    "elapsed_ms", "cached", "error") if key in repo}
+                                    "elapsed_ms", "cached", "error", "repo_slug",
+                                    "github_url") if key in repo}
             group["repo_summary"] = self._repository_summary(repo)
         result = {"ok": True, "t": snapshot.get("t") or time.time(),
                   "version": stamp[0], "workstreams": records,
@@ -2186,7 +2504,7 @@ class Engine:
             return None
         keys = ("ok", "state", "root", "worktree", "branch", "detached", "head_oid",
                 "upstream", "ahead", "behind", "dirty", "conflicts", "files", "remotes",
-                "remote", "remote_branch", "repo_slug", "default_base", "latest_commit", "pr", "tests",
+                "remote", "remote_branch", "repo_slug", "github_url", "default_base", "latest_commit", "pr", "tests",
                 "observed_at", "elapsed_ms", "revision", "actions", "cached", "error")
         return {key: repo.get(key) for key in keys if key in repo}
 
@@ -2296,7 +2614,6 @@ class Engine:
     def _persist_config_fields(self, changed):
         """Merge internal/UI state into config.json without dropping secret fields."""
         path = os.path.join(BASE, "config.json")
-        temp_path = path + ".tmp"
         with self.config_lock:
             try:
                 with open(path) as handle:
@@ -2304,9 +2621,7 @@ class Engine:
             except Exception:
                 raw = {}
             raw.update(changed)
-            with open(temp_path, "w") as handle:
-                json.dump(raw, handle, indent=2)
-            os.replace(temp_path, path)
+            _write_private_json(path, raw)
 
     def stable_working_order(self, sessions):
         """Append new Working entries; never reorder incumbents by activity."""
@@ -4002,6 +4317,92 @@ Treat this as an independent session. Verify the repository state before changin
                 "stderr": stderr, "truncated": truncated, "timeout": timed_out}
 
     @staticmethod
+    def _bounded_nul_paths(argv, timeout=8, max_input=67_108_864, keep=40):
+        """Stream a large NUL path list into a bounded sample, count, and digest."""
+        try:
+            process = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        except (FileNotFoundError, OSError) as exc:
+            return {"ok": False, "code": None, "paths": [], "count": 0,
+                    "digest": "", "stderr": str(exc), "truncated": False}
+        selector = selectors.DefaultSelector()
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + timeout
+        digest = hashlib.sha256()
+        carry = bytearray()
+        stderr_buffer = bytearray()
+        paths = []
+        count = total = 0
+        truncated = timed_out = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    process.kill()
+                    break
+                events = selector.select(min(0.1, remaining))
+                if not events and process.poll() is not None:
+                    events = [(key, selectors.EVENT_READ)
+                              for key in list(selector.get_map().values())]
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 65_536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total += len(chunk)
+                    if total > max_input:
+                        truncated = True
+                        process.kill()
+                        break
+                    if key.data == "stderr":
+                        if len(stderr_buffer) < 65_536:
+                            stderr_buffer.extend(chunk[:65_536 - len(stderr_buffer)])
+                        continue
+                    digest.update(chunk)
+                    carry.extend(chunk)
+                    records = carry.split(b"\0")
+                    carry = bytearray(records.pop())
+                    if len(carry) > 16_384:
+                        truncated = True
+                        process.kill()
+                        break
+                    for record in records:
+                        if not record:
+                            continue
+                        count += 1
+                        if len(paths) < keep:
+                            paths.append(record.decode("utf-8", "replace"))
+                if truncated:
+                    break
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        stderr = stderr_buffer.decode("utf-8", "replace")
+        if timed_out:
+            stderr = (stderr + "\nGit probe timed out").strip()
+        if truncated:
+            stderr = (stderr + "\nGit path probe exceeded its scan limit").strip()
+        return {"ok": process.returncode == 0 and not timed_out and not truncated,
+                "code": process.returncode, "paths": paths, "count": count,
+                "digest": digest.hexdigest(), "stderr": stderr,
+                "truncated": truncated, "timeout": timed_out}
+
+    @staticmethod
     def _parse_worktree_list(raw):
         entries = []
         current = None
@@ -4058,6 +4459,19 @@ Treat this as an independent session. Verify the repository state before changin
                               "title": item.get("title") or item.get("name") or sid})
         return users
 
+    @staticmethod
+    def _owned_claude_worktree_lock(session, registered):
+        """Whether Claude itself locked this session's generated worktree."""
+        if str(session.get("provider") or "claude") != "claude":
+            return False
+        try:
+            pid = int(session.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        reason = str(registered.get("lock_reason") or "")
+        return pid > 1 and bool(re.fullmatch(
+            rf"claude session .+ \(pid {pid} start .+\)", reason))
+
     def close_worktree_preview(self, session, issue_ticket=True):
         """Describe optional cleanup without trusting a client path."""
         sid = str(session.get("session_id") or session.get("sessionId") or "")
@@ -4088,16 +4502,17 @@ Treat this as an independent session. Verify the repository state before changin
         if not registered or primary == worktree or registered.get("prunable"):
             return {**base, "inspect_ok": False, "registered": bool(registered),
                     "reason": "The linked worktree registration is stale or unsafe."}
-        if registered.get("locked"):
+        owned_lock = self._owned_claude_worktree_lock(session, registered)
+        if registered.get("locked") and not owned_lock:
             return {**base, "inspect_ok": False, "registered": True, "locked": True,
                     "reason": "This worktree is locked by Git and cannot be removed from Fleet."}
 
         status_result = self._bounded_process(
             ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
              "--untracked-files=all"], timeout=8, max_output=1_048_576)
-        ignored_result = self._bounded_process(
+        ignored_result = self._bounded_nul_paths(
             ["git", "-C", worktree, "ls-files", "--others", "--ignored",
-             "--exclude-standard", "-z"], timeout=8, max_output=524_288)
+             "--exclude-standard", "-z"], timeout=8, max_input=67_108_864, keep=40)
         if not status_result["ok"] or not ignored_result["ok"]:
             detail = status_result["stderr"] or ignored_result["stderr"] or \
                 "Git could not completely inspect the worktree"
@@ -4106,7 +4521,8 @@ Treat this as an independent session. Verify the repository state before changin
 
         status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
         files = status.get("files") or []
-        ignored = [path for path in ignored_result["stdout"].split("\0") if path]
+        ignored = ignored_result["paths"]
+        ignored_count = ignored_result["count"]
         categories = {
             "staged": [item for item in files if item.get("staged")],
             "unstaged": [item for item in files if item.get("unstaged") and
@@ -4128,16 +4544,18 @@ Treat this as an independent session. Verify the repository state before changin
         dirty = bool(files)
         destructive_contents = dirty or bool(ignored)
         material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
-                    status_result["stdout"] + "\0" + ignored_result["stdout"] + "\0" +
+                    status_result["stdout"] + "\0" + ignored_result["digest"] + "\0" +
                     json.dumps(shared, sort_keys=True, separators=(",", ":")))
         revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         result = {**base, "inspect_ok": True, "registered": True,
+                  "locked": bool(registered.get("locked")),
+                  "owned_lock": owned_lock,
                   "branch": status.get("branch"), "head_oid": status.get("head_oid"),
                   "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
                   "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
                   "dirty_files_truncated": len(dirty_files) > 100,
-                  "ignored_count": len(ignored), "ignored_files": ignored[:40],
-                  "ignored_files_truncated": len(ignored) > 40,
+                  "ignored_count": ignored_count, "ignored_files": ignored,
+                  "ignored_files_truncated": ignored_count > len(ignored),
                   "shared_sessions": shared,
                   "remove_allowed": not destructive_contents and not shared,
                   "force_remove_allowed": destructive_contents and not shared}
@@ -4145,6 +4563,8 @@ Treat this as an independent session. Verify the repository state before changin
             result["reason"] = "Another live Fleet session is using this worktree."
         elif destructive_contents:
             result["reason"] = "The worktree contains files that removal would erase."
+        elif owned_lock:
+            result["reason"] = "Claude's worktree lock will be released after the session closes."
         if issue_ticket:
             token = secrets.token_urlsafe(24)
             ticket = {"session_id": sid, "provider": provider, "root": root,
@@ -4203,7 +4623,7 @@ Treat this as an independent session. Verify the repository state before changin
                         "preserved": True}
         force = action.get("force") is True
         session = {"session_id": ticket["session_id"], "provider": ticket["provider"],
-                   "cwd": ticket["worktree"]}
+                   "cwd": ticket["worktree"], "pid": ticket.get("pid")}
         preview = self.close_worktree_preview(session, issue_ticket=False)
         if not preview.get("inspect_ok") or preview.get("revision") != ticket["revision"]:
             return {"ok": False, "error": "the worktree changed after preview — it was preserved",
@@ -4216,6 +4636,16 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": preview.get("reason") or
                     "worktree removal is no longer safe", "worktree": ticket["worktree"],
                     "preserved": True}
+        unlocked = False
+        if preview.get("owned_lock"):
+            unlock = self._bounded_process(
+                ["git", "-C", ticket["root"], "worktree", "unlock", ticket["worktree"]],
+                timeout=10, max_output=262_144)
+            if not unlock["ok"]:
+                return {"ok": False, "error": (unlock["stderr"] or unlock["stdout"] or
+                        "Claude's worktree lock could not be released")[:500],
+                        "worktree": ticket["worktree"], "preserved": True}
+            unlocked = True
         argv = ["git", "-C", ticket["root"], "worktree", "remove"]
         if force:
             argv.append("--force")
@@ -4224,7 +4654,7 @@ Treat this as an independent session. Verify the repository state before changin
         if not removed["ok"]:
             return {"ok": False, "error": (removed["stderr"] or removed["stdout"] or
                     "Git worktree removal failed")[:500], "worktree": ticket["worktree"],
-                    "preserved": os.path.exists(ticket["worktree"])}
+                    "preserved": os.path.exists(ticket["worktree"]), "unlocked": unlocked}
         self._workstream_cache.clear()
         self._workstreams_snapshot_cache = None
         return {"ok": True, "removed": True, "forced": force,
@@ -4307,7 +4737,7 @@ Treat this as an independent session. Verify the repository state before changin
 
         interrupted = False
         interrupt_error = None
-        if reg.get("status") in ("busy", "waiting"):
+        if reg.get("status") in ("busy", "shell", "waiting"):
             tty = self._tty_cache.get(pid)
             if not tty:
                 try:
@@ -4424,6 +4854,202 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "error": f"briefing is temporarily unavailable: {exc}"}
+
+    def notifications_snapshot(self, device_id="default", cursor=None, limit=100,
+                               states=None, kinds=None, event_id=None):
+        try:
+            return self.operations.notification_snapshot(
+                device_id=device_id or "default", cursor=cursor, limit=limit,
+                states=states, kinds=kinds, event_id=event_id)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"notifications are temporarily unavailable: {exc}"}
+
+    def push_config(self, device_id=None):
+        try:
+            devices = self.operations.notification_devices_snapshot(device_id)
+            with self.web_push_lock:
+                runtime = self.web_push.status() if self.web_push else {
+                    "configured": False, "public_key": None, "delivery": "starting",
+                    "helper": {"ready": False, "restarts": 0, "state": "starting"},
+                    "queue": self.operations.notification_delivery_diagnostics()}
+            return {"ok": True, "feature": "production",
+                    "configured": bool(runtime.get("configured")),
+                    "public_key": runtime.get("public_key"),
+                    "delivery": runtime.get("delivery") or "unavailable",
+                    "helper": runtime.get("helper"), "queue": runtime.get("queue"),
+                    "current_device": devices.get("current_device"),
+                    "registered_devices": devices.get("registered", 0),
+                    "enabled_devices": devices.get("enabled", 0)}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push configuration is temporarily unavailable"}
+
+    def push_devices(self, current_device_id=None):
+        try:
+            return self.operations.notification_devices_snapshot(current_device_id)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push devices are temporarily unavailable"}
+
+    def push_diagnostics(self):
+        with self.web_push_lock:
+            runtime = self.web_push.status() if self.web_push else {
+                "configured": False, "delivery": "starting",
+                "helper": {"ready": False, "restarts": 0, "state": "starting"},
+                "queue": self.operations.notification_delivery_diagnostics()}
+        return {key: runtime.get(key) for key in
+                ("configured", "delivery", "helper", "runtime", "queue")}
+
+    def legacy_ntfy_diagnostics(self):
+        out = self.operations.legacy_notification_diagnostics()
+        return {"enabled": self.cfg.get("legacy_ntfy_enabled") is True,
+                "configured": bool(self.cfg.get("ntfy_topic") and
+                                   self.cfg.get("ntfy_server")), **out}
+
+    def push_subscription(self, payload):
+        try:
+            if payload.get("remove"):
+                device = self.operations.notification_remove_device(
+                    payload.get("device_id"), payload.get("permission_state") or "expired")
+            else:
+                device = self.operations.notification_register_device(
+                    payload.get("device_id"), payload.get("display_name"),
+                    payload.get("platform"), payload.get("subscription"),
+                    permission_state=payload.get("permission_state") or "granted",
+                    preferences=payload.get("preferences"),
+                    allowed_origins=self.cfg.get("web_push_allowed_origins") or [])
+            return {"ok": True, "device": device}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push subscription could not be saved"}
+
+    def push_device_settings(self, payload):
+        try:
+            device = self.operations.notification_update_device(
+                payload.get("device_id"),
+                display_name=payload.get("display_name") if "display_name" in payload else None,
+                enabled=payload.get("enabled") if "enabled" in payload else None,
+                preferences=payload.get("preferences") if "preferences" in payload else None)
+            return {"ok": True, "device": device}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push device settings could not be saved"}
+
+    def notifications_mark_read(self, payload):
+        try:
+            cursor = self.operations.notification_mark_read(
+                payload.get("device_id"), payload.get("cursor"))
+            return {"ok": True, "cursor": cursor}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification read state could not be saved"}
+
+    def notifications_snooze(self, payload):
+        try:
+            until = self.operations.notification_snooze(
+                payload.get("event_id"), payload.get("source_revision"), payload.get("until"))
+            return {"ok": True, "until": until}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification could not be snoozed"}
+
+    def notifications_wake(self, payload):
+        try:
+            self.operations.notification_wake(
+                payload.get("event_id"), payload.get("source_revision"))
+            return {"ok": True}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification could not be woken"}
+
+    def notifications_mute(self, payload):
+        try:
+            event = self.operations.notification_snapshot(
+                payload.get("device_id") or "default", event_id=payload.get("event_id"))
+            item = (event.get("events") or [None])[0]
+            if (not item or item.get("source_revision") != payload.get("source_revision") or
+                    not item.get("session_id")):
+                raise OperationsError("notification event is stale")
+            muted = payload.get("muted")
+            if not isinstance(muted, bool):
+                raise OperationsError("invalid notification mute state")
+            saved = self.update_settings({"mute_session": item["session_id"], "muted": muted})
+            if not saved.get("ok"):
+                raise OperationsError(saved.get("error") or "notification mute failed")
+            self.operations.notification_set_session_mute(
+                item["session_id"], item.get("provider"), muted)
+            return {"ok": True, "muted": muted, "session_id": item["session_id"]}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification mute could not be saved"}
+
+    def notifications_retry(self, payload):
+        try:
+            delivery = self.operations.notification_retry_delivery(payload.get("delivery_id"))
+            with self.web_push_lock:
+                if self.web_push:
+                    self.web_push.wake_event.set()
+            return {"ok": True, "delivery": delivery}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification delivery could not be retried"}
+
+    def start_web_push(self):
+        """Start the isolated delivery runtime without delaying daemon availability."""
+        with self.web_push_lock:
+            if self.web_push is None:
+                self.web_push = WebPushService(self.operations, BASE, self.cfg)
+            self.web_push.start()
+
+    def push_capability_action(self, payload):
+        """Apply one signed reversible push action without using the act token."""
+        token = payload.get("capability") if isinstance(payload, dict) else None
+        if not isinstance(token, str):
+            return {"ok": False, "error": "notification capability is unavailable"}
+
+        def persist_mute(session_id):
+            values = dict(self.cfg.get("muted_sessions") or {})
+            values.pop(session_id, None)
+            values[session_id] = time.time()
+            values = dict(list(values.items())[-1000:])
+            self._persist_config_fields({"muted_sessions": values})
+            self.cfg["muted_sessions"] = values
+
+        try:
+            with self.web_push_lock:
+                service = self.web_push
+            if not service:
+                raise OperationsError("notification capability is unavailable")
+            with self.config_lock:
+                result = service.capability_action(token, mute_callback=persist_mute)
+            return {"ok": True, **result}
+        except Exception:
+            return {"ok": False, "error": "notification capability is unavailable"}
+
+    def push_test(self, payload):
+        try:
+            with self.web_push_lock:
+                service = self.web_push
+            if not service or not service.status().get("configured"):
+                return {"ok": False, "error": "Web Push delivery is not ready",
+                        "code": "delivery_unavailable"}
+            delivery = service.enqueue_test(payload.get("device_id"))
+            return {"ok": True, "delivery": delivery}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "test delivery could not be queued"}
 
     def budgets_snapshot(self, spawn=None):
         with self.lock:
@@ -4600,9 +5226,18 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
-        {type:'text', session_id, text:'...'}"""
+        {type:'text', session_id, text:'...'} |
+        {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if action.get("type") == "image_text":
+            paths, error = self._resolve_image_uploads(
+                str(action.get("session_id") or ""), action.get("upload_ids"))
+            if error:
+                return {"ok": False, "error": error}
+            # Client-supplied paths are never accepted. Only this server-side
+            # resolution can add image_paths to a provider action.
+            action = {**action, "image_paths": paths}
         if action.get("type") == "briefing_review":
             return self.briefing_action(action)
         if str(action.get("type") or "").startswith("outbox_"):
@@ -4662,7 +5297,7 @@ Treat this as an independent session. Verify the repository state before changin
            and reg.get("status") != "waiting":
             return {"ok": False, "error": "session isn't waiting on a prompt — "
                     "this question may have been blocked or already answered"}
-        if action.get("type") == "interrupt" and reg.get("status") != "busy":
+        if action.get("type") == "interrupt" and reg.get("status") not in ("busy", "shell"):
             return {"ok": False, "error": "session isn't mid-turn — nothing to interrupt"}
         # a relay is typed into the PARENT's input box: if the parent is blocked on
         # a prompt, that box is the ask TUI and the relay would answer the question
@@ -4670,6 +5305,13 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "the parent session is waiting on a prompt — "
                     "answer that first, then relay"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+        if action.get("type") == "interrupt" and reg.get("status") == "shell":
+            with self.scan_lock:
+                shell_tail = self.tail_for(path)
+                shell_tail.poll()
+                if shell_tail.turn_state() == "awaiting_input":
+                    return {"ok": False, "error": "the shell command has finished — "
+                            "there is no active turn to interrupt"}
         # scan_lock is held by the poll thread while it folds EVERY transcript in the
         # fleet, so taking it here made a click wait out a whole scan (~300ms of the
         # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it
@@ -4833,9 +5475,17 @@ Treat this as an independent session. Verify the repository state before changin
                           f"{f' — “{desc}”' if desc else ''}] {body} "
                           f"(forward it with SendMessage; if that agent can't be "
                           f"resumed, say so instead of acting on this yourself)", True)]
-            elif typ in ("text", "handoff_text"):
+            elif typ in ("text", "image_text", "handoff_text"):
                 limit = 30_000 if typ == "handoff_text" else 2000
                 txt = str(action.get("text", ""))[:limit].strip()
+                if typ == "image_text":
+                    paths = action.get("image_paths") or []
+                    if not paths:
+                        return {"ok": False, "error": "no images"}
+                    txt = txt or ("Please inspect the attached image." if len(paths) == 1 else
+                                  "Please inspect the attached images.")
+                    txt += "\n\nImages attached through Fleet:\n" + "\n".join(
+                        f"- {path}" for path in paths)
                 if not txt:
                     return {"ok": False, "error": "empty text"}
                 # a leading "/" opens the TUI's OWN command popup, where Enter fires
@@ -4863,7 +5513,7 @@ Treat this as an independent session. Verify the repository state before changin
         # (digits/arrows/CR need a render between them, or keys get dropped — invariant
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
-        fast = typ in ("text", "handoff_text", "relay", "focus", "interrupt", "noop")
+        fast = typ in ("text", "image_text", "handoff_text", "relay", "focus", "interrupt", "noop")
         result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
         if typ == "permission_mode" and result.get("ok"):
             # Claude may defer its transcript marker until the next prompt. Keep
@@ -5213,16 +5863,16 @@ Treat this as an independent session. Verify the repository state before changin
                 "dialog appeared, grant it and retry"}
 
     # ---------------------------------------------------------------- ntfy
-    def ntfy(self, key, title, body, tags="robot", priority="default"):
+    def _send_legacy_ntfy_test(self, key):
         topic = self.cfg.get("ntfy_topic")
         if not topic:
             self.operations.notification_status(key, "disabled")
             return
         url = f"{self.cfg['ntfy_server'].rstrip('/')}/{topic}"
-        headers = {"Title": title, "Tags": tags, "Priority": priority}
-        if self.cfg.get("dashboard_url"):
-            headers["Click"] = self.cfg["dashboard_url"]
-        req = urllib.request.Request(url, data=body.encode(), method="POST", headers=headers)
+        headers = {"Title": "Fleet legacy notification test", "Tags": "test_tube",
+                   "Priority": "default"}
+        req = urllib.request.Request(
+            url, data=b"Manual ntfy delivery is working.", method="POST", headers=headers)
         threading.Thread(target=lambda: self._post(key, req), daemon=True).start()
 
     def _post(self, key, req):
@@ -5230,77 +5880,32 @@ Treat this as an independent session. Verify the repository state before changin
             with urllib.request.urlopen(req, timeout=10):
                 pass
             self.operations.notification_status(key, "sent")
-        except Exception as exc:
-            self.operations.notification_status(key, "failed", str(exc))
+        except Exception:
+            self.operations.notification_status(
+                key, "failed", "Legacy ntfy delivery failed")
 
-    def check_notifications(self, fleet):
-        cfg, now = self.cfg, time.time()
-        on = cfg.get("notify") or {}      # per-category toggles (dashboard ⚙ settings)
-        for s in fleet["sessions"]:
-            if s.get("muted"):            # 🔕 on the card: no per-session pushes
-                continue
-            key_base = s["session_id"][:8]
-            if on.get("stall", True) and s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
-                self.once(f"stall:{key_base}:{s['quiet_s'] // 300}", "Session stalled",
-                          f"{s['name']}: frozen {s['quiet_s']}s mid-turn", "warning", "high")
-            if on.get("needs_you", True) and s.get("ui_group") == "needs_you" \
-               and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
-                p = s.get("pending") or {}
-                what = f" — {s.get('reason_label') or 'response needed'}"
-                if p.get("kind") == "question" and p.get("questions"):
-                    q0 = p["questions"][0]
-                    what += f": {q0.get('header') or 'question'} — {q0.get('question', '')}"
-                elif p.get("kind") == "permission":
-                    what += f": {p.get('tool', '')}"
-                self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
-                          f"{s['name']}: waiting {s['quiet_s'] // 60}m{what}"[:400],
-                          "hourglass_flowing_sand")
-            measured_cost = ((s.get("cost") or 0) + (s.get("agent_cost") or 0)
-                             if s.get("capabilities", {}).get("exact_cost") else None)
-            mult = int(measured_cost / cfg["spend_threshold_usd"]) if measured_cost else 0
-            if on.get("spend", True) and mult >= 1:   # only the highest crossed threshold, once
-                self.once(f"spend:{key_base}:{mult}", "Spend threshold",
-                          f"{s['name']}: ${measured_cost:.2f} "
-                          f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
-        busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
-        self.quiet_since = self.operations.fleet_activity_transition(busy, now)
-        if on.get("fleet_quiet", True) and busy == 0 and self.quiet_since \
-           and now - self.quiet_since >= float(cfg.get("fleet_quiet_minutes") or 0) * 60 \
-           and fleet["totals"]["sessions"] > 0:
-            # keyed on the episode start: one push per quiet stretch
-            self.once(f"quiet:{int(self.quiet_since)}", "Fleet quiet",
-                      self.operations.quiet_digest(self.quiet_since), "white_check_mark",
-                      force=True)
-        if on.get("scheduled_digest", False):
-            try:
-                zone_name = str(cfg.get("digest_schedule_zone") or "UTC")
-                local = dt.datetime.fromtimestamp(now, ZoneInfo(zone_name))
-                hour, minute = [int(part) for part in
-                                str(cfg.get("digest_schedule_time") or "09:00").split(":", 1)]
-                due = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if local >= due:
-                    start = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-                    self.once(f"digest:{zone_name}:{local.date().isoformat()}",
-                              "Fleet daily briefing", self.operations.quiet_digest(start),
-                              "clipboard", force=True)
-            except (ValueError, ZoneInfoNotFoundError):
-                pass
-        self.prev_fleet_busy = busy
-        self.seeded = True
+    def legacy_ntfy_test(self):
+        """Queue one generic legacy delivery; ntfy never receives automatic events."""
+        if self.cfg.get("legacy_ntfy_enabled") is not True:
+            return {"ok": False, "error": "Legacy ntfy is disabled"}
+        if not self.cfg.get("ntfy_topic") or not self.cfg.get("ntfy_server"):
+            return {"ok": False, "error": "Legacy ntfy is not configured"}
+        key = "legacy-test:" + uuid.uuid4().hex
+        if not self.operations.notification_claim(
+                key, "legacy_test", "Fleet legacy notification test",
+                "Manual ntfy delivery is working.", dispatch=True):
+            return {"ok": False, "error": "Legacy ntfy test could not be queued"}
+        self._send_legacy_ntfy_test(key)
+        return {"ok": True, "queued": True}
 
-    NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet", "scheduled_digest")
     #                key                              type  min  max
-    NUM_KEYS = {"awaiting_input_notify_seconds": (int,   0,    86400),
-                "stall_seconds":                 (int,   30,   86400),
-                "spend_threshold_usd":           (float, 0.5,  10000),
-                "fleet_quiet_minutes":           (float, 0,    1440),
+    NUM_KEYS = {"stall_seconds":                 (int,   30,   86400),
                 "preview_session_lines":         (int,   1,    6),
                 "preview_agent_lines":           (int,   1,    6)}
-    BOOL_KEYS = ("preview_sessions", "preview_agents")
+    BOOL_KEYS = ("preview_sessions", "preview_agents", "legacy_ntfy_enabled")
 
     def update_settings(self, patch):
-        """Persist dashboard-editable settings: notify toggles, notification
-        thresholds, session pins, read state, and per-session mutes."""
+        """Persist dashboard-editable layout, legacy, session, and budget settings."""
         if not isinstance(patch, dict):
             return {"ok": False, "error": "settings patch must be an object"}
         with self.config_lock:
@@ -5308,8 +5913,7 @@ Treat this as an independent session. Verify the repository state before changin
 
     def _update_settings(self, patch):
         allowed = (set(self.NUM_KEYS) | set(self.BOOL_KEYS) | {
-            "notify", "reader_width", "dashboard_url", "digest_schedule_time",
-            "digest_schedule_zone", "mute_session", "muted", "pin_session", "pinned",
+            "reader_width", "mute_session", "muted", "pin_session", "pinned",
             "mark_available_session", "mark_read_session", "revision", "bulk_triage",
             "budgets"})
         unknown = sorted(str(key) for key in patch if key not in allowed)
@@ -5323,18 +5927,6 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "revision requires a session marker"}
         staged = copy.deepcopy(self.cfg)
         changed = {}
-        nt = patch.get("notify")
-        if nt is not None:
-            if not isinstance(nt, dict):
-                return {"ok": False, "error": "notify must be an object"}
-            cur = {**DEFAULT_CONFIG["notify"], **(staged.get("notify") or {})}
-            for k, v in nt.items():
-                if k not in self.NOTIFY_KEYS:
-                    return {"ok": False, "error": f"unknown notification field: {k}"}
-                if not isinstance(v, bool):
-                    return {"ok": False, "error": f"notify.{k} must be boolean"}
-                cur[k] = v
-            staged["notify"] = changed["notify"] = cur
         for k, (typ, lo, hi) in self.NUM_KEYS.items():
             if k in patch:
                 if isinstance(patch[k], bool):
@@ -5356,29 +5948,6 @@ Treat this as an independent session. Verify the repository state before changin
             if width not in ("fit", "centered"):
                 return {"ok": False, "error": "reader_width must be fit or centered"}
             staged["reader_width"] = changed["reader_width"] = width
-        if "dashboard_url" in patch:
-            u = str(patch["dashboard_url"] or "").strip()
-            if len(u) > 300 or any(ord(char) < 32 for char in u):
-                return {"ok": False, "error": "dashboard_url is too long or invalid"}
-            if u and (not u.startswith(("http://", "https://")) or
-                      re.fullmatch(r"https?://[^\s/]+(?:/.*)?", u) is None):
-                return {"ok": False, "error": "dashboard_url must start with http(s)://"}
-            staged["dashboard_url"] = changed["dashboard_url"] = u
-        if "digest_schedule_time" in patch:
-            wall = str(patch.get("digest_schedule_time") or "").strip()
-            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", wall):
-                return {"ok": False, "error": "digest_schedule_time must be HH:MM"}
-            staged["digest_schedule_time"] = changed["digest_schedule_time"] = wall
-        if "digest_schedule_zone" in patch:
-            zone = str(patch.get("digest_schedule_zone") or "").strip()
-            if len(zone) > 120 or any(ord(char) < 32 for char in zone):
-                return {"ok": False,
-                        "error": "digest_schedule_zone is too long or invalid"}
-            try:
-                ZoneInfo(zone)
-            except ZoneInfoNotFoundError:
-                return {"ok": False, "error": "digest_schedule_zone must be an IANA timezone"}
-            staged["digest_schedule_zone"] = changed["digest_schedule_zone"] = zone
         ms = patch.get("mute_session")
         if "mute_session" in patch:
             if (not isinstance(ms, str) or not ms.strip() or len(ms) > 300 or
@@ -5391,7 +5960,8 @@ Treat this as an independent session. Verify the repository state before changin
                 mu[ms] = time.time()
             else:
                 mu.pop(ms, None)
-            mu = {k: v for k, v in mu.items() if time.time() - v < 30 * 86400}
+            if len(mu) > 5000:
+                return {"ok": False, "error": "too many muted sessions"}
             staged["muted_sessions"] = changed["muted_sessions"] = mu
         if "pin_session" in patch:
             sid = str(patch.get("pin_session") or "").strip()
@@ -5459,8 +6029,8 @@ Treat this as an independent session. Verify the repository state before changin
                 values = dict(staged.get("muted_sessions") or {})
                 for sid, _, _ in normalized:
                     values[sid] = now
-                values = {key: value for key, value in values.items()
-                          if now - float(value or 0) < 30 * 86400}
+                if len(values) > 5000:
+                    return {"ok": False, "error": "too many muted sessions"}
                 staged["muted_sessions"] = changed["muted_sessions"] = values
             elif operation == "dismiss":
                 values = dict(staged.get("dismissed_actions") or {})
@@ -5488,18 +6058,6 @@ Treat this as an independent session. Verify the repository state before changin
             self._persist_config_fields(persisted)
             self.cfg.update(persisted)
         return {"ok": True, **changed}
-
-    def once(self, key, title, body, tags="robot", priority="default", force=False):
-        if key in self.notified:
-            return
-        self.notified[key] = time.time()
-        if len(self.notified) > 5000:
-            self.notified.clear()
-        if self.operations.notification_claim(
-                key, key.split(":", 1)[0], title, body,
-                dispatch=self.seeded or bool(force)):
-            self.ntfy(key, title, body, tags, priority)
-
 
 # ---------------------------------------------------------------- one-shots
 

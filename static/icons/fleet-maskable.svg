@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Fleet Dash">
+  <rect width="512" height="512" fill="#0a0e14"/>
+  <path d="M134 120h244v65H211v61h143v64H211v82h-77z" fill="#58a6ff"/>
+  <circle cx="366" cy="378" r="24" fill="#3fb950"/>
+</svg>

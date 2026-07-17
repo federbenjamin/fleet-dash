@@ -9,7 +9,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **Now is an operations queue:** **Fleet Briefing** appears first, then **Pinned** sessions and one deduplicated **Action
+- **Now is an operations queue:** **Pinned** sessions appear first, then one deduplicated **Action
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
@@ -27,12 +27,21 @@ the provider's native control path. Built 2026-07-13; still evolving.
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
-- **Responsive application navigation:** desktop uses a persistent rail for Now, Search,
-  Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
-  fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
+- **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
+  **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
+  mobile tab show active/unread counts; opening a row loads its current exact state before marking it
+  read. Event detail supports 15-minute, one-hour, and tomorrow snooze, early wake, session mute until
+  manual unmute, delivery retry, and expired-device reconnect. Exact links use
+  `#notifications/<event-id>` and participate in refresh and browser/native back. Desktop keeps a
+  split list/detail view; mobile opens detail as a full-height drawer. Briefing now lives here instead
+  of competing with the live Action Inbox on Now.
+- **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
+  Search, Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes
+  a fixed bottom bar; History, Insights, and Settings live under More. The URL hash preserves destinations
   across refresh and browser/native back gestures. Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
-  filters whose named saved views remain on this device.
+  filters whose named saved views remain on this device. Settings and History paint their visible
+  destination immediately, then do heavier rendering/fetch work on the next frame.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
   canonical cwd, missing or unknown locations stay separate, and symlink/nested-repository cases do
@@ -40,7 +49,17 @@ the provider's native control path. Built 2026-07-13; still evolving.
   measured or partial cost, latest outcome, and its filtered sessions. Git changes, tests, PR state,
   and budgets say **not observed/not configured** until their later evidence systems measure them.
   Repository grouping is loaded through `/api/workstreams` only while that destination is open, so
-  it does not enlarge or delay the two-second `/api/fleet` poll.
+  it does not enlarge or delay the two-second `/api/fleet` poll. Recognized GitHub repositories expose
+  one external **GitHub ↗** link; Fleet does not duplicate GitHub repository or pull-request pages.
+- **Durable local drafts:** unsent composer, relay, handoff, scheduling, new-session, question-other,
+  and filter text survives polling, navigation, and reloads on that device. A draft clears only when
+  its action is accepted for sending or the user deletes the text. Password/secret answers are never
+  persisted. If Fleet is known to be offline, ordinary messages pressed Send enter a bounded local
+  queue, appear immediately as **Queued offline**, and send in order after a live fleet poll confirms
+  reconnection. Commands stay as drafts until online. The full-chat composer also accepts up to four
+  JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
+  device storage, can queue offline with their message, and are removed locally after delivery or
+  after 24 hours.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
   including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
@@ -49,16 +68,19 @@ the provider's native control path. Built 2026-07-13; still evolving.
   initial indexing and transcript updates do not block the provider poll or `/api/fleet`. Progress,
   parser/file warnings, and a confirmed rebuild control are visible on the page. Search is action-
   token protected because it exposes unmanaged local transcripts.
-- **⚙ settings** (desktop rail or mobile More): per-category toggles for the ntfy pushes (waiting-on-you,
-  stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
-  seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
-  **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
-  notification opens the dashboard). It also selects the per-device desktop navigation side and
+- **⚙ settings** (desktop rail or mobile More): an install-and-delivery rail distinguishes browser
+  install, notification permission, and registered-device health. It can enable/repair a Web Push
+  subscription, rename or pause this device, disconnect it, and queue a real test push without
+  making the Settings request wait for the push provider.
+  Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
+  A separate **Legacy ntfy** panel can send one generic manual test when explicitly enabled and
+  configured. It has no automatic categories, fallback, duplicates, content-bearing payload, or
+  tap target. The page also selects the per-device desktop navigation side and
   **Fit the screen** or **Centered · fixed width** for every full-screen reading surface. Server
   settings persist to `config.json`; the navigation side stays in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
-  pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
-  across daemon restarts and auto-expire 30 days after being set.
+  Web Push deliveries without hiding its canonical in-app notifications. Mutes persist
+  across daemon restarts until manually unmuted.
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
   The running-agent count stays visible everywhere.
@@ -173,7 +195,10 @@ the provider without affecting Claude sessions.
   code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
   height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 500
-  characters of the latest session message. Overflow replaces the final collapsed row with a
+  characters of the latest session message. That line setting also fixes the height of ordinary
+  collapsed session cards, so short/missing messages and poll updates do not move the list.
+  Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
+  running subagents grow to fit those controls. Overflow replaces the final collapsed row with a
   clickable `...`; expanding reveals the full bounded 500-character preview. Tapping a
   subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
   is the context.
@@ -188,6 +213,10 @@ the provider without affecting Claude sessions.
   expands usage details on tap. Missing provider data is omitted; completed agents and closed
   sessions keep their last known values. Tapping a main tree total opens the main-plus-children
   breakdown. No Git fetch or transcript rescan occurs when the strip opens.
+- **Sticky full-chat work footer** at the bottom of the conversation history while the main session
+  or any child subagent is active. Main and child work have separate symbols and counts; tapping the
+  footer expands the active names and distinguishes ordinary work from slow-but-still-possible work.
+  It disappears only when neither the main session nor a child is active.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
@@ -198,12 +227,12 @@ the provider without affecting Claude sessions.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards keep the order in which
+  **📌 pinned sessions** block at the top of Now. Pinned cards keep the order in which
   they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
-  Cards are relocated rather than duplicated. On **desktop**, use the
-  contained 📌 button immediately to the right of **open/attach/view only** in the session header; on
-  **mobile**, **long-press** the header (it highlights immediately; a short tap still opens
-  its chat). Pins persist in server settings across reloads, daemon restarts, and devices. A failed
+  Cards are relocated rather than duplicated. The visible 📌 button appears in session headers and
+  Needs-you Action Inbox rows on desktop and mobile. Mobile also supports **long-pressing** a session
+  header as a shortcut (it highlights immediately; a short tap still opens its chat). Pins persist
+  in server settings across reloads, daemon restarts, and devices. A failed
   pin restores the prior order and stays visible with Retry. Pinning an
   external Codex thread also opts it into read-only local lifecycle/message observation; it does not
   make the thread interactive.
@@ -246,7 +275,9 @@ the provider without affecting Claude sessions.
   Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
   the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
   that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
-  session uses that worktree. The conversation moves to **History**. The card's bounded Markdown
+  session uses that worktree. A lock created by the Claude session itself is released only after that
+  session closes; unrelated Git worktree locks remain blocked. The conversation moves to **History**.
+  The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
@@ -290,7 +321,9 @@ the provider without affecting Claude sessions.
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
   never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
   newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
-  Send/Relay button remains available. Structured-question answers use the selected option labels and the
+  Send/Relay button remains available. The full-chat **＋** button opens the phone camera/photo
+  picker (or desktop file picker); selected images are shown beside the composer and delivered to
+  either Claude or Codex with the message. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.
@@ -354,7 +387,7 @@ session (wraps `engine.py spend --cwd "$PWD"`; needs sandbox-off because the eng
 ## How it works (one paragraph)
 
 A launchd daemon (`server.py` + `engine.py`) polls `~/.claude/sessions/*.json` (the CLI's live
-registry — pid, status busy/idle/waiting, claude.ai bridge id) and incrementally tails each
+registry — pid, status busy/shell/idle/waiting, claude.ai bridge id) and incrementally tails each
 session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompts come from
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
 only writes AskUserQuestion rows to the transcript *after* they're answered. Hook evidence is
@@ -365,6 +398,26 @@ applet types into the iTerm session matched by tty). Finished agent runs and clo
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
+Fleet is also an installable PWA. Its root-scoped service worker refreshes the app shell from the
+network first and keeps the last successful `/api/fleet` snapshot on that device. After temporary
+connection loss or a reload, Fleet opens the cached dashboard immediately as explicitly offline and
+read-only except for its device-local ordinary-message queue. Queued messages send in order after a
+live fleet poll confirms reconnection; a connection drop during an attempted send requires manual
+restore so Fleet cannot duplicate a message with an unknown outcome. Conversation-detail,
+notification, settings, action, search, and token-bearing responses stay network-only. Web Push delivery runs
+in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
+and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
+file disables delivery instead of silently replacing keys and breaking registered devices. Its
+pinned DNS lookup supports Node 18–24 and prefers a validated IPv4 address on dual-stack hosts when
+the Mac has no IPv6 route, while retaining IPv6-only support.
+Only current Needs-you questions/approvals/forms/reply requests, confirmed provider or delivery
+failures, and prolonged stalls enter the external policy. A registered device must first pass its
+explicit test push. Each event gets one initial delivery per eligible device and at most one
+15-minute reminder wave; Snooze replaces that reminder with one wake, while session Mute suppresses
+every device until manual unmute. Lock-screen payloads contain generic state and an opaque exact-event
+link only. Snooze/Mute shortcuts use ten-minute, single-use signed capabilities; they never carry the
+reusable dashboard token. Clients without system action buttons open the exact event with the same
+controls at the top of Fleet.
 
 ## Manual setup — already done on this Mac
 
@@ -379,17 +432,21 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 4. Act token loaded once per device by opening `http://127.0.0.1:8377/?token=<act_token>`
    (token lives in `config.json`; yellow "read-only" banner = this device has no token).
 
-## Enabling phone use (still TODO — the only unfinished setup)
+## Enabling phone use
 
 1. Install **Tailscale** on the Mac and phone, sign both into your tailnet.
 2. On the Mac: `tailscale serve --bg 8377` → gives an HTTPS URL like
    `https://<mac-name>.<tailnet>.ts.net`.
 3. On the phone, open that URL once with `?token=<act_token>` appended (get it via:
    `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash/config.json'))['act_token'])"`).
-4. Push notifications: install the **ntfy** app, subscribe to topic `fleet-efe34e31d4ca2b81`
-   (server ntfy.sh). Events: session stalled, spend threshold crossed ($5 steps), fleet gone
-   quiet, blocked-on-you >3 min. Topic/server/threshold in `config.json`; per-category
-   on/off via the dashboard's ⚙ settings.
+4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
+   **Fleet app & Web Push**. Notification permission is requested only from the explicit Enable
+   button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
+5. Click **Send test**. Fleet queues the encrypted minimal test immediately; Settings then reports
+   device delivery health and qualifies that exact subscription for production delivery. Replacing
+   a browser subscription requires a fresh successful test. Web Push is the only automatic external
+   path. The separate legacy ntfy switch permits only a generic manual test; it is never automatic,
+   a fallback, or a duplicate destination.
 
 ## Config (`config.json`)
 
@@ -401,23 +458,25 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |
 | `search_discover_seconds` | 2 | filesystem discovery cadence for new/changed transcript sources |
 | `search_batch_rows` | 250 | bounded JSONL rows committed per worker batch |
-| `stall_seconds` | 240 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
+| `stall_seconds` | 600 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
 | `dormant_seconds` | 7200 | quiet sessions demote to dormant |
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |
-| `awaiting_input_notify_seconds` | 180 | blocked-on-you push debounce |
-| `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
-| `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
-| `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
-| `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
+| `legacy_ntfy_enabled` | false | allow one generic manual ntfy test; never automatic/fallback/duplicate |
+| `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle; persists until manual unmute |
 | `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
 | `reply_available` | {} | session id → conversation revision explicitly marked available |
 | `read_sessions` | {} | session id → opened conversation revision for the New response badge |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
-| `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |
-| `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
+| `ntfy_server`/`ntfy_topic` | ntfy.sh / "" | manual legacy test destination; empty topic = unavailable |
+| `web_push_allowed_origins` | [] | optional exact HTTPS push-service origins added by the local operator; never client-supplied |
+| `web_push_node_command` | "" | optional absolute Node 18+ executable; otherwise resolved without shell startup files |
+| `web_push_subject` | "" | optional credential-free VAPID HTTPS or `mailto:` contact |
 | `act_token` | generated | device token for the act endpoint |
+
+Retired automatic-ntfy keys may remain in an older `config.json` for migration compatibility, but
+Fleet no longer reads them for dispatch and Settings rejects attempts to change them.
 
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
 (dashboard/static asset changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.
@@ -428,6 +487,7 @@ Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benja
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tests/search_benchmark.py
 npm install
+npm run test:push
 npx playwright install chromium
 npm run test:browser
 ```
