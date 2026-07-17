@@ -281,6 +281,9 @@ class Handler(BaseHTTPRequestHandler):
                         out["search"] = search.status()
                     except Exception as exc:
                         out["search"] = {"ok": False, "error": str(exc)}
+                push_diagnostics = getattr(self.eng, "push_diagnostics", None)
+                if push_diagnostics:
+                    out["web_push"] = push_diagnostics()
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:
@@ -429,6 +432,7 @@ def main():
     cfg = load_config()
     eng = Engine(cfg)
     eng.scan()
+    eng.start_web_push()
     if cfg.get("search_enabled", True):
         eng.search = SearchIndex(os.path.join(BASE, "search.db"), PROJECTS,
                                  os.path.expanduser("~/.codex/sessions"),

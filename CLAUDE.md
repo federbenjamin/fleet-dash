@@ -25,6 +25,8 @@ Claude/Codex JSONL ─ search_index.py --worker (nice 10) ─ search.db WAL/FTS5
                                       └ server.py separate reader ─ authenticated
                                         /api/search, /api/search/status, /api/search/context
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
+           notification_events/devices/deliveries ─ web_push.py background lease worker
+                                                    └ fixed web_push_worker.js Node protocol
 ```
 
 The launchd parent has HTTP threads + one provider poll thread. It owns one low-priority child
@@ -400,6 +402,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
     to keep every action visible. Keep the height inputs synchronized with the header/meta/peek/
     More CSS measurements if their typography or padding changes.
+46. **Web Push delivery is isolated, durable, and secret-redacted.** VAPID/action material exists
+    only in ignored `push-secrets.json`: it must be a same-owner regular file with mode 0600, and
+    malformed or weak-permission content disables delivery instead of regenerating keys. The Python
+    supervisor resolves a fixed Node 18+ executable without a shell, strips proxy environment, and
+    speaks bounded JSONL to one restart/backoff-managed `web_push_worker.js`. The worker validates a
+    fixed/exact push-origin allowlist, resolves only global addresses, pins the chosen address into a
+    TLS-verified HTTPS request, permits no redirect/proxy/custom client headers, and uses
+    `web-push.generateRequestDetails` rather than its network sender. HTTP actions and provider scans
+    only persist/coalesce jobs; the background thread claims SQLite leases and applies bounded
+    jittered retry for timeout/429/5xx, Retry-After, and helper failure. A 404/410 or revoked
+    permission scrubs the subscription and disables the device. Public status contains only the
+    VAPID public key, helper state/restart count, and queue aggregates; endpoint, subscription keys,
+    private keys, and raw errors never cross a read API. N1–N3 stay dark: only the explicit Settings
+    test queues delivery until N5 enables production policy.
 
 ## Dev workflow
 
@@ -436,6 +452,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
+- `web_push.py` + `web_push_worker.js` — private key store, asynchronous durable-lease supervisor,
+  bounded helper protocol, Web Push encryption/request construction, endpoint/DNS confinement, and
+  retry/result mapping. No provider scan or HTTP handler performs remote delivery.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`

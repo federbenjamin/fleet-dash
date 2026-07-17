@@ -674,7 +674,8 @@ let pushInstallPrompt=null,pushBusy=false,pushLoadedAt=0;
 let pushData={ok:true,configured:false,delivery:'not_configured',current_device:null};
 let pushLocal={secure:window.isSecureContext,serviceWorker:'serviceWorker' in navigator,
   notifications:'Notification' in window,push:'PushManager' in window,
-  permission:'Notification' in window?Notification.permission:'unsupported',registered:false,error:''};
+  permission:'Notification' in window?Notification.permission:'unsupported',registered:false,
+  error:'',notice:''};
 const pushStandalone=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
 const pushPlatform=()=>navigator.userAgentData?.platform||navigator.platform||'browser';
 const pushDeviceName=()=>pushData.current_device?.display_name||`Fleet on ${pushPlatform()}`;
@@ -776,8 +777,10 @@ async function disconnectFleetPush(){
   finally{pushBusy=false;renderSettings();}
 }
 async function testFleetPush(){
-  if(pushBusy||!pushData.current_device)return;pushBusy=true;pushLocal.error='';renderSettings();try{
+  if(pushBusy||!pushData.current_device)return;pushBusy=true;pushLocal.error='';pushLocal.notice='';renderSettings();try{
     await pushApi('/api/push/test',{device_id:briefingDevice});
+    pushLocal.notice='Test queued · delivery runs in the background';
+    setTimeout(()=>loadPushState(true),750);
   }catch(error){pushLocal.error=String(error.message||error);}
   finally{pushBusy=false;renderSettings();}
 }
@@ -786,14 +789,16 @@ function pushSettingsHtml(){
   const installState=standalone?'Installed':pushInstallPrompt?'Ready to install':'Browser tab';
   const permission=pushLocal.permission==='granted'?'Allowed':pushLocal.permission==='denied'?'Blocked':
     pushLocal.permission==='prompt'?'Not requested':'Unsupported';
-  const delivery=!pushData.configured?'Server setup pending':!device?'Not connected':
+  const delivery=!pushData.configured?'Server setup pending':pushData.delivery!=='ready'?
+    `Worker ${String(pushData.delivery||'unavailable').replaceAll('_',' ')}`:!device?'Not connected':
     device.health==='healthy'?'Healthy':device.health==='registered'?'Registered · awaiting test':
     device.health==='disabled'?'Paused':String(device.health||'Unavailable').replaceAll('_',' ');
   const help=/iPhone|iPad|iPod/.test(navigator.userAgent)&&!standalone?
     'On iPhone or iPad: Share → Add to Home Screen. Open the installed Fleet app, then enable notifications.':
     !pushLocal.secure?'Mobile Web Push requires Fleet’s HTTPS tailnet URL. Localhost remains valid on this Mac.':
     !supported?'This browser does not expose the Service Worker, Notifications, and Push APIs together.':
-    !pushData.configured?'The PWA shell is ready. Delivery keys and the worker arrive in the next milestone.':
+    !pushData.configured?'Fleet is creating its private delivery keys. This page will update automatically.':
+    pushData.delivery!=='ready'?'The delivery helper is unavailable. Persisted jobs wait and retry without delaying Fleet.':
     'Fleet sends only a minimal summary. Open Fleet for session details.';
   return`<section class="pushsetup"><div class="pushsetuphead"><span><b>Fleet app & Web Push</b><small>One installed app · per-device delivery</small></span>
     <i class="pushsignal ${esc(device?.health||(!pushData.configured?'pending':'off'))}"></i></div>
@@ -810,6 +815,7 @@ function pushSettingsHtml(){
       <label class="pushswitch"><input type="checkbox" ${device.enabled?'checked':''} ${device.permission_state!=='granted'?'disabled':''} onchange="setPushDeviceEnabled(this.checked)"><span>Delivery enabled</span></label>
       <button onclick="disconnectFleetPush()" ${pushBusy?'disabled':''}>Disconnect</button></div>`:''}
     ${pushLocal.error?`<div class="pusherror" role="alert">${esc(pushLocal.error)}</div>`:''}
+    ${pushLocal.notice?`<div class="pushnotice" role="status">${esc(pushLocal.notice)}</div>`:''}
     <div class="sethint">Subscription endpoints and encryption keys are write-only. Fleet’s device list exposes only names, state, and health.</div></section>`;
 }
 async function initFleetPwa(){

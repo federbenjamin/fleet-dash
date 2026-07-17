@@ -499,6 +499,8 @@ production PWA correctly reports `configured: false` until N3 creates the VAPID/
 
 ### N3 — Persistent Web Push delivery
 
+Status: complete · 2026-07-17
+
 - Add `web-push` dependency, supervised Node helper, VAPID/action key generation, endpoint allowlist,
   durable leasing/retry, device health, redacted diagnostics, coalescing, and queue bounds.
 - Keep delivery completely outside scan and HTTP request locks.
@@ -508,6 +510,27 @@ production PWA correctly reports `configured: false` until N3 creates the VAPID/
 Exit: delivery is at-least-attempted with bounded retry and idempotent job identity; failures are
 recoverable and cannot affect core Fleet availability; registered test devices can receive an
 explicit minimal test event.
+
+Evidence: production source now owns a same-owner 0600 VAPID/action secret file, fixed Node 18+
+resolution, a supervised bounded JSONL helper, `web-push` encryption, exact push-origin validation,
+global-address DNS validation with TLS-host-preserving address pinning, fixed HTTPS requests, a
+bounded durable lease/retry queue, per-event/device coalescing, Retry-After, 404/410 credential
+scrubbing, device health, and aggregate-only diagnostics. The Settings test route persists work and
+returns immediately; the worker runs outside HTTP and provider-scan locks. Python tests cover secret
+permissions/corruption, leasing, reclaim after restart, bounded exhaustion, 410 reconnect, queue
+saturation, coalescing, helper crash/backoff/recovery, and payload redaction. Node tests cover hostile
+destinations and fields, generated encrypted requests, 429/410/503, timeout, and network failure.
+After a real launchd restart, the live smoke proved helper readiness, ignored 0600 secret storage,
+redacted config/device/diagnostic responses, and all install assets. No real device was registered,
+so app-closed iPhone/macOS delivery remains the explicit N0b gate after N4.
+
+Gate: 207 Python tests and five Node transport tests passed. The two named desktop/mobile latency
+inventories passed in 1.9 minutes. The deterministic browser matrix passed all 114 feature checks:
+103 passed in the loaded full run and its 11 desktop five-second fixture timeouts all passed together
+on isolated rerun in 36.8 seconds; the full mobile matrix passed. Twelve opt-in live-browser cases
+were intentionally skipped. With the native helper active, the read-only latency contract passed at
+7.748 ms `/api/fleet` p95, 3.672 ms context p95, 2.288 ms search p95, and 3.188 ms authenticated
+no-op action p95.
 
 ### N4 — Notification Center and surface consolidation
 

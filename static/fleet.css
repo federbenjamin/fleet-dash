@@ -170,6 +170,7 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .pushdevice input[type=text],.pushdevice input:not([type]){min-width:0;width:100%;border:1px solid var(--line);border-radius:7px;background:#0b0f14;color:var(--fg);padding:7px 8px;font:inherit;font-size:11.5px;text-transform:none;letter-spacing:0}
 .pushswitch{display:flex;align-items:center;min-height:32px;color:var(--dim);font-size:10.5px;white-space:nowrap}.pushswitch input{accent-color:var(--blue);margin-right:6px}
 .pusherror{margin-top:9px;border:1px solid rgba(248,81,73,.4);border-radius:8px;background:rgba(248,81,73,.08);color:var(--red);padding:8px 9px;font-size:10.5px}
+.pushnotice{margin-top:9px;border:1px solid rgba(63,185,80,.4);border-radius:8px;background:rgba(63,185,80,.08);color:var(--green);padding:8px 9px;font-size:10.5px}
 #settingsview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:58;flex-direction:column}
 #sethead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
   padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}

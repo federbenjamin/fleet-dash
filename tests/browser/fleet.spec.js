@@ -1839,6 +1839,10 @@ test('PWA shell stays private and device settings remain redacted', async ({ pag
   await name.press('Tab');
   await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].display_name)
     .toBe('Studio Mac');
+  await setup.getByRole('button', { name: 'Send test' }).click();
+  await expect(setup.locator('.pushnotice')).toContainText('Test queued');
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].health)
+    .toBe('healthy');
   await setup.locator('.pushswitch input').uncheck();
   await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].enabled)
     .toBe(false);

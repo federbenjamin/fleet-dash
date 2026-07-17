@@ -479,6 +479,105 @@ class BriefingTests(unittest.TestCase):
                 push_subscription("https://sub.push.example.test/send/secret"),
                 allowed_origins=["https://push.example.test"])
 
+    def test_push_delivery_lease_success_and_redacted_diagnostics(self):
+        self.ops.notification_register_device(
+            "phone", "Phone", "iOS", push_subscription())
+        queued = self.ops.notification_create_test_delivery("phone")
+        self.assertEqual(queued["status"], "queued")
+        claim = self.ops.notification_claim_delivery()
+        self.assertEqual(claim["id"], queued["id"])
+        self.assertEqual(claim["attempt"], 1)
+        self.assertEqual(claim["event"]["push_test"], True)
+        self.assertIn("subscription", claim)
+        sent = self.ops.notification_finish_delivery(
+            queued["id"], {"ok": True, "status": 201, "remote_id": "safe-id"})
+        self.assertEqual(sent["status"], "sent")
+        self.assertEqual(sent["remote_status"], 201)
+        device = self.ops.notification_devices_snapshot("phone")["current_device"]
+        self.assertEqual(device["health"], "healthy")
+        diagnostics = self.ops.notification_delivery_diagnostics()
+        self.assertEqual(diagnostics["statuses"]["sent"], 1)
+        self.assertNotIn("web.push.apple.com", repr(diagnostics))
+        self.assertNotIn("subscription", repr(sent))
+
+    def test_push_delivery_enqueue_coalesces_same_event_and_device(self):
+        self.ops.notification_register_device(
+            "phone", "Phone", "iOS", push_subscription())
+        delivery = self.ops.notification_create_test_delivery("phone")
+        duplicate = self.ops.notification_enqueue_delivery(
+            delivery["event_id"], "phone")
+        self.assertEqual(duplicate["id"], delivery["id"])
+        self.assertEqual(duplicate["generation"], 1)
+        self.assertEqual(self.ops.notification_delivery_diagnostics()["queued"], 1)
+
+    def test_push_delivery_retry_after_lease_reclaim_and_exhaustion(self):
+        retry_path = os.path.join(self.tmp.name, "retry.db")
+        ops = FleetOperations(
+            retry_path, clock=self.clock, delivery_retry_delays=(2, 10),
+            delivery_jitter=lambda delay: delay)
+        ops.notification_register_device("phone", "Phone", "iOS", push_subscription())
+        queued = ops.notification_create_test_delivery("phone")
+        first = ops.notification_claim_delivery()
+        retrying = ops.notification_finish_delivery(
+            first["id"], {"ok": False, "status": 429, "retry_after": 5})
+        self.assertEqual(retrying["status"], "retrying")
+        self.assertEqual(retrying["next_attempt_at"], self.clock() + 5)
+        self.assertIsNone(ops.notification_claim_delivery())
+        self.clock.advance(5)
+        second = ops.notification_claim_delivery()
+        self.assertEqual(second["attempt"], 2)
+
+        # A crashed worker leaves a sending lease. A fresh process reclaims it,
+        # increments the durable attempt, and never duplicates the generation.
+        self.clock.advance(31)
+        restarted = FleetOperations(
+            retry_path, clock=self.clock, delivery_retry_delays=(2, 10),
+            delivery_jitter=lambda delay: delay)
+        third = restarted.notification_claim_delivery()
+        self.assertEqual(third["id"], queued["id"])
+        self.assertEqual(third["attempt"], 3)
+        exhausted = restarted.notification_finish_delivery(
+            third["id"], {"ok": False, "retryable": True, "code": "timeout"})
+        self.assertEqual(exhausted["status"], "failed")
+
+        retried = restarted.notification_retry_delivery(queued["id"])
+        self.assertEqual(retried["generation"], 2)
+        self.assertNotEqual(retried["id"], queued["id"])
+
+    def test_push_410_expires_and_scrubs_subscription_until_reconnect(self):
+        self.ops.notification_register_device(
+            "phone", "Phone", "iOS", push_subscription())
+        queued = self.ops.notification_create_test_delivery("phone")
+        self.ops.notification_claim_delivery()
+        expired = self.ops.notification_finish_delivery(
+            queued["id"], {"ok": False, "status": 410})
+        self.assertEqual(expired["status"], "subscription_expired")
+        device = self.ops.notification_devices_snapshot("phone")["current_device"]
+        self.assertEqual(device["permission_state"], "expired")
+        self.assertEqual(device["health"], "disabled")
+        with sqlite3.connect(self.path) as db:
+            stored = db.execute("""SELECT subscription_json,endpoint_origin
+                FROM notification_devices WHERE id='phone'""").fetchone()
+        self.assertEqual(stored, ("{}", ""))
+        with self.assertRaises(OperationsError):
+            self.ops.notification_retry_delivery(queued["id"])
+
+        self.ops.notification_register_device(
+            "phone", "Phone", "iOS",
+            push_subscription("https://web.push.apple.com/Qreplacement"))
+        retried = self.ops.notification_retry_delivery(queued["id"])
+        self.assertEqual(retried["status"], "queued")
+
+    def test_push_queue_bound_rejects_new_work_without_evicting_existing(self):
+        bounded_path = os.path.join(self.tmp.name, "bounded.db")
+        bounded = FleetOperations(bounded_path, clock=self.clock, delivery_queue_limit=1)
+        bounded.notification_register_device("phone", "Phone", "iOS", push_subscription())
+        first = bounded.notification_create_test_delivery("phone")
+        with self.assertRaisesRegex(OperationsError, "queue is full"):
+            bounded.notification_create_test_delivery("phone")
+        self.assertEqual(bounded.notification_delivery_status(first["id"])["status"],
+                         "queued")
+
     def test_legacy_notification_table_migrates_transactionally_and_still_dispatches(self):
         other = os.path.join(self.tmp.name, "legacy.db")
         with sqlite3.connect(other) as db:

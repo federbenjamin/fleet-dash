@@ -788,7 +788,10 @@ class Handler(BaseHTTPRequestHandler):
                             "enabled": sum(item.get("enabled") is True for item in devices)})
                     return self.json_reply({"ok": True, "feature": "dark", "configured": True,
                         "public_key": "BErt812-TgTDdRIdV-OWO4wuFeaDBBA3j8jvS4JtMHcY1sxINPdwC3iYMeJOV245gdZZoyYWQ_Mh48zA64LKNns",
-                        "delivery": "registration_only", "current_device": current,
+                        "delivery": "ready", "helper": {"ready": True, "restarts": 0,
+                            "state": "ready"},
+                        "queue": {"queued": 0, "failed": 0, "subscription_expired": 0},
+                        "current_device": current,
                         "registered_devices": len(devices),
                         "enabled_devices": sum(item.get("enabled") is True for item in devices)})
                 if route == "/api/repo":
@@ -1111,9 +1114,15 @@ class Handler(BaseHTTPRequestHandler):
                     device["preferences"] = copy.deepcopy(payload["preferences"])
                 return self.json_reply({"ok": True, "device": copy.deepcopy(device)})
             if route == "/api/push/test":
-                return self.json_reply({"ok": False,
-                    "error": "test delivery is not configured yet",
-                    "code": "delivery_unavailable"})
+                device = STATE["push_devices"].get(str(payload.get("device_id") or ""))
+                if not device or not device.get("enabled"):
+                    return self.json_reply({"ok": False, "error": "device not available"})
+                device["health"] = "healthy"
+                device["last_success_at"] = time.time()
+                STATE["actions"].append({"type": "push_test", "device_id": device["id"]})
+                return self.json_reply({"ok": True, "delivery": {"id": "push-fixture",
+                    "event_id": "evt-fixture", "device_id": device["id"],
+                    "generation": 1, "status": "queued", "attempt": 0}})
             if route == "/api/notifications/read":
                 return self.json_reply({"ok": True, "cursor": int(payload.get("cursor") or 0)})
             if route == "/api/search/rebuild":

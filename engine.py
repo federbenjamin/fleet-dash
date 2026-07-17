@@ -18,6 +18,7 @@ from codex_observer import CodexRolloutObserver
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
 from outbox import OutboxError, OutboxManager
 from briefing import FleetOperations, OperationsError
+from web_push import WebPushService
 
 HOME = os.path.expanduser("~")
 BASE = os.path.join(HOME, ".claude", "fleet-dash")
@@ -63,8 +64,9 @@ DEFAULT_CONFIG = {
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
-    "web_push_public_key": "",          # public VAPID key; private material lives elsewhere
     "web_push_allowed_origins": [],      # explicit exact HTTPS push-service origins
+    "web_push_node_command": "",        # optional absolute Node >=18 executable
+    "web_push_subject": "",             # HTTPS URL or mailto; dashboard_url is preferred default
     # last-message peeks: on/off + how many lines each is allowed
     "preview_sessions": True,
     "preview_session_lines": 2,
@@ -1033,6 +1035,8 @@ class Engine:
         self.ledger_status = self._prepare_ledger(ledger_path)
         self.outbox = OutboxManager(ledger_path)
         self.operations = FleetOperations(ledger_path)
+        self.web_push = None
+        self.web_push_lock = threading.RLock()
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
         self._state_event_signatures = None
@@ -4441,10 +4445,16 @@ Treat this as an independent session. Verify the repository state before changin
     def push_config(self, device_id=None):
         try:
             devices = self.operations.notification_devices_snapshot(device_id)
-            public_key = str(self.cfg.get("web_push_public_key") or "").strip()
-            return {"ok": True, "feature": "dark", "configured": bool(public_key),
-                    "public_key": public_key or None,
-                    "delivery": "not_configured" if not public_key else "registration_only",
+            with self.web_push_lock:
+                runtime = self.web_push.status() if self.web_push else {
+                    "configured": False, "public_key": None, "delivery": "starting",
+                    "helper": {"ready": False, "restarts": 0, "state": "starting"},
+                    "queue": self.operations.notification_delivery_diagnostics()}
+            return {"ok": True, "feature": "dark",
+                    "configured": bool(runtime.get("configured")),
+                    "public_key": runtime.get("public_key"),
+                    "delivery": runtime.get("delivery") or "unavailable",
+                    "helper": runtime.get("helper"), "queue": runtime.get("queue"),
                     "current_device": devices.get("current_device"),
                     "registered_devices": devices.get("registered", 0),
                     "enabled_devices": devices.get("enabled", 0)}
@@ -4460,6 +4470,15 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": str(exc)}
         except Exception:
             return {"ok": False, "error": "push devices are temporarily unavailable"}
+
+    def push_diagnostics(self):
+        with self.web_push_lock:
+            runtime = self.web_push.status() if self.web_push else {
+                "configured": False, "delivery": "starting",
+                "helper": {"ready": False, "restarts": 0, "state": "starting"},
+                "queue": self.operations.notification_delivery_diagnostics()}
+        return {key: runtime.get(key) for key in
+                ("configured", "delivery", "helper", "queue")}
 
     def push_subscription(self, payload):
         try:
@@ -4502,10 +4521,26 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception:
             return {"ok": False, "error": "notification read state could not be saved"}
 
-    @staticmethod
-    def push_test(_payload):
-        return {"ok": False, "error": "test delivery is not configured yet",
-                "code": "delivery_unavailable"}
+    def start_web_push(self):
+        """Start the isolated delivery runtime without delaying daemon availability."""
+        with self.web_push_lock:
+            if self.web_push is None:
+                self.web_push = WebPushService(self.operations, BASE, self.cfg)
+            self.web_push.start()
+
+    def push_test(self, payload):
+        try:
+            with self.web_push_lock:
+                service = self.web_push
+            if not service or not service.status().get("configured"):
+                return {"ok": False, "error": "Web Push delivery is not ready",
+                        "code": "delivery_unavailable"}
+            delivery = service.enqueue_test(payload.get("device_id"))
+            return {"ok": True, "delivery": delivery}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "test delivery could not be queued"}
 
     def budgets_snapshot(self, spawn=None):
         with self.lock:

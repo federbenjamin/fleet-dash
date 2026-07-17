@@ -51,7 +51,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   token protected because it exposes unmanaged local transcripts.
 - **⚙ settings** (desktop rail or mobile More): an install-and-delivery rail distinguishes browser
   install, notification permission, and registered-device health. It can enable/repair a Web Push
-  subscription, rename or pause this device, disconnect it, and eventually send a real test push.
+  subscription, rename or pause this device, disconnect it, and queue a real test push without
+  making the Settings request wait for the push provider.
   Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
   The same page retains per-category toggles for the legacy ntfy pushes (waiting-on-you,
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
@@ -374,7 +375,10 @@ incrementally indexes Claude/Codex transcripts and provider-referenced artifacts
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
 Fleet is also an installable PWA. Its root-scoped service worker caches only versioned public shell
 assets. API responses, transcripts, notification data, settings, and token-bearing navigation stay
-network-only; offline navigation renders only **Reconnect to your tailnet**.
+network-only; offline navigation renders only **Reconnect to your tailnet**. Web Push delivery runs
+in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
+and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
+file disables delivery instead of silently replacing keys and breaking registered devices.
 
 ## Manual setup — already done on this Mac
 
@@ -399,9 +403,10 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
    **Fleet app & Web Push**. Notification permission is requested only from the explicit Enable
    button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
-5. During the dark N2 migration the shell and device registration are present, while the Settings
-   rail says **Server setup pending** until the N3 VAPID/delivery worker is configured. The existing
-   ntfy transport remains available during this migration; it is not an automatic Web Push fallback.
+5. Click **Send test**. Fleet queues the encrypted minimal test immediately; Settings then reports
+   device delivery health. The current dark migration sends only explicit tests. The existing ntfy
+   transport remains available until the production-policy switch; it is not an automatic Web Push
+   fallback.
 
 ## Config (`config.json`)
 
@@ -429,8 +434,9 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
 | `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
-| `web_push_public_key` | "" | public VAPID key projected to authenticated devices; private VAPID material never belongs in `config.json` |
 | `web_push_allowed_origins` | [] | optional exact HTTPS push-service origins added by the local operator; never client-supplied |
+| `web_push_node_command` | "" | optional absolute Node 18+ executable; otherwise resolved without shell startup files |
+| `web_push_subject` | "" | optional VAPID HTTPS or `mailto:` subject; defaults to the HTTPS dashboard URL or a local Fleet contact |
 | `act_token` | generated | device token for the act endpoint |
 
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
@@ -442,6 +448,7 @@ Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benja
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 tests/search_benchmark.py
 npm install
+npm run test:push
 npx playwright install chromium
 npm run test:browser
 ```
