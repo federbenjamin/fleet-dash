@@ -1078,8 +1078,9 @@ Planned 2026-07-16. The approved implementation contract, requirements catalogue
 and release gates live in
 [`docs/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
 
-- **N0 — Compatibility prototype and baseline:** prove standards-based Web Push on an installed
-  iPhone Home Screen app and macOS app before changing production triggers.
+- **N0a/N0b — Compatibility prototype and baseline:** record runtime/latency and encrypted-request
+  evidence first; prove installed iPhone/macOS app-closed delivery after N3 and before N5 changes
+  production triggers.
 - **N1 — Canonical event and device stores:** replace truncated/time-bucket identities with durable
   event lifecycle, device, read, snooze, mute, and leased-delivery records.
 - **N2 — Installable Fleet PWA:** add the manifest, private-data-safe service worker, permission and

@@ -122,6 +122,7 @@ preserve the broken transport keys, repeat buckets, delivery schema, or global t
 
 ```text
 id TEXT PRIMARY KEY                 opaque random identifier used by deep links
+sequence INTEGER UNIQUE NOT NULL    monotonic cursor for per-device unread state
 event_key TEXT UNIQUE NOT NULL      semantic provider/source identity
 kind TEXT NOT NULL                  question, approval, failure, stall, completion, ...
 state TEXT NOT NULL                 active, snoozed, resolved, expired
@@ -186,6 +187,8 @@ generation INTEGER NOT NULL
 status TEXT NOT NULL                 queued, sending, retrying, sent, failed,
                                      suppressed, subscription_expired
 attempt INTEGER NOT NULL
+claimed_at REAL
+lease_until REAL
 next_attempt_at REAL
 remote_status INTEGER
 remote_id TEXT
@@ -195,9 +198,18 @@ updated_at REAL NOT NULL
 UNIQUE(event_id, device_id, generation)
 ```
 
-The migration builds a v2 table transactionally. Existing ntfy rows are imported as legacy history
-and never redispatched. Current active requests are inserted into Notification Center on first scan,
-but a newly registered device starts at the current event cursor so setup cannot blast old work.
+`notification_session_mutes` stores full session ID, provider, and mute time. Mute is never inferred
+from event state and has no automatic expiry.
+
+The migration transactionally renames the incompatible current delivery table to
+`notification_deliveries_legacy`, then builds v2. Legacy ntfy rows remain queryable as legacy history
+and are never forced into synthetic device jobs or redispatched. Current active requests are inserted
+into Notification Center on first scan, but a newly registered device starts at the current event
+sequence so setup cannot blast old work.
+
+Informational completion/outcome/artifact/budget events enter the canonical stream as `resolved`:
+they describe a completed observation, while the per-device read cursor controls whether they are
+new. Actionable and current failure events enter as `active`.
 
 ## Event selection and reminder policy
 
@@ -421,14 +433,18 @@ demand.
 
 - Capture current notification trigger/delivery counts and scan/API latency.
 - Add a disposable standalone manifest/service-worker prototype under test fixtures.
-- Prove a real test push on one iPhone Home Screen install and one macOS install.
-- Prove exact event deep-link opening, PWA badge update, app-closed delivery, and action-support
-  fallback before altering production triggers.
+- Use the disposable probe to validate request construction and payload privacy before persistent
+  production delivery exists.
+- Record real-device checks as N0b. N0b remains a hard gate before N5 changes production triggers,
+  because app-closed iPhone/macOS proof requires the N2/N3 subscription/delivery path.
 - Validate the Node `web-push` helper against Apple and Chromium subscriptions and record the exact
   supported endpoint origins observed.
 
-Exit: real-device proof exists; unsupported conditions are surfaced; `/api/fleet` and scan baselines
-are recorded; no production push behavior changed.
+Exit N0a: dependency/runtime compatibility and `/api/fleet`, scan, and browser baselines are recorded;
+the disposable probe constructs an encrypted minimal request; no production push behavior changed.
+
+Exit N0b, required before N5: real-device proof exists for installed iPhone and macOS delivery,
+exact deep link, app-closed behavior, badge, and action fallback.
 
 ### N1 — Canonical event and device stores
 
@@ -440,7 +456,7 @@ are recorded; no production push behavior changed.
 - Add deterministic collision, restart, stale-event, resolution, mute, snooze, and migration tests.
 
 Exit: Notification Center data can be queried deterministically; existing ntfy behavior still runs;
-no event identity relies on truncated IDs, mtimes, or time buckets.
+no canonical event identity relies on truncated IDs, mtimes, or time buckets.
 
 ### N2 — Installable Fleet PWA and device registration
 
@@ -450,7 +466,7 @@ no event identity relies on truncated IDs, mtimes, or time buckets.
 - Add Network-only private data rules and offline tailnet guidance.
 
 Exit: desktop/mobile deterministic flows pass; a real iPhone and macOS device can register, rename,
-disable, reconnect, and receive a test event.
+disable, and reconnect. End-to-end test delivery is an N3/N0b gate.
 
 ### N3 — Persistent Web Push delivery
 
@@ -461,7 +477,8 @@ disable, reconnect, and receive a test event.
   timeout, hostile endpoint, malformed key, queue saturation, and secret-redaction tests.
 
 Exit: delivery is at-least-attempted with bounded retry and idempotent job identity; failures are
-recoverable and cannot affect core Fleet availability.
+recoverable and cannot affect core Fleet availability; registered test devices can receive an
+explicit minimal test event.
 
 ### N4 — Notification Center and surface consolidation
 
@@ -583,7 +600,7 @@ links pass; daemon restart loses no jobs; all docs and legacy migration behavior
 
 ## Implementation order
 
-`N0 → N1 → N2 → N3 → N4 → N5 → N6`
+`N0a → N1 → N2 → N3 → N4 → N0b → N5 → N6`
 
 Do not parallelize a dependent milestone before the previous milestone's source, tests, and evidence
 are folded back into this document. Each milestone gets one focused append-only commit. Runtime
