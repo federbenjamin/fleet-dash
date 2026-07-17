@@ -63,6 +63,8 @@ DEFAULT_CONFIG = {
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
+    "web_push_public_key": "",          # public VAPID key; private material lives elsewhere
+    "web_push_allowed_origins": [],      # explicit exact HTTPS push-service origins
     # last-message peeks: on/off + how many lines each is allowed
     "preview_sessions": True,
     "preview_session_lines": 2,
@@ -4435,6 +4437,75 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "error": f"notifications are temporarily unavailable: {exc}"}
+
+    def push_config(self, device_id=None):
+        try:
+            devices = self.operations.notification_devices_snapshot(device_id)
+            public_key = str(self.cfg.get("web_push_public_key") or "").strip()
+            return {"ok": True, "feature": "dark", "configured": bool(public_key),
+                    "public_key": public_key or None,
+                    "delivery": "not_configured" if not public_key else "registration_only",
+                    "current_device": devices.get("current_device"),
+                    "registered_devices": devices.get("registered", 0),
+                    "enabled_devices": devices.get("enabled", 0)}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push configuration is temporarily unavailable"}
+
+    def push_devices(self, current_device_id=None):
+        try:
+            return self.operations.notification_devices_snapshot(current_device_id)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push devices are temporarily unavailable"}
+
+    def push_subscription(self, payload):
+        try:
+            if payload.get("remove"):
+                device = self.operations.notification_remove_device(
+                    payload.get("device_id"), payload.get("permission_state") or "expired")
+            else:
+                device = self.operations.notification_register_device(
+                    payload.get("device_id"), payload.get("display_name"),
+                    payload.get("platform"), payload.get("subscription"),
+                    permission_state=payload.get("permission_state") or "granted",
+                    preferences=payload.get("preferences"),
+                    allowed_origins=self.cfg.get("web_push_allowed_origins") or [])
+            return {"ok": True, "device": device}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push subscription could not be saved"}
+
+    def push_device_settings(self, payload):
+        try:
+            device = self.operations.notification_update_device(
+                payload.get("device_id"),
+                display_name=payload.get("display_name") if "display_name" in payload else None,
+                enabled=payload.get("enabled") if "enabled" in payload else None,
+                preferences=payload.get("preferences") if "preferences" in payload else None)
+            return {"ok": True, "device": device}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "push device settings could not be saved"}
+
+    def notifications_mark_read(self, payload):
+        try:
+            cursor = self.operations.notification_mark_read(
+                payload.get("device_id"), payload.get("cursor"))
+            return {"ok": True, "cursor": cursor}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification read state could not be saved"}
+
+    @staticmethod
+    def push_test(_payload):
+        return {"ok": False, "error": "test delivery is not configured yet",
+                "code": "delivery_unavailable"}
 
     def budgets_snapshot(self, spawn=None):
         with self.lock:

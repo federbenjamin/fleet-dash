@@ -1,5 +1,7 @@
+import base64
 import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 
@@ -58,6 +60,13 @@ def action(sid="s1", provider="claude", kind="question", nonce="ask-1", **overri
     }
     item.update(overrides)
     return item
+
+
+def push_subscription(endpoint="https://web.push.apple.com/Qfixture"):
+    encoded = lambda value: base64.urlsafe_b64encode(value).decode().rstrip("=")
+    return {"endpoint": endpoint, "expirationTime": None,
+            "keys": {"p256dh": encoded(b"\x04" + b"p" * 64),
+                     "auth": encoded(b"a" * 16)}}
 
 
 class BriefingTests(unittest.TestCase):
@@ -380,14 +389,15 @@ class BriefingTests(unittest.TestCase):
     def test_device_seed_cursor_read_cursor_and_indefinite_session_mute(self):
         self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
         device = self.ops.notification_register_device(
-            "phone-1", "Phone", "ios", {"endpoint": "write-only", "keys": {}},
-            "https://web.push.apple.com", preferences={"urgent_only": True})
+            "phone-1", "Phone", "ios", push_subscription(),
+            "https://web.push.apple.com", preferences={"minimum_severity": "warning"})
         self.assertEqual(device["read_cursor"], 1)
         self.assertNotIn("subscription_json", device)
         refreshed = self.ops.notification_register_device(
-            "phone-1", "Phone", "ios", {"endpoint": "replacement", "keys": {}},
+            "phone-1", "Phone", "ios",
+            push_subscription("https://web.push.apple.com/Qreplacement"),
             "https://web.push.apple.com")
-        self.assertEqual(refreshed["preferences"], {"urgent_only": True})
+        self.assertEqual(refreshed["preferences"], {"minimum_severity": "warning"})
 
         self.clock.advance(10)
         current = fleet(self.clock, actions=[action(), action("s2", nonce="ask-2")])
@@ -405,6 +415,69 @@ class BriefingTests(unittest.TestCase):
         self.assertTrue(restarted.notification_session_muted("s2"))
         self.assertFalse(restarted.notification_set_session_mute("s2", "claude", False))
         self.assertFalse(restarted.notification_session_muted("s2"))
+
+    def test_push_subscription_boundary_and_redacted_device_lifecycle(self):
+        rejected = [
+            push_subscription("http://fcm.googleapis.com/fcm/send/x"),
+            push_subscription("https://127.0.0.1/push"),
+            push_subscription("https://user:pass@fcm.googleapis.com/push"),
+            push_subscription("https://internal.example.test/push"),
+            push_subscription("https://fcm.googleapis.com:444/push"),
+            push_subscription("https://fcm.googleapis.com/push#fragment"),
+            push_subscription("https://fcm.googleapis.com/push\nignored"),
+        ]
+        for subscription in rejected:
+            with self.subTest(endpoint=subscription["endpoint"]), \
+                    self.assertRaises(OperationsError):
+                self.ops.notification_register_device(
+                    "desktop", "Desktop", "macOS", subscription)
+
+        invalid_key = push_subscription()
+        invalid_key["keys"]["auth"] = "short"
+        with self.assertRaises(OperationsError):
+            self.ops.notification_register_device(
+                "desktop", "Desktop", "macOS", invalid_key)
+
+        device = self.ops.notification_register_device(
+            "desktop", "Desktop", "macOS",
+            push_subscription("https://fcm.googleapis.com/fcm/send/secret"),
+            preferences={"kinds": ["question", "approval"],
+                         "minimum_severity": "info", "initial_delay_seconds": 30})
+        self.assertEqual(device["health"], "registered")
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertNotIn("endpoint_origin", device)
+        self.assertNotIn("subscription_json", device)
+
+        renamed = self.ops.notification_update_device(
+            "desktop", display_name="Studio Mac", enabled=False,
+            preferences={"minimum_severity": "critical"})
+        self.assertEqual(renamed["display_name"], "Studio Mac")
+        self.assertEqual(renamed["health"], "disabled")
+        listing = self.ops.notification_devices_snapshot("desktop")
+        self.assertEqual(listing["current_device"]["id"], "desktop")
+        self.assertNotIn("subscription_json", repr(listing))
+        self.assertNotIn("fcm.googleapis.com", repr(listing))
+
+        removed = self.ops.notification_remove_device("desktop")
+        self.assertEqual(removed["permission_state"], "expired")
+        with self.assertRaises(OperationsError):
+            self.ops.notification_update_device("desktop", enabled=True)
+        with sqlite3.connect(self.path) as db:
+            stored = db.execute("""SELECT subscription_json,endpoint_origin
+                FROM notification_devices WHERE id='desktop'""").fetchone()
+        self.assertEqual(stored, ("{}", ""))
+
+    def test_explicit_exact_push_origin_can_be_allowed_without_wildcards(self):
+        device = self.ops.notification_register_device(
+            "custom", "Custom", "test",
+            push_subscription("https://push.example.test/send/secret"),
+            allowed_origins=["https://push.example.test"])
+        self.assertEqual(device["id"], "custom")
+        with self.assertRaises(OperationsError):
+            self.ops.notification_register_device(
+                "other", "Other", "test",
+                push_subscription("https://sub.push.example.test/send/secret"),
+                allowed_origins=["https://push.example.test"])
 
     def test_legacy_notification_table_migrates_transactionally_and_still_dispatches(self):
         other = os.path.join(self.tmp.name, "legacy.db")

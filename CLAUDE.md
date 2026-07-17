@@ -380,6 +380,19 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     projections without `scan_lock`. The locked `Tail.poll()` path is startup/fallback only, before a
     completed scan has published that exact conversation. Keep the parent in the child key because
     different sessions can reuse an agent ID. Snapshot pruning follows the live registry/child set.
+44. **Web Push subscriptions are write-only outbound credentials.** `/api/push/subscription`
+    accepts only action-token-authenticated HTTPS subscriptions whose endpoint is port 443 on a
+    built-in push-service origin (or an exact operator-configured origin), with no credentials,
+    fragment, IP literal, oversized URL, or malformed P-256/auth material. The server derives the
+    origin; it never trusts a client origin field. Device/config/list projections expose only ID,
+    display name, platform, permission, enabled/read state, bounded preferences, health, and
+    timestamps—never endpoint, origin, subscription JSON, keys, or raw failure details. The PWA
+    reuses `fleet.briefingDevice.v1`; re-registration preserves its read cursor and preferences.
+    `FleetOperations` keeps the shared ledger mode 0600 because it now holds encrypted-push
+    subscription credentials.
+    `/sw.js` has root scope but caches only the explicit versioned public shell list. Navigations are
+    network-first with the content-free tailnet reconnect page as fallback; `/api/*`, transcripts,
+    notifications, settings, token-bearing URLs, and conversation content are always network-only.
 
 ## Dev workflow
 
@@ -421,8 +434,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
-  + token-gated `/api/search`, `/api/search/status`, and `/api/search/context`; POST
-  `/api/act` + `/api/settings` + `/api/search/rebuild` are token-gated. Settings persists the
+  + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
+  `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/settings` +
+  `/api/search/rebuild` + notification read/device/subscription/test routes are token-gated.
+  Settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
   the stalled STATE, not just the push), `muted_sessions` (sid → ts, persists until manual unmute),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
@@ -444,6 +459,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
   (`open`/`infoOpen`/`doneOpen`/`filesOpen` plus route/filter globals) re-applied at render —
   a full innerHTML re-render destroys native `<details>` state otherwise.
+- `static/manifest.webmanifest` + `static/sw.js` + `static/offline.html` + `static/icons/` — stable
+  install identity, root-scoped network/private-data boundary, shell-only offline guidance, and
+  regular/maskable PWA artwork. Bump the service-worker cache name when changing its shell contract.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
   `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
   header/meta/peek/pending/running-agents/more-btn, in a `.ctop` wrapper rebuilt every poll,

@@ -471,13 +471,31 @@ The live canonical projection measured 1.756 ms p95, below the 5 ms scan-budget 
 
 ### N2 — Installable Fleet PWA and device registration
 
+Status: Complete (deterministic) · 2026-07-16/17 · real-device proof remains N0b
+
 - Add manifest, icons, secure service worker, install guidance, permission flow, subscription repair,
   redacted device APIs, and per-device settings.
 - Add clear unsupported/insecure/not-installed/prompt/denied/granted/expired states and test send.
 - Add Network-only private data rules and offline tailnet guidance.
 
-Exit: desktop/mobile deterministic flows pass; a real iPhone and macOS device can register, rename,
-disable, and reconnect. End-to-end test delivery is an N3/N0b gate.
+Exit N2: desktop/mobile deterministic flows pass; install, permission, registration, rename, disable,
+disconnect, repair, redaction, and network-only cache boundaries are implemented. Real iPhone and
+macOS registration/reconnect proof remains part of N0b after N3 supplies the production VAPID and
+delivery path; end-to-end test delivery is an N3/N0b gate.
+
+Evidence: the stable manifest, regular/maskable icons, root-scoped worker, shell-only cache, tailnet
+offline page, foreground subscription repair, saved device identity, write-only subscription route,
+and redacted device/settings/config routes are in production source. Registration accepts only
+bounded HTTPS port-443 subscriptions on built-in or exact operator-configured push origins; it
+rejects credentials, fragments, IP literals, unknown origins, malformed key sizes, and client origin
+mismatches. The shared credential-bearing ledger is mode 0600. The Python suite passed 197 tests.
+The complete desktop/mobile feature matrix passed 112 checks, and both named latency inventories
+passed (the desktop gate passed on isolated rerun after one loaded full-suite sample measured 109.8
+ms against the 100 ms budget). The two PWA flows also proved that no API, token URL, or private
+navigation was cached and that fixture state retained no submitted endpoint or key material.
+After a real daemon restart, the read-only live smoke verified authenticated config/device redaction,
+all six install assets, the existing canonical notification stream, and the broader live API; the
+production PWA correctly reports `configured: false` until N3 creates the VAPID/delivery runtime.
 
 ### N3 — Persistent Web Push delivery
 

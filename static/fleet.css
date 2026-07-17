@@ -150,6 +150,26 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
   font:inherit;font-size:12.5px;cursor:pointer}
 .setchoice button[aria-pressed="true"]{background:var(--card2);color:var(--fg);font-weight:600}
 .sethint{color:var(--faint);font-size:10.5px;line-height:1.4;margin-top:5px}
+.pushsetup{margin:-10px -14px 14px;padding:14px;border-bottom:1px solid var(--line);
+  background:linear-gradient(135deg,rgba(88,166,255,.08),transparent 58%)}
+.pushsetuphead{display:flex;align-items:center;justify-content:space-between;gap:12px}.pushsetuphead>span{display:flex;flex-direction:column;gap:2px}
+.pushsetuphead b{font-size:14px}.pushsetuphead small{color:var(--faint);font-size:10px}
+.pushsignal{width:10px;height:10px;border-radius:50%;background:var(--faint);box-shadow:0 0 0 5px rgba(139,148,158,.1)}
+.pushsignal.healthy,.pushsignal.registered{background:var(--green);box-shadow:0 0 0 5px rgba(63,185,80,.12)}
+.pushsignal.pending{background:var(--amber);box-shadow:0 0 0 5px rgba(210,153,34,.12)}
+.pushsignal.failing,.pushsignal.denied,.pushsignal.expired{background:var(--red);box-shadow:0 0 0 5px rgba(248,81,73,.12)}
+.pushrail{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin:14px 0 9px;border:1px solid var(--line);border-radius:10px;background:#0b0f14;overflow:hidden}
+.pushrail>span{position:relative;display:grid;grid-template-columns:10px minmax(0,1fr);gap:1px 7px;padding:10px 11px;border-left:1px solid var(--line)}
+.pushrail>span:first-child{border-left:0}.pushrail i{grid-row:1/3;align-self:center;width:7px;height:7px;border-radius:50%;background:var(--blue)}
+.pushrail b{font-size:10px;text-transform:uppercase;letter-spacing:.35px}.pushrail small{color:var(--faint);font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pushhelp{margin:0 0 10px;color:var(--dim);font-size:11px;line-height:1.45}.pushactions{display:flex;gap:7px;flex-wrap:wrap}
+.pushactions button,.pushdevice button{border:1px solid var(--line);border-radius:8px;background:var(--card2);color:var(--fg);padding:7px 10px;font:inherit;font-size:11px;cursor:pointer}
+.pushactions button.primary{background:var(--blue);border-color:transparent;color:#03121f;font-weight:700}.pushactions button:disabled,.pushdevice button:disabled{opacity:.42;cursor:not-allowed}
+.pushdevice{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:end;margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
+.pushdevice>label:first-child{display:flex;flex-direction:column;gap:3px;color:var(--faint);font-size:9px;text-transform:uppercase;letter-spacing:.4px}
+.pushdevice input[type=text],.pushdevice input:not([type]){min-width:0;width:100%;border:1px solid var(--line);border-radius:7px;background:#0b0f14;color:var(--fg);padding:7px 8px;font:inherit;font-size:11.5px;text-transform:none;letter-spacing:0}
+.pushswitch{display:flex;align-items:center;min-height:32px;color:var(--dim);font-size:10.5px;white-space:nowrap}.pushswitch input{accent-color:var(--blue);margin-right:6px}
+.pusherror{margin-top:9px;border:1px solid rgba(248,81,73,.4);border-radius:8px;background:rgba(248,81,73,.08);color:var(--red);padding:8px 9px;font-size:10.5px}
 #settingsview{display:none;position:fixed;inset:0;background:#0a0e14;z-index:58;flex-direction:column}
 #sethead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
   padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}
@@ -159,6 +179,7 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 #settings{flex:1;overflow:auto;padding:14px 14px calc(18px + env(safe-area-inset-bottom));
   overscroll-behavior:contain}
 #settings>.setpanel{width:min(100%,760px);margin-inline:auto}
+@media(max-width:600px){.pushrail{grid-template-columns:1fr}.pushrail>span{border-left:0;border-top:1px solid var(--line)}.pushrail>span:first-child{border-top:0}.pushdevice{grid-template-columns:1fr}.pushswitch{min-height:28px}.pushdevice button{justify-self:start}}
 .bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
 .bell.muted{opacity:.4}
 /* Provider account usage lives on demand in a popover/sheet instead of occupying Now. */

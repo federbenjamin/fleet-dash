@@ -10,6 +10,8 @@ GET /api/repo authenticated repository outcome/action preview
 GET /api/outbox authenticated scheduled-message list and audit trail
 GET /api/briefing deterministic operational briefing and per-device cursor
 GET /api/notifications authenticated canonical notification event stream
+GET /api/push/config authenticated PWA/Web Push capability and current-device health
+GET /api/push/devices authenticated redacted registered-device list
 GET /api/budgets measured budget state and forecasts
 GET /api/history paginated closed-session metadata
 GET /api/diagnostics authenticated latency, payload, and memory measurements
@@ -26,8 +28,20 @@ from search_index import SearchIndex  # noqa: E402
 
 
 STATIC_FILES = {
-    "/static/fleet.css": "text/css; charset=utf-8",
-    "/static/app.js": "text/javascript; charset=utf-8",
+    "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8", "no-cache", {}),
+    "/static/app.js": ("static/app.js", "text/javascript; charset=utf-8", "no-cache", {}),
+    "/static/manifest.webmanifest": ("static/manifest.webmanifest",
+        "application/manifest+json; charset=utf-8", "no-cache", {}),
+    "/static/offline.html": ("static/offline.html", "text/html; charset=utf-8", "no-cache", {}),
+    "/static/icons/fleet.svg": ("static/icons/fleet.svg", "image/svg+xml", "public, max-age=86400", {}),
+    "/static/icons/fleet-192.png": ("static/icons/fleet-192.png", "image/png",
+        "public, max-age=86400", {}),
+    "/static/icons/fleet-512.png": ("static/icons/fleet-512.png", "image/png",
+        "public, max-age=86400", {}),
+    "/static/icons/fleet-maskable-512.png": ("static/icons/fleet-maskable-512.png", "image/png",
+        "public, max-age=86400", {}),
+    "/sw.js": ("static/sw.js", "text/javascript; charset=utf-8", "no-cache",
+               {"Service-Worker-Allowed": "/"}),
 }
 
 
@@ -125,7 +139,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         route = self.path.split("?", 1)[0]
-        if route not in ("/api/act", "/api/settings", "/api/search/rebuild"):
+        if route not in ("/api/act", "/api/settings", "/api/search/rebuild",
+                         "/api/notifications/read", "/api/push/subscription",
+                         "/api/push/test", "/api/push/device-settings"):
             return self.reply(404, "text/plain", b"not found")
         if not self.token_ok():
             print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
@@ -149,6 +165,22 @@ class Handler(BaseHTTPRequestHandler):
             if audit.get("dashboard_url"):
                 audit["dashboard_url"] = "[URL omitted]"
             print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/read":
+            result = self.eng.notifications_mark_read(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/subscription":
+            result = self.eng.push_subscription(action)
+            audit = {"device_id": action.get("device_id"),
+                     "remove": bool(action.get("remove")),
+                     "permission_state": action.get("permission_state")}
+            print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/device-settings":
+            result = self.eng.push_device_settings(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/push/test":
+            result = self.eng.push_test(action)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/search/rebuild":
             search = getattr(self.eng, "search", None)
@@ -207,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
                      "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics",
-                     "/api/notifications"):
+                     "/api/notifications", "/api/push/config", "/api/push/devices"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -229,6 +261,14 @@ class Handler(BaseHTTPRequestHandler):
                 out = self.eng.notifications_snapshot(
                     self.query("device") or "default", self.query("cursor") or None,
                     self.query("limit") or 100, states, kinds, self.query("id") or None)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/push/config":
+                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+                out = self.eng.push_config(device)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/push/devices":
+                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+                out = self.eng.push_devices(device)
                 return self.reply(200, "application/json", json.dumps(out).encode())
             if route == "/api/diagnostics":
                 out = self.diagnostics()
@@ -327,16 +367,17 @@ class Handler(BaseHTTPRequestHandler):
             snap["closed"] = [item for item in closed if item.get("pinned")]
             try:  # page version: lets stale tabs self-reload on dashboard.html changes
                 assets = [os.path.join(BASE, "dashboard.html")]
-                assets.extend(os.path.join(BASE, route.removeprefix("/"))
-                              for route in STATIC_FILES)
+                assets.extend(os.path.join(BASE, spec[0]) for spec in STATIC_FILES.values())
                 snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
             except OSError:
                 pass
             self.reply(200, "application/json", json.dumps(snap).encode())
         elif route in STATIC_FILES:
             try:
-                with open(os.path.join(BASE, route.removeprefix("/")), "rb") as f:
-                    self.reply(200, STATIC_FILES[route], f.read())
+                path, content_type, cache_control, headers = STATIC_FILES[route]
+                with open(os.path.join(BASE, path), "rb") as f:
+                    self.reply(200, content_type, f.read(), cache_control=cache_control,
+                               extra_headers=headers)
             except FileNotFoundError:
                 self.reply(404, "text/plain", b"asset missing")
         elif route == "/" or route.startswith("/index"):
@@ -354,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, "application/json", body)
         return self.reply(500, "text/plain; charset=utf-8", b"request failed")
 
-    def reply(self, code, ctype, body):
+    def reply(self, code, ctype, body, *, cache_control="no-store", extra_headers=None):
         elapsed_ms = ((time.perf_counter() - getattr(self, "_request_started",
                                                      time.perf_counter())) * 1000)
         route = getattr(self, "_request_route", self.path.split("?", 1)[0])
@@ -369,7 +410,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
             self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache_control)
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):

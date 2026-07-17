@@ -123,6 +123,50 @@ class ServerHandlerTest(unittest.TestCase):
                                   ["active", "snoozed"],
                                   ["question", "approval"], "evt-1")])
 
+    def test_push_get_routes_require_auth_and_return_only_engine_projection(self):
+        calls = []
+        for route, method in (("/api/push/config?device=phone-1", "push_config"),
+                              ("/api/push/devices?device=phone-1", "push_devices")):
+            handler = self.handler(route)
+            handler.eng = SimpleNamespace(cfg={"act_token": "token"}, **{
+                method: lambda device, method=method: calls.append((method, device)) or
+                    {"ok": True, "current_device": {"id": device}}})
+            replies = []
+            handler.reply = lambda code, ctype, body: replies.append(
+                (code, json.loads(body)))
+            Handler._do_GET(handler)
+            self.assertEqual(replies[0][0], 403)
+            handler.headers = {"X-Act-Token": "token"}
+            replies.clear()
+            Handler._do_GET(handler)
+            self.assertEqual(replies[0][1]["current_device"]["id"], "phone-1")
+        self.assertEqual(calls, [("push_config", "phone-1"),
+                                 ("push_devices", "phone-1")])
+
+    def test_push_subscription_post_never_logs_subscription_material(self):
+        handler = self.handler("/api/push/subscription")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        captured = []
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "token"},
+            push_subscription=lambda payload: captured.append(payload) or
+                {"ok": True, "device": {"id": payload["device_id"]}})
+        payload = json.dumps({"device_id": "phone-1", "subscription": {
+            "endpoint": "https://web.push.apple.com/private-endpoint",
+            "keys": {"p256dh": "private-key", "auth": "private-auth"}}}).encode()
+        handler.headers = {"X-Act-Token": "token", "Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        replies = []
+        handler.reply = lambda code, ctype, body: replies.append(json.loads(body))
+        audit = io.StringIO()
+        with redirect_stderr(audit):
+            Handler._do_POST(handler)
+        self.assertTrue(replies[0]["ok"])
+        self.assertEqual(captured[0]["subscription"]["keys"]["auth"], "private-auth")
+        self.assertNotIn("private-endpoint", audit.getvalue())
+        self.assertNotIn("private-key", audit.getvalue())
+        self.assertNotIn("private-auth", audit.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -181,10 +181,10 @@ def fresh_state():
                 "digest_schedule_time": "09:00", "digest_schedule_zone": "UTC",
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
-                "reader_width": "fit", "pinned_sessions": []},
+            "reader_width": "fit", "pinned_sessions": []},
             "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
             "repo": repo, "repo_actions": [], "outbox": [], "budgets": [],
-            "briefing_reviewed": {}}
+            "briefing_reviewed": {}, "push_devices": {}}
 
 
 STATE = fresh_state()
@@ -773,9 +773,24 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         with LOCK:
             if route in ("/api/search", "/api/search/status", "/api/search/context",
-                         "/api/handoff", "/api/repo", "/api/outbox"):
+                         "/api/handoff", "/api/repo", "/api/outbox",
+                         "/api/push/config", "/api/push/devices"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                if route in ("/api/push/config", "/api/push/devices"):
+                    device_id = (query.get("device") or
+                        [self.headers.get("X-Fleet-Device-ID") or ""])[0]
+                    devices = [copy.deepcopy(item) for item in STATE["push_devices"].values()]
+                    current = next((item for item in devices if item["id"] == device_id), None)
+                    if route == "/api/push/devices":
+                        return self.json_reply({"ok": True, "devices": devices,
+                            "current_device": current, "registered": len(devices),
+                            "enabled": sum(item.get("enabled") is True for item in devices)})
+                    return self.json_reply({"ok": True, "feature": "dark", "configured": True,
+                        "public_key": "BErt812-TgTDdRIdV-OWO4wuFeaDBBA3j8jvS4JtMHcY1sxINPdwC3iYMeJOV245gdZZoyYWQ_Mh48zA64LKNns",
+                        "delivery": "registration_only", "current_device": current,
+                        "registered_devices": len(devices),
+                        "enabled_devices": sum(item.get("enabled") is True for item in devices)})
                 if route == "/api/repo":
                     return self.json_reply(copy.deepcopy(STATE["repo"]))
                 if route == "/api/outbox":
@@ -1018,10 +1033,22 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html"):
             with open(os.path.join(ROOT, "dashboard.html"), "rb") as handle:
                 return self.reply(200, "text/html; charset=utf-8", handle.read())
-        if route in ("/static/fleet.css", "/static/app.js"):
-            ctype = ("text/css; charset=utf-8" if route.endswith(".css")
-                     else "text/javascript; charset=utf-8")
-            with open(os.path.join(ROOT, route.removeprefix("/")), "rb") as handle:
+        assets = {
+            "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8"),
+            "/static/app.js": ("static/app.js", "text/javascript; charset=utf-8"),
+            "/static/manifest.webmanifest": ("static/manifest.webmanifest",
+                                                "application/manifest+json"),
+            "/static/offline.html": ("static/offline.html", "text/html; charset=utf-8"),
+            "/static/icons/fleet.svg": ("static/icons/fleet.svg", "image/svg+xml"),
+            "/static/icons/fleet-192.png": ("static/icons/fleet-192.png", "image/png"),
+            "/static/icons/fleet-512.png": ("static/icons/fleet-512.png", "image/png"),
+            "/static/icons/fleet-maskable-512.png": ("static/icons/fleet-maskable-512.png",
+                                                       "image/png"),
+            "/sw.js": ("static/sw.js", "text/javascript; charset=utf-8"),
+        }
+        if route in assets:
+            path, ctype = assets[route]
+            with open(os.path.join(ROOT, path), "rb") as handle:
                 return self.reply(200, ctype, handle.read())
         return self.reply(404, "text/plain", "not found")
 
@@ -1046,9 +1073,49 @@ class Handler(BaseHTTPRequestHandler):
                 if session:
                     session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
-            if route in ("/api/act", "/api/settings", "/api/search/rebuild") \
+            if route in ("/api/act", "/api/settings", "/api/search/rebuild",
+                         "/api/notifications/read", "/api/push/subscription",
+                         "/api/push/test", "/api/push/device-settings") \
                     and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
+            if route == "/api/push/subscription":
+                device_id = str(payload.get("device_id") or "")
+                if payload.get("remove"):
+                    device = STATE["push_devices"].get(device_id)
+                    if not device:
+                        return self.json_reply({"ok": False, "error": "device not registered"})
+                    device.update(enabled=False,
+                        permission_state=payload.get("permission_state") or "expired",
+                        health="disabled", last_registered_at=time.time())
+                else:
+                    device = STATE["push_devices"].get(device_id) or {
+                        "id": device_id, "created_at": time.time(), "read_cursor": 0,
+                        "preferences": {}}
+                    device.update(display_name=str(payload.get("display_name") or "Fleet device")[:80],
+                        platform=str(payload.get("platform") or "browser")[:80], enabled=True,
+                        permission_state="granted", health="registered",
+                        last_registered_at=time.time(), last_success_at=None,
+                        last_failure_at=None)
+                    STATE["push_devices"][device_id] = device
+                return self.json_reply({"ok": True, "device": copy.deepcopy(device)})
+            if route == "/api/push/device-settings":
+                device = STATE["push_devices"].get(str(payload.get("device_id") or ""))
+                if not device:
+                    return self.json_reply({"ok": False, "error": "device not registered"})
+                if "display_name" in payload:
+                    device["display_name"] = str(payload["display_name"])[:80]
+                if "enabled" in payload:
+                    device["enabled"] = payload["enabled"] is True
+                    device["health"] = "registered" if device["enabled"] else "disabled"
+                if "preferences" in payload:
+                    device["preferences"] = copy.deepcopy(payload["preferences"])
+                return self.json_reply({"ok": True, "device": copy.deepcopy(device)})
+            if route == "/api/push/test":
+                return self.json_reply({"ok": False,
+                    "error": "test delivery is not configured yet",
+                    "code": "delivery_unavailable"})
+            if route == "/api/notifications/read":
+                return self.json_reply({"ok": True, "cursor": int(payload.get("cursor") or 0)})
             if route == "/api/search/rebuild":
                 STATE["actions"].append({"type": "search_rebuild"})
                 return self.json_reply({"ok": True, "rebuilding": True})

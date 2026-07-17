@@ -1792,6 +1792,52 @@ test('fleet briefing separates current attention from completed outcomes and per
   await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
 });
 
+test('PWA shell stays private and device settings remain redacted', async ({ page }) => {
+  await reset(page, 'base');
+  const manifest = await (await page.request.get('/static/manifest.webmanifest')).json();
+  expect(manifest).toMatchObject({id: '/', start_url: '/#now', scope: '/', display: 'standalone'});
+  expect(manifest.icons.map(icon => icon.sizes)).toEqual(['192x192', '512x512', '512x512']);
+
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  const cached = await page.evaluate(async () => {
+    const entries = [];
+    for (const key of await caches.keys()) {
+      for (const request of await (await caches.open(key)).keys()) entries.push(request.url);
+    }
+    return entries;
+  });
+  expect(cached.some(url => url.includes('/api/'))).toBe(false);
+  expect(cached.some(url => url.includes('token='))).toBe(false);
+  expect(cached.some(url => new URL(url).pathname === '/')).toBe(false);
+  expect(cached.some(url => url.endsWith('/static/offline.html'))).toBe(true);
+
+  await goTo(page, 'settings');
+  const setup = page.locator('.pushsetup');
+  await expect(setup).toContainText('Fleet app & Web Push');
+  await expect(setup).toContainText(/Not requested|Blocked/);
+  await expect(setup).toContainText('Not connected');
+
+  const deviceId = await page.evaluate(() => localStorage.getItem('fleet.briefingDevice.v1'));
+  await page.request.post('/api/push/subscription', {data: {device_id: deviceId,
+    display_name: 'Fixture Mac', platform: 'macOS', permission_state: 'granted',
+    subscription: {endpoint: 'https://fcm.googleapis.com/fcm/send/private',
+      keys: {p256dh: 'private-p256dh', auth: 'private-auth'}}}});
+  await page.evaluate(() => window.__fleetPush.loadPushState(true));
+  const name = setup.locator('.pushdevice input').first();
+  await expect(name).toHaveValue('Fixture Mac');
+  await name.fill('Studio Mac');
+  await name.press('Tab');
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].display_name)
+    .toBe('Studio Mac');
+  await setup.locator('.pushswitch input').uncheck();
+  await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].enabled)
+    .toBe(false);
+  const state = await fixtureState(page);
+  expect(JSON.stringify(state.push_devices)).not.toContain('private-p256dh');
+  expect(JSON.stringify(state.push_devices)).not.toContain('private-auth');
+  expect(JSON.stringify(state.push_devices)).not.toContain('fcm.googleapis.com');
+});
+
 test('budget editor, scheduled digest, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
   await reset(page, 'base');
   await goTo(page, 'settings');

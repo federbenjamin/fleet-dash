@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import contextlib
+import base64
+import binascii
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -13,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from urllib.parse import urlsplit
 
 
 EVENT_CATEGORIES = {
@@ -26,6 +30,13 @@ NOTIFICATION_STATES = {"active", "snoozed", "resolved", "expired"}
 NOTIFICATION_KINDS = {
     "question", "approval", "form", "reply", "failure", "stall", "completion",
     "artifact", "outcome", "budget", "measurement", "notification",
+}
+NOTIFICATION_SEVERITIES = {"info", "warning", "critical"}
+PUSH_PERMISSION_STATES = {"granted", "denied", "prompt", "expired", "unsupported"}
+DEFAULT_PUSH_ORIGINS = {
+    "https://fcm.googleapis.com",
+    "https://updates.push.services.mozilla.com",
+    "https://web.push.apple.com",
 }
 
 
@@ -54,6 +65,10 @@ class FleetOperations:
         self.notification_projection_ms = deque(maxlen=240)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
+        try:
+            os.chmod(self.db_path, 0o600)
+        except OSError:
+            pass
 
     def _connect(self):
         started = time.perf_counter()
@@ -189,6 +204,137 @@ class FleetOperations:
     @staticmethod
     def _json(value):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _base64url(value, label, length):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise OperationsError(f"invalid notification {label}")
+        try:
+            decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        except (binascii.Error, ValueError, TypeError):
+            raise OperationsError(f"invalid notification {label}")
+        if len(decoded) != length:
+            raise OperationsError(f"invalid notification {label}")
+        return value
+
+    @classmethod
+    def _push_subscription(cls, subscription, extra_origins=None):
+        if not isinstance(subscription, dict):
+            raise OperationsError("invalid notification subscription")
+        endpoint = subscription.get("endpoint")
+        if (not isinstance(endpoint, str) or not 1 <= len(endpoint) <= 2048 or
+                any(ord(char) <= 32 or ord(char) == 127 for char in endpoint)):
+            raise OperationsError("invalid notification endpoint")
+        try:
+            parsed = urlsplit(endpoint)
+            port = parsed.port
+        except (binascii.Error, ValueError):
+            raise OperationsError("invalid notification endpoint")
+        host = (parsed.hostname or "").rstrip(".").lower()
+        if (parsed.scheme != "https" or not host or port not in (None, 443) or
+                parsed.username is not None or parsed.password is not None or
+                parsed.fragment or len(host) > 253 or len(parsed.path) > 1536 or
+                len(parsed.query) > 1024):
+            raise OperationsError("invalid notification endpoint")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise OperationsError("invalid notification endpoint")
+        origin = "https://" + host
+        allowed = set(DEFAULT_PUSH_ORIGINS)
+        for value in extra_origins or ():
+            try:
+                candidate = urlsplit(str(value))
+                candidate_port = candidate.port
+            except (TypeError, ValueError):
+                continue
+            if (candidate.scheme == "https" and candidate.hostname and
+                    candidate_port in (None, 443) and not candidate.path.strip("/") and
+                    not candidate.query and not candidate.fragment and
+                    candidate.username is None and candidate.password is None):
+                allowed.add("https://" + candidate.hostname.rstrip(".").lower())
+        if origin not in allowed and not host.endswith(".notify.windows.com"):
+            raise OperationsError("notification push service is not allowed")
+        keys = subscription.get("keys")
+        if not isinstance(keys, dict):
+            raise OperationsError("invalid notification subscription keys")
+        p256dh = cls._base64url(keys.get("p256dh"), "p256dh key", 65)
+        try:
+            public_key = base64.urlsafe_b64decode(p256dh + "=" * (-len(p256dh) % 4))
+        except (binascii.Error, ValueError):
+            raise OperationsError("invalid notification p256dh key")
+        if public_key[0] != 4:
+            raise OperationsError("invalid notification p256dh key")
+        auth = cls._base64url(keys.get("auth"), "auth key", 16)
+        expiration = subscription.get("expirationTime")
+        if expiration is not None:
+            if isinstance(expiration, bool) or not isinstance(expiration, (int, float)) \
+               or not math.isfinite(expiration) or expiration < 0 or expiration > 9e15:
+                raise OperationsError("invalid notification expiration")
+        normalized = {"endpoint": endpoint, "expirationTime": expiration,
+                      "keys": {"p256dh": p256dh, "auth": auth}}
+        if len(cls._json(normalized)) > 4096:
+            raise OperationsError("notification subscription is too large")
+        return normalized, origin
+
+    @staticmethod
+    def _device_preferences(preferences):
+        if preferences is None:
+            return None
+        if not isinstance(preferences, dict):
+            raise OperationsError("invalid notification preferences")
+        unknown = set(preferences) - {"kinds", "minimum_severity", "initial_delay_seconds"}
+        if unknown:
+            raise OperationsError("invalid notification preferences")
+        out = {}
+        if "kinds" in preferences:
+            kinds = preferences["kinds"]
+            if not isinstance(kinds, list) or len(kinds) > len(NOTIFICATION_KINDS):
+                raise OperationsError("invalid notification kinds")
+            normalized = []
+            for item in kinds:
+                if item not in NOTIFICATION_KINDS:
+                    raise OperationsError("invalid notification kinds")
+                if item not in normalized:
+                    normalized.append(item)
+            out["kinds"] = normalized
+        if "minimum_severity" in preferences:
+            severity = preferences["minimum_severity"]
+            if severity not in NOTIFICATION_SEVERITIES:
+                raise OperationsError("invalid notification severity")
+            out["minimum_severity"] = severity
+        if "initial_delay_seconds" in preferences:
+            delay = preferences["initial_delay_seconds"]
+            if isinstance(delay, bool) or not isinstance(delay, (int, float)) \
+               or not math.isfinite(delay) or not 0 <= delay <= 3600:
+                raise OperationsError("invalid notification delay")
+            out["initial_delay_seconds"] = int(delay)
+        return out
+
+    @staticmethod
+    def _notification_device(row):
+        item = dict(row)
+        item["enabled"] = bool(item.get("enabled"))
+        try:
+            item["preferences"] = json.loads(item.pop("preferences_json") or "{}")
+        except (TypeError, ValueError):
+            item["preferences"] = {}
+        last_success = float(item.get("last_success_at") or 0)
+        last_failure = float(item.get("last_failure_at") or 0)
+        if not item["enabled"]:
+            health = "disabled"
+        elif item.get("permission_state") != "granted":
+            health = item.get("permission_state") or "unavailable"
+        elif last_failure > last_success:
+            health = "failing"
+        elif last_success:
+            health = "healthy"
+        else:
+            health = "registered"
+        item["health"] = health
+        return item
 
     @staticmethod
     def _signature(value):
@@ -1078,29 +1224,30 @@ class FleetOperations:
         return {key: snapshot[key] for key in ("unread", "active", "event_cursor")}
 
     def notification_register_device(self, device_id, display_name, platform,
-                                     subscription, endpoint_origin,
-                                     permission_state="granted", preferences=None):
+                                     subscription, endpoint_origin=None,
+                                     permission_state="granted", preferences=None,
+                                     allowed_origins=None):
         device_id = str(device_id or "")
         if not DEVICE_RE.fullmatch(device_id):
             raise OperationsError("invalid notification device ID")
         display_name = self._text(display_name, 80)
         platform = self._text(platform, 80)
-        endpoint_origin = self._text(endpoint_origin, 320)
         permission_state = self._text(permission_state, 20)
-        if not display_name or not endpoint_origin or permission_state not in (
-                "granted", "denied", "prompt", "expired", "unsupported"):
+        if not display_name or not platform or permission_state != "granted":
             raise OperationsError("invalid notification device")
-        if not isinstance(subscription, dict) or not isinstance(preferences or {}, dict):
-            raise OperationsError("invalid notification subscription")
+        subscription, derived_origin = self._push_subscription(
+            subscription, extra_origins=allowed_origins)
+        if endpoint_origin and self._text(endpoint_origin, 320) != derived_origin:
+            raise OperationsError("notification endpoint origin mismatch")
+        endpoint_origin = derived_origin
+        validated_preferences = self._device_preferences(preferences)
         subscription_json = self._json(subscription)
-        if len(subscription_json) > 8192:
-            raise OperationsError("notification subscription is too large")
         now = self.clock()
         with self.lock, self._transaction(immediate=True) as db:
             existing = db.execute(
                 "SELECT preferences_json FROM notification_devices WHERE id=?",
                 (device_id,)).fetchone()
-            preferences_json = self._json(preferences) if preferences is not None else \
+            preferences_json = self._json(validated_preferences) if preferences is not None else \
                 (existing["preferences_json"] if existing else "{}")
             maximum = int(db.execute(
                 "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
@@ -1120,10 +1267,84 @@ class FleetOperations:
                 created_at,last_registered_at,last_success_at,last_failure_at,last_failure,
                 read_cursor,preferences_json FROM notification_devices WHERE id=?""",
                              (device_id,)).fetchone()
-        item = dict(row)
-        item["enabled"] = bool(item["enabled"])
-        item["preferences"] = json.loads(item.pop("preferences_json") or "{}")
-        return item
+        return self._notification_device(row)
+
+    def notification_devices_snapshot(self, current_device_id=None):
+        current_device_id = str(current_device_id or "")
+        if current_device_id and not DEVICE_RE.fullmatch(current_device_id):
+            raise OperationsError("invalid notification device ID")
+        with self.lock, self._connect() as db:
+            rows = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
+                created_at,last_registered_at,last_success_at,last_failure_at,read_cursor,
+                preferences_json FROM notification_devices
+                ORDER BY enabled DESC,last_registered_at DESC,id""").fetchall()
+        devices = [self._notification_device(row) for row in rows]
+        current = next((item for item in devices if item["id"] == current_device_id), None)
+        return {"ok": True, "devices": devices, "current_device": current,
+                "registered": len(devices),
+                "enabled": sum(item["enabled"] for item in devices)}
+
+    def notification_update_device(self, device_id, *, display_name=None,
+                                   enabled=None, preferences=None):
+        device_id = str(device_id or "")
+        if not DEVICE_RE.fullmatch(device_id):
+            raise OperationsError("invalid notification device ID")
+        if display_name is not None:
+            display_name = self._text(display_name, 80)
+            if not display_name:
+                raise OperationsError("invalid notification device name")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise OperationsError("invalid notification device state")
+        validated_preferences = self._device_preferences(preferences)
+        if display_name is None and enabled is None and preferences is None:
+            raise OperationsError("no notification device setting supplied")
+        fields, values = [], []
+        if display_name is not None:
+            fields.append("display_name=?")
+            values.append(display_name)
+        if enabled is not None:
+            fields.append("enabled=?")
+            values.append(1 if enabled else 0)
+        if preferences is not None:
+            fields.append("preferences_json=?")
+            values.append(self._json(validated_preferences))
+        values.append(device_id)
+        with self.lock, self._transaction(immediate=True) as db:
+            current = db.execute("""SELECT subscription_json,permission_state
+                FROM notification_devices WHERE id=?""", (device_id,)).fetchone()
+            if not current:
+                raise OperationsError("notification device is not registered")
+            if enabled is True and (current["subscription_json"] == "{}" or
+                                    current["permission_state"] != "granted"):
+                raise OperationsError("notification device must reconnect before enabling")
+            changed = db.execute(
+                "UPDATE notification_devices SET " + ",".join(fields) + " WHERE id=?",
+                values).rowcount
+            if not changed:
+                raise OperationsError("notification device settings were not changed")
+            row = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
+                created_at,last_registered_at,last_success_at,last_failure_at,read_cursor,
+                preferences_json FROM notification_devices WHERE id=?""",
+                             (device_id,)).fetchone()
+        return self._notification_device(row)
+
+    def notification_remove_device(self, device_id, permission_state="expired"):
+        device_id = str(device_id or "")
+        permission_state = self._text(permission_state, 20)
+        if not DEVICE_RE.fullmatch(device_id) or permission_state not in PUSH_PERMISSION_STATES:
+            raise OperationsError("invalid notification device")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            changed = db.execute("""UPDATE notification_devices SET subscription_json='{}',
+                endpoint_origin='',enabled=0,permission_state=?,last_registered_at=?
+                WHERE id=?""", (permission_state, now, device_id)).rowcount
+            if not changed:
+                raise OperationsError("notification device is not registered")
+            row = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
+                created_at,last_registered_at,last_success_at,last_failure_at,read_cursor,
+                preferences_json FROM notification_devices WHERE id=?""",
+                             (device_id,)).fetchone()
+        return self._notification_device(row)
 
     def notification_mark_read(self, device_id, cursor):
         device_id = str(device_id or "")

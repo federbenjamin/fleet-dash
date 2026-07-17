@@ -49,7 +49,11 @@ the provider's native control path. Built 2026-07-13; still evolving.
   initial indexing and transcript updates do not block the provider poll or `/api/fleet`. Progress,
   parser/file warnings, and a confirmed rebuild control are visible on the page. Search is action-
   token protected because it exposes unmanaged local transcripts.
-- **⚙ settings** (desktop rail or mobile More): per-category toggles for the ntfy pushes (waiting-on-you,
+- **⚙ settings** (desktop rail or mobile More): an install-and-delivery rail distinguishes browser
+  install, notification permission, and registered-device health. It can enable/repair a Web Push
+  subscription, rename or pause this device, disconnect it, and eventually send a real test push.
+  Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
+  The same page retains per-category toggles for the legacy ntfy pushes (waiting-on-you,
   stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
@@ -58,7 +62,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
   settings persist to `config.json`; the navigation side stays in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
-  across daemon restarts and auto-expire 30 days after being set.
+  across daemon restarts until manually unmuted.
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
   The running-agent count stays visible everywhere.
@@ -365,6 +369,9 @@ applet types into the iTerm session matched by tty). Finished agent runs and clo
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
+Fleet is also an installable PWA. Its root-scoped service worker caches only versioned public shell
+assets. API responses, transcripts, notification data, settings, and token-bearing navigation stay
+network-only; offline navigation renders only **Reconnect to your tailnet**.
 
 ## Manual setup — already done on this Mac
 
@@ -379,17 +386,19 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 4. Act token loaded once per device by opening `http://127.0.0.1:8377/?token=<act_token>`
    (token lives in `config.json`; yellow "read-only" banner = this device has no token).
 
-## Enabling phone use (still TODO — the only unfinished setup)
+## Enabling phone use
 
 1. Install **Tailscale** on the Mac and phone, sign both into your tailnet.
 2. On the Mac: `tailscale serve --bg 8377` → gives an HTTPS URL like
    `https://<mac-name>.<tailnet>.ts.net`.
 3. On the phone, open that URL once with `?token=<act_token>` appended (get it via:
    `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash/config.json'))['act_token'])"`).
-4. Push notifications: install the **ntfy** app, subscribe to topic `fleet-efe34e31d4ca2b81`
-   (server ntfy.sh). Events: session stalled, spend threshold crossed ($5 steps), fleet gone
-   quiet, blocked-on-you >3 min. Topic/server/threshold in `config.json`; per-category
-   on/off via the dashboard's ⚙ settings.
+4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
+   **Fleet app & Web Push**. Notification permission is requested only from the explicit Enable
+   button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
+5. During the dark N2 migration the shell and device registration are present, while the Settings
+   rail says **Server setup pending** until the N3 VAPID/delivery worker is configured. The existing
+   ntfy transport remains available during this migration; it is not an automatic Web Push fallback.
 
 ## Config (`config.json`)
 
@@ -417,6 +426,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
 | `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |
 | `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
+| `web_push_public_key` | "" | public VAPID key projected to authenticated devices; private VAPID material never belongs in `config.json` |
+| `web_push_allowed_origins` | [] | optional exact HTTPS push-service origins added by the local operator; never client-supplied |
 | `act_token` | generated | device token for the act endpoint |
 
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
