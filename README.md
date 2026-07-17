@@ -260,7 +260,9 @@ the provider without affecting Claude sessions.
   Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
   the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
   that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
-  session uses that worktree. The conversation moves to **History**. The card's bounded Markdown
+  session uses that worktree. A lock created by the Claude session itself is released only after that
+  session closes; unrelated Git worktree locks remain blocked. The conversation moves to **History**.
+  The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
   file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
@@ -368,7 +370,7 @@ session (wraps `engine.py spend --cwd "$PWD"`; needs sandbox-off because the eng
 ## How it works (one paragraph)
 
 A launchd daemon (`server.py` + `engine.py`) polls `~/.claude/sessions/*.json` (the CLI's live
-registry — pid, status busy/idle/waiting, claude.ai bridge id) and incrementally tails each
+registry — pid, status busy/shell/idle/waiting, claude.ai bridge id) and incrementally tails each
 session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompts come from
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
 only writes AskUserQuestion rows to the transcript *after* they're answered. Hook evidence is

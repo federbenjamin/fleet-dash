@@ -5,6 +5,7 @@ import plistlib
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -178,6 +179,40 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(session["cost"])
         self.assertEqual(self.engine.session_context("same"), {
             "ok": True, "messages": [], "files": [], "starting": True})
+
+    def test_large_nul_path_probe_keeps_only_a_bounded_sample(self):
+        probe = self.engine._bounded_nul_paths([
+            sys.executable, "-c",
+            "import sys; sys.stdout.buffer.write(b\"ignored\\0\" * 70000)"],
+            max_input=1_000_000, keep=3)
+        self.assertTrue(probe["ok"])
+        self.assertEqual(probe["count"], 70000)
+        self.assertEqual(probe["paths"], ["ignored", "ignored", "ignored"])
+        self.assertEqual(len(probe["digest"]), 64)
+
+    def test_claude_shell_status_defers_to_a_completed_transcript_turn(self):
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "shell", "name": "Claude", "startedAt": 1}, handle)
+        settled = next(item for item in self.engine.scan()["sessions"]
+                       if item["provider"] == "claude")
+        self.assertEqual((settled["state"], settled["ui_group"],
+                          settled["capabilities"]["interrupt"]),
+                         ("turn_done", "available", False))
+
+        with open(self.transcript, "a") as handle:
+            handle.write(json.dumps({
+                "type": "assistant", "timestamp": "2026-07-17T07:40:00Z",
+                "message": {"role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "tool_use", "content": [{"type": "tool_use",
+                        "id": "shell-active", "name": "Bash", "input": {}}]},
+            }) + "\n")
+        active = next(item for item in self.engine.scan()["sessions"]
+                      if item["provider"] == "claude")
+        self.assertEqual((active["state"], active["ui_group"],
+                          active["capabilities"]["interrupt"]),
+                         ("running", "working", True))
 
     def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
         fleet = self.engine.scan()
@@ -597,7 +632,7 @@ class EngineProviderTest(unittest.TestCase):
                "status": "idle", "name": "Claude"}
         self.engine.live_sessions = lambda: [reg]
         self.engine._tty_cache[os.getpid()] = "ttys-test"
-        tail = SimpleNamespace(pending={}, poll=lambda: None)
+        tail = SimpleNamespace(pending={}, poll=lambda: None, turn_state=lambda: "running")
         self.engine.tail_for = lambda path: tail
         writes = []
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
@@ -614,6 +649,12 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(self.engine.act({"type": "interrupt",
                                          "session_id": "same"})["ok"])
         self.assertEqual(writes[-1][1], [("\x1b", False)])
+        reg["status"] = "shell"
+        self.assertTrue(self.engine.act({"type": "interrupt",
+                                         "session_id": "same"})["ok"])
+        tail.turn_state = lambda: "awaiting_input"
+        self.assertIn("finished", self.engine.act({"type": "interrupt",
+            "session_id": "same"})["error"])
         reg["status"] = "waiting"
         self.engine.hook_pending = lambda sid, status: {
             "kind": "question", "nonce": "q1", "questions": []}
@@ -681,6 +722,25 @@ class EngineProviderTest(unittest.TestCase):
         pid = 424242
         reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
                "status": "busy", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        process = SimpleNamespace(stdout="/usr/local/bin/claude --model sonnet")
+        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
+             mock.patch.object(engine_module.os, "kill") as kill, \
+             mock.patch.object(engine_module.time, "sleep"):
+            result = self.engine.act({"type": "close", "session_id": "same"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["interrupted"])
+        self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.05)])
+        kill.assert_called_once_with(pid, engine_module.signal.SIGTERM)
+
+    def test_claude_close_interrupts_an_active_shell_before_termination(self):
+        pid = 424244
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "shell", "name": "Claude"}
         self.engine.live_sessions = lambda: [reg]
         self.engine._tty_cache[pid] = "ttys-test"
         writes = []
@@ -1395,6 +1455,39 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(clean_removed["ok"])
         self.assertFalse(os.path.exists(clean))
         self.assertEqual(git("show-ref", "--verify", "refs/heads/feature/clean").returncode, 0)
+
+        locked = os.path.join(self.tmp.name, "close-claude-locked")
+        git("worktree", "add", "-b", "feature/claude-locked", locked)
+        lock_reason = "claude session close-claude-locked (pid 424242 start now)"
+        git("worktree", "lock", "--reason", lock_reason, locked)
+        locked_session = {"session_id": "same", "provider": "claude", "cwd": locked,
+                          "pid": 424242}
+        locked_preview = self.engine.close_worktree_preview(locked_session)
+        self.assertTrue(locked_preview["inspect_ok"])
+        self.assertTrue(locked_preview["owned_lock"])
+        self.assertTrue(locked_preview["remove_allowed"])
+        self.engine._mark_cleanup_ticket_closed(locked_preview["cleanup_ticket"], "same")
+        real_run = subprocess.run
+        def closed_process(argv, *args, **kwargs):
+            if argv[:2] == ["ps", "-p"]:
+                return SimpleNamespace(stdout="")
+            return real_run(argv, *args, **kwargs)
+        with mock.patch.object(engine_module.subprocess, "run", side_effect=closed_process):
+            locked_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
+                "cleanup_ticket": locked_preview["cleanup_ticket"], "force": False})
+        self.assertTrue(locked_removed["ok"], locked_removed)
+        self.assertFalse(os.path.exists(locked))
+        self.assertEqual(git("show-ref", "--verify",
+            "refs/heads/feature/claude-locked").returncode, 0)
+
+        foreign_locked = os.path.join(self.tmp.name, "close-foreign-locked")
+        git("worktree", "add", "-b", "feature/foreign-locked", foreign_locked)
+        git("worktree", "lock", "--reason", "maintenance", foreign_locked)
+        foreign_preview = self.engine.close_worktree_preview({
+            "session_id": "same", "provider": "claude", "cwd": foreign_locked,
+            "pid": 424242})
+        self.assertFalse(foreign_preview["inspect_ok"])
+        self.assertFalse(foreign_preview["remove_allowed"])
 
         stale = os.path.join(self.tmp.name, "close-stale")
         git("worktree", "add", "-b", "feature/stale", stale)

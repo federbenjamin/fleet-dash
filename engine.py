@@ -1826,7 +1826,7 @@ class Engine:
             main_path = os.path.join(proj_dir, f"{sid}.jsonl")
             if not os.path.isfile(main_path):
                 reg_status = reg.get("status")
-                state = "running" if reg_status == "busy" else "idle"
+                state = "running" if reg_status in ("busy", "shell") else "idle"
                 sessions.append({
                     "session_id": sid, "native_session_id": sid,
                     "provider": "claude", "pid": reg.get("pid"),
@@ -1869,7 +1869,7 @@ class Engine:
             mtime = os.path.getmtime(main_path)
             quiet = now - mtime
 
-            reg_status = reg.get("status")  # 'busy' | 'idle' | 'waiting' | None
+            reg_status = reg.get("status")  # 'busy' | 'shell' | 'idle' | 'waiting' | None
             # Hooks are positive evidence. The bare registry flag is debounced:
             # Claude briefly reports `waiting` between assistant prose and its
             # next tool call even though the turn is still progressing.
@@ -1890,7 +1890,8 @@ class Engine:
             turn = mt.turn_state()
             if confirmed_waiting:
                 state = "needs_you"         # blocked mid-turn: question or permission prompt
-            elif reg_status == "idle" or (reg_status is None and turn == "awaiting_input"):
+            elif reg_status == "idle" or (reg_status in (None, "shell") and
+                                          turn == "awaiting_input"):
                 # at the prompt: only actionable if a work turn finished recently
                 if turn == "awaiting_input" and quiet < cfg["turn_done_window_seconds"]:
                     state = "turn_done"
@@ -4092,6 +4093,92 @@ Treat this as an independent session. Verify the repository state before changin
                 "stderr": stderr, "truncated": truncated, "timeout": timed_out}
 
     @staticmethod
+    def _bounded_nul_paths(argv, timeout=8, max_input=67_108_864, keep=40):
+        """Stream a large NUL path list into a bounded sample, count, and digest."""
+        try:
+            process = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        except (FileNotFoundError, OSError) as exc:
+            return {"ok": False, "code": None, "paths": [], "count": 0,
+                    "digest": "", "stderr": str(exc), "truncated": False}
+        selector = selectors.DefaultSelector()
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        deadline = time.monotonic() + timeout
+        digest = hashlib.sha256()
+        carry = bytearray()
+        stderr_buffer = bytearray()
+        paths = []
+        count = total = 0
+        truncated = timed_out = False
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    process.kill()
+                    break
+                events = selector.select(min(0.1, remaining))
+                if not events and process.poll() is not None:
+                    events = [(key, selectors.EVENT_READ)
+                              for key in list(selector.get_map().values())]
+                for key, _ in events:
+                    try:
+                        chunk = os.read(key.fd, 65_536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total += len(chunk)
+                    if total > max_input:
+                        truncated = True
+                        process.kill()
+                        break
+                    if key.data == "stderr":
+                        if len(stderr_buffer) < 65_536:
+                            stderr_buffer.extend(chunk[:65_536 - len(stderr_buffer)])
+                        continue
+                    digest.update(chunk)
+                    carry.extend(chunk)
+                    records = carry.split(b"\0")
+                    carry = bytearray(records.pop())
+                    if len(carry) > 16_384:
+                        truncated = True
+                        process.kill()
+                        break
+                    for record in records:
+                        if not record:
+                            continue
+                        count += 1
+                        if len(paths) < keep:
+                            paths.append(record.decode("utf-8", "replace"))
+                if truncated:
+                    break
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+        finally:
+            selector.close()
+            for stream in (process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        stderr = stderr_buffer.decode("utf-8", "replace")
+        if timed_out:
+            stderr = (stderr + "\nGit probe timed out").strip()
+        if truncated:
+            stderr = (stderr + "\nGit path probe exceeded its scan limit").strip()
+        return {"ok": process.returncode == 0 and not timed_out and not truncated,
+                "code": process.returncode, "paths": paths, "count": count,
+                "digest": digest.hexdigest(), "stderr": stderr,
+                "truncated": truncated, "timeout": timed_out}
+
+    @staticmethod
     def _parse_worktree_list(raw):
         entries = []
         current = None
@@ -4148,6 +4235,19 @@ Treat this as an independent session. Verify the repository state before changin
                               "title": item.get("title") or item.get("name") or sid})
         return users
 
+    @staticmethod
+    def _owned_claude_worktree_lock(session, registered):
+        """Whether Claude itself locked this session's generated worktree."""
+        if str(session.get("provider") or "claude") != "claude":
+            return False
+        try:
+            pid = int(session.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        reason = str(registered.get("lock_reason") or "")
+        return pid > 1 and bool(re.fullmatch(
+            rf"claude session .+ \(pid {pid} start .+\)", reason))
+
     def close_worktree_preview(self, session, issue_ticket=True):
         """Describe optional cleanup without trusting a client path."""
         sid = str(session.get("session_id") or session.get("sessionId") or "")
@@ -4178,16 +4278,17 @@ Treat this as an independent session. Verify the repository state before changin
         if not registered or primary == worktree or registered.get("prunable"):
             return {**base, "inspect_ok": False, "registered": bool(registered),
                     "reason": "The linked worktree registration is stale or unsafe."}
-        if registered.get("locked"):
+        owned_lock = self._owned_claude_worktree_lock(session, registered)
+        if registered.get("locked") and not owned_lock:
             return {**base, "inspect_ok": False, "registered": True, "locked": True,
                     "reason": "This worktree is locked by Git and cannot be removed from Fleet."}
 
         status_result = self._bounded_process(
             ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
              "--untracked-files=all"], timeout=8, max_output=1_048_576)
-        ignored_result = self._bounded_process(
+        ignored_result = self._bounded_nul_paths(
             ["git", "-C", worktree, "ls-files", "--others", "--ignored",
-             "--exclude-standard", "-z"], timeout=8, max_output=524_288)
+             "--exclude-standard", "-z"], timeout=8, max_input=67_108_864, keep=40)
         if not status_result["ok"] or not ignored_result["ok"]:
             detail = status_result["stderr"] or ignored_result["stderr"] or \
                 "Git could not completely inspect the worktree"
@@ -4196,7 +4297,8 @@ Treat this as an independent session. Verify the repository state before changin
 
         status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
         files = status.get("files") or []
-        ignored = [path for path in ignored_result["stdout"].split("\0") if path]
+        ignored = ignored_result["paths"]
+        ignored_count = ignored_result["count"]
         categories = {
             "staged": [item for item in files if item.get("staged")],
             "unstaged": [item for item in files if item.get("unstaged") and
@@ -4218,16 +4320,18 @@ Treat this as an independent session. Verify the repository state before changin
         dirty = bool(files)
         destructive_contents = dirty or bool(ignored)
         material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
-                    status_result["stdout"] + "\0" + ignored_result["stdout"] + "\0" +
+                    status_result["stdout"] + "\0" + ignored_result["digest"] + "\0" +
                     json.dumps(shared, sort_keys=True, separators=(",", ":")))
         revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         result = {**base, "inspect_ok": True, "registered": True,
+                  "locked": bool(registered.get("locked")),
+                  "owned_lock": owned_lock,
                   "branch": status.get("branch"), "head_oid": status.get("head_oid"),
                   "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
                   "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
                   "dirty_files_truncated": len(dirty_files) > 100,
-                  "ignored_count": len(ignored), "ignored_files": ignored[:40],
-                  "ignored_files_truncated": len(ignored) > 40,
+                  "ignored_count": ignored_count, "ignored_files": ignored,
+                  "ignored_files_truncated": ignored_count > len(ignored),
                   "shared_sessions": shared,
                   "remove_allowed": not destructive_contents and not shared,
                   "force_remove_allowed": destructive_contents and not shared}
@@ -4235,6 +4339,8 @@ Treat this as an independent session. Verify the repository state before changin
             result["reason"] = "Another live Fleet session is using this worktree."
         elif destructive_contents:
             result["reason"] = "The worktree contains files that removal would erase."
+        elif owned_lock:
+            result["reason"] = "Claude's worktree lock will be released after the session closes."
         if issue_ticket:
             token = secrets.token_urlsafe(24)
             ticket = {"session_id": sid, "provider": provider, "root": root,
@@ -4293,7 +4399,7 @@ Treat this as an independent session. Verify the repository state before changin
                         "preserved": True}
         force = action.get("force") is True
         session = {"session_id": ticket["session_id"], "provider": ticket["provider"],
-                   "cwd": ticket["worktree"]}
+                   "cwd": ticket["worktree"], "pid": ticket.get("pid")}
         preview = self.close_worktree_preview(session, issue_ticket=False)
         if not preview.get("inspect_ok") or preview.get("revision") != ticket["revision"]:
             return {"ok": False, "error": "the worktree changed after preview — it was preserved",
@@ -4306,6 +4412,16 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": preview.get("reason") or
                     "worktree removal is no longer safe", "worktree": ticket["worktree"],
                     "preserved": True}
+        unlocked = False
+        if preview.get("owned_lock"):
+            unlock = self._bounded_process(
+                ["git", "-C", ticket["root"], "worktree", "unlock", ticket["worktree"]],
+                timeout=10, max_output=262_144)
+            if not unlock["ok"]:
+                return {"ok": False, "error": (unlock["stderr"] or unlock["stdout"] or
+                        "Claude's worktree lock could not be released")[:500],
+                        "worktree": ticket["worktree"], "preserved": True}
+            unlocked = True
         argv = ["git", "-C", ticket["root"], "worktree", "remove"]
         if force:
             argv.append("--force")
@@ -4314,7 +4430,7 @@ Treat this as an independent session. Verify the repository state before changin
         if not removed["ok"]:
             return {"ok": False, "error": (removed["stderr"] or removed["stdout"] or
                     "Git worktree removal failed")[:500], "worktree": ticket["worktree"],
-                    "preserved": os.path.exists(ticket["worktree"])}
+                    "preserved": os.path.exists(ticket["worktree"]), "unlocked": unlocked}
         self._workstream_cache.clear()
         self._workstreams_snapshot_cache = None
         return {"ok": True, "removed": True, "forced": force,
@@ -4397,7 +4513,7 @@ Treat this as an independent session. Verify the repository state before changin
 
         interrupted = False
         interrupt_error = None
-        if reg.get("status") in ("busy", "waiting"):
+        if reg.get("status") in ("busy", "shell", "waiting"):
             tty = self._tty_cache.get(pid)
             if not tty:
                 try:
@@ -4948,7 +5064,7 @@ Treat this as an independent session. Verify the repository state before changin
            and reg.get("status") != "waiting":
             return {"ok": False, "error": "session isn't waiting on a prompt — "
                     "this question may have been blocked or already answered"}
-        if action.get("type") == "interrupt" and reg.get("status") != "busy":
+        if action.get("type") == "interrupt" and reg.get("status") not in ("busy", "shell"):
             return {"ok": False, "error": "session isn't mid-turn — nothing to interrupt"}
         # a relay is typed into the PARENT's input box: if the parent is blocked on
         # a prompt, that box is the ask TUI and the relay would answer the question
@@ -4956,6 +5072,13 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "the parent session is waiting on a prompt — "
                     "answer that first, then relay"}
         path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+        if action.get("type") == "interrupt" and reg.get("status") == "shell":
+            with self.scan_lock:
+                shell_tail = self.tail_for(path)
+                shell_tail.poll()
+                if shell_tail.turn_state() == "awaiting_input":
+                    return {"ok": False, "error": "the shell command has finished — "
+                            "there is no active turn to interrupt"}
         # scan_lock is held by the poll thread while it folds EVERY transcript in the
         # fleet, so taking it here made a click wait out a whole scan (~300ms of the
         # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it

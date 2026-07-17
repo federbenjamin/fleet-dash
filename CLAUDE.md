@@ -6,7 +6,7 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
 ## Architecture (data flow)
 
 ```
-~/.claude/sessions/<pid>.json      CLI live registry: sessionId, cwd, status busy/idle/waiting,
+~/.claude/sessions/<pid>.json      CLI live registry: sessionId, cwd, status busy/shell/idle/waiting,
                                    name, bridgeSessionId (claude.ai deep link). PID-liveness
                                    filters stale files (they're deleted on clean exit only).
 ~/.claude/projects/<proj>/<sid>.jsonl            main transcript  ─┐ incremental byte-offset
@@ -78,7 +78,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    the ghost question renders, but the session sits at its main input and injected digits
    would type (and send) as a message. hook_pending also hides a question pending >5s old on a
    non-waiting session for the same reason. `interrupt` (Esc mid-turn) has the mirror gate: it
-   requires status `busy`, so an Esc can never land in an idle session's input box.
+   requires status `busy`, or `shell` plus a freshly re-polled mid-tool transcript, so an Esc can
+   never land in an idle session's input box. Close also interrupts an active shell before SIGTERM.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
 7. **Agent state semantics: "stalled" means frozen mid-TOOL, nothing else.** An agent is
    working only while something is in flight — a `tool_use` awaiting its result, or a
@@ -93,7 +94,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    `status` is authoritative after corroboration (hook-captured waiting → needs_you
    immediately; a bare waiting flag must persist for `WAITING_CONFIRM_SECONDS` because Claude
    can flash it between progress prose and the next tool; idle → turn_done if fresh end_turn
-   else idle; busy → running/stalled).
+   else idle; busy → running/stalled). Claude's `shell` registry state is active while the
+   transcript remains mid-tool, but a completed `end_turn` wins over a stale detached shell child
+   and returns the session to turn_done/idle.
    **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
    parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
    ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/
@@ -362,7 +365,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Claude's folder-trust or bypass warning on the user's behalf.
 41. **Secondary-worktree cleanup is preview-ticketed and happens after provider close.**
     `close_worktree_preview` resolves the canonical workstream identity, refuses primary/unregistered/
-    locked/prunable worktrees, and returns bounded porcelain-v2 dirty plus ignored-file evidence.
+    prunable worktrees and unrelated Git locks, and returns bounded porcelain-v2 dirty plus
+    ignored-file evidence. A `claude session … (pid <same pid> …)` lock is the narrow exception:
+    it remains locked during preview and is released only after that exact Claude process closes.
+    Ignored paths can number in the millions: stream their NUL output into an exact count, full
+    digest, and first 40 paths under a fixed byte/time cap; never buffer the whole list.
     Its opaque five-minute ticket binds session/provider/root/worktree and the exact status revision.
     Normal removal requires clean status and no ignored files; force requires the explicit dirty path;
     either is refused while another live Fleet session uses the exact worktree. Only after close marks
