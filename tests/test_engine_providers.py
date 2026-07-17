@@ -167,6 +167,51 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(second["diagnostics"]["scan_samples"], 2)
         self.assertGreaterEqual(second["diagnostics"]["scan_p95_ms"], 0)
 
+    def test_staging_mirrors_production_sessions_read_only_and_enforces_owner_gate(self):
+        self.engine.cfg.update(instance_mode="staging", instance_name="Fleet Staging",
+                               staging_owned_sessions={"codex:same": {
+                                   "provider": "codex", "cwd": self.cwd,
+                                   "created_at": time.time()}})
+        fleet = self.engine.scan()
+        claude = next(item for item in fleet["sessions"]
+                      if item["session_id"] == "same")
+        codex = next(item for item in fleet["sessions"]
+                     if item["session_id"] == "codex:same")
+        self.assertTrue(claude["staging_observer"])
+        self.assertEqual(claude["access"], "view_only")
+        self.assertFalse(claude["capabilities"]["submit"])
+        self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        self.assertTrue(codex["staging_owned"])
+        self.assertTrue(codex["capabilities"]["submit"])
+        denied = self.engine.act({"type": "text", "session_id": "same",
+                                  "text": "must not land"})
+        self.assertFalse(denied["ok"])
+        self.assertIn("view only", denied["error"])
+        allowed = self.engine.act({"type": "text", "session_id": "codex:same",
+                                   "text": "staging test"})
+        self.assertTrue(allowed["ok"])
+
+    def test_staging_spawn_forces_dedicated_worktree_and_records_exact_session(self):
+        workspace = os.path.join(self.tmp.name, "staging-workspace")
+        os.makedirs(workspace)
+        self.engine.cfg.update(instance_mode="staging", instance_name="Fleet Staging",
+                               staging_owned_sessions={})
+        persisted = []
+        with mock.patch.object(self.engine, "_create_staging_workspace", return_value={
+                "ok": True, "cwd": workspace, "branch": "fleet-staging/test",
+                "worktree_name": "test"}), \
+             mock.patch.object(self.engine, "_iterm_write", return_value={"ok": True}), \
+             mock.patch.object(self.engine, "_persist_config_fields",
+                               side_effect=lambda fields: persisted.append(fields)):
+            result = self.engine.act({"type": "spawn", "provider": "claude",
+                "cwd": self.cwd, "worktree": False, "__staging_internal": True})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["cwd"], os.path.realpath(workspace))
+        self.assertNotIn(self.cwd, result["command"])
+        self.assertTrue(result["staging_owned"])
+        self.assertIn(result["session_id"], self.engine.cfg["staging_owned_sessions"])
+        self.assertTrue(any("staging_owned_sessions" in fields for fields in persisted))
+
     def test_stall_default_migrates_exact_old_default_once(self):
         migration_base = os.path.join(self.tmp.name, "migration")
         os.makedirs(migration_base)

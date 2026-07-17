@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.benjaminfeder.fleet-dash.staging</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/benjaminfeder/.claude/fleet-dash/server.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FLEET_DASH_INSTANCE</key><string>staging</string>
+    <key>FLEET_DASH_STATE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging</string>
+    <key>FLEET_DASH_CAPTURE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash</string>
+    <key>FLEET_DASH_STAGING_SOURCE</key><string>/Users/benjaminfeder/.claude/fleet-dash</string>
+    <key>FLEET_DASH_CODEX_SOCKET</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging/codex-app-server.sock</string>
+    <key>FLEET_DASH_PORT</key><string>8378</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging/fleet-dash.log</string>
+  <key>StandardErrorPath</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging/fleet-dash.log</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

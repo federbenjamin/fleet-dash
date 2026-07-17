@@ -20,18 +20,34 @@ from briefing import FleetOperations, OperationsError
 from web_push import WebPushService
 
 HOME = os.path.expanduser("~")
-BASE = os.path.join(HOME, ".claude", "fleet-dash")
+PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash")
+BASE = os.path.abspath(os.path.expanduser(
+    os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
+INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()
+if INSTANCE_MODE not in ("production", "staging"):
+    INSTANCE_MODE = "production"
+_CAPTURE_BASE_OVERRIDE = os.environ.get("FLEET_DASH_CAPTURE_DIR")
+CAPTURE_BASE = os.path.abspath(os.path.expanduser(
+    _CAPTURE_BASE_OVERRIDE or PRODUCTION_BASE))
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 SESSIONS = os.path.join(HOME, ".claude", "sessions")
 CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
-CLAUDE_USAGE = os.path.join(BASE, "usage.json")
+CLAUDE_USAGE = os.path.join(CAPTURE_BASE, "usage.json")
 CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
 CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
 CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 CLAUDE_USAGE_PREFS = os.path.join(
     HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
 
+
+def capture_base():
+    """Shared hook/statusline artifacts; tests that patch BASE keep working."""
+    return CAPTURE_BASE if _CAPTURE_BASE_OVERRIDE else BASE
+
 DEFAULT_CONFIG = {
+    "instance_mode": INSTANCE_MODE,
+    "instance_name": "Fleet Staging" if INSTANCE_MODE == "staging" else "Fleet Dash",
+    "staging_owned_sessions": {},
     "poll_seconds": 2,
     "stall_seconds": 600,
     "dormant_seconds": 7200,
@@ -192,6 +208,23 @@ def load_config():
         raw["_stall_default_v2"] = True
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
+    # Instance identity and listener overrides belong to launchd, not to a
+    # browser-editable config file. A stale copied config must never turn a
+    # staging process into production or make it bind production's port.
+    merged["instance_mode"] = INSTANCE_MODE
+    merged["instance_name"] = "Fleet Staging" if INSTANCE_MODE == "staging" else "Fleet Dash"
+    port_override = os.environ.get("FLEET_DASH_PORT")
+    if port_override:
+        try:
+            port = int(port_override)
+            if not 1 <= port <= 65535:
+                raise ValueError
+            merged["port"] = port
+        except ValueError:
+            print("FLEET_DASH_PORT is invalid; using configured port", file=sys.stderr)
+    bind_override = os.environ.get("FLEET_DASH_BIND")
+    if bind_override:
+        merged["bind"] = bind_override
     _write_private_json(path, merged)
     return merged
 
@@ -1173,6 +1206,131 @@ class Engine:
             self.codex_observer = None
             self.codex = CodexAdapter(enabled=False, client=object())
             self.codex.error = str(exc)
+
+    @property
+    def is_staging(self):
+        return self.cfg.get("instance_mode") == "staging"
+
+    def _staging_owned(self):
+        records = self.cfg.get("staging_owned_sessions") or {}
+        return records if isinstance(records, dict) else {}
+
+    def _staging_owns(self, sid):
+        return bool(sid and str(sid) in self._staging_owned())
+
+    def _register_staging_session(self, sid, provider, cwd):
+        if not self.is_staging or not sid:
+            return
+        with self.config_lock:
+            records = dict(self._staging_owned())
+            records[str(sid)] = {
+                "provider": str(provider), "cwd": os.path.realpath(str(cwd)),
+                "created_at": time.time(),
+            }
+            if len(records) > 500:
+                records = dict(sorted(records.items(),
+                    key=lambda item: float((item[1] or {}).get("created_at") or 0))[-500:])
+            self._persist_config_fields({"staging_owned_sessions": records})
+            self.cfg["staging_owned_sessions"] = records
+
+    def _staging_source_root(self):
+        source = os.path.realpath(os.path.expanduser(
+            str(os.environ.get("FLEET_DASH_STAGING_SOURCE") or "")))
+        if not source or not os.path.isdir(source) or not os.path.exists(
+                os.path.join(source, ".git")):
+            return None
+        return source
+
+    def _create_staging_workspace(self, requested_name=""):
+        source = self._staging_source_root()
+        if not source:
+            return {"ok": False, "error": "staging source checkout is unavailable"}
+        requested = str(requested_name or "").strip()
+        if requested and not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", requested):
+            return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
+        stem = requested or "session"
+        name = f"{stem}-{secrets.token_hex(4)}"
+        parent = os.path.join(BASE, "workspaces")
+        path = os.path.join(parent, name)
+        branch = f"fleet-staging/{name}"
+        try:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            os.chmod(parent, 0o700, follow_symlinks=False)
+            process = subprocess.run(
+                ["git", "-C", source, "worktree", "add", "-b", branch, path, "HEAD"],
+                capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return {"ok": False, "error": f"could not create staging worktree: {exc}"}
+        if process.returncode:
+            detail = (process.stderr or process.stdout or "git worktree add failed").strip()
+            return {"ok": False, "error": detail[:1000]}
+        return {"ok": True, "cwd": path, "branch": branch, "worktree_name": name}
+
+    def _spawn_staging_session(self, action, provider, reserved_sid=None):
+        workspace = self._create_staging_workspace(action.get("worktree_name"))
+        if not workspace.get("ok"):
+            return workspace
+        prepared = {**action, "cwd": workspace["cwd"], "worktree": False,
+                    "worktree_name": "", "__staging_internal": True}
+        result = (self.spawn_codex_session(prepared) if provider == "codex" else
+                  self.spawn_session(prepared, reserved_sid=reserved_sid))
+        if result.get("ok") and result.get("session_id"):
+            self._register_staging_session(
+                result["session_id"], provider, workspace["cwd"])
+            result["staging_owned"] = True
+            result["staging_workspace"] = workspace
+        else:
+            result.setdefault("staging_workspace", workspace)
+        return result
+
+    def _staging_mask_session(self, session):
+        session = dict(session)
+        owned = self._staging_owns(session.get("session_id"))
+        session["staging_owned"] = owned
+        session["staging_observer"] = not owned
+        if owned:
+            return session
+        capabilities = dict(session.get("capabilities") or {})
+        for key in ("submit", "interrupt", "takeover", "archive", "close", "compact",
+                    "review", "focus_terminal", "answer_structured", "decide_approval",
+                    "spawn_agent", "relay_agent", "relay_agent_direct", "reopen",
+                    "change_permission_mode"):
+            capabilities[key] = False
+        session.update(capabilities=capabilities, read_only=True, access="view_only",
+                       access_label="View only", primary_action="view",
+                       primary_action_label="View",
+                       read_only_reason="Production session; staging can observe but not control it")
+        if "can_reopen" in session:
+            session["can_reopen"] = False
+        return session
+
+    def _staging_operations_fleet(self, fleet):
+        if not self.is_staging:
+            return fleet
+        projected = copy.deepcopy(fleet)
+        projected["sessions"] = [item for item in projected.get("sessions") or []
+                                  if item.get("staging_owned")]
+        projected["closed"] = [item for item in projected.get("closed") or []
+                                if item.get("staging_owned")]
+        owned = {item.get("session_id") for item in projected["sessions"] + projected["closed"]}
+        projected["actions"] = [item for item in projected.get("actions") or []
+                                if item.get("session_id") in owned]
+        # Production provider failures belong to production. Staging notification
+        # projection is intentionally limited to staging-owned test sessions.
+        projected["providers"] = {key: {"ok": True}
+                                  for key in (projected.get("providers") or {})}
+        return projected
+
+    def _staging_action_error(self, action):
+        if not self.is_staging:
+            return None
+        typ = str(action.get("type") or "")
+        if typ in ("ping", "spawn", "briefing_review") or typ.startswith("outbox_"):
+            return None
+        if self._staging_owns(action.get("session_id")):
+            return None
+        return {"ok": False, "error":
+                "production session is view only in staging; create a staging test session"}
 
     @staticmethod
     def _prepare_ledger(path):
@@ -2316,8 +2474,20 @@ class Engine:
         except Exception as exc:
             codex_usage = {"provider": "codex", "stale": True, "error": str(exc)}
         phase("usage")
+        if self.is_staging:
+            sessions = [self._staging_mask_session(item) for item in sessions]
+            closed = [self._staging_mask_session(item) for item in closed]
+            actions = [item for item in actions
+                       if self._staging_owns(item.get("session_id"))]
         fleet = {
             "t": now,
+            "instance": {
+                "mode": self.cfg.get("instance_mode", "production"),
+                "name": self.cfg.get("instance_name", "Fleet Dash"),
+                "controls": "staging_owned_only" if self.is_staging else "production",
+                "owned_sessions": len(self._staging_owned()) if self.is_staging else None,
+                "source_root": self._staging_source_root() if self.is_staging else None,
+            },
             "sessions": sessions,
             "totals": {
                 "sessions": len(sessions),
@@ -2364,7 +2534,8 @@ class Engine:
             fleet["outbox_summary"] = {"pending": 0, "attention": 0,
                                         "stale": True, "error": str(exc)}
         try:
-            budgets = self.operations.observe(fleet, self.workstream_identity)
+            budgets = self.operations.observe(
+                self._staging_operations_fleet(fleet), self.workstream_identity)
             fleet["actions"] = self._sort_action_records([
                 *(fleet.get("actions") or []), *self.budget_action_records(budgets)])
             fleet["budget_summary"] = {
@@ -3922,7 +4093,7 @@ Treat this as an independent session. Verify the repository state before changin
 
     def hook_pending(self, sid, reg_status):
         """Pending prompt captured by the PreToolUse/Notification hooks."""
-        path = os.path.join(BASE, "pending", f"{sid}.json")
+        path = os.path.join(capture_base(), "pending", f"{sid}.json")
         try:
             d = json.load(open(path))
         except Exception:
@@ -4006,7 +4177,7 @@ Treat this as an independent session. Verify the repository state before changin
         registry. So the statusline script side-writes it here (see its
         `fleet-dash effort side-write` block); no statusline, no effort."""
         try:
-            with open(os.path.join(BASE, "effort", sid)) as f:
+            with open(os.path.join(capture_base(), "effort", sid)) as f:
                 v = f.read().strip()
         except OSError:
             return None
@@ -5131,8 +5302,16 @@ Treat this as an independent session. Verify the repository state before changin
     def _prepare_outbox_payload(self, payload):
         prepared = dict(payload or {})
         if prepared.get("kind") == "new_session" or prepared.get("spawn_spec"):
-            prepared["spawn_spec"] = self._validate_outbox_spawn(prepared.get("spawn_spec"))
+            spawn_spec = dict(prepared.get("spawn_spec") or {})
+            if self.is_staging:
+                source = self._staging_source_root()
+                if not source:
+                    raise OutboxError("staging source checkout is unavailable")
+                spawn_spec.update(cwd=source, worktree=False)
+            prepared["spawn_spec"] = self._validate_outbox_spawn(spawn_spec)
         elif prepared.get("target_session_id"):
+            if self.is_staging and not self._staging_owns(prepared.get("target_session_id")):
+                raise OutboxError("production sessions are view only in staging")
             status, reason, _ = self._outbox_current_target(prepared)
             if status == "block":
                 raise OutboxError(reason or "target is unavailable")
@@ -5228,6 +5407,15 @@ Treat this as an independent session. Verify the repository state before changin
                                               forward with SendMessage) |
         {type:'text', session_id, text:'...'} |
         {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']}"""
+        if not isinstance(action, dict):
+            return {"ok": False, "error": "action must be an object"}
+        # Double-underscore fields are server-internal. A client must never be
+        # able to claim that an arbitrary directory is a prepared staging worktree.
+        action = {key: value for key, value in action.items()
+                  if not str(key).startswith("__")}
+        staging_error = self._staging_action_error(action)
+        if staging_error:
+            return staging_error
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
         if action.get("type") == "image_text":
@@ -5705,6 +5893,8 @@ Treat this as an independent session. Verify the repository state before changin
 
     def spawn_codex_session(self, action):
         """Create a Codex thread through app-server; no terminal or TUI scraping."""
+        if self.is_staging and not action.get("__staging_internal"):
+            return self._spawn_staging_session(action, "codex")
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
         home = os.path.realpath(HOME)
         if not cwd or not os.path.isdir(cwd):
@@ -5738,6 +5928,8 @@ Treat this as an independent session. Verify the repository state before changin
         name is regex-bounded, and the directory must be an existing dir under $HOME. Nothing the
         client sends is interpolated raw — the act token opens a terminal here, so a
         free-form command string would be a remote shell."""
+        if self.is_staging and not action.get("__staging_internal"):
+            return self._spawn_staging_session(action, "claude", reserved_sid=reserved_sid)
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
         home = os.path.realpath(HOME)
         if not cwd or not os.path.isdir(cwd):

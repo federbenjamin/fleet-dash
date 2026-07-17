@@ -517,11 +517,31 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     reveal the already-rendered destination before starting its fetch/render in the next animation
     frame. Keep both deferrals: synchronously rebuilding these surfaces produced 265–947 ms desktop
     first-feedback outliers even though their network work was asynchronous.
+56. **Production and staging are hard-separated instances.** Production code runs from the dedicated
+    `~/.claude/fleet-dash-prod` checkout on 8377; development/staging runs from
+    `~/.claude/fleet-dash` on 8378. `server.APP_ROOT` is always the directory containing `server.py`;
+    `engine.BASE` is instance runtime state selected by `FLEET_DASH_STATE_DIR`. Never collapse those
+    concepts again: production must not serve live-edited staging assets. Staging has its own config,
+    token, ledger/search DBs, uploads, log, Codex socket, injector request/result files, applet bundle
+    ID, browser origin, service worker, drafts, outbox, and push registrations. It may READ the shared
+    registries/transcripts and hook/statusline captures, but a server-side exact-ID allowlist
+    (`staging_owned_sessions`) strips capabilities from every production session and rejects every
+    mutation even if a client forges the POST. Only sessions spawned by staging are registered; every
+    spawn is forced into a server-created `fleet-staging/*` worktree rooted under staging state.
+    Double-underscore request keys are stripped before policy checks, so a client cannot claim the
+    internal prepared-worktree marker. Notification projection in staging receives staging-owned
+    sessions only; production requests/provider failures must never leak into staging pushes.
 
 ## Dev workflow
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,
   then `curl -s http://127.0.0.1:8377/api/fleet | python3 -m json.tool | head`.
+- Staging changes are restarted independently with
+  `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging`, then probe
+  `http://127.0.0.1:8378/api/fleet`. Development edits belong in the staging checkout; production
+  is promoted only from merged `main` in `~/.claude/fleet-dash-prod`. Run `npm ci --omit=dev` in the
+  production checkout on every promotion; its isolated Web Push worker must have its own installed
+  `web-push` dependency rather than reaching into staging's `node_modules`.
   `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
   self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
 - Log: `~/.claude/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get
@@ -639,7 +659,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   inputs focusable underneath.
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
-- `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
+- `com.benjaminfeder.fleet-dash.plist` + `com.benjaminfeder.fleet-dash.staging.plist` — isolated
+  production/staging launchd copies (live copies in `~/Library/LaunchAgents`).
 - Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`,
   `ledger.db`, `search.db*`, `pending/`,
   `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
