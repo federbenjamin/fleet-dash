@@ -2324,6 +2324,20 @@ function cardCls(s){
   if(s.ui_group==='history')return'dorm';
   return s.reason_label==='Slow'?'stalled':'';
 }
+// Ordinary collapsed cards use one stable frame whose height follows the
+// session-peek line preference. Anything that adds an actionable/volatile row
+// stays content-sized so a fixed frame can never hide a control.
+function cardUsesFixedPeekHeight(s){
+  if(s.provisional||open.has(s.session_id)||expandedPeeks.has(s.session_id))return false;
+  const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
+  const running=s.ui_group==='working'&&(s.agents||[]).some(a=>!['done','ended'].includes(a.state));
+  const answerFeedback=(optimisticMessages.get(s.session_id)||[]).some(item=>item.kind==='answer');
+  return!pending&&!s.error&&!s.reply_requested&&!running&&!pinActions.has(s.session_id)&&
+    !quickResponses.has(s.session_id)&&!answerFeedback;
+}
+function cardFrame(s){
+  return{fixed:cardUsesFixedPeekHeight(s),lines:previewSessions()?clampS():0};
+}
 // The volatile top of the card — rebuilt every poll (header, meta, peek, pending,
 // running agents, the more/less toggle). No native <details> here, so replacing it
 // each tick doesn't flash.
@@ -2441,7 +2455,9 @@ function detailSig(s){
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
   const isOpen=open.has(s.session_id);
-  return`<div class="card ${cardCls(s)}${isOpen?' open':''}" data-sid="${s.session_id}">
+  const frame=cardFrame(s);
+  return`<div class="card ${cardCls(s)}${isOpen?' open':''}${frame.fixed?' fixedpeek':''}" data-sid="${s.session_id}"
+    style="--session-card-lines:${frame.lines}">
     <div class="ctop">${cardTop(s)}</div>${isOpen?cardDetail(s):''}</div>`;
 }
 // Reconcile #sessions in place: persist each card node, rebuild only the volatile
@@ -2460,7 +2476,10 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
       const top=document.createElement('div');top.className='ctop';card.appendChild(top);
       container.appendChild(card);
     }
-    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'')+(pinnedSessions.has(s.session_id)?' pinned':'');
+    const frame=cardFrame(s);
+    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'')+
+      (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'');
+    card.style.setProperty('--session-card-lines',String(frame.lines));
     card.querySelector('.ctop').innerHTML=cardTop(s);
     let detail=card.querySelector(':scope > .detail');
     if(isOpen){

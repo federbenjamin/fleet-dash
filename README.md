@@ -177,7 +177,10 @@ the provider without affecting Claude sessions.
   code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
   height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 500
-  characters of the latest session message. Overflow replaces the final collapsed row with a
+  characters of the latest session message. That line setting also fixes the height of ordinary
+  collapsed session cards, so short/missing messages and poll updates do not move the list.
+  Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
+  running subagents grow to fit those controls. Overflow replaces the final collapsed row with a
   clickable `...`; expanding reveals the full bounded 500-character preview. Tapping a
   subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
   is the context.

@@ -319,6 +319,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await expect(page.locator('#usagepanel')).toBeHidden();
 
   await reset(page, 'subagent');
+  await expect(page.locator('[data-sid="codex:thread-one"]')).not.toHaveClass(/fixedpeek/);
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 1');
   await page.locator('[data-now-filter="subagents"]').click();
   const child = page.locator('#subagents .activeagentcard');
@@ -643,6 +644,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
+  await expect(card).toHaveClass(/fixedpeek/);
   await expand.click();
   await expect(peekRow).toHaveClass(/expanded/);
   await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
@@ -654,6 +656,14 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
   await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
   await expect(peekRow).toHaveClass(/truncated/);
+  await expect(card).toHaveClass(/fixedpeek/);
+  const collapsedHeight = await card.evaluate(el => el.getBoundingClientRect().height);
+  await page.evaluate(() => setNum('preview_session_lines', 5));
+  await expect.poll(async () => card.evaluate(el => el.getBoundingClientRect().height))
+    .toBeGreaterThan(collapsedHeight + 45);
+  const fiveLineHeight = await card.evaluate(el => el.getBoundingClientRect().height);
+  expect(fiveLineHeight - collapsedHeight).toBeLessThan(60);
+  await page.screenshot({ path: testInfo.outputPath('markdown-peek-fixed.png'), fullPage: true });
 
   const gauge = await card.locator('.ctxbar').evaluate(el => ({
     background: getComputedStyle(el).backgroundColor,

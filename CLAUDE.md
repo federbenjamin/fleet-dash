@@ -393,6 +393,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `/sw.js` has root scope but caches only the explicit versioned public shell list. Navigations are
     network-first with the content-free tailnet reconnect page as fallback; `/api/*`, transcripts,
     notifications, settings, token-bearing URLs, and conversation content are always network-only.
+45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
+    card uses the measured fixed frame `117px + preview_session_lines × 17.4px` (or zero preview
+    rows when session peeks are disabled), with its More control anchored at the bottom. Never put
+    `.fixedpeek` on an open card, an explicitly expanded peek, or a card showing a pending request,
+    error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
+    to keep every action visible. Keep the height inputs synchronized with the header/meta/peek/
+    More CSS measurements if their typography or padding changes.
 
 ## Dev workflow
 
