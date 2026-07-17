@@ -381,9 +381,10 @@ applet types into the iTerm session matched by tty). Finished agent runs and clo
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
-Fleet is also an installable PWA. Its root-scoped service worker caches only versioned public shell
-assets. API responses, transcripts, notification data, settings, and token-bearing navigation stay
-network-only; offline navigation renders only **Reconnect to your tailnet**. Web Push delivery runs
+Fleet is also an installable PWA. Its root-scoped service worker refreshes public shell assets from
+the network first and keeps only a versioned offline fallback, so installed apps cannot remain stuck
+on old routing code. API responses, transcripts, notification data, settings, and token-bearing
+navigation stay network-only; offline navigation renders only **Reconnect to your tailnet**. Web Push delivery runs
 in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
 and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
 file disables delivery instead of silently replacing keys and breaking registered devices. Its

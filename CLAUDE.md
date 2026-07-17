@@ -392,9 +392,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     reuses `fleet.briefingDevice.v1`; re-registration preserves its read cursor and preferences.
     `FleetOperations` keeps the shared ledger mode 0600 because it now holds encrypted-push
     subscription credentials.
-    `/sw.js` has root scope but caches only the explicit versioned public shell list. Navigations are
-    network-first with the content-free tailnet reconnect page as fallback; `/api/*`, transcripts,
-    notifications, settings, token-bearing URLs, and conversation content are always network-only.
+    `/sw.js` has root scope but caches only the explicit versioned public shell list. Navigations and
+    shell assets are network-first, with cached public assets and the content-free tailnet reconnect
+    page as offline fallbacks. Never make unhashed shell assets cache-first: an unchanged worker then
+    strands installed apps on old routing code. Bump `SHELL_CACHE` for structural shell changes so
+    already-installed apps replace the old cache on activation. `/api/*`, transcripts, notifications,
+    settings, token-bearing URLs, and conversation content are always network-only.
 45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
     card uses the measured fixed frame `117px + preview_session_lines × 17.4px` (or zero preview
     rows when session peeks are disabled), with its More control anchored at the bottom. Never put

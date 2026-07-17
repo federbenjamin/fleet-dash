@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'fleet-shell-n2-v1';
+const SHELL_CACHE = 'fleet-shell-n4-v1';
 const SHELL_ASSETS = [
   '/static/fleet.css',
   '/static/app.js',
@@ -38,7 +38,13 @@ self.addEventListener('fetch', event => {
     return;
   }
   if (SHELL_PATHS.has(url.pathname)) {
-    event.respondWith(caches.match(url.pathname).then(cached => cached || fetch(request)));
+    event.respondWith(fetch(request).then(response => {
+      if (response.ok) {
+        const copy = response.clone();
+        event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.put(request, copy)));
+      }
+      return response;
+    }).catch(() => caches.match(request)));
   }
 });
 
