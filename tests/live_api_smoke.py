@@ -25,7 +25,8 @@ def main():
     assert status == 200 and kind == "text/html"
     assert b'<div id="appshell">' in html
     assert b'<div id="outboxview">' in html
-    assert b'<div id="briefing">' in html
+    assert b'id="route-notifications"' in html
+    assert b'data-notification-section="briefing"' in html
     assert b'<div id="budgets">' in html
     assert b'<script src="/static/app.js"></script>' in html
 

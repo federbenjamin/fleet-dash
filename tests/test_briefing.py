@@ -380,6 +380,10 @@ class BriefingTests(unittest.TestCase):
         self.ops.observe(current, self.workstream)
         self.assertEqual(self.ops.notification_snapshot("desktop")["events"][0]["state"],
                          "snoozed")
+        self.assertTrue(self.ops.notification_wake(event["id"], event["source_revision"]))
+        self.assertEqual(self.ops.notification_snapshot("desktop")["events"][0]["state"],
+                         "active")
+        self.ops.notification_snooze(event["id"], event["source_revision"], until)
         self.clock.advance(20)
         self.ops.observe(fleet(self.clock), self.workstream)
         resolved = self.ops.notification_snapshot("desktop")["events"][0]
@@ -415,6 +419,57 @@ class BriefingTests(unittest.TestCase):
         self.assertTrue(restarted.notification_session_muted("s2"))
         self.assertFalse(restarted.notification_set_session_mute("s2", "claude", False))
         self.assertFalse(restarted.notification_session_muted("s2"))
+
+    def test_browser_read_cursor_works_without_push_registration_and_survives_restart(self):
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        seeded = self.ops.notification_snapshot("browser-only")
+        self.assertEqual(seeded["event_cursor"], 1)
+        self.assertEqual(seeded["read_cursor"], 1)
+        self.assertEqual(seeded["unread"], 0)
+
+        self.clock.advance(10)
+        self.ops.observe(fleet(self.clock, actions=[action(), action("s2", nonce="ask-2")]),
+                         self.workstream)
+        changed = self.ops.notification_snapshot("browser-only")
+        self.assertEqual(changed["unread"], 1)
+        self.assertEqual(self.ops.notification_mark_read("browser-only", changed["event_cursor"]), 2)
+
+        restarted = FleetOperations(self.path, clock=self.clock)
+        saved = restarted.notification_snapshot("browser-only")
+        self.assertEqual(saved["read_cursor"], 2)
+        self.assertEqual(saved["unread"], 0)
+        registered = restarted.notification_register_device(
+            "browser-only", "Browser", "macOS", push_subscription())
+        self.assertEqual(registered["read_cursor"], 2)
+
+    def test_notification_snapshot_projects_mute_and_redacted_delivery_problem(self):
+        ops = FleetOperations(os.path.join(self.tmp.name, "problems.db"), clock=self.clock,
+                              delivery_retry_delays=(1,), delivery_jitter=lambda delay: delay)
+        ops.notification_register_device("phone", "Phone", "iOS", push_subscription())
+        delivery = ops.notification_create_test_delivery("phone")
+        ops.notification_claim_delivery()
+        retrying = ops.notification_finish_delivery(delivery["id"], {
+            "ok": False, "status": 503, "error": "secret endpoint detail"})
+        self.assertEqual(retrying["status"], "retrying")
+        self.clock.advance(1)
+        ops.notification_claim_delivery()
+        failed = ops.notification_finish_delivery(delivery["id"], {
+            "ok": False, "status": 503, "error": "secret endpoint detail"})
+        self.assertEqual(failed["status"], "failed")
+        snapshot = ops.notification_snapshot("phone")
+        problem = snapshot["delivery_problems"][0]
+        self.assertEqual(problem["id"], delivery["id"])
+        self.assertTrue(problem["can_retry"])
+        self.assertNotIn("error", problem)
+        self.assertNotIn("subscription", repr(problem))
+        self.assertNotIn("endpoint", repr(problem))
+
+        current = fleet(self.clock, actions=[action("muted-session")])
+        ops.observe(current, self.workstream)
+        ops.notification_set_session_mute("muted-session", "claude", True)
+        projected = next(item for item in ops.notification_snapshot("phone")["events"]
+                         if item.get("session_id") == "muted-session")
+        self.assertTrue(projected["muted"])
 
     def test_push_subscription_boundary_and_redacted_device_lifecycle(self):
         rejected = [

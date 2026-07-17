@@ -140,7 +140,9 @@ class Handler(BaseHTTPRequestHandler):
     def _do_POST(self):
         route = self.path.split("?", 1)[0]
         if route not in ("/api/act", "/api/settings", "/api/search/rebuild",
-                         "/api/notifications/read", "/api/push/subscription",
+                         "/api/notifications/read", "/api/notifications/snooze",
+                         "/api/notifications/wake", "/api/notifications/mute",
+                         "/api/notifications/retry", "/api/push/subscription",
                          "/api/push/test", "/api/push/device-settings"):
             return self.reply(404, "text/plain", b"not found")
         if not self.token_ok():
@@ -168,6 +170,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/notifications/read":
             result = self.eng.notifications_mark_read(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/snooze":
+            result = self.eng.notifications_snooze(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/wake":
+            result = self.eng.notifications_wake(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/mute":
+            result = self.eng.notifications_mute(action)
+            return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notifications/retry":
+            result = self.eng.notifications_retry(action)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/push/subscription":
             result = self.eng.push_subscription(action)

@@ -21,6 +21,7 @@
     <div class="brand"><span class="brandmark">F</span><span><b>Fleet Dash</b><small>local operations</small></span></div>
     <nav class="navlist">
       <button data-route="now" onclick="navigateTo('now')"><span class="navicon">⌂</span><span>Now</span><b id="nav-now-count"></b></button>
+      <button data-route="notifications" onclick="navigateTo('notifications')"><span class="navicon">◉</span><span>Notifications</span><b id="nav-notification-count"></b></button>
       <button data-route="search" onclick="navigateTo('search')"><span class="navicon">⌕</span><span>Search</span></button>
       <button data-route="workstreams" onclick="navigateTo('workstreams')"><span class="navicon">⌘</span><span>Workstreams</span></button>
       <button data-route="history" onclick="navigateTo('history')"><span class="navicon">↺</span><span>History</span></button>
@@ -50,7 +51,6 @@
           <button class="saveview" onclick="saveCurrentView('now')" title="Save this filter">＋ Save view</button>
         </div>
       </div>
-      <div id="briefing"></div>
       <div id="pinned"></div>
       <div id="stale">server unreachable — showing last snapshot</div>
       <div id="providerstate"></div>
@@ -62,6 +62,24 @@
       <div id="working"></div>
       <div id="sessions"></div>
       <div id="newsess"></div>
+    </section>
+    <section class="destination" id="route-notifications" data-destination="notifications" hidden>
+      <div class="desthead"><div><h1>Notifications</h1><p>Durable requests, updates, problems, and review history.</p></div>
+        <button class="headsecondary" onclick="markNotificationsRead()">Mark all read</button></div>
+      <div class="notificationbar" aria-label="Notification sections">
+        <button data-notification-section="needs" onclick="setNotificationSection('needs')">Needs action</button>
+        <button data-notification-section="updates" onclick="setNotificationSection('updates')">Updates</button>
+        <button data-notification-section="snoozed" onclick="setNotificationSection('snoozed')">Snoozed</button>
+        <button data-notification-section="problems" onclick="setNotificationSection('problems')">Problems</button>
+        <button data-notification-section="briefing" onclick="setNotificationSection('briefing')">Briefing</button>
+        <button data-notification-section="history" onclick="setNotificationSection('history')">History</button>
+      </div>
+      <div id="notificationstatus" aria-live="polite"></div>
+      <div id="notificationlayout">
+        <div><div id="notifications" aria-live="polite"></div>
+          <button id="notificationmore" class="searchmore" onclick="loadNotifications(false)" hidden>Load older</button></div>
+        <aside id="notificationdetail" aria-label="Notification detail"></aside>
+      </div>
     </section>
     <section class="destination" id="route-search" data-destination="search" hidden>
       <div class="desthead"><div><h1>Search</h1><p>Claude, Codex, subagents, and delivered artifacts on this Mac.</p></div>
@@ -112,12 +130,13 @@
 </div>
 <nav id="bottomnav" aria-label="Fleet mobile navigation">
   <button data-route="now" onclick="navigateTo('now')"><span>⌂</span><small>Now</small></button>
+  <button data-route="notifications" onclick="navigateTo('notifications')"><span>◉</span><small>Notifications</small><b id="mobile-notification-count"></b></button>
   <button data-route="search" onclick="navigateTo('search')"><span>⌕</span><small>Search</small></button>
   <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>⌘</span><small>Work</small></button>
-  <button data-route="history" onclick="navigateTo('history')"><span>↺</span><small>History</small></button>
   <button data-route="more" onclick="toggleMobileMore()"><span>•••</span><small>More</small></button>
 </nav>
 <div id="mobilemore" role="menu">
+  <button role="menuitem" onclick="navigateTo('history')">↺ <span>History</span></button>
   <button role="menuitem" onclick="navigateTo('insights')">⌁ <span>Insights</span></button>
   <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
 </div>

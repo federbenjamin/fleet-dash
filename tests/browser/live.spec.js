@@ -125,11 +125,9 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   expect(briefing.ok).toBe(true);
   const budgets = await (await page.request.get('/api/budgets')).json();
   expect(budgets.ok).toBe(true);
-  await page.evaluate(() => loadBriefing(true));
-  if (await page.locator('#briefing .briefhead').isVisible()) {
-    await page.locator('#briefing .briefhead').click();
-    await expect(page.locator('#briefing .briefbody')).toBeVisible();
-  }
+  await goTo(page, 'notifications');
+  await page.locator('.notificationbar').getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications .briefbody')).toBeVisible();
   await goTo(page, 'settings');
   await expect(page.locator('.setrow:has-text("daily briefing push")')).toBeVisible();
   await expect(page.locator('.digestsettings input[type="time"]')).toBeVisible();

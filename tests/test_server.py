@@ -143,6 +143,43 @@ class ServerHandlerTest(unittest.TestCase):
         self.assertEqual(calls, [("push_config", "phone-1"),
                                  ("push_devices", "phone-1")])
 
+    def test_notification_mutation_routes_are_token_gated_and_dispatch_exact_payload(self):
+        routes = {
+            "/api/notifications/read": "notifications_mark_read",
+            "/api/notifications/snooze": "notifications_snooze",
+            "/api/notifications/wake": "notifications_wake",
+            "/api/notifications/mute": "notifications_mute",
+            "/api/notifications/retry": "notifications_retry",
+        }
+        payload = {"device_id": "phone-1", "event_id": "evt-1",
+                   "source_revision": "rev-1", "cursor": 3,
+                   "until": time.time() + 900, "muted": True,
+                   "delivery_id": "delivery-1"}
+        for route, method in routes.items():
+            with self.subTest(route=route):
+                calls = []
+                handler = self.handler(route)
+                handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+                handler.eng = SimpleNamespace(cfg={"act_token": "token"}, **{
+                    method: lambda action, method=method: calls.append((method, action)) or
+                        {"ok": True}})
+                body = json.dumps(payload).encode()
+                handler.headers = {"Content-Length": str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                replies = []
+                handler.reply = lambda code, ctype, data: replies.append(
+                    (code, json.loads(data)))
+                Handler._do_POST(handler)
+                self.assertEqual(replies[0][0], 403)
+                self.assertEqual(calls, [])
+
+                handler.headers["X-Act-Token"] = "token"
+                handler.rfile = io.BytesIO(body)
+                replies.clear()
+                Handler._do_POST(handler)
+                self.assertEqual(replies[0], (200, {"ok": True}))
+                self.assertEqual(calls, [(method, payload)])
+
     def test_push_subscription_post_never_logs_subscription_material(self):
         handler = self.handler("/api/push/subscription")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)

@@ -99,6 +99,26 @@ def base_session(provider, sid, title):
     return session
 
 
+def fixture_notification(sequence, kind, state, title, summary, provider="claude",
+                         session_id=None, *, unread=False, snoozed_until=None,
+                         link_kind=None, link_id=None):
+    now = time.time()
+    event_id = f"evt-{sequence}-{kind}"
+    return {"id": event_id, "event_key": f"fixture:{kind}:{sequence}",
+        "sequence": sequence, "kind": kind, "state": state,
+        "severity": "watch" if kind in ("failure", "stall") else "info",
+        "title": title, "summary": summary, "provider": provider,
+        "session_id": session_id, "workstream_id": "ws-fleet" if session_id else None,
+        "source_type": "action" if state != "resolved" else "briefing",
+        "source_id": session_id or event_id, "source_revision": f"rev-{sequence}",
+        "opened_at": now - sequence * 65, "changed_at": now - sequence * 30,
+        "resolved_at": now - sequence * 30 if state == "resolved" else None,
+        "snoozed_until": snoozed_until, "reminder_budget": 1,
+        "reminders_sent": 0, "payload": ({"link_kind": link_kind,
+            "link_id": link_id} if link_kind else {}), "unread": unread,
+        "muted": False}
+
+
 def fresh_state():
     claude = base_session("claude", "claude-one", "Claude parser fix")
     codex = base_session("codex", "codex:thread-one", "Codex parity work")
@@ -140,6 +160,25 @@ def fresh_state():
             "title": "Add repository outcome center", "body": "", "base": "main"},
         "pr_mark_ready": {"enabled": False, "reason": "No pull request",
             "number": None, "url": None}}
+    now = time.time()
+    notifications = [
+        fixture_notification(6, "question", "active", "Choose a release target",
+            "Claude needs one answer before it can continue.", "claude", "claude-one",
+            unread=True),
+        fixture_notification(5, "failure", "active", "Codex connection interrupted",
+            "The shared runtime stopped responding.", "codex", "codex:thread-one",
+            unread=True),
+        fixture_notification(4, "completion", "resolved", "Build finished",
+            "The notification persistence milestone completed.", "claude", "claude-one",
+            unread=True, link_kind="session", link_id="claude-one"),
+        fixture_notification(3, "stall", "snoozed", "Parser audit is quiet",
+            "No new progress has appeared for four minutes.", "codex", "codex:thread-one",
+            snoozed_until=now + 900),
+        fixture_notification(2, "outcome", "resolved", "Artifact delivered",
+            "A browser verification report is ready.", "codex", "codex:thread-one",
+            link_kind="session", link_id="codex:thread-one"),
+        fixture_notification(1, "notification", "resolved", "Push delivery recovered",
+            "The test device accepted its next delivery.", "claude")]
     return {"sessions": [claude, codex], "closed": [], "actions": [],
             "hidden_action_sessions": [],
             "ledger": {"ok": True, "recovered": False},
@@ -184,10 +223,62 @@ def fresh_state():
             "reader_width": "fit", "pinned_sessions": []},
             "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
             "repo": repo, "repo_actions": [], "outbox": [], "budgets": [],
-            "briefing_reviewed": {}, "push_devices": {}}
+            "briefing_reviewed": {}, "push_devices": {},
+            "notification_events": notifications,
+            "notification_read_cursors": {}, "muted_notification_sessions": [],
+            "notification_delivery_problems": [{"id": "delivery-fixture-1",
+                "event_id": "evt-5-failure", "device_id": "expired-phone",
+                "generation": 1, "status": "subscription_expired", "attempt": 2,
+                "remote_status": 410, "created_at": now - 300, "updated_at": now - 60,
+                "display_name": "Benjamin’s iPhone", "platform": "iOS",
+                "permission_state": "expired", "last_success_at": now - 3600,
+                "last_failure_at": now - 60, "enabled": False, "can_retry": False},
+                {"id": "delivery-fixture-2", "event_id": "evt-4-completion",
+                "device_id": "desktop", "generation": 1, "status": "failed",
+                "attempt": 1, "remote_status": 503, "created_at": now - 90,
+                "updated_at": now - 45, "display_name": "Studio Mac",
+                "platform": "macOS", "permission_state": "granted",
+                "last_success_at": now - 600, "last_failure_at": now - 45,
+                "enabled": True, "can_retry": True}]}
 
 
 STATE = fresh_state()
+
+
+def fixture_notifications(query):
+    device_id = (query.get("device") or ["default"])[0]
+    read_cursor = STATE["notification_read_cursors"].setdefault(device_id, 3)
+    event_id = (query.get("id") or [""])[0]
+    try:
+        limit = max(1, min(200, int((query.get("limit") or ["100"])[0])))
+        cursor = int((query.get("cursor") or ["0"])[0] or 0)
+    except ValueError:
+        return {"ok": False, "error": "invalid notification pagination"}
+    states = {item for item in (query.get("state") or [""])[0].split(",") if item}
+    kinds = {item for item in (query.get("kind") or [""])[0].split(",") if item}
+    events = copy.deepcopy(STATE["notification_events"])
+    maximum = max((item["sequence"] for item in events), default=0)
+    for item in events:
+        item["unread"] = item["sequence"] > read_cursor
+        item["muted"] = item.get("session_id") in STATE["muted_notification_sessions"]
+    if event_id:
+        rows = [item for item in events if item["id"] == event_id]
+        next_cursor = None
+    else:
+        before = cursor or maximum + 1
+        rows = [item for item in events if item["sequence"] < before and
+                (not states or item["state"] in states) and
+                (not kinds or item["kind"] in kinds)]
+        rows.sort(key=lambda item: item["sequence"], reverse=True)
+        next_cursor = rows[limit - 1]["sequence"] if len(rows) > limit else None
+        rows = rows[:limit]
+    return {"ok": True, "device_id": device_id, "read_cursor": read_cursor,
+        "event_cursor": maximum,
+        "unread": sum(item["sequence"] > read_cursor for item in events),
+        "active": sum(item["state"] in ("active", "snoozed") for item in events),
+        "events": rows,
+        "delivery_problems": copy.deepcopy(STATE["notification_delivery_problems"]),
+        "next_cursor": next_cursor}
 
 
 def fixture_actions(sessions):
@@ -546,7 +637,8 @@ def set_scenario(name):
     STATE = fresh_state()
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
-        name.startswith("mobile-needs-you") or name.startswith("close-worktree")) else codex_session()
+        name.startswith("mobile-needs-you") or name.startswith("close-worktree") or
+        name == "notification-request") else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -558,6 +650,14 @@ def set_scenario(name):
             "compact_remaining": None, "cache_read_pct": None, "cache_write": None,
             "tree_cost": None, "cost_scope": "unavailable", "frozen": False}
         STATE["contexts"]["claude-one"] = []
+    elif name == "notification-request":
+        session.update(state="needs_you", normalized_state="needs_you", reg_status="waiting",
+            pending={"kind": "question", "nonce": "rev-6", "dismiss_action": "cancel_turn",
+                "questions": [{"header": "Release target",
+                    "question": "Which release target should Fleet use?", "multiSelect": False,
+                    "allowOther": True, "options": [
+                        {"label": "Staging", "description": "Verify before production."},
+                        {"label": "Production", "description": "Ship the approved build."}]}]})
     elif name in ("mobile-needs-you", "mobile-needs-you-missing-action"):
         session.update(title="Get 429 into a mergable state", name="hazy-hatching-curry-d8",
             project="hazy-hatching-curry", branch="fix/pr-429", state="needs_you",
@@ -774,9 +874,11 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if route in ("/api/search", "/api/search/status", "/api/search/context",
                          "/api/handoff", "/api/repo", "/api/outbox",
-                         "/api/push/config", "/api/push/devices"):
+                         "/api/notifications", "/api/push/config", "/api/push/devices"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                if route == "/api/notifications":
+                    return self.json_reply(fixture_notifications(query))
                 if route in ("/api/push/config", "/api/push/devices"):
                     device_id = (query.get("device") or
                         [self.headers.get("X-Fleet-Device-ID") or ""])[0]
@@ -1077,7 +1179,9 @@ class Handler(BaseHTTPRequestHandler):
                     session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
             if route in ("/api/act", "/api/settings", "/api/search/rebuild",
-                         "/api/notifications/read", "/api/push/subscription",
+                         "/api/notifications/read", "/api/notifications/snooze",
+                         "/api/notifications/wake", "/api/notifications/mute",
+                         "/api/notifications/retry", "/api/push/subscription",
                          "/api/push/test", "/api/push/device-settings") \
                     and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
@@ -1124,7 +1228,56 @@ class Handler(BaseHTTPRequestHandler):
                     "event_id": "evt-fixture", "device_id": device["id"],
                     "generation": 1, "status": "queued", "attempt": 0}})
             if route == "/api/notifications/read":
-                return self.json_reply({"ok": True, "cursor": int(payload.get("cursor") or 0)})
+                device_id = str(payload.get("device_id") or "default")
+                cursor = int(payload.get("cursor") or 0)
+                STATE["notification_read_cursors"][device_id] = max(
+                    cursor, STATE["notification_read_cursors"].get(device_id, 0))
+                STATE["actions"].append({"type": "notifications_read",
+                    "device_id": device_id, "cursor": cursor})
+                return self.json_reply({"ok": True,
+                    "cursor": STATE["notification_read_cursors"][device_id]})
+            if route in ("/api/notifications/snooze", "/api/notifications/wake",
+                         "/api/notifications/mute"):
+                event = next((item for item in STATE["notification_events"]
+                    if item["id"] == payload.get("event_id")), None)
+                if not event or event["source_revision"] != payload.get("source_revision"):
+                    return self.json_reply({"ok": False,
+                        "error": "notification changed; refresh and try again"}, 409)
+                if route == "/api/notifications/snooze":
+                    event.update(state="snoozed", snoozed_until=float(payload.get("until") or 0),
+                        changed_at=time.time())
+                    result = {"ok": True, "event": copy.deepcopy(event)}
+                elif route == "/api/notifications/wake":
+                    event.update(state="active", snoozed_until=None, changed_at=time.time())
+                    result = {"ok": True, "event": copy.deepcopy(event)}
+                else:
+                    sid = event.get("session_id")
+                    if not sid:
+                        return self.json_reply({"ok": False,
+                            "error": "notification has no session"}, 409)
+                    muted = payload.get("muted") is True
+                    sessions = set(STATE["muted_notification_sessions"])
+                    sessions.add(sid) if muted else sessions.discard(sid)
+                    STATE["muted_notification_sessions"] = sorted(sessions)
+                    for session in STATE["sessions"]:
+                        if session["session_id"] == sid:
+                            session["muted"] = muted
+                    result = {"ok": True, "session_id": sid, "muted": muted}
+                STATE["actions"].append({"type": route.rsplit("/", 1)[-1],
+                    "event_id": event["id"]})
+                return self.json_reply(result)
+            if route == "/api/notifications/retry":
+                delivery_id = str(payload.get("delivery_id") or "")
+                before = len(STATE["notification_delivery_problems"])
+                STATE["notification_delivery_problems"] = [item for item in
+                    STATE["notification_delivery_problems"] if item["id"] != delivery_id]
+                if len(STATE["notification_delivery_problems"]) == before:
+                    return self.json_reply({"ok": False,
+                        "error": "delivery is no longer retryable"}, 409)
+                STATE["actions"].append({"type": "notification_retry",
+                    "delivery_id": delivery_id})
+                return self.json_reply({"ok": True, "delivery": {"id": delivery_id,
+                    "status": "queued"}})
             if route == "/api/search/rebuild":
                 STATE["actions"].append({"type": "search_rebuild"})
                 return self.json_reply({"ok": True, "rebuilding": True})

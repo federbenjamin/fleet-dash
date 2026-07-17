@@ -16,6 +16,9 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       await frame();
       const started = performance.now();
       if (flow === 'navigation') document.querySelector('[data-route="search"]:not([hidden])')?.click();
+      else if (flow === 'notifications') document.querySelector('[data-route="notifications"]:not([hidden])')?.click();
+      else if (flow === 'notification_detail') openNotification('evt-6-question');
+      else if (flow === 'notification_action') snoozeNotification('evt-6-question', 'rev-6', 'quarter');
       else if (flow === 'now') document.querySelector('[data-now-filter="needs_you"]')?.click();
       else if (flow === 'session_chat') document.querySelector('[data-sid="claude-one"] .shead')?.click();
       else if (flow === 'native_requests') document.querySelector('[data-sid="claude-one"] .termbtn')?.click();
@@ -48,8 +51,17 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
           await new Promise(resolve => setTimeout(resolve, 2));
         }
       }
+      if (flow === 'notification_action') {
+        while (notificationActionState.busy) {
+          await new Promise(resolve => setTimeout(resolve, 2));
+        }
+      }
 
-      if (flow === 'navigation' || flow === 'search_history' || flow === 'workstreams_repository') navigateTo('now', false);
+      if (flow === 'navigation' || flow === 'notifications' || flow === 'search_history' || flow === 'workstreams_repository') navigateTo('now', false);
+      else if (flow === 'notification_detail') {
+        notificationDetailId = null; notificationDetail = null; notificationDetailError = '';
+        navigateTo('now', false);
+      }
       else if (flow === 'now' || flow === 'subagents') setNowState('all');
       else if (flow === 'session_chat') closeSession();
       else if (flow === 'native_requests') {
@@ -72,11 +84,15 @@ function p95(values) {
 }
 
 test('named interaction inventory meets first-feedback and local completion budgets', async ({ page }) => {
-  test.setTimeout(120_000);
+  // The inventory includes 20 serialized native/persistence action samples.
+  // Mobile headless RAF throttling can make the complete matrix exceed two
+  // minutes even while every measured input remains inside its own budget.
+  test.setTimeout(240_000);
   await reset(page);
 
   const flows = [
     'navigation', 'now', 'session_chat', 'native_requests', 'session_lifecycle',
+    'notifications', 'notification_detail', 'notification_action',
     'subagents', 'search_history', 'workstreams_repository', 'insights_usage',
     'settings', 'outbox_handoff', 'pinning', 'mobile_pin_hold',
   ];

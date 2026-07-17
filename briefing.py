@@ -179,6 +179,9 @@ class FleetOperations:
                 preferences_json TEXT NOT NULL DEFAULT '{}')""")
             db.execute("""CREATE INDEX IF NOT EXISTS notification_devices_enabled
                 ON notification_devices(enabled, permission_state)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_read_cursors(
+                device_id TEXT PRIMARY KEY, read_cursor INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_deliveries(
                 id TEXT PRIMARY KEY, event_id TEXT NOT NULL, device_id TEXT NOT NULL,
                 generation INTEGER NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL,
@@ -1200,9 +1203,19 @@ class FleetOperations:
         with self.lock, self._connect() as db:
             device = db.execute("""SELECT read_cursor FROM notification_devices
                 WHERE id=?""", (device_id,)).fetchone()
-            read_cursor = int(device[0]) if device else 0
+            browser = db.execute("""SELECT read_cursor FROM notification_read_cursors
+                WHERE device_id=?""", (device_id,)).fetchone()
             maximum = int(db.execute(
                 "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
+            saved_cursors = [int(row[0]) for row in (device, browser) if row]
+            # A browser identity begins at the current edge, like a newly registered
+            # push device. The successful page load immediately persists that edge;
+            # old history remains queryable without appearing as a notification blast.
+            read_cursor = max(saved_cursors) if saved_cursors else maximum
+            if not saved_cursors:
+                db.execute("""INSERT OR IGNORE INTO notification_read_cursors(
+                    device_id,read_cursor,updated_at) VALUES(?,?,?)""",
+                           (device_id, read_cursor, self.clock()))
             if event_id:
                 rows = db.execute("SELECT * FROM notification_events WHERE id=?",
                                   (event_id,)).fetchall()
@@ -1223,13 +1236,38 @@ class FleetOperations:
                 has_more = len(rows) > limit
                 rows = rows[:limit]
             events = [self._notification_event(row, read_cursor) for row in rows]
+            muted_sessions = {row[0] for row in db.execute(
+                "SELECT session_id FROM notification_session_mutes").fetchall()}
+            for item in events:
+                item["muted"] = bool(item.get("session_id") in muted_sessions)
             unread = int(db.execute("""SELECT COUNT(*) FROM notification_events
                 WHERE sequence>?""", (read_cursor,)).fetchone()[0])
             active = int(db.execute("""SELECT COUNT(*) FROM notification_events
                 WHERE state IN ('active','snoozed')""").fetchone()[0])
+            delivery_rows = db.execute("""SELECT d.id,d.event_id,d.device_id,d.generation,
+                    d.status,d.attempt,d.remote_status,d.created_at,d.updated_at,
+                    v.display_name,v.platform,v.enabled,v.permission_state,
+                    v.last_success_at,v.last_failure_at
+                FROM notification_deliveries d
+                JOIN notification_devices v ON v.id=d.device_id
+                WHERE d.status IN ('failed','subscription_expired')
+                AND NOT EXISTS(SELECT 1 FROM notification_deliveries newer
+                    WHERE newer.event_id=d.event_id AND newer.device_id=d.device_id
+                    AND newer.generation>d.generation)
+                ORDER BY d.updated_at DESC LIMIT 50""").fetchall()
+            delivery_problems = []
+            for row in delivery_rows:
+                problem = {key: row[key] for key in (
+                    "id", "event_id", "device_id", "generation", "status", "attempt",
+                    "remote_status", "created_at", "updated_at", "display_name", "platform",
+                    "permission_state", "last_success_at", "last_failure_at")}
+                problem["enabled"] = bool(row["enabled"])
+                problem["can_retry"] = (row["status"] == "failed" and bool(row["enabled"])
+                                        and row["permission_state"] == "granted")
+                delivery_problems.append(problem)
         return {"ok": True, "device_id": device_id, "read_cursor": read_cursor,
                 "event_cursor": maximum, "unread": unread, "active": active,
-                "events": events,
+                "events": events, "delivery_problems": delivery_problems,
                 "next_cursor": (events[-1]["sequence"] if has_more and events else None)}
 
     def notification_counts(self, device_id="default"):
@@ -1260,10 +1298,13 @@ class FleetOperations:
             existing = db.execute(
                 "SELECT preferences_json FROM notification_devices WHERE id=?",
                 (device_id,)).fetchone()
+            browser = db.execute("""SELECT read_cursor FROM notification_read_cursors
+                WHERE device_id=?""", (device_id,)).fetchone()
             preferences_json = self._json(validated_preferences) if preferences is not None else \
                 (existing["preferences_json"] if existing else "{}")
             maximum = int(db.execute(
                 "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
+            initial_cursor = int(browser[0]) if browser else maximum
             db.execute("""INSERT INTO notification_devices(
                 id,display_name,platform,subscription_json,endpoint_origin,enabled,
                 permission_state,created_at,last_registered_at,read_cursor,preferences_json)
@@ -1273,9 +1314,15 @@ class FleetOperations:
                 endpoint_origin=excluded.endpoint_origin,enabled=1,
                 permission_state=excluded.permission_state,
                 last_registered_at=excluded.last_registered_at,
+                read_cursor=MAX(notification_devices.read_cursor,excluded.read_cursor),
                 preferences_json=excluded.preferences_json""", (
                 device_id, display_name, platform, subscription_json, endpoint_origin,
-                permission_state, now, now, maximum, preferences_json))
+                permission_state, now, now, initial_cursor, preferences_json))
+            db.execute("""INSERT INTO notification_read_cursors(
+                device_id,read_cursor,updated_at) VALUES(?,?,?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                read_cursor=MAX(read_cursor,excluded.read_cursor),updated_at=excluded.updated_at""",
+                       (device_id, initial_cursor, now))
             row = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
                 created_at,last_registered_at,last_success_at,last_failure_at,last_failure,
                 read_cursor,preferences_json FROM notification_devices WHERE id=?""",
@@ -1374,14 +1421,15 @@ class FleetOperations:
             maximum = int(db.execute(
                 "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
             cursor = min(cursor, maximum)
-            changed = db.execute("""UPDATE notification_devices SET
-                read_cursor=MAX(read_cursor,?),last_registered_at=last_registered_at
-                WHERE id=?""", (cursor, device_id)).rowcount
-            if not changed:
-                raise OperationsError("notification device is not registered")
-            saved = int(db.execute(
-                "SELECT read_cursor FROM notification_devices WHERE id=?",
-                (device_id,)).fetchone()[0])
+            db.execute("""INSERT INTO notification_read_cursors(
+                device_id,read_cursor,updated_at) VALUES(?,?,?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                read_cursor=MAX(read_cursor,excluded.read_cursor),updated_at=excluded.updated_at""",
+                       (device_id, cursor, now))
+            db.execute("""UPDATE notification_devices SET
+                read_cursor=MAX(read_cursor,?) WHERE id=?""", (cursor, device_id))
+            saved = int(db.execute("""SELECT read_cursor FROM notification_read_cursors
+                WHERE device_id=?""", (device_id,)).fetchone()[0])
         return saved
 
     def notification_snooze(self, event_id, source_revision, until):
@@ -1403,6 +1451,22 @@ class FleetOperations:
             db.execute("""UPDATE notification_events SET state='snoozed',
                 snoozed_until=?,changed_at=? WHERE id=?""", (until, now, event_id))
         return until
+
+    def notification_wake(self, event_id, source_revision):
+        event_id = self._text(event_id, 100)
+        source_revision = self._text(source_revision, 320)
+        if not event_id or not source_revision:
+            raise OperationsError("invalid wake request")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            row = db.execute("""SELECT source_revision,state FROM notification_events
+                WHERE id=?""", (event_id,)).fetchone()
+            if (not row or row["source_revision"] != source_revision or
+                    row["state"] != "snoozed"):
+                raise OperationsError("notification event is stale")
+            db.execute("""UPDATE notification_events SET state='active',
+                snoozed_until=NULL,changed_at=? WHERE id=?""", (now, event_id))
+        return True
 
     def notification_set_session_mute(self, session_id, provider=None, muted=True):
         session_id = self._text(session_id, 320)

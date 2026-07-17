@@ -9,7 +9,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## What it shows
 
-- **Now is an operations queue:** **Fleet Briefing** appears first, then **Pinned** sessions and one deduplicated **Action
+- **Now is an operations queue:** **Pinned** sessions appear first, then one deduplicated **Action
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
@@ -27,9 +27,17 @@ the provider's native control path. Built 2026-07-13; still evolving.
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
-- **Responsive application navigation:** desktop uses a persistent rail for Now, Search,
-  Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes a
-  fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
+- **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
+  **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
+  mobile tab show active/unread counts; opening a row loads its current exact state before marking it
+  read. Event detail supports 15-minute, one-hour, and tomorrow snooze, early wake, session mute until
+  manual unmute, delivery retry, and expired-device reconnect. Exact links use
+  `#notifications/<event-id>` and participate in refresh and browser/native back. Desktop keeps a
+  split list/detail view; mobile opens detail as a full-height drawer. Briefing now lives here instead
+  of competing with the live Action Inbox on Now.
+- **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
+  Search, Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes
+  a fixed bottom bar; History, Insights, and Settings live under More. The URL hash preserves destinations
   across refresh and browser/native back gestures. Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
   filters whose named saved views remain on this device.
@@ -206,7 +214,7 @@ the provider without affecting Claude sessions.
   External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
   The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
-  **📌 pinned sessions** block directly below Fleet Briefing. Pinned cards keep the order in which
+  **📌 pinned sessions** block at the top of Now. Pinned cards keep the order in which
   they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
   Cards are relocated rather than duplicated. On **desktop**, use the
   contained 📌 button immediately to the right of **open/attach/view only** in the session header; on

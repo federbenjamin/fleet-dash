@@ -19,7 +19,7 @@ Status: M0–M11 complete; M12 approved for sequential implementation on
 | M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 | M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
-| M12 — Notification Center and Web Push | In progress · N0a/N1/N2/N3 complete · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; write-only subscriptions; supervised VAPID helper; durable coalesced lease/retry; expired-device cleanup; redacted health/diagnostics; explicit asynchronous test delivery. Real-device proof remains N0b after N4. |
+| M12 — Notification Center and Web Push | In progress · N0a/N1/N2/N3/N4 complete · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center with exact detail links, read/snooze/wake/mute/retry state, delivery problems, badges, and Briefing consolidation. Real-device N0b remains the gate before N5. |
 
 Completion here records the milestone gate, not proof by assertion. M10 reopened the M0–M10
 catalogue rows, verified the current implementation and tests, and recorded the source/runtime
@@ -107,7 +107,7 @@ the current source and running app; a checked box or this document's prose is no
 | UX-012 | Session close/stop controls live in the full-chat overflow menu with confirmation. Stop affects the current turn; Claude close may terminate its terminal, while provider capability text remains explicit. | M1 |
 | UX-013 | Every message composer groups Send now, Schedule, When available, and When usage resets without making the common Send now path slower. New Session offers Schedule session alongside Start session. | M7 |
 | UX-014 | The Outbox is reachable from Now and the sticky command bar, has a pending-count badge, and supports edit, send now, retarget, retry, and cancel where state permits. | M7 |
-| UX-015 | Now puts counts in its All/Needs you/Working/Available/Subagents filters, keeps Fleet Briefing above Pinned, and moves detailed provider usage behind a warning-aware Usage chip. | M11 |
+| UX-015 | Now puts counts in its All/Needs you/Working/Available/Subagents filters and moves detailed provider usage behind a warning-aware Usage chip. M11's Briefing-above-Pinned placement was intentionally superseded by UX-019 when N4 moved Briefing into Notifications. | M11/M12 |
 | UX-016 | Every composer is multiline: Return inserts a newline, modified Return or the explicit button sends, and optimistic startup/sending states retain exact text on failure. | M11 |
 | UX-017 | Full chat and subagent chat expose an adaptive operational status strip; Markdown and chat headers avoid duplicated metadata; nested overlays always stack above chat evidence. | M11 |
 | UX-018 | Every asynchronous control paints a pressed/optimistic/loading state immediately, rejects duplicate submissions, ignores stale responses, and keeps an inline restore/retry path on failure. | M11 |
@@ -1074,8 +1074,8 @@ responsive, deterministic, and live evidence. The daemon is running the M11 engi
 
 ### M12 — Notification Center and Web Push
 
-Planned 2026-07-16. The approved implementation contract, requirements catalogue, migration order,
-and release gates live in
+Implementation started 2026-07-16; N0a and N1–N4 are complete, with real-device N0b next. The
+approved implementation contract, requirements catalogue, migration order, and release gates live in
 [`docs/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
 
 - **N0a/N0b — Compatibility prototype and baseline:** record runtime/latency and encrypted-request
@@ -1087,8 +1087,9 @@ and release gates live in
   subscription repair flows, per-device setup, and honest health states.
 - **N3 — Persistent Web Push delivery:** add the supervised fixed-protocol Node helper, VAPID,
   endpoint confinement, durable retry, expired-subscription handling, and redacted diagnostics.
-- **N4 — Notification Center consolidation:** add the desktop/mobile destination and move Briefing
-  history out of Now while preserving Now's live Action Inbox.
+- **N4 — Notification Center consolidation (complete):** desktop/mobile Notifications owns exact
+  canonical event detail, per-device read state, snooze/wake/mute/retry controls, delivery problems,
+  badges, filters/history, and Briefing; Now retains its live Action Inbox.
 - **N5 — Production policy and actions:** enable the selected event policy, one reminder, minimal
   payloads, exact deep links, and one-use Snooze/Mute capabilities.
 - **N6 — Legacy retirement and release:** make ntfy manual legacy only, complete migration/docs,

@@ -416,6 +416,19 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     VAPID public key, helper state/restart count, and queue aggregates; endpoint, subscription keys,
     private keys, and raw errors never cross a read API. N1–N3 stay dark: only the explicit Settings
     test queues delivery until N5 enables production policy.
+47. **Notification Center owns durable interruption history; Now owns live actions.** The old Now
+    Briefing block must not return: Briefing is an on-demand section beside Needs action, Updates,
+    Snoozed, Problems, and History. `GET /api/notifications` is action-token protected and projects
+    canonical event counts, per-device unread state, session mute state, and redacted delivery
+    problems. A browser identity needs no push registration: its first successful snapshot seeds a
+    durable read cursor at the current edge, later reads are monotonic, and a future push
+    registration inherits that cursor. Exact `#notifications/<opaque-id>` routes load the current
+    event successfully before marking through its sequence; browser/native back closes the detail.
+    Snooze, Wake, Mute/Unmute, and Retry are separate token-gated POST routes and event mutations
+    require the exact source revision. Badges count canonical active/unread events, never delivery
+    attempts. Desktop is a list/detail split; mobile detail is a fixed drawer above the bottom bar.
+    Delivery failures may expose bounded device name/platform/status/timestamps and retryability,
+    never endpoint, origin, subscription material, keys, or raw errors.
 
 ## Dev workflow
 
@@ -462,7 +475,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
   `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/settings` +
-  `/api/search/rebuild` + notification read/device/subscription/test routes are token-gated.
+  `/api/search/rebuild` + notification read/snooze/wake/mute/retry and
+  device/subscription/test routes are token-gated.
   Settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
   the stalled STATE, not just the push), `muted_sessions` (sid → ts, persists until manual unmute),
@@ -475,7 +489,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
 - `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a per-device left/right rail;
-  mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
+  mobile navigation is a bottom bar with History/Insights/Settings under More. Destinations are URL-hash
   routed, participate in browser/native back, and keep History/Insights out of Now.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
   motion/mobile rules.

@@ -66,7 +66,7 @@ test('responsive application shell routes, filters, and follows browser back', a
   await nowControl.focus();
   await expect(nowControl).toBeFocused();
   await page.keyboard.press('Tab');
-  expect(await page.evaluate(() => document.activeElement?.dataset?.route)).toBe('search');
+  expect(await page.evaluate(() => document.activeElement?.dataset?.route)).toBe('notifications');
 
   await goTo(page, 'search');
   await expect(page).toHaveURL(/#search$/);
@@ -294,8 +294,8 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
 
 test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
   await reset(page);
-  expect(await page.evaluate(() => Boolean(document.querySelector('#briefing')
-    .compareDocumentPosition(document.querySelector('#pinned')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(page.locator('#route-now #briefing')).toHaveCount(0);
+  await expect(page.locator('#pinned')).toHaveCount(1);
   await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
   await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
   await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
@@ -1786,9 +1786,10 @@ test('usage-reset and scheduled-new-session forms keep full target configuration
 
 test('fleet briefing separates current attention from completed outcomes and persists review', async ({ page }, testInfo) => {
   await reset(page, 'base');
-  await expect(page.locator('#briefing')).toContainText('Fleet briefing');
-  await expect(page.locator('#briefing')).toContainText('2 since review');
-  await page.locator('.briefhead').click();
+  await goTo(page, 'notifications');
+  await page.getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications')).toContainText('Fleet briefing');
+  await expect(page.locator('#notifications')).toContainText('2 since review');
   await expect(page.locator('.briefbody')).toContainText('Completed since last review');
   await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
   await expect(page.locator('.briefbody')).toContainText('Artifacts delivered');
@@ -1796,10 +1797,72 @@ test('fleet briefing separates current attention from completed outcomes and per
   await page.screenshot({ path: testInfo.outputPath('fleet-briefing.png'), fullPage: true });
 
   await page.reload();
-  await expect(page.locator('#briefing')).toContainText('2 recently reviewed');
-  await page.locator('.briefhead').click();
+  await page.getByRole('button', { name: /^Briefing/ }).click();
+  await expect(page.locator('#notifications')).toContainText('2 recently reviewed');
   await expect(page.locator('.briefbody')).toContainText('Recently reviewed');
   await expect(page.locator('.briefbody')).toContainText('Parser tests passed');
+});
+
+test('Notification Center keeps durable state, exact detail routes, and delivery recovery together', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await goTo(page, 'notifications');
+  await expect(page.locator('#notificationstatus')).toContainText('3 active');
+  await expect(page.locator('#notificationstatus')).toContainText('3 unread');
+  await expect(page.getByRole('button', { name: /^Needs action/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Updates/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 1');
+  await expect(page.getByRole('button', { name: /^Problems/ })).toContainText('· 3');
+
+  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  await expect(page).toHaveURL(/#notifications\/evt-6-question$/);
+  await expect(page.locator('#notificationdetail')).toContainText('Claude needs one answer');
+  await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
+  if (testInfo.project.name.startsWith('mobile')) {
+    await expect(page.locator('#notificationdetail')).toBeVisible();
+    expect(await page.locator('#notificationdetail').evaluate(element => getComputedStyle(element).position)).toBe('fixed');
+  }
+  await expect.poll(async () => (await fixtureState(page)).notification_read_cursors).not.toEqual({});
+  await expect(page.locator('#notificationstatus')).toContainText('0 unread');
+
+  await page.getByRole('button', { name: 'Snooze 15m' }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Snoozed until');
+  await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 2');
+  await page.getByRole('button', { name: 'Wake now' }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Moved back to Needs action');
+  await page.getByRole('button', { name: 'Mute session' }).click();
+  await expect(page.getByRole('button', { name: 'Unmute session' })).toBeVisible();
+  await expect.poll(async () => (await fixtureState(page)).muted_notification_sessions).toContain('claude-one');
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#notificationdetail')).not.toHaveClass(/open/);
+  await page.locator('.notificationbar').getByRole('button', { name: /^Problems/ }).click();
+  await expect(page.locator('.deliveryproblem')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.locator('.deliveryproblem')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Reconnect' })).toBeVisible();
+
+  await page.locator('.notificationbar').getByRole('button', { name: /^History/ }).click();
+  await page.locator('.notificationsearch input').fill('artifact');
+  await page.getByLabel('notification workstream').selectOption('ws-fleet');
+  await page.getByLabel('notification session').selectOption('codex:thread-one');
+  await page.getByLabel('notification age').selectOption('604800');
+  await expect(page.locator('#notifications .notificationrow')).toHaveCount(1);
+  await expect(page.locator('#notifications')).toContainText('Artifact delivered');
+
+  await page.goto('/#notifications/evt-5-failure');
+  await expect(page.locator('#notificationdetail')).toContainText('Codex connection interrupted');
+  await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
+  await page.screenshot({ path: testInfo.outputPath('notification-center.png'), fullPage: true });
+
+  await reset(page, 'notification-request');
+  await goTo(page, 'notifications');
+  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Respond here');
+  await expect(page.locator('#notificationdetail')).toContainText('Which release target should Fleet use?');
+  await page.locator('#notificationdetail').getByRole('button', { name: /Staging/ }).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.some(action =>
+    action.type === 'option' && action.session_id === 'claude-one' && action.nonce === 'rev-6')).toBe(true);
 });
 
 test('PWA shell stays private and device settings remain redacted', async ({ page }) => {

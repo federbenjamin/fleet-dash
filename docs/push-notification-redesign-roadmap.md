@@ -411,9 +411,12 @@ All JSON routes retain the existing action-token authentication, body limits, ti
 error behavior unless the route is explicitly capability-authenticated.
 
 ```text
-GET  /api/notifications?section=&cursor=&limit=&device=
-POST /api/notifications/read       {device_id, cursor|event_ids}
-POST /api/notifications/action     {event_id, action, duration?}
+GET  /api/notifications?cursor=&limit=&device=&state=&kind=&id=
+POST /api/notifications/read       {device_id, cursor}
+POST /api/notifications/snooze     {event_id, source_revision, until}
+POST /api/notifications/wake       {event_id, source_revision}
+POST /api/notifications/mute       {device_id, event_id, source_revision, muted}
+POST /api/notifications/retry      {delivery_id}
 
 GET  /api/push/config              public VAPID key + feature/health projection
 POST /api/push/subscription        create/update/remove current device subscription
@@ -534,6 +537,8 @@ no-op action p95.
 
 ### N4 — Notification Center and surface consolidation
 
+Status: Complete · 2026-07-17
+
 - Add desktop/mobile destination, badges, sections, pagination/filters, exact event detail, per-device
   read state, Snooze/Wake/Unmute/Retry/Reconnect, and responsive/accessible empty/error/loading states.
 - Move Briefing history/summary into Notifications and remove the old Now Briefing block.
@@ -542,6 +547,22 @@ no-op action p95.
 
 Exit: every canonical event is discoverable in exactly one durable inbox; Now and Notifications have
 distinct roles; desktop 1440×1000 and mobile 390×844 pass.
+
+Evidence: Notifications is a primary desktop/mobile destination with canonical active/unread badges,
+six sections, bounded pagination, provider/workstream/session/kind/time/text History filters, exact
+event routes, current-state detail, inline native request controls, per-device read state for both
+registered and browser-only identities, Snooze/Wake, indefinite Mute/Unmute, delivery Retry/Reconnect,
+responsive loading/error/empty states, and a fixed mobile drawer. Briefing moved out of Now while the
+live Action Inbox stayed in place. Python tests cover monotonic browser cursors across restart, future
+push-registration inheritance, stale mutation checks, mute projection, redacted delivery problems,
+and token-gated route dispatch. The 210-test Python suite and five Node transport tests passed. All
+114 deterministic desktop/mobile feature checks passed on the final source. The named latency
+inventory passed on desktop in 1.1 minutes and mobile in 1.2 minutes with every first-feedback p95
+below 100 ms. Workstreams and the Subagents filter now commit a visible destination/selection state
+before their heavier render runs on the next animation frame. After a native launchd restart, the
+authenticated Notification/API/PWA smokes passed with the Web Push helper ready, six install assets,
+redacted delivery/device state, and the live Notifications → Briefing flow. No push device is
+registered, so real app-closed device proof remains N0b before N5.
 
 ### N5 — Production policy, deep links, and reversible push actions
 

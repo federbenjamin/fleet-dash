@@ -4521,6 +4521,60 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception:
             return {"ok": False, "error": "notification read state could not be saved"}
 
+    def notifications_snooze(self, payload):
+        try:
+            until = self.operations.notification_snooze(
+                payload.get("event_id"), payload.get("source_revision"), payload.get("until"))
+            return {"ok": True, "until": until}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification could not be snoozed"}
+
+    def notifications_wake(self, payload):
+        try:
+            self.operations.notification_wake(
+                payload.get("event_id"), payload.get("source_revision"))
+            return {"ok": True}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification could not be woken"}
+
+    def notifications_mute(self, payload):
+        try:
+            event = self.operations.notification_snapshot(
+                payload.get("device_id") or "default", event_id=payload.get("event_id"))
+            item = (event.get("events") or [None])[0]
+            if (not item or item.get("source_revision") != payload.get("source_revision") or
+                    not item.get("session_id")):
+                raise OperationsError("notification event is stale")
+            muted = payload.get("muted")
+            if not isinstance(muted, bool):
+                raise OperationsError("invalid notification mute state")
+            saved = self.update_settings({"mute_session": item["session_id"], "muted": muted})
+            if not saved.get("ok"):
+                raise OperationsError(saved.get("error") or "notification mute failed")
+            self.operations.notification_set_session_mute(
+                item["session_id"], item.get("provider"), muted)
+            return {"ok": True, "muted": muted, "session_id": item["session_id"]}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification mute could not be saved"}
+
+    def notifications_retry(self, payload):
+        try:
+            delivery = self.operations.notification_retry_delivery(payload.get("delivery_id"))
+            with self.web_push_lock:
+                if self.web_push:
+                    self.web_push.wake_event.set()
+            return {"ok": True, "delivery": delivery}
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            return {"ok": False, "error": "notification delivery could not be retried"}
+
     def start_web_push(self):
         """Start the isolated delivery runtime without delaying daemon availability."""
         with self.web_push_lock:
