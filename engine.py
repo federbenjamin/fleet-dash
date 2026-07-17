@@ -46,7 +46,7 @@ DEFAULT_CONFIG = {
     "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
     "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
     "digest_schedule_zone": "UTC",
-    "muted_sessions": {},               # session_id -> mute ts (per-session push mute, 🔕)
+    "muted_sessions": {},               # session_id -> mute ts; persists until manual unmute
     "pinned_sessions": [],               # shared watchlist, stable insertion order
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
@@ -4425,6 +4425,17 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception as exc:
             return {"ok": False, "error": f"briefing is temporarily unavailable: {exc}"}
 
+    def notifications_snapshot(self, device_id="default", cursor=None, limit=100,
+                               states=None, kinds=None, event_id=None):
+        try:
+            return self.operations.notification_snapshot(
+                device_id=device_id or "default", cursor=cursor, limit=limit,
+                states=states, kinds=kinds, event_id=event_id)
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": f"notifications are temporarily unavailable: {exc}"}
+
     def budgets_snapshot(self, spawn=None):
         with self.lock:
             snapshot = copy.deepcopy(self.snapshot_cache)
@@ -5391,7 +5402,8 @@ Treat this as an independent session. Verify the repository state before changin
                 mu[ms] = time.time()
             else:
                 mu.pop(ms, None)
-            mu = {k: v for k, v in mu.items() if time.time() - v < 30 * 86400}
+            if len(mu) > 5000:
+                return {"ok": False, "error": "too many muted sessions"}
             staged["muted_sessions"] = changed["muted_sessions"] = mu
         if "pin_session" in patch:
             sid = str(patch.get("pin_session") or "").strip()
@@ -5459,8 +5471,8 @@ Treat this as an independent session. Verify the repository state before changin
                 values = dict(staged.get("muted_sessions") or {})
                 for sid, _, _ in normalized:
                     values[sid] = now
-                values = {key: value for key, value in values.items()
-                          if now - float(value or 0) < 30 * 86400}
+                if len(values) > 5000:
+                    return {"ok": False, "error": "too many muted sessions"}
                 staged["muted_sessions"] = changed["muted_sessions"] = values
             elif operation == "dismiss":
                 values = dict(staged.get("dismissed_actions") or {})

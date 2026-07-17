@@ -409,7 +409,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
 | `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
-| `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle (30-day auto-expiry) |
+| `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle; persists until manual unmute |
 | `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
 | `reply_available` | {} | session id → conversation revision explicitly marked available |
 | `read_sessions` | {} | session id → opened conversation revision for the New response badge |

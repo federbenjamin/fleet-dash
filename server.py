@@ -9,6 +9,7 @@ GET /api/handoff authenticated editable provider-handoff preview
 GET /api/repo authenticated repository outcome/action preview
 GET /api/outbox authenticated scheduled-message list and audit trail
 GET /api/briefing deterministic operational briefing and per-device cursor
+GET /api/notifications authenticated canonical notification event stream
 GET /api/budgets measured budget state and forecasts
 GET /api/history paginated closed-session metadata
 GET /api/diagnostics authenticated latency, payload, and memory measurements
@@ -205,7 +206,8 @@ class Handler(BaseHTTPRequestHandler):
     def _do_GET(self):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics"):
+                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics",
+                     "/api/notifications"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -220,6 +222,13 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/outbox":
                 out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
                                                self.query("limit") or 100)
+                return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/notifications":
+                states = [item for item in self.query("state").split(",") if item]
+                kinds = [item for item in self.query("kind").split(",") if item]
+                out = self.eng.notifications_snapshot(
+                    self.query("device") or "default", self.query("cursor") or None,
+                    self.query("limit") or 100, states, kinds, self.query("id") or None)
                 return self.reply(200, "application/json", json.dumps(out).encode())
             if route == "/api/diagnostics":
                 out = self.diagnostics()

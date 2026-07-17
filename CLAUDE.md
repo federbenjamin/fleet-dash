@@ -103,6 +103,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
 8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
    daemon start. Spend pushes fire only on the highest crossed multiple.
+   The M12 dark migration keeps legacy ntfy claims in `notification_deliveries_legacy` and writes
+   canonical lifecycle rows to `notification_events`; the two identities must not be conflated.
+   Canonical identities use the full provider/session/native revision, never truncated session IDs,
+   transcript mtimes, or repeat buckets. Informational events are resolved observations; per-device
+   cursors, not lifecycle state, decide whether they are unread.
 9. **Never inject into real sessions during dev-testing** except via the user-driven live-test
    protocol below. The auto-mode classifier blocks self-injection from the building session.
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
@@ -419,7 +424,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + token-gated `/api/search`, `/api/search/status`, and `/api/search/context`; POST
   `/api/act` + `/api/settings` + `/api/search/rebuild` are token-gated. Settings persists the
   `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
-  the stalled STATE, not just the push), `muted_sessions` (sid → ts, pruned at 30d),
+  the stalled STATE, not just the push), `muted_sessions` (sid → ts, persists until manual unmute),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
   `Engine.update_settings`. Muted sessions skip all per-session pushes.
   Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle

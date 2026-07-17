@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,11 @@ EVENT_CATEGORIES = {
 BUDGET_SCOPES = {"fleet", "provider", "workstream", "session"}
 BUDGET_METRICS = {"usd", "tokens", "runtime", "concurrency"}
 DEVICE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+NOTIFICATION_STATES = {"active", "snoozed", "resolved", "expired"}
+NOTIFICATION_KINDS = {
+    "question", "approval", "form", "reply", "failure", "stall", "completion",
+    "artifact", "outcome", "budget", "measurement", "notification",
+}
 
 
 class OperationsError(ValueError):
@@ -34,14 +40,18 @@ class FleetOperations:
     remain responsible for deciding which measurements are exact or unavailable.
     """
 
-    def __init__(self, db_path, *, clock=time.time, id_factory=None):
+    def __init__(self, db_path, *, clock=time.time, id_factory=None,
+                 event_id_factory=None, delivery_id_factory=None):
         self.db_path = db_path
         self.clock = clock
         self.id_factory = id_factory or (lambda: "bud-" + uuid.uuid4().hex)
+        self.event_id_factory = event_id_factory or (lambda: "evt-" + uuid.uuid4().hex)
+        self.delivery_id_factory = delivery_id_factory or (lambda: "push-" + uuid.uuid4().hex)
         self.lock = threading.RLock()
         self.measurement_signatures = {}
         self.db_connect_ms = deque(maxlen=240)
         self.db_begin_ms = deque(maxlen=240)
+        self.notification_projection_ms = deque(maxlen=240)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
 
@@ -77,12 +87,16 @@ class FleetOperations:
             return round(ordered[index], 3)
         return {"connect_p95_ms": percentile(self.db_connect_ms, .95),
                 "begin_wait_p95_ms": percentile(self.db_begin_ms, .95),
+                "notification_projection_p95_ms": percentile(
+                    self.notification_projection_ms, .95),
                 "samples": max(len(self.db_connect_ms), len(self.db_begin_ms))}
 
     def _init_db(self):
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
         with self._transaction() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS operations_meta(
+                key TEXT PRIMARY KEY, value_json TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS briefing_events(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_key TEXT NOT NULL UNIQUE, created_at REAL NOT NULL,
@@ -105,11 +119,51 @@ class FleetOperations:
                 created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
             db.execute("""CREATE INDEX IF NOT EXISTS budgets_scope
                 ON budgets(enabled, scope_type, scope_id, metric)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS notification_deliveries(
+            columns = {row[1] for row in
+                       db.execute("PRAGMA table_info(notification_deliveries)").fetchall()}
+            if "event_key" in columns:
+                db.execute("ALTER TABLE notification_deliveries RENAME TO notification_deliveries_legacy")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_deliveries_legacy(
                 event_key TEXT PRIMARY KEY, category TEXT NOT NULL,
                 title TEXT NOT NULL, body TEXT NOT NULL,
                 status TEXT NOT NULL, error TEXT,
                 created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_events(
+                id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE,
+                event_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL,
+                severity TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+                provider TEXT, session_id TEXT, workstream_id TEXT,
+                source_type TEXT NOT NULL, source_id TEXT, source_revision TEXT NOT NULL,
+                opened_at REAL NOT NULL, changed_at REAL NOT NULL, resolved_at REAL,
+                snoozed_until REAL, reminder_budget INTEGER NOT NULL DEFAULT 0,
+                last_push_at REAL, payload_json TEXT NOT NULL DEFAULT '{}')""")
+            db.execute("""CREATE INDEX IF NOT EXISTS notification_events_state
+                ON notification_events(state, sequence DESC)""")
+            db.execute("""CREATE INDEX IF NOT EXISTS notification_events_session
+                ON notification_events(session_id, state)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_devices(
+                id TEXT PRIMARY KEY, display_name TEXT NOT NULL, platform TEXT,
+                subscription_json TEXT NOT NULL, endpoint_origin TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1, permission_state TEXT NOT NULL,
+                created_at REAL NOT NULL, last_registered_at REAL NOT NULL,
+                last_success_at REAL, last_failure_at REAL, last_failure TEXT,
+                read_cursor INTEGER NOT NULL DEFAULT 0,
+                preferences_json TEXT NOT NULL DEFAULT '{}')""")
+            db.execute("""CREATE INDEX IF NOT EXISTS notification_devices_enabled
+                ON notification_devices(enabled, permission_state)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_deliveries(
+                id TEXT PRIMARY KEY, event_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                generation INTEGER NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL,
+                claimed_at REAL, lease_until REAL, next_attempt_at REAL,
+                remote_status INTEGER, remote_id TEXT, error TEXT,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                UNIQUE(event_id,device_id,generation))""")
+            db.execute("""CREATE INDEX IF NOT EXISTS notification_delivery_due
+                ON notification_deliveries(status, next_attempt_at)""")
+            db.execute("""CREATE INDEX IF NOT EXISTS notification_delivery_event
+                ON notification_deliveries(event_id, device_id)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_session_mutes(
+                session_id TEXT PRIMARY KEY, provider TEXT, muted_at REAL NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS session_measurements(
                 session_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
                 workstream_id TEXT, project TEXT, model TEXT,
@@ -126,8 +180,7 @@ class FleetOperations:
                 measurement_scope TEXT NOT NULL)""")
             db.execute("""CREATE INDEX IF NOT EXISTS metric_samples_key
                 ON metric_samples(sample_key, metric, at DESC)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS operations_meta(
-                key TEXT PRIMARY KEY, value_json TEXT NOT NULL)""")
+            self._set_meta(db, "notification_schema_version", 2)
 
     @staticmethod
     def _text(value, limit):
@@ -183,6 +236,215 @@ class FleetOperations:
         db.execute("""INSERT INTO operations_meta(key,value_json) VALUES(?,?)
             ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json""",
                    (key, self._json(value)))
+
+    @staticmethod
+    def _canonical_notification_key(*parts):
+        material = FleetOperations._json([str(part or "") for part in parts])
+        return "ntf-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _notification_event(row, read_cursor=0):
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item.pop("payload_json") or "{}")
+        except (TypeError, ValueError):
+            item["payload"] = {}
+        item["unread"] = int(item.get("sequence") or 0) > int(read_cursor or 0)
+        item["reminder_budget"] = int(item.get("reminder_budget") or 0)
+        return item
+
+    def _upsert_notification_event(self, db, spec, now):
+        event_key = self._text(spec.get("event_key"), 300)
+        if not event_key:
+            raise OperationsError("notification event key is required")
+        kind = self._text(spec.get("kind"), 40)
+        state = self._text(spec.get("state"), 20)
+        if kind not in NOTIFICATION_KINDS or state not in NOTIFICATION_STATES:
+            raise OperationsError("invalid notification event")
+        row = db.execute("SELECT * FROM notification_events WHERE event_key=?",
+                         (event_key,)).fetchone()
+        if row:
+            next_state = state
+            snoozed_until = row["snoozed_until"]
+            if state == "active" and row["state"] == "snoozed" \
+               and float(snoozed_until or 0) > now:
+                next_state = "snoozed"
+            elif next_state != "snoozed":
+                snoozed_until = None
+            resolved_at = now if next_state in ("resolved", "expired") else None
+            changed = any((
+                row["kind"] != kind,
+                row["state"] != next_state,
+                row["severity"] != self._text(spec.get("severity"), 20),
+                row["title"] != self._text(spec.get("title"), 160),
+                row["summary"] != self._text(spec.get("summary"), 800),
+                row["source_revision"] != self._text(spec.get("source_revision"), 320),
+                (row["payload_json"] or "{}") != self._json(spec.get("payload") or {}),
+            ))
+            if changed:
+                db.execute("""UPDATE notification_events SET kind=?,state=?,severity=?,
+                    title=?,summary=?,provider=?,session_id=?,workstream_id=?,source_type=?,
+                    source_id=?,source_revision=?,changed_at=?,resolved_at=?,snoozed_until=?,
+                    reminder_budget=?,payload_json=? WHERE event_key=?""", (
+                    kind, next_state, self._text(spec.get("severity"), 20) or "info",
+                    self._text(spec.get("title"), 160), self._text(spec.get("summary"), 800),
+                    self._text(spec.get("provider"), 30) or None,
+                    self._text(spec.get("session_id"), 320) or None,
+                    self._text(spec.get("workstream_id"), 120) or None,
+                    self._text(spec.get("source_type"), 40),
+                    self._text(spec.get("source_id"), 320) or None,
+                    self._text(spec.get("source_revision"), 320), now, resolved_at,
+                    snoozed_until, int(spec.get("reminder_budget") or 0),
+                    self._json(spec.get("payload") or {}), event_key))
+            return row["id"]
+        sequence = int(db.execute(
+            "SELECT COALESCE(MAX(sequence),0)+1 FROM notification_events").fetchone()[0])
+        event_id = self._text(self.event_id_factory(), 100)
+        if not event_id:
+            raise OperationsError("notification event ID is required")
+        resolved_at = now if state in ("resolved", "expired") else None
+        opened_at = float(spec.get("opened_at") or now)
+        db.execute("""INSERT INTO notification_events(
+            id,sequence,event_key,kind,state,severity,title,summary,provider,session_id,
+            workstream_id,source_type,source_id,source_revision,opened_at,changed_at,
+            resolved_at,snoozed_until,reminder_budget,last_push_at,payload_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            event_id, sequence, event_key, kind, state,
+            self._text(spec.get("severity"), 20) or "info",
+            self._text(spec.get("title"), 160), self._text(spec.get("summary"), 800),
+            self._text(spec.get("provider"), 30) or None,
+            self._text(spec.get("session_id"), 320) or None,
+            self._text(spec.get("workstream_id"), 120) or None,
+            self._text(spec.get("source_type"), 40),
+            self._text(spec.get("source_id"), 320) or None,
+            self._text(spec.get("source_revision"), 320), opened_at, now, resolved_at, None,
+            int(spec.get("reminder_budget") or 0), None,
+            self._json(spec.get("payload") or {})))
+        return event_id
+
+    def _action_notification_spec(self, action):
+        action_kind = self._text(action.get("kind"), 40)
+        kind = action_kind if action_kind in ("question", "approval", "form", "reply") \
+            else "failure"
+        if action_kind not in ("question", "approval", "form", "reply", "problem", "attention"):
+            return None
+        provider = self._text(action.get("provider") or "claude", 30)
+        sid = self._text(action.get("session_id"), 320)
+        revision = self._text(action.get("pending_nonce") or action.get("revision") or
+                              action.get("action_id"), 320)
+        if not sid or not revision:
+            return None
+        return {
+            "event_key": self._canonical_notification_key(
+                "action", provider, sid, kind, revision),
+            "kind": kind, "state": "active", "severity": "action",
+            "title": action.get("title") or action.get("request") or "Fleet needs you",
+            "summary": action.get("request") or action.get("delivery_state") or
+                       action.get("reason") or "Response needed",
+            "provider": provider, "session_id": sid, "source_type": "action",
+            "source_id": action.get("pending_nonce") or sid,
+            "source_revision": revision,
+            "reminder_budget": 1,
+            "payload": {"action_id": action.get("action_id"), "kind": action_kind,
+                        "access": action.get("access")},
+        }
+
+    def _reconcile_notification_events(self, db, fleet, now):
+        current = {}
+        for action in fleet.get("actions") or []:
+            spec = self._action_notification_spec(action)
+            if spec:
+                current[spec["event_key"]] = spec
+
+        stall_threshold = max(30, int(float(
+            (fleet.get("settings") or {}).get("stall_seconds") or 240)))
+        for session in fleet.get("sessions") or []:
+            sid = self._text(session.get("session_id"), 320)
+            provider = self._text(session.get("provider") or "claude", 30)
+            if sid:
+                if session.get("muted"):
+                    db.execute("""INSERT INTO notification_session_mutes(
+                        session_id,provider,muted_at) VALUES(?,?,?)
+                        ON CONFLICT(session_id) DO UPDATE SET provider=excluded.provider""",
+                               (sid, provider, now))
+                else:
+                    db.execute("DELETE FROM notification_session_mutes WHERE session_id=?", (sid,))
+            if (session.get("state") != "stalled" and
+                    session.get("normalized_state") != "stalled"):
+                continue
+            if float(session.get("quiet_s") or 0) < stall_threshold or not sid:
+                continue
+            revision = self._text(session.get("turn_id") or session.get("convo_v") or
+                                  session.get("activity_at"), 320)
+            spec = {
+                "event_key": self._canonical_notification_key(
+                    "stall", provider, sid, revision),
+                "kind": "stall", "state": "active", "severity": "watch",
+                "title": session.get("title") or session.get("name") or "Slow work",
+                "summary": "Session stopped showing progress",
+                "provider": provider, "session_id": sid, "source_type": "stall",
+                "source_id": sid, "source_revision": revision, "reminder_budget": 0,
+                "payload": {"quiet_seconds": int(float(session.get("quiet_s") or 0))},
+            }
+            current[spec["event_key"]] = spec
+
+        for provider, state in (fleet.get("providers") or {}).items():
+            if not state or state.get("ok") is not False:
+                continue
+            revision = self._signature({
+                "error": state.get("error"), "state": state.get("state"),
+                "revision": state.get("revision")})
+            spec = {
+                "event_key": self._canonical_notification_key(
+                    "provider", provider, revision),
+                "kind": "failure", "state": "active", "severity": "watch",
+                "title": f"{str(provider).title()} unavailable",
+                "summary": state.get("error") or "Provider evidence is stale",
+                "provider": provider, "source_type": "provider",
+                "source_id": provider, "source_revision": revision,
+                "reminder_budget": 1, "payload": {},
+            }
+            current[spec["event_key"]] = spec
+
+        for spec in current.values():
+            self._upsert_notification_event(db, spec, now)
+        db.execute("""UPDATE notification_events SET state='active',changed_at=?,
+            snoozed_until=NULL WHERE state='snoozed' AND snoozed_until<=?
+            AND source_type IN ('action','stall','provider')""", (now, now))
+        rows = db.execute("""SELECT event_key FROM notification_events
+            WHERE state IN ('active','snoozed')
+            AND source_type IN ('action','stall','provider')""").fetchall()
+        missing = [row[0] for row in rows if row[0] not in current]
+        db.executemany("""UPDATE notification_events SET state='resolved',changed_at=?,
+            resolved_at=?,snoozed_until=NULL WHERE event_key=?""",
+                       ((now, now, event_key) for event_key in missing))
+
+        cursor = int(self._meta(db, "notification_briefing_cursor", 0) or 0)
+        rows = db.execute("""SELECT * FROM briefing_events WHERE id>? ORDER BY id""",
+                          (cursor,)).fetchall()
+        category_kind = {
+            "completed": "completion", "outcome": "outcome", "budget": "budget",
+            "measurement": "measurement", "notification": "notification",
+            "attention": "failure", "slow": "stall",
+        }
+        for row in rows:
+            kind = "artifact" if row["source_type"] == "artifact" else \
+                category_kind.get(row["category"], "outcome")
+            self._upsert_notification_event(db, {
+                "event_key": self._canonical_notification_key(
+                    "briefing", row["event_key"]),
+                "kind": kind, "state": "resolved", "severity": row["severity"],
+                "title": row["title"], "summary": row["summary"],
+                "provider": row["provider"], "session_id": row["session_id"],
+                "workstream_id": row["workstream_id"], "source_type": "briefing",
+                "source_id": row["event_key"], "source_revision": row["event_key"],
+                "opened_at": row["created_at"],
+                "reminder_budget": 0,
+                "payload": {"briefing_id": row["id"], "category": row["category"],
+                            "link_kind": row["link_kind"], "link_id": row["link_id"]},
+            }, now)
+        if rows:
+            self._set_meta(db, "notification_briefing_cursor", rows[-1]["id"])
 
     @staticmethod
     def _runtime(session, now):
@@ -344,6 +606,10 @@ class FleetOperations:
                 item["alert_created_at"] = float(event[0]) if event else now
             self._set_meta(db, "budget_alert_episodes", next_alerts)
             self._sample_budget_values(db, evaluations, now)
+            projection_started = time.perf_counter()
+            self._reconcile_notification_events(db, fleet, now)
+            self.notification_projection_ms.append(
+                (time.perf_counter() - projection_started) * 1000)
         return evaluations
 
     def _observe_external_outcomes(self, db):
@@ -699,7 +965,8 @@ class FleetOperations:
             reviewed = [self._event(row) for row in reviewed_rows]
             evaluations = self._evaluate_budgets(db, fleet)
             failures = [dict(row) for row in db.execute("""SELECT event_key,title,error,updated_at
-                FROM notification_deliveries WHERE status='failed' ORDER BY updated_at DESC LIMIT 20""").fetchall()]
+                FROM notification_deliveries_legacy WHERE status='failed'
+                ORDER BY updated_at DESC LIMIT 20""").fetchall()]
 
         attention = []
         for action in fleet.get("actions") or []:
@@ -754,15 +1021,187 @@ class FleetOperations:
                 "next_cursor": max_id, "unread": max(0, max_id-saved),
                 "muted_omitted": muted_omitted, "sections": sections}
 
+    def notification_snapshot(self, device_id="default", cursor=None, limit=100,
+                              states=None, kinds=None, event_id=None):
+        device_id = str(device_id or "default")
+        if not DEVICE_RE.fullmatch(device_id):
+            raise OperationsError("invalid notification device ID")
+        try:
+            limit = max(1, min(200, int(limit)))
+            cursor = None if cursor in (None, "") else int(cursor)
+        except (TypeError, ValueError):
+            raise OperationsError("invalid notification pagination")
+        if cursor is not None and cursor < 0:
+            raise OperationsError("invalid notification pagination")
+        states = {str(item) for item in (states or []) if str(item)}
+        kinds = {str(item) for item in (kinds or []) if str(item)}
+        if not states.issubset(NOTIFICATION_STATES) or not kinds.issubset(NOTIFICATION_KINDS):
+            raise OperationsError("invalid notification filter")
+        event_id = self._text(event_id, 100) or None
+        with self.lock, self._connect() as db:
+            device = db.execute("""SELECT read_cursor FROM notification_devices
+                WHERE id=?""", (device_id,)).fetchone()
+            read_cursor = int(device[0]) if device else 0
+            maximum = int(db.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
+            if event_id:
+                rows = db.execute("SELECT * FROM notification_events WHERE id=?",
+                                  (event_id,)).fetchall()
+                has_more = False
+            else:
+                before = maximum + 1 if cursor is None else cursor
+                query = "SELECT * FROM notification_events WHERE sequence<?"
+                params = [before]
+                if states:
+                    query += " AND state IN (" + ",".join("?" for _ in states) + ")"
+                    params.extend(sorted(states))
+                if kinds:
+                    query += " AND kind IN (" + ",".join("?" for _ in kinds) + ")"
+                    params.extend(sorted(kinds))
+                query += " ORDER BY sequence DESC LIMIT ?"
+                params.append(limit + 1)
+                rows = db.execute(query, params).fetchall()
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+            events = [self._notification_event(row, read_cursor) for row in rows]
+            unread = int(db.execute("""SELECT COUNT(*) FROM notification_events
+                WHERE sequence>?""", (read_cursor,)).fetchone()[0])
+            active = int(db.execute("""SELECT COUNT(*) FROM notification_events
+                WHERE state IN ('active','snoozed')""").fetchone()[0])
+        return {"ok": True, "device_id": device_id, "read_cursor": read_cursor,
+                "event_cursor": maximum, "unread": unread, "active": active,
+                "events": events,
+                "next_cursor": (events[-1]["sequence"] if has_more and events else None)}
+
+    def notification_counts(self, device_id="default"):
+        snapshot = self.notification_snapshot(device_id, limit=1)
+        return {key: snapshot[key] for key in ("unread", "active", "event_cursor")}
+
+    def notification_register_device(self, device_id, display_name, platform,
+                                     subscription, endpoint_origin,
+                                     permission_state="granted", preferences=None):
+        device_id = str(device_id or "")
+        if not DEVICE_RE.fullmatch(device_id):
+            raise OperationsError("invalid notification device ID")
+        display_name = self._text(display_name, 80)
+        platform = self._text(platform, 80)
+        endpoint_origin = self._text(endpoint_origin, 320)
+        permission_state = self._text(permission_state, 20)
+        if not display_name or not endpoint_origin or permission_state not in (
+                "granted", "denied", "prompt", "expired", "unsupported"):
+            raise OperationsError("invalid notification device")
+        if not isinstance(subscription, dict) or not isinstance(preferences or {}, dict):
+            raise OperationsError("invalid notification subscription")
+        subscription_json = self._json(subscription)
+        if len(subscription_json) > 8192:
+            raise OperationsError("notification subscription is too large")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            existing = db.execute(
+                "SELECT preferences_json FROM notification_devices WHERE id=?",
+                (device_id,)).fetchone()
+            preferences_json = self._json(preferences) if preferences is not None else \
+                (existing["preferences_json"] if existing else "{}")
+            maximum = int(db.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
+            db.execute("""INSERT INTO notification_devices(
+                id,display_name,platform,subscription_json,endpoint_origin,enabled,
+                permission_state,created_at,last_registered_at,read_cursor,preferences_json)
+                VALUES(?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                display_name=excluded.display_name,platform=excluded.platform,
+                subscription_json=excluded.subscription_json,
+                endpoint_origin=excluded.endpoint_origin,enabled=1,
+                permission_state=excluded.permission_state,
+                last_registered_at=excluded.last_registered_at,
+                preferences_json=excluded.preferences_json""", (
+                device_id, display_name, platform, subscription_json, endpoint_origin,
+                permission_state, now, now, maximum, preferences_json))
+            row = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
+                created_at,last_registered_at,last_success_at,last_failure_at,last_failure,
+                read_cursor,preferences_json FROM notification_devices WHERE id=?""",
+                             (device_id,)).fetchone()
+        item = dict(row)
+        item["enabled"] = bool(item["enabled"])
+        item["preferences"] = json.loads(item.pop("preferences_json") or "{}")
+        return item
+
+    def notification_mark_read(self, device_id, cursor):
+        device_id = str(device_id or "")
+        if not DEVICE_RE.fullmatch(device_id):
+            raise OperationsError("invalid notification device ID")
+        try:
+            cursor = int(cursor)
+        except (TypeError, ValueError):
+            raise OperationsError("invalid notification cursor")
+        if cursor < 0:
+            raise OperationsError("invalid notification cursor")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            maximum = int(db.execute(
+                "SELECT COALESCE(MAX(sequence),0) FROM notification_events").fetchone()[0])
+            cursor = min(cursor, maximum)
+            changed = db.execute("""UPDATE notification_devices SET
+                read_cursor=MAX(read_cursor,?),last_registered_at=last_registered_at
+                WHERE id=?""", (cursor, device_id)).rowcount
+            if not changed:
+                raise OperationsError("notification device is not registered")
+            saved = int(db.execute(
+                "SELECT read_cursor FROM notification_devices WHERE id=?",
+                (device_id,)).fetchone()[0])
+        return saved
+
+    def notification_snooze(self, event_id, source_revision, until):
+        event_id = self._text(event_id, 100)
+        source_revision = self._text(source_revision, 320)
+        try:
+            until = float(until)
+        except (TypeError, ValueError):
+            raise OperationsError("invalid snooze time")
+        now = self.clock()
+        if not event_id or not source_revision or not now < until <= now + 30 * 86400:
+            raise OperationsError("invalid snooze request")
+        with self.lock, self._transaction(immediate=True) as db:
+            row = db.execute("""SELECT source_revision,state FROM notification_events
+                WHERE id=?""", (event_id,)).fetchone()
+            if (not row or row["source_revision"] != source_revision or
+                    row["state"] not in ("active", "snoozed")):
+                raise OperationsError("notification event is stale")
+            db.execute("""UPDATE notification_events SET state='snoozed',
+                snoozed_until=?,changed_at=? WHERE id=?""", (until, now, event_id))
+        return until
+
+    def notification_set_session_mute(self, session_id, provider=None, muted=True):
+        session_id = self._text(session_id, 320)
+        provider = self._text(provider, 30) or None
+        if not session_id:
+            raise OperationsError("invalid notification session ID")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            if muted:
+                db.execute("""INSERT INTO notification_session_mutes(
+                    session_id,provider,muted_at) VALUES(?,?,?)
+                    ON CONFLICT(session_id) DO UPDATE SET provider=excluded.provider""",
+                           (session_id, provider, now))
+            else:
+                db.execute("DELETE FROM notification_session_mutes WHERE session_id=?",
+                           (session_id,))
+        return bool(muted)
+
+    def notification_session_muted(self, session_id):
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT 1 FROM notification_session_mutes WHERE session_id=?",
+                             (self._text(session_id, 320),)).fetchone()
+        return bool(row)
+
     def notification_claim(self, key, category, title, body, *, dispatch):
         now = self.clock()
         with self.lock, self._transaction(immediate=True) as db:
-            row = db.execute("SELECT status FROM notification_deliveries WHERE event_key=?",
+            row = db.execute("SELECT status FROM notification_deliveries_legacy WHERE event_key=?",
                              (key,)).fetchone()
             if row:
                 return False
             status = "queued" if dispatch else "suppressed_seed"
-            db.execute("""INSERT INTO notification_deliveries(
+            db.execute("""INSERT INTO notification_deliveries_legacy(
                 event_key,category,title,body,status,error,created_at,updated_at)
                 VALUES(?,?,?,?,?,NULL,?,?)""", (self._text(key, 300),
                 self._text(category, 40), self._text(title, 160), self._text(body, 800),
@@ -774,10 +1213,10 @@ class FleetOperations:
             raise OperationsError("invalid notification status")
         now = self.clock()
         with self.lock, self._transaction(immediate=True) as db:
-            db.execute("""UPDATE notification_deliveries SET status=?,error=?,updated_at=?
+            db.execute("""UPDATE notification_deliveries_legacy SET status=?,error=?,updated_at=?
                 WHERE event_key=?""", (status, self._text(error, 800) or None, now, key))
             if status == "failed":
-                row = db.execute("""SELECT category,title,body FROM notification_deliveries
+                row = db.execute("""SELECT category,title,body FROM notification_deliveries_legacy
                     WHERE event_key=?""", (key,)).fetchone()
                 if row:
                     self._insert_event(

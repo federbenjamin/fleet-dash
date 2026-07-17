@@ -431,6 +431,8 @@ demand.
 
 ### N0 — Compatibility prototype and baseline
 
+Status: N0a complete · N0b pending real-device path
+
 - Capture current notification trigger/delivery counts and scan/API latency.
 - Add a disposable standalone manifest/service-worker prototype under test fixtures.
 - Use the disposable probe to validate request construction and payload privacy before persistent
@@ -448,6 +450,8 @@ exact deep link, app-closed behavior, badge, and action fallback.
 
 ### N1 — Canonical event and device stores
 
+Status: Complete · 2026-07-16/17
+
 - Add the v2 event/device/delivery schema and transactional migration.
 - Normalize existing Action Inbox, briefing, repository, outbox, budget, provider, and session-state
   evidence into stable event identities.
@@ -457,6 +461,13 @@ exact deep link, app-closed behavior, badge, and action fallback.
 
 Exit: Notification Center data can be queried deterministically; existing ntfy behavior still runs;
 no canonical event identity relies on truncated IDs, mtimes, or time buckets.
+
+Evidence: transactional live migration preserved 24 legacy ntfy rows, projected 228 historical
+events without fabricating delivery jobs, and recorded schema version 2. The authenticated live API
+and daemon smoke passed. The Python suite passed 190 tests, including full-ID collision, restart,
+revision replacement, resolution, snooze, device cursor, indefinite mute, redaction, migration
+idempotency, and route-auth cases. Post-change fleet/context/search/action contracts remained green.
+The live canonical projection measured 1.756 ms p95, below the 5 ms scan-budget gate.
 
 ### N2 — Installable Fleet PWA and device registration
 

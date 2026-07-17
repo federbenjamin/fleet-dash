@@ -98,6 +98,31 @@ class ServerHandlerTest(unittest.TestCase):
         self.assertIn("[URL omitted]", audit.getvalue())
         self.assertNotIn("secret-value", audit.getvalue())
 
+    def test_notifications_route_requires_auth_and_forwards_bounded_query(self):
+        calls = []
+        handler = self.handler(
+            "/api/notifications?device=phone-1&cursor=42&limit=20&state=active,snoozed"
+            "&kind=question,approval&id=evt-1")
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "token"},
+            notifications_snapshot=lambda *args: calls.append(args) or
+            {"ok": True, "events": []})
+        replies = []
+        handler.reply = lambda code, ctype, body: replies.append(
+            (code, ctype, json.loads(body)))
+
+        Handler._do_GET(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers = {"X-Act-Token": "token"}
+        replies.clear()
+        Handler._do_GET(handler)
+        self.assertEqual(replies[0][0], 200)
+        self.assertEqual(calls, [("phone-1", "42", "20",
+                                  ["active", "snoozed"],
+                                  ["question", "approval"], "evt-1")])
+
 
 if __name__ == "__main__":
     unittest.main()

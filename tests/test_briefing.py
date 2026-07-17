@@ -48,6 +48,18 @@ def fleet(clock, sessions=None, actions=None, providers=None):
     }
 
 
+def action(sid="s1", provider="claude", kind="question", nonce="ask-1", **overrides):
+    item = {
+        "action_id": "action-" + sid + "-" + nonce,
+        "session_id": sid, "provider": provider, "kind": kind,
+        "request": "Choose a deployment target", "delivery_state": "Awaiting response",
+        "reason": "Question waiting", "revision": "rev-1", "pending_nonce": nonce,
+        "title": sid, "access": "interactive", "muted": False,
+    }
+    item.update(overrides)
+    return item
+
+
 class BriefingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -320,6 +332,104 @@ class BriefingTests(unittest.TestCase):
         snap = self.ops.briefing_snapshot(fleet(self.clock), "device-1")
         high = self.ops.review("device-1", snap["next_cursor"])
         self.assertEqual(self.ops.review("device-1", 0), high)
+
+    def test_canonical_notification_identity_uses_full_session_and_native_revision(self):
+        first = "codex:thread-shared-prefix-alpha"
+        second = "codex:thread-shared-prefix-beta"
+        current = fleet(self.clock, actions=[action(first, "codex"), action(second, "codex")])
+        self.ops.observe(current, self.workstream)
+        snap = self.ops.notification_snapshot("desktop")
+        self.assertEqual(len(snap["events"]), 2)
+        self.assertEqual({item["session_id"] for item in snap["events"]}, {first, second})
+        self.assertEqual({item["state"] for item in snap["events"]}, {"active"})
+        original = {item["session_id"]: (item["id"], item["opened_at"])
+                    for item in snap["events"]}
+
+        restarted = FleetOperations(self.path, clock=self.clock)
+        restarted.observe(current, self.workstream)
+        after = restarted.notification_snapshot("desktop")
+        self.assertEqual({item["session_id"]: (item["id"], item["opened_at"])
+                          for item in after["events"]}, original)
+
+        self.clock.advance(10)
+        changed = fleet(self.clock, actions=[action(first, "codex", nonce="ask-2"),
+                                             action(second, "codex")])
+        restarted.observe(changed, self.workstream)
+        rows = restarted.notification_snapshot("desktop", limit=10)["events"]
+        self.assertEqual(sum(item["session_id"] == first and item["state"] == "active"
+                             for item in rows), 1)
+        self.assertEqual(sum(item["session_id"] == first and item["state"] == "resolved"
+                             for item in rows), 1)
+
+    def test_snooze_persists_for_same_evidence_and_resolves_when_evidence_disappears(self):
+        current = fleet(self.clock, actions=[action()])
+        self.ops.observe(current, self.workstream)
+        event = self.ops.notification_snapshot("desktop")["events"][0]
+        until = self.clock() + 900
+        self.assertEqual(self.ops.notification_snooze(
+            event["id"], event["source_revision"], until), until)
+        self.ops.observe(current, self.workstream)
+        self.assertEqual(self.ops.notification_snapshot("desktop")["events"][0]["state"],
+                         "snoozed")
+        self.clock.advance(20)
+        self.ops.observe(fleet(self.clock), self.workstream)
+        resolved = self.ops.notification_snapshot("desktop")["events"][0]
+        self.assertEqual(resolved["state"], "resolved")
+        self.assertIsNotNone(resolved["resolved_at"])
+
+    def test_device_seed_cursor_read_cursor_and_indefinite_session_mute(self):
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        device = self.ops.notification_register_device(
+            "phone-1", "Phone", "ios", {"endpoint": "write-only", "keys": {}},
+            "https://web.push.apple.com", preferences={"urgent_only": True})
+        self.assertEqual(device["read_cursor"], 1)
+        self.assertNotIn("subscription_json", device)
+        refreshed = self.ops.notification_register_device(
+            "phone-1", "Phone", "ios", {"endpoint": "replacement", "keys": {}},
+            "https://web.push.apple.com")
+        self.assertEqual(refreshed["preferences"], {"urgent_only": True})
+
+        self.clock.advance(10)
+        current = fleet(self.clock, actions=[action(), action("s2", nonce="ask-2")])
+        self.ops.observe(current, self.workstream)
+        snap = self.ops.notification_snapshot("phone-1")
+        self.assertEqual(snap["unread"], 1)
+        high = self.ops.notification_mark_read("phone-1", snap["event_cursor"])
+        self.assertEqual(self.ops.notification_mark_read("phone-1", 0), high)
+        self.assertEqual(self.ops.notification_snapshot("phone-1")["unread"], 0)
+
+        self.assertTrue(self.ops.notification_set_session_mute("s2", "claude", True))
+        self.assertTrue(self.ops.notification_session_muted("s2"))
+        self.clock.advance(31 * 86400)
+        restarted = FleetOperations(self.path, clock=self.clock)
+        self.assertTrue(restarted.notification_session_muted("s2"))
+        self.assertFalse(restarted.notification_set_session_mute("s2", "claude", False))
+        self.assertFalse(restarted.notification_session_muted("s2"))
+
+    def test_legacy_notification_table_migrates_transactionally_and_still_dispatches(self):
+        other = os.path.join(self.tmp.name, "legacy.db")
+        with sqlite3.connect(other) as db:
+            db.execute("""CREATE TABLE notification_deliveries(
+                event_key TEXT PRIMARY KEY, category TEXT NOT NULL,
+                title TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+                error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+            db.execute("""INSERT INTO notification_deliveries VALUES(
+                'old','needs_you','Waiting','Old work','sent',NULL,1,1)""")
+        migrated = FleetOperations(other, clock=self.clock)
+        with sqlite3.connect(other) as db:
+            legacy = db.execute("""SELECT event_key,status
+                FROM notification_deliveries_legacy""").fetchall()
+            columns = {row[1] for row in
+                       db.execute("PRAGMA table_info(notification_deliveries)").fetchall()}
+        self.assertEqual(legacy, [("old", "sent")])
+        self.assertIn("event_id", columns)
+        self.assertNotIn("event_key", columns)
+        self.assertTrue(migrated.notification_claim(
+            "new", "needs_you", "Waiting", "New work", dispatch=True))
+        migrated.notification_status("new", "sent")
+        restarted = FleetOperations(other, clock=self.clock)
+        self.assertFalse(restarted.notification_claim(
+            "new", "needs_you", "Waiting", "New work", dispatch=True))
 
 
 if __name__ == "__main__":
