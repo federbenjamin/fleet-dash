@@ -32,12 +32,16 @@ class PwaContractTest(unittest.TestCase):
             expected = int(size.split("x", 1)[0])
             self.assertEqual((width, height), (expected, expected))
 
-    def test_service_worker_is_root_scoped_and_private_data_is_network_only(self):
+    def test_service_worker_caches_only_shell_and_the_last_exact_fleet_snapshot(self):
         worker = self.read("static/sw.js")
         self.assertIn('url.pathname.startsWith(\'/api/\')', worker)
+        self.assertIn("if (url.pathname === '/api/fleet')", worker)
+        self.assertIn("cache.put('/api/fleet', response.clone())", worker)
+        self.assertIn("if (url.pathname.startsWith('/api/')) return;", worker)
         self.assertIn("request.mode === 'navigate'", worker)
-        self.assertIn("fetch(request).catch(() => caches.match('/static/offline.html'))", worker)
-        self.assertIn("const SHELL_CACHE = 'fleet-shell-n6-v1'", worker)
+        self.assertIn("catch(async () => (await caches.match('/')) || caches.match('/static/offline.html'))", worker)
+        self.assertIn("const SHELL_CACHE = 'fleet-shell-n6-v2'", worker)
+        self.assertIn("const RUNTIME_CACHE = 'fleet-runtime-n6-v1'", worker)
         self.assertIn("fetch(request).then(response =>", worker)
         self.assertIn("catch(() => caches.match(url.pathname))", worker)
         self.assertNotIn("'/api/", worker.split("const SHELL_ASSETS", 1)[1].split("];", 1)[0])

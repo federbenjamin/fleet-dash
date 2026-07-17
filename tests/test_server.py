@@ -81,6 +81,36 @@ class ServerHandlerTest(unittest.TestCase):
         Handler._do_POST(handler)
         self.assertEqual(replies[0][0], 413)
 
+    def test_image_upload_is_token_gated_bounded_and_keeps_binary_out_of_json(self):
+        calls, timeouts, replies = [], [], []
+        data = b"\x89PNG\r\n\x1a\nprivate-binary"
+        handler = self.handler(
+            "/api/upload-image?sid=codex%3Aone&id=opaque_1&name=phone%20photo.png")
+        handler.connection = SimpleNamespace(settimeout=lambda seconds: timeouts.append(seconds))
+        handler.eng = SimpleNamespace(cfg={"act_token": "token"},
+            store_image_upload=lambda *args: calls.append(args) or
+                {"ok": True, "upload_id": "opaque_1"})
+        handler.headers = {"Content-Type": "image/png", "Content-Length": str(len(data))}
+        handler.rfile = io.BytesIO(data)
+        handler.reply = lambda code, ctype, body: replies.append((code, json.loads(body)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers["X-Act-Token"] = "token"
+        handler.rfile = io.BytesIO(data)
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True, "upload_id": "opaque_1"})])
+        self.assertEqual(calls, [("codex:one", "opaque_1", "phone photo.png",
+                                  "image/png", data)])
+        self.assertEqual(timeouts, [20])
+
+        handler.headers["Transfer-Encoding"] = "chunked"
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 400)
+
     def test_settings_audit_logs_only_field_names(self):
         handler = self.handler("/api/settings")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)

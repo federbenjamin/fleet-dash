@@ -200,6 +200,21 @@ class RepositoryOutcomeCenter:
                        f"{host}/{owner}/{repo}"
         return None
 
+    @staticmethod
+    def _github_url(repo_slug):
+        parts = str(repo_slug or "").split("/")
+        if len(parts) == 2:
+            host, owner, repo = "github.com", parts[0], parts[1]
+        elif len(parts) == 3:
+            host, owner, repo = parts
+        else:
+            return None
+        if (not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host) or
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", owner) or
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", repo)):
+            return None
+        return f"https://{host}/{owner}/{repo}"
+
     def _github_pr(self, branch, repo_slug):
         if not branch:
             return {"state": "unavailable", "error": "Detached HEAD has no branch pull request"}
@@ -302,13 +317,15 @@ class RepositoryOutcomeCenter:
         observed = {"ok": True, "state": "ok", "root": root, "worktree": worktree,
                     **status, "dirty": bool(status["files"]), "conflicts": len(conflicts),
                     "remotes": remotes, "remote": remote, "remote_branch": remote_branch,
-                    "repo_slug": repo_slug, "default_base": default_base,
+                    "repo_slug": repo_slug, "github_url": self._github_url(repo_slug),
+                    "default_base": default_base,
                     "latest_commit": latest_commit, "pr": pr,
                     "observed_at": self.clock(),
                     "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
         material = {key: observed.get(key) for key in
                     ("root", "worktree", "branch", "detached", "head_oid", "upstream",
-                     "ahead", "behind", "remote", "remote_branch", "repo_slug")}
+                     "ahead", "behind", "remote", "remote_branch", "repo_slug",
+                     "github_url")}
         material["files"] = [{key: item.get(key) for key in
                              ("path", "status", "staged", "unstaged", "untracked", "conflict")}
                              for item in observed["files"]]

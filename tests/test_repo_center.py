@@ -67,6 +67,11 @@ class RepositoryOutcomeCenterTests(unittest.TestCase):
         self.assertEqual(parse("ssh://git@github.example.com/team/repo.git"),
                          "github.example.com/team/repo")
         self.assertIsNone(parse("https://user:secret@github.com/team/repo.git"))
+        self.assertEqual(RepositoryOutcomeCenter._github_url("federbenjamin/fleet-dash"),
+                         "https://github.com/federbenjamin/fleet-dash")
+        self.assertEqual(RepositoryOutcomeCenter._github_url("github.example.com/team/repo"),
+                         "https://github.example.com/team/repo")
+        self.assertIsNone(RepositoryOutcomeCenter._github_url("bad/path/with/extra"))
 
     def test_observed_test_outcome_is_honest_about_running_failure_and_success(self):
         self.assertEqual(observed_test_outcome([
@@ -97,6 +102,8 @@ class RepositoryOutcomeCenterTests(unittest.TestCase):
         self.assertTrue(snapshot["actions"]["push"]["enabled"])
         self.assertTrue(snapshot["actions"]["pr_create_draft"]["enabled"])
         self.assertEqual(snapshot["pr"]["state"], "none")
+        self.assertEqual(snapshot["github_url"],
+                         "https://github.com/federbenjamin/fleet-dash")
 
     def test_snapshot_cache_avoids_repeating_bounded_probes(self):
         runner = FakeRunner()

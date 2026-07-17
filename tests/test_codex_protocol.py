@@ -146,6 +146,18 @@ class CodexProtocolTest(unittest.TestCase):
             client.start()
         self.assertEqual(factory.processes, [])
 
+    def test_structured_usage_limit_blocks_only_its_thread(self):
+        client, _ = self.client()
+        client.thread_state["healthy"] = {"status": "idle", "error": None}
+        client._notification("turn/completed", {"threadId": "limited", "turn": {
+            "id": "turn-limited", "status": "failed",
+            "error": {"code": "usage_limit", "message": "Usage limit reached"}}})
+        self.assertEqual(client.thread_state["limited"]["status"], "blocked")
+        self.assertEqual(client.thread_state["limited"]["error"],
+                         "Usage limit reached")
+        self.assertEqual(client.thread_state["healthy"],
+                         {"status": "idle", "error": None})
+
     def test_npm_shared_runtime_detaches_one_unix_listener_and_reuses_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             socket_path = os.path.join(tmp, "control.sock")
@@ -383,6 +395,24 @@ class CodexProtocolTest(unittest.TestCase):
             "threadId": "thread-one", "expectedTurnId": "turn-active",
             "input": [{"type": "text", "text": "Focus on the failing test"}],
         })])
+
+    def test_image_inputs_use_local_image_for_new_and_active_turns(self):
+        client, _ = self.client()
+        calls = []
+        client.request = lambda method, params=None, timeout=None: calls.append(
+            (method, params)) or {"turnId": "turn-active"}
+        inputs = [{"type": "text", "text": "Inspect it"},
+                  {"type": "localImage", "path": "/private/fleet/photo.jpg"}]
+        client.start_turn("thread-one", "Inspect it", inputs=inputs)
+        client.thread_state["thread-one"] = {
+            "status": "running", "turn_id": "turn-active"}
+        client.steer_turn("thread-one", "Inspect it", inputs=inputs)
+
+        self.assertEqual(calls[0], ("turn/start", {
+            "threadId": "thread-one", "input": inputs}))
+        self.assertEqual(calls[1], ("turn/steer", {
+            "threadId": "thread-one", "expectedTurnId": "turn-active",
+            "input": inputs}))
 
 
 if __name__ == "__main__":

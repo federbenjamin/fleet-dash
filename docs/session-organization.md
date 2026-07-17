@@ -73,6 +73,7 @@ a direct question, it moves to Needs you with View-only access instead.
 | Needs you | Response needed | The provider reports that the session is waiting, but Fleet has no more specific normalized request. For Claude, a bare registry flag must persist for 3 seconds; hook-captured questions and permissions are immediate. | Respond |
 | Needs you | Check session | Claude appears frozen on an assistant tool prompt but the exact pending request was not captured. | Open |
 | Needs you | Fix needed | The session has a confirmed provider or protocol error. | Open |
+| Needs you | Limit reached | This session hit a provider rate, usage, quota, context, or token limit. Other sessions remain usable. | Open |
 | Working | Compacting | Context compaction is active. | Open |
 | Working | Working | Fleet owns an active turn. | Open |
 | Working | Working elsewhere | An external provider runtime owns an active turn. | View |
@@ -102,6 +103,7 @@ when the user sends a response or explicitly chooses **Mark available**.
 | Completed assistant prose requesting a response | Needs you / Reply requested |
 | `stalled_or_prompt` | Needs you / Check session |
 | `error` or a confirmed session-specific system error | Needs you / Fix needed |
+| `blocked` or a recognized session-specific provider limit | Needs you / Limit reached |
 | `running` | Working / Working |
 | `running` plus external/view-only ownership | Working / Working elsewhere |
 | Active compaction | Working / Compacting |

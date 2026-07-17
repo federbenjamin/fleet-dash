@@ -1,5 +1,7 @@
-const SHELL_CACHE = 'fleet-shell-n6-v1';
+const SHELL_CACHE = 'fleet-shell-n6-v2';
+const RUNTIME_CACHE = 'fleet-runtime-n6-v1';
 const SHELL_ASSETS = [
+  '/',
   '/static/fleet.css',
   '/static/app.js',
   '/static/manifest.webmanifest',
@@ -22,7 +24,7 @@ self.addEventListener('install', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil(Promise.all([
-    caches.keys().then(keys => Promise.all(keys.filter(key => key !== SHELL_CACHE)
+    caches.keys().then(keys => Promise.all(keys.filter(key => ![SHELL_CACHE,RUNTIME_CACHE].includes(key))
       .map(key => caches.delete(key)))),
     self.clients.claim()
   ]));
@@ -32,9 +34,38 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname === '/api/fleet') {
+    event.respondWith((async () => {
+      const cache = await caches.open(RUNTIME_CACHE);
+      try {
+        const response = await fetch(request);
+        if (response.ok) {
+          event.waitUntil(cache.put('/api/fleet', response.clone()));
+          return response;
+        }
+        const cached = await cache.match('/api/fleet');
+        if (!cached) return response;
+        const headers = new Headers(cached.headers);
+        headers.set('X-Fleet-Offline', '1');headers.delete('Content-Length');
+        return new Response(await cached.blob(), {status: 200, headers});
+      } catch (_) {
+        const cached = await cache.match('/api/fleet');
+        if (!cached) return new Response(JSON.stringify({ok:false,error:'Fleet is offline and has no cached snapshot'}),
+          {status:503,headers:{'Content-Type':'application/json'}});
+        const headers = new Headers(cached.headers);
+        headers.set('X-Fleet-Offline', '1');headers.delete('Content-Length');
+        return new Response(await cached.blob(), {status: 200, headers});
+      }
+    })());
+    return;
+  }
+  if (url.pathname.startsWith('/api/')) return;
   if (request.mode === 'navigate') {
-    event.respondWith(fetch(request).catch(() => caches.match('/static/offline.html')));
+    event.respondWith(fetch(request).then(response => {
+      if (response.ok) event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.put('/', response.clone())));
+      return response;
+    }).catch(async () => (await caches.match('/')) || caches.match('/static/offline.html')));
     return;
   }
   if (!url.search && !url.hash && SHELL_PATHS.has(url.pathname)) {

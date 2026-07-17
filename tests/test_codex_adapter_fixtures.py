@@ -18,6 +18,8 @@ class FixtureClient:
         self.archive_error = None
         self.interrupts = []
         self.loaded = []
+        self.started_turns = []
+        self.steered_turns = []
 
     def list_threads(self):
         if self.fail_list:
@@ -49,6 +51,12 @@ class FixtureClient:
 
     def interrupt(self, thread_id):
         self.interrupts.append(thread_id)
+
+    def start_turn(self, thread_id, text, **kwargs):
+        self.started_turns.append((thread_id, text, kwargs))
+
+    def steer_turn(self, thread_id, text, **kwargs):
+        self.steered_turns.append((thread_id, text, kwargs))
 
     def account_limits(self):
         if self.fail_account:
@@ -116,6 +124,18 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(external["read_only"])
         self.assertFalse(external["capabilities"]["takeover"])
         self.assertFalse(external["capabilities"]["submit"])
+
+    def test_structured_limit_error_is_one_blocked_session_not_provider_failure(self):
+        limited = self.thread("limited", {"type": "systemError"})
+        limited["error"] = {"code": "rate_limit", "message": "Rate limit reached"}
+        healthy = self.thread("healthy", {"type": "idle"})
+        adapter, _ = self.adapter([limited, healthy])
+        adapter._refresh()
+        sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+        self.assertEqual(sessions["limited"]["state"], "blocked")
+        self.assertEqual(sessions["limited"]["error"], "Rate limit reached")
+        self.assertFalse(sessions["limited"]["capabilities"]["submit"])
+        self.assertEqual(sessions["healthy"]["state"], "idle")
 
     def test_pinned_external_rollout_is_live_but_remains_view_only(self):
         class Observer:
@@ -218,6 +238,19 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(session["capabilities"]["submit"])
         self.assertFalse(session["capabilities"]["close"])
         self.assertTrue(session["headless"])
+
+    def test_image_action_builds_native_local_image_inputs(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter._sessions = [{"native_session_id": "managed", "read_only": False,
+            "capabilities": {"submit": True}, "collaboration_mode": "default",
+            "model": "gpt-5.4", "effort": "high"}]
+        client.thread_state["managed"] = {"status": "idle"}
+        result = adapter.act({"type": "image_text", "session_id": "codex:managed",
+                              "text": "Inspect", "image_paths": ["/private/fleet/photo.jpg"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.started_turns[0][2]["inputs"], [
+            {"type": "text", "text": "Inspect"},
+            {"type": "localImage", "path": "/private/fleet/photo.jpg"}])
 
     def test_fleet_owned_vscode_source_stays_managed(self):
         thread = {**self.thread("fleet-rich-client", {"type": "idle"}),

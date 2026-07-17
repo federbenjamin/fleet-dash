@@ -140,6 +140,8 @@ def fresh_state():
         "upstream": "origin/codex-integration", "ahead": 2, "behind": 0,
         "dirty": True, "conflicts": 0, "remotes": ["origin"], "remote": "origin",
         "remote_branch": "codex-integration", "default_base": "main",
+        "repo_slug": "federbenjamin/fleet-dash",
+        "github_url": "https://github.com/federbenjamin/fleet-dash",
         "files": [{"path": "engine.py", "status": ".M", "staged": False,
             "unstaged": True, "untracked": False, "conflict": False},
             {"path": "repo_center.py", "status": "??", "staged": False,
@@ -179,7 +181,7 @@ def fresh_state():
             link_kind="session", link_id="codex:thread-one"),
         fixture_notification(1, "notification", "resolved", "Push delivery recovered",
             "The test device accepted its next delivery.", "claude")]
-    return {"sessions": [claude, codex], "closed": [], "actions": [],
+    return {"sessions": [claude, codex], "closed": [], "actions": [], "uploads": [],
             "hidden_action_sessions": [],
             "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
@@ -355,7 +357,8 @@ def fixture_workstreams():
                             "none" if STATE["repo"]["pr"].get("state") == "none" else
                             STATE["repo"]["pr"].get("state"))},
         "repository": {key: copy.deepcopy(STATE["repo"].get(key)) for key in
-            ("ok", "state", "worktree", "observed_at", "elapsed_ms", "cached", "error")
+            ("ok", "state", "worktree", "observed_at", "elapsed_ms", "cached", "error",
+             "repo_slug", "github_url")
             if key in STATE["repo"]}, "budget_state": next((item.get("status") for item in
                 fixture_budgets()["budgets"] if item.get("scope_type") == "workstream" and
                 item.get("scope_id") == "ws-fleet"), "not_configured"),
@@ -1156,6 +1159,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global STATE
         route = urlparse(self.path).path
+        if route == "/api/upload-image":
+            if not authorized(self):
+                return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
+            query = parse_qs(urlparse(self.path).query)
+            length = int(self.headers.get("Content-Length", 0))
+            data = self.rfile.read(length)
+            upload_id = (query.get("id") or [""])[0]
+            with LOCK:
+                STATE["uploads"].append({"id": upload_id,
+                    "sid": (query.get("sid") or [""])[0],
+                    "name": (query.get("name") or [""])[0],
+                    "content_type": self.headers.get("Content-Type"), "size": len(data)})
+            return self.json_reply({"ok": True, "upload_id": upload_id,
+                "name": (query.get("name") or ["image"])[0],
+                "content_type": "image/jpeg", "size": len(data)})
         payload = self.body()
         with LOCK:
             if route == "/test/reset":
@@ -1174,7 +1192,7 @@ class Handler(BaseHTTPRequestHandler):
                 if session:
                     session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
-            if route in ("/api/act", "/api/settings", "/api/search/rebuild",
+            if route in ("/api/act", "/api/upload-image", "/api/settings", "/api/search/rebuild",
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",

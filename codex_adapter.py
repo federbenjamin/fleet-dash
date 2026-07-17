@@ -521,9 +521,13 @@ class CodexAppServer:
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
                 status = turn.get("status") or "completed"
-                state.update(status="idle" if status in ("completed", "interrupted") else "error",
+                turn_error = _error_text(turn.get("error"))
+                failed_status = status not in ("completed", "interrupted")
+                state.update(status=("blocked" if failed_status and
+                                     _is_limit_error(turn_error) else
+                                     "error" if failed_status else "idle"),
                              turn_id=None, completed_at=now,
-                             turn_status=status, error=turn.get("error"))
+                             turn_status=status, error=turn_error or None)
             elif method == "thread/tokenUsage/updated":
                 state["token_usage"] = params.get("tokenUsage") or params.get("usage") or {}
             elif method == "thread/status/changed":
@@ -555,7 +559,10 @@ class CodexAppServer:
             elif method in ("error", "warning", "guardianWarning", "configWarning"):
                 state["last_notice"] = {"method": method, "params": params, "ts": now}
                 if method == "error":
-                    state["error"] = params.get("message") or str(params)
+                    state["error"] = _error_text(params.get("message") or params)
+                    if _is_limit_error(state["error"]):
+                        state["status"] = "blocked"
+                        state["turn_id"] = None
 
     def list_threads(self, limit=100):
         data, cursor = [], None
@@ -648,13 +655,13 @@ class CodexAppServer:
             params["effort"] = effort
         return self.request("turn/start", params)
 
-    def steer_turn(self, thread_id, text):
+    def steer_turn(self, thread_id, text, inputs=None):
         turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
         if not turn_id:
             raise CodexError("Codex thread has no active turn to steer")
         return self.request("turn/steer", {"threadId": thread_id,
                                             "expectedTurnId": turn_id,
-                                            "input": [{"type": "text", "text": text}]})
+                                            "input": inputs or [{"type": "text", "text": text}]})
 
     def interrupt(self, thread_id):
         turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
@@ -933,7 +940,17 @@ class CodexAdapter:
             running = native_running or observed_running or bool(
                 (observation or {}).get("active"))
             quiet = max(0, now - updated_epoch)
-            if detail_error or live.get("error") or recorded_type == "systemError":
+            turn_error = _error_text(turn_lifecycle.get("error"))
+            provider_error = _error_text(detail_error or live.get("error") or
+                                         thread.get("error") or
+                                         (recorded.get("error") if
+                                          isinstance(recorded, dict) else None) or
+                                         turn_error)
+            blocked = (live.get("status") == "blocked" or
+                       _is_limit_error(provider_error))
+            if blocked:
+                state = "blocked"
+            elif detail_error or provider_error or recorded_type == "systemError":
                 state = "error"
             elif pending or flags.intersection({"waitingOnApproval", "waitingOnUserInput"}):
                 state = "needs_you"
@@ -1043,9 +1060,9 @@ class CodexAdapter:
                 "convo_v": revision, "files_n": len(files), "agents": agents,
                 "agents_running": agents_running, "agents_total": len(agents),
                 "agent_cost": None, "stale": False,
-                "error": detail_error or live.get("error"),
+                "error": provider_error or None,
                 "capabilities": {"submit": is_managed and
-                    state not in ("error", "stale") and not uncontrolled_active,
+                    state not in ("blocked", "error", "stale") and not uncontrolled_active,
                     "interrupt": can_interrupt,
                     "takeover": False, "archive": is_managed,
                     "close": is_managed and not uncontrolled_active,
@@ -1513,7 +1530,7 @@ class CodexAdapter:
                 return {"ok": False,
                         "error": known.get("read_only_reason") or
                                  "external Codex thread is view only"}
-            required_capability = {"text": "submit", "mode": "submit",
+            required_capability = {"text": "submit", "image_text": "submit", "mode": "submit",
                                    "interrupt": "interrupt", "close": "close",
                                    "compact": "compact", "review": "review",
                                    "relay": "relay_agent"}.get(typ)
@@ -1523,10 +1540,19 @@ class CodexAdapter:
                     return {"ok": False, "error":
                             "Codex is active in another client; control it there until the turn ends"}
                 return {"ok": False, "error": f"session does not support {typ}"}
-            if typ == "text":
+            if typ in ("text", "image_text"):
                 text = str(action.get("text") or "").strip()
-                if not text:
+                image_paths = list(action.get("image_paths") or []) if typ == "image_text" else []
+                if not text and not image_paths:
                     return {"ok": False, "error": "empty text"}
+                if image_paths and (len(image_paths) > 4 or any(
+                        not isinstance(path, str) or not os.path.isabs(path) for path in image_paths)):
+                    return {"ok": False, "error": "invalid image inputs"}
+                text = text or ("Please inspect the attached image." if len(image_paths) == 1 else
+                                "Please inspect the attached images.")
+                inputs = (([{"type": "text", "text": text}] +
+                           [{"type": "localImage", "path": path} for path in image_paths])
+                          if image_paths else None)
                 with self._lock:
                     session = next((s for s in self._sessions
                                     if s.get("native_session_id") == tid), {})
@@ -1537,10 +1563,15 @@ class CodexAdapter:
                 if mode == "plan" and not model:
                     return {"ok": False, "error": "Codex model is unavailable; refresh and try again"}
                 if live.get("status") == "running" and hasattr(self.client, "steer_turn"):
-                    self.client.steer_turn(tid, text)
+                    if inputs:
+                        self.client.steer_turn(tid, text, inputs=inputs)
+                    else:
+                        self.client.steer_turn(tid, text)
                 else:
-                    self.client.start_turn(tid, text, mode=mode,
-                                           model=model, effort=effort)
+                    kwargs = {"mode": mode, "model": model, "effort": effort}
+                    if inputs:
+                        kwargs["inputs"] = inputs
+                    self.client.start_turn(tid, text, **kwargs)
             elif typ == "mode":
                 mode = str(action.get("mode") or "")
                 if mode not in ("plan", "default"):
@@ -1678,7 +1709,7 @@ def _latest_turn_lifecycle(thread):
               (explicitly_active or started_at is not None))
     return {"active": active, "started_at": started_at,
             "completed_at": completed_at, "status": turn.get("status"),
-            "turn_id": turn.get("id")}
+            "turn_id": turn.get("id"), "error": turn.get("error")}
 
 
 def _millis(value):
@@ -1880,6 +1911,31 @@ def _safe_json(value):
         return json.dumps(value, separators=(",", ":"), default=str)
     except Exception:
         return repr(value)
+
+
+def _error_text(value, limit=1000):
+    """Project App Server's string-or-object errors to bounded UI text."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        preferred = next((value.get(key) for key in
+                          ("message", "detail", "error", "reason")
+                          if value.get(key) not in (None, "")), None)
+        text = _error_text(preferred, limit) if preferred is not None else _safe_json(value)
+    else:
+        text = _safe_json(value)
+    text = str(text).replace("\x00", " ").strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _is_limit_error(value):
+    text = _error_text(value).lower()
+    return any(marker in text for marker in (
+        "rate limit", "usage limit", "quota exceeded", "limit reached",
+        "too many requests", "insufficient quota", "context window exceeded",
+        "maximum context length", "maximum token limit"))
 
 
 def _revision(thread, live):

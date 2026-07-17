@@ -33,7 +33,7 @@ CLAUDE_USAGE_PREFS = os.path.join(
 
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
-    "stall_seconds": 240,
+    "stall_seconds": 600,
     "dormant_seconds": 7200,
     "turn_done_window_seconds": 900,
     "agent_done_quiet_seconds": 5,
@@ -183,6 +183,13 @@ def load_config():
         return cfg
     if not raw.get("act_token"):        # device token for the remote act endpoint
         raw["act_token"] = secrets.token_hex(16)
+    # The former shipped default was four minutes. Move existing installs that
+    # still carry that exact value to the new ten-minute default once; preserve
+    # every other user-selected threshold.
+    if not raw.get("_stall_default_v2"):
+        if raw.get("stall_seconds", 240) == 240:
+            raw["stall_seconds"] = 600
+        raw["_stall_default_v2"] = True
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
     _write_private_json(path, merged)
@@ -211,6 +218,13 @@ def cwd_to_project_dir(cwd):
 KEY_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit", "Bash", "Agent", "Skill", "SendUserFile"}
 IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 WAITING_CONFIRM_SECONDS = 3.0
+IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+IMAGE_UPLOAD_TTL_SECONDS = 24 * 60 * 60
+IMAGE_UPLOAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+IMAGE_UPLOAD_MIMES = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+    "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif",
+}
 
 # slash commands that destroy conversation state — the page confirms before sending
 DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
@@ -305,6 +319,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
         candidates.append((rule, "needs_you", reason, primary, "confirmed"))
     if raw_state == "error":
         candidates.append(("placement.provider.error", "needs_you", "Fix needed",
+                           "open", "confirmed"))
+    if raw_state == "blocked":
+        candidates.append(("placement.provider.limit", "needs_you", "Limit reached",
                            "open", "confirmed"))
     if state == "stalled_or_prompt":
         candidates.append(("placement.state.stalled_or_prompt", "needs_you",
@@ -1087,6 +1104,9 @@ class Engine:
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
         self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
         self._cleanup_lock = threading.Lock()
+        self._image_upload_lock = threading.RLock()
+        self._image_cleanup_due = 0.0
+        self._image_cleanup_running = False
         self.db = None
         self.pending_seen = {}          # pending nonce -> first-observed timestamp
         self.lock = threading.Lock()
@@ -1203,6 +1223,207 @@ class Engine:
             out.append(d)
         return out
 
+    @staticmethod
+    def _image_kind(data):
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in {
+                b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
+            return "image/heic"
+        return None
+
+    @staticmethod
+    def _strip_jpeg_metadata(data):
+        """Drop JPEG APP/COM segments (EXIF GPS, XMP, camera data, comments)."""
+        if not isinstance(data, bytes) or not data.startswith(b"\xff\xd8"):
+            return None
+        out = bytearray(data[:2])
+        pos = 2
+        while pos < len(data):
+            marker_start = pos
+            if data[pos] != 0xff:
+                return None
+            while pos < len(data) and data[pos] == 0xff:
+                pos += 1
+            if pos >= len(data):
+                return None
+            marker = data[pos]
+            pos += 1
+            if marker == 0xda:  # scan data has byte-stuffing, so preserve the rest verbatim
+                out.extend(data[marker_start:])
+                return bytes(out)
+            if marker in tuple(range(0xd0, 0xda)) + (0x01,):
+                out.extend(data[marker_start:pos])
+                continue
+            if pos + 2 > len(data):
+                return None
+            length = int.from_bytes(data[pos:pos + 2], "big")
+            end = pos + length
+            if length < 2 or end > len(data):
+                return None
+            if not (0xe0 <= marker <= 0xef or marker == 0xfe):
+                out.extend(data[marker_start:end])
+            pos = end
+        return bytes(out) if data.endswith(b"\xff\xd9") else None
+
+    @staticmethod
+    def _image_upload_paths(upload_id):
+        root = os.path.join(BASE, "uploads")
+        return root, os.path.join(root, upload_id + ".jpg"), os.path.join(root, upload_id + ".json")
+
+    def _cleanup_image_uploads(self, now=None):
+        with self._image_upload_lock:
+            now = float(now or time.time())
+            root = os.path.join(BASE, "uploads")
+            try:
+                names = os.listdir(root)[:2000]
+            except FileNotFoundError:
+                return
+            for name in names:
+                if not name.endswith(".json") or not IMAGE_UPLOAD_ID_RE.fullmatch(name[:-5]):
+                    continue
+                upload_id = name[:-5]
+                _, image_path, meta_path = self._image_upload_paths(upload_id)
+                expired = False
+                try:
+                    info = os.lstat(meta_path)
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                        expired = True
+                    else:
+                        with open(meta_path) as handle:
+                            meta = json.load(handle)
+                        expired = float(meta.get("expires_at") or 0) <= now
+                except Exception:
+                    expired = True
+                if expired:
+                    for path in (image_path, meta_path):
+                        try:
+                            if stat.S_ISREG(os.lstat(path).st_mode):
+                                os.unlink(path)
+                        except FileNotFoundError:
+                            pass
+                        except OSError:
+                            pass
+
+    def _schedule_image_cleanup(self):
+        now = time.time()
+        with self._image_upload_lock:
+            if self._image_cleanup_running or now < self._image_cleanup_due:
+                return
+            self._image_cleanup_running = True
+            self._image_cleanup_due = now + 3600
+
+        def clean():
+            try:
+                self._cleanup_image_uploads()
+            finally:
+                with self._image_upload_lock:
+                    self._image_cleanup_running = False
+        threading.Thread(target=clean, name="fleet-image-cleanup", daemon=True).start()
+
+    def store_image_upload(self, sid, upload_id, display_name, content_type, data):
+        """Validate and normalize one private image for an interactive live session."""
+        sid = str(sid or "")
+        upload_id = str(upload_id or "")
+        content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+        if not IMAGE_UPLOAD_ID_RE.fullmatch(upload_id):
+            return {"ok": False, "error": "invalid image ID"}
+        if not isinstance(data, bytes) or not 1 <= len(data) <= IMAGE_UPLOAD_BYTES:
+            return {"ok": False, "error": "image must be between 1 byte and 10 MB"}
+        detected = self._image_kind(data)
+        if content_type not in IMAGE_UPLOAD_MIMES or detected != content_type and not (
+                content_type == "image/heif" and detected == "image/heic"):
+            return {"ok": False, "error": "image type does not match its contents"}
+        with self.lock:
+            session = next((copy.deepcopy(item) for item in
+                self.snapshot_cache.get("sessions") or [] if item.get("session_id") == sid), None)
+        if not session or not (session.get("capabilities") or {}).get("submit"):
+            return {"ok": False, "error": "session is not available for image messages"}
+        root, image_path, meta_path = self._image_upload_paths(upload_id)
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        os.chmod(root, 0o700, follow_symlinks=False)
+        source_path = os.path.join(root, "." + upload_id + IMAGE_UPLOAD_MIMES[content_type])
+        output_path = os.path.join(root, "." + upload_id + "-normalized.jpg")
+        safe_name = os.path.basename(str(display_name or "image"))[:120]
+        with self._image_upload_lock:
+            self._cleanup_image_uploads()
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(source_path, flags, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                converted = subprocess.run([
+                    "/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "85",
+                    source_path, "--out", output_path], capture_output=True, text=True, timeout=30)
+                if converted.returncode != 0:
+                    return {"ok": False, "error": "image could not be normalized"}
+                with open(output_path, "rb") as stream:
+                    scrubbed = self._strip_jpeg_metadata(stream.read(IMAGE_UPLOAD_BYTES + 1))
+                if not scrubbed or len(scrubbed) > IMAGE_UPLOAD_BYTES:
+                    return {"ok": False, "error": "image metadata could not be removed"}
+                flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(output_path, flags)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(scrubbed)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                info = os.lstat(output_path)
+                if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= IMAGE_UPLOAD_BYTES:
+                    return {"ok": False, "error": "normalized image exceeds 10 MB"}
+                os.chmod(output_path, 0o600, follow_symlinks=False)
+                os.replace(output_path, image_path)
+                created = time.time()
+                _write_private_json(meta_path, {"version": 1, "upload_id": upload_id,
+                    "session_id": sid, "display_name": safe_name, "content_type": "image/jpeg",
+                    "size": info.st_size, "created_at": created,
+                    "expires_at": created + IMAGE_UPLOAD_TTL_SECONDS})
+                return {"ok": True, "upload_id": upload_id, "name": safe_name,
+                        "content_type": "image/jpeg", "size": info.st_size,
+                        "expires_at": created + IMAGE_UPLOAD_TTL_SECONDS}
+            except (OSError, subprocess.SubprocessError):
+                return {"ok": False, "error": "image upload failed"}
+            finally:
+                for path in (source_path, output_path):
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        pass
+
+    def _resolve_image_uploads(self, sid, upload_ids):
+        if not isinstance(upload_ids, list) or not 1 <= len(upload_ids) <= 4:
+            return None, "attach between 1 and 4 images"
+        paths = []
+        now = time.time()
+        with self._image_upload_lock:
+            self._cleanup_image_uploads(now)
+            for upload_id in upload_ids:
+                upload_id = str(upload_id or "")
+                if not IMAGE_UPLOAD_ID_RE.fullmatch(upload_id):
+                    return None, "invalid image ID"
+                _, image_path, meta_path = self._image_upload_paths(upload_id)
+                try:
+                    image_info, meta_info = os.lstat(image_path), os.lstat(meta_path)
+                    if not stat.S_ISREG(image_info.st_mode) or not stat.S_ISREG(meta_info.st_mode):
+                        raise ValueError
+                    with open(meta_path) as handle:
+                        meta = json.load(handle)
+                    if meta.get("session_id") != sid or float(meta.get("expires_at") or 0) <= now:
+                        raise ValueError
+                    if image_info.st_size != int(meta.get("size") or -1):
+                        raise ValueError
+                except Exception:
+                    return None, "image upload is missing, expired, or belongs to another session"
+                paths.append(image_path)
+        return paths, None
+
     def tail_for(self, path):
         t = self.tails.get(path)
         if t is None:
@@ -1307,7 +1528,8 @@ class Engine:
                 kind, request, delivery = "reply", "Reply requested", "Awaiting response"
                 safe_bulk.append("mark_available")
             elif session.get("ui_group") == "needs_you":
-                kind = "problem" if session.get("state") in ("error", "stalled_or_prompt") \
+                kind = "problem" if session.get("state") in \
+                    ("blocked", "error", "stalled_or_prompt") \
                     else "attention"
                 request = session.get("error") or session.get("reason_label") or "Session needs attention"
                 delivery = "Intervention needed"
@@ -1776,6 +1998,7 @@ class Engine:
         with self.scan_lock:
             acquired = time.perf_counter()
             fleet = self._scan()
+        self._schedule_image_cleanup()
         elapsed = (time.perf_counter() - started) * 1000
         wait_ms = (acquired - started) * 1000
         self.scan_timings_ms.append(elapsed)
@@ -2251,7 +2474,8 @@ class Engine:
                 include_github=False)
             group["repository"] = {key: repo.get(key) for key in
                                    ("ok", "state", "worktree", "observed_at",
-                                    "elapsed_ms", "cached", "error") if key in repo}
+                                    "elapsed_ms", "cached", "error", "repo_slug",
+                                    "github_url") if key in repo}
             group["repo_summary"] = self._repository_summary(repo)
         result = {"ok": True, "t": snapshot.get("t") or time.time(),
                   "version": stamp[0], "workstreams": records,
@@ -2280,7 +2504,7 @@ class Engine:
             return None
         keys = ("ok", "state", "root", "worktree", "branch", "detached", "head_oid",
                 "upstream", "ahead", "behind", "dirty", "conflicts", "files", "remotes",
-                "remote", "remote_branch", "repo_slug", "default_base", "latest_commit", "pr", "tests",
+                "remote", "remote_branch", "repo_slug", "github_url", "default_base", "latest_commit", "pr", "tests",
                 "observed_at", "elapsed_ms", "revision", "actions", "cached", "error")
         return {key: repo.get(key) for key in keys if key in repo}
 
@@ -5002,9 +5226,18 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
-        {type:'text', session_id, text:'...'}"""
+        {type:'text', session_id, text:'...'} |
+        {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']}"""
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
+        if action.get("type") == "image_text":
+            paths, error = self._resolve_image_uploads(
+                str(action.get("session_id") or ""), action.get("upload_ids"))
+            if error:
+                return {"ok": False, "error": error}
+            # Client-supplied paths are never accepted. Only this server-side
+            # resolution can add image_paths to a provider action.
+            action = {**action, "image_paths": paths}
         if action.get("type") == "briefing_review":
             return self.briefing_action(action)
         if str(action.get("type") or "").startswith("outbox_"):
@@ -5242,9 +5475,17 @@ Treat this as an independent session. Verify the repository state before changin
                           f"{f' — “{desc}”' if desc else ''}] {body} "
                           f"(forward it with SendMessage; if that agent can't be "
                           f"resumed, say so instead of acting on this yourself)", True)]
-            elif typ in ("text", "handoff_text"):
+            elif typ in ("text", "image_text", "handoff_text"):
                 limit = 30_000 if typ == "handoff_text" else 2000
                 txt = str(action.get("text", ""))[:limit].strip()
+                if typ == "image_text":
+                    paths = action.get("image_paths") or []
+                    if not paths:
+                        return {"ok": False, "error": "no images"}
+                    txt = txt or ("Please inspect the attached image." if len(paths) == 1 else
+                                  "Please inspect the attached images.")
+                    txt += "\n\nImages attached through Fleet:\n" + "\n".join(
+                        f"- {path}" for path in paths)
                 if not txt:
                     return {"ok": False, "error": "empty text"}
                 # a leading "/" opens the TUI's OWN command popup, where Enter fires
@@ -5272,7 +5513,7 @@ Treat this as an independent session. Verify the repository state before changin
         # (digits/arrows/CR need a render between them, or keys get dropped — invariant
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
-        fast = typ in ("text", "handoff_text", "relay", "focus", "interrupt", "noop")
+        fast = typ in ("text", "image_text", "handoff_text", "relay", "focus", "interrupt", "noop")
         result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
         if typ == "permission_mode" and result.get("ok"):
             # Claude may defer its transcript marker until the next prompt. Keep

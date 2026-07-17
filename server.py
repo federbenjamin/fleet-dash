@@ -138,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         route = self.path.split("?", 1)[0]
-        if route not in ("/api/act", "/api/settings", "/api/search/rebuild",
+        if route not in ("/api/act", "/api/upload-image", "/api/settings", "/api/search/rebuild",
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
@@ -171,6 +171,27 @@ class Handler(BaseHTTPRequestHandler):
                   file=sys.stderr, flush=True)
             return self.reply(403, "application/json",
                               b'{"ok": false, "error": "bad or missing act token"}')
+        if route == "/api/upload-image":
+            if self.headers.get("Transfer-Encoding"):
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "chunked uploads are unsupported"}')
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = 0
+            if n <= 0 or n > 10 * 1024 * 1024:
+                return self.reply(413, "application/json",
+                                  b'{"ok": false, "error": "image must be 10 MB or smaller"}')
+            self.connection.settimeout(20)
+            data = self.rfile.read(n)
+            if len(data) != n:
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "incomplete image upload"}')
+            result = self.eng.store_image_upload(
+                self.query("sid"), self.query("id"), self.query("name"),
+                self.headers.get("Content-Type", ""), data)
+            status = 200 if result.get("ok") else 400
+            return self.reply(status, "application/json", json.dumps(result).encode())
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n < 0 or n > 65536:
@@ -472,7 +493,6 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     cfg = load_config()
     eng = Engine(cfg)
-    eng.scan()
     eng.start_web_push()
     if cfg.get("search_enabled", True):
         eng.search = SearchIndex(os.path.join(BASE, "search.db"), PROJECTS,
@@ -480,11 +500,13 @@ def main():
                                  discover_seconds=cfg.get("search_discover_seconds", 2),
                                  batch_rows=cfg.get("search_batch_rows", 250))
         eng.search.start_process()
-    threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
-    threading.Thread(target=outbox_loop, args=(eng,), daemon=True).start()
     Handler.eng = eng
     srv = ThreadingHTTPServer((cfg["bind"], cfg["port"]), Handler)
     print(f"fleet-dash on http://{cfg['bind']}:{cfg['port']}", flush=True)
+    # Bind before the first provider scan. One slow or malformed session must
+    # never make the dashboard's HTTP server disappear during startup.
+    threading.Thread(target=poll_loop, args=(eng,), daemon=True).start()
+    threading.Thread(target=outbox_loop, args=(eng,), daemon=True).start()
     srv.serve_forever()
 
 

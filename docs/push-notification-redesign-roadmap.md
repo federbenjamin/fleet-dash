@@ -111,8 +111,9 @@ preserve the broken transport keys, repeat buckets, delivery schema, or global t
 8. Web Push setup is honest: unsupported browser, insecure origin, missing Home Screen install,
    denied permission, expired subscription, missing Node helper, and last-delivery failure are
    distinct states.
-9. The service worker caches only versioned application shell assets. API, transcript, notification,
-   and session responses are network-only and never stored in Cache Storage.
+9. The service worker caches the token-free application shell and the last successful exact
+   `/api/fleet` snapshot under a fixed key. Transcript, notification, action, settings, search, and
+   every other session/API response remain network-only and never enter Cache Storage.
 10. Real-device delivery is a release gate, not inferred from a successful HTTP response from a fake
     endpoint.
 

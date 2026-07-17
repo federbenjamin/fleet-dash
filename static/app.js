@@ -1,4 +1,113 @@
 const $=q=>document.querySelector(q);
+const DRAFT_STORE_KEY='fleet.drafts.v1';
+const OFFLINE_MESSAGE_STORE_KEY='fleet.offlineMessages.v1';
+const IMAGE_DRAFT_STORE_KEY='fleet.imageDrafts.v1';
+const IMAGE_DB_NAME='fleet-images-v1',IMAGE_STORE='images';
+const IMAGE_MAX_BYTES=10*1024*1024,IMAGE_MAX_COUNT=4,IMAGE_TTL_MS=24*60*60*1000;
+let draftStore=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(DRAFT_STORE_KEY)||'{}');
+  return value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+}catch(_){return {};}})();
+function draftValue(key,fallback=''){
+  return Object.prototype.hasOwnProperty.call(draftStore,key)?String(draftStore[key]):String(fallback??'');
+}
+function persistDrafts(){
+  try{localStorage.setItem(DRAFT_STORE_KEY,JSON.stringify(draftStore));}catch(error){
+    console.warn('Fleet could not persist drafts',error);
+  }
+}
+function setDraft(key,value){
+  if(!key)return;
+  const text=String(value??'').slice(0,30000);
+  if(text)draftStore[key]=text;else delete draftStore[key];
+  const keys=Object.keys(draftStore);for(const old of keys.slice(0,Math.max(0,keys.length-200)))delete draftStore[old];
+  persistDrafts();
+}
+function clearDraft(...keys){let changed=false;for(const key of keys){
+  if(key&&Object.prototype.hasOwnProperty.call(draftStore,key)){delete draftStore[key];changed=true;}
+}if(changed)persistDrafts();}
+const composerDraftKey=sid=>`composer:${sid}`;
+const relayDraftKey=(sid,aid)=>`relay:${sid}:${aid}`;
+const questionDraftPrefix=(sid,nonce)=>`request:${sid}:${nonce}:`;
+function clearDraftPrefix(prefix){
+  const keys=Object.keys(draftStore).filter(key=>key.startsWith(prefix));
+  clearDraft(...keys);
+}
+let offlineMessages=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(OFFLINE_MESSAGE_STORE_KEY)||'[]');
+  return(Array.isArray(value)?value:[]).filter(item=>item&&
+    /^[A-Za-z0-9_-]{1,100}$/.test(String(item.id||''))&&
+    typeof item.sid==='string'&&item.sid.length>0&&item.sid.length<=200&&
+    typeof item.text==='string'&&item.text.trim()&&item.text.length<=30000&&
+    Number.isFinite(Number(item.created))).slice(-100).map(item=>({
+      id:String(item.id),sid:item.sid,text:item.text,created:Number(item.created),
+      imageIds:(Array.isArray(item.imageIds)?item.imageIds:[]).filter(id=>
+        /^[A-Za-z0-9_-]{1,100}$/.test(String(id))).slice(0,IMAGE_MAX_COUNT).map(String),
+      baseCount:Math.max(0,Number(item.baseCount)||0)}));
+}catch(_){return [];}})();
+function persistOfflineMessages(){
+  try{
+    if(offlineMessages.length)localStorage.setItem(OFFLINE_MESSAGE_STORE_KEY,JSON.stringify(offlineMessages));
+    else localStorage.removeItem(OFFLINE_MESSAGE_STORE_KEY);
+  }catch(error){console.warn('Fleet could not persist the offline message queue',error);}
+}
+function offlineMessageId(){
+  if(crypto?.randomUUID)return crypto.randomUUID().replace(/-/g,'');
+  return`${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.slice(0,100);
+}
+let imageDrafts=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(IMAGE_DRAFT_STORE_KEY)||'{}');
+  if(!value||typeof value!=='object'||Array.isArray(value))return{};
+  return Object.fromEntries(Object.entries(value).slice(-200).map(([sid,ids])=>[
+    String(sid),Array.isArray(ids)?ids.filter(id=>/^[A-Za-z0-9_-]{1,100}$/.test(String(id)))
+      .slice(0,IMAGE_MAX_COUNT).map(String):[]]));
+}catch(_){return {};}})();
+function persistImageDrafts(){try{
+  const clean=Object.fromEntries(Object.entries(imageDrafts).filter(([,ids])=>ids.length));
+  imageDrafts=clean;
+  if(Object.keys(clean).length)localStorage.setItem(IMAGE_DRAFT_STORE_KEY,JSON.stringify(clean));
+  else localStorage.removeItem(IMAGE_DRAFT_STORE_KEY);
+}catch(error){console.warn('Fleet could not persist image draft references',error);}}
+const imageDraftIds=sid=>[...(imageDrafts[String(sid)]||[])];
+function setImageDraftIds(sid,ids){
+  const clean=[...new Set((ids||[]).map(String).filter(id=>/^[A-Za-z0-9_-]{1,100}$/.test(id)))]
+    .slice(0,IMAGE_MAX_COUNT);
+  if(clean.length)imageDrafts[String(sid)]=clean;else delete imageDrafts[String(sid)];
+  persistImageDrafts();
+}
+function restoreImageDraftIds(sid,ids){setImageDraftIds(sid,[...imageDraftIds(sid),...(ids||[])]);}
+let imageDbPromise=null;
+function imageDb(){
+  if(!('indexedDB' in window))return Promise.reject(new Error('This browser cannot persist image drafts'));
+  if(imageDbPromise)return imageDbPromise;
+  imageDbPromise=new Promise((resolve,reject)=>{
+    const request=indexedDB.open(IMAGE_DB_NAME,1);
+    request.onupgradeneeded=()=>request.result.createObjectStore(IMAGE_STORE,{keyPath:'id'});
+    request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+  });
+  return imageDbPromise;
+}
+async function imageStoreRequest(mode,operation){
+  const db=await imageDb();
+  return new Promise((resolve,reject)=>{const tx=db.transaction(IMAGE_STORE,mode),store=tx.objectStore(IMAGE_STORE);
+    let request,result;try{request=operation(store);}catch(error){reject(error);return;}
+    request.onsuccess=()=>{result=request.result;};request.onerror=()=>reject(request.error);
+    tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+  });
+}
+const putImage=record=>imageStoreRequest('readwrite',store=>store.put(record));
+const getImage=id=>imageStoreRequest('readonly',store=>store.get(String(id)));
+const deleteImage=id=>imageStoreRequest('readwrite',store=>store.delete(String(id)));
+async function deleteImages(ids){await Promise.allSettled((ids||[]).map(deleteImage));}
+async function pruneImages(){
+  let records=[];try{records=await imageStoreRequest('readonly',store=>store.getAll());}catch(_){return;}
+  const cutoff=Date.now()-IMAGE_TTL_MS;
+  await deleteImages(records.filter(record=>Number(record.created||0)<cutoff).map(record=>record.id));
+}
+document.addEventListener('input',event=>{
+  const input=event.target,key=input?.dataset?.draftKey;
+  if(key&&input.type!=='password')setDraft(key,input.value);
+},true);
 const fleetPerf=window.__fleetPerf={samples:{render_ms:[],poll_ms:[],poll_payload_bytes:[],
   input_feedback_ms:[]}};
 function perfRecord(name,value){
@@ -45,7 +154,7 @@ if(initialDestination.detail&&!(history.state&&history.state.eventId)){
   history.pushState({fdRoute:'notifications',eventId:initialDestination.detail},'',detailHash);
 }
 let currentRoute=initialDestination.route,notificationDetailId=initialDestination.detail;
-let nowFilter='',nowState='all',workFilter='',workState='all';
+let nowFilter=draftValue('filter:now'),nowState='all',workFilter=draftValue('filter:workstreams'),workState='all';
 const NAV_SIDE_KEY='fleet.navSide.v1';
 let navSide=localStorage.getItem(NAV_SIDE_KEY)==='right'?'right':'left';
 function applyNavSide(){document.documentElement.dataset.navSide=navSide;}
@@ -106,11 +215,13 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
     }
     requestAnimationFrame(()=>{if(currentRoute==='workstreams')loadWorkstreams();});
   }
-  if(route==='history')loadHistory(!(historyData.items||[]).length);
+  if(route==='history')requestAnimationFrame(()=>{
+    if(currentRoute==='history')loadHistory(!(historyData.items||[]).length);
+  });
   if(route==='notifications'){renderNotifications();loadNotifications(true);}
   window.scrollTo({top:0,behavior:'auto'});
 }
-function setNowFilter(value){nowFilter=value;render(last,true);}
+function setNowFilter(value){nowFilter=value;setDraft('filter:now',value);render(last,true);}
 let nowStateFrame=0;
 function setNowState(value){
   nowState=['all','needs_you','working','available','subagents'].includes(value)?value:'all';
@@ -132,7 +243,7 @@ async function loadWorkstreams(force=false){
   }catch(error){workstreamData={ok:false,error:String(error),workstreams:workstreamData.workstreams||[]};}
   finally{workstreamsLoading=false;renderWorkstreams(workstreamData);if(settingsOpen&&budgetSettingsOpen)renderSettings();}
 }
-function setWorkFilter(value){workFilter=value;renderWorkstreams(workstreamData);}
+function setWorkFilter(value){workFilter=value;setDraft('filter:workstreams',value);renderWorkstreams(workstreamData);}
 function setWorkState(value){
   workState=['all','needs_you','working','mixed'].includes(value)?value:'all';
   renderWorkstreams(workstreamData);
@@ -152,9 +263,11 @@ function applySavedView(destination,index){
   const view=(savedViews[destination]||[])[index];if(!view)return;
   if(destination==='now'){
     nowFilter=view.query||'';nowState=view.state||'all';
+    setDraft('filter:now',nowFilter);
     const input=$('#nowfilter');if(input)input.value=nowFilter;render(last,true);
   }else{
     workFilter=view.query||'';workState=view.state||'all';
+    setDraft('filter:workstreams',workFilter);
     const input=$('#workfilter');if(input)input.value=workFilter;renderWorkstreams(workstreamData);
   }
 }
@@ -367,10 +480,10 @@ document.addEventListener('scroll',e=>{
 const fmt$=v=>v==null?'unavailable':'$'+(v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2));
 const fmtTok=v=>v==null?'—':v>=1e9?(v/1e9).toFixed(2)+'B':v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'k':v;
 const fmtAge=s=>s>=86400?Math.round(s/86400)+'d':s>=3600?Math.round(s/3600)+'h':s>=60?Math.round(s/60)+'m':s+'s';
-const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const stateLabel={running:'Working',needs_you:'Response needed',turn_done:'Available',idle:'Available',
   stalled:'Slow',stalled_or_prompt:'Check session',dormant:'Inactive',reopenable:'Reopenable',
-  stale:'Unavailable',error:'Fix needed'};
+  stale:'Unavailable',blocked:'Limit reached',error:'Fix needed'};
 
 // ---- on-demand provider plan usage ----------------------------------------
 let usageOpen=false;
@@ -623,13 +736,21 @@ async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,
   const loading=loadOutbox();
   const input=inputId?document.getElementById(inputId):null;
   const source=existing||{};
+  const draftKey=source.id?`schedule:${source.id}`:spawnSpec?'schedule:new-session':
+    `schedule:${sid}:${agentId||'session'}`;
+  const initialMessage=message||source.message||(input?.value||'');
+  const scheduleSpawn=spawnSpec||source.spawn_spec?{...(spawnSpec||source.spawn_spec)}:null;
+  if(scheduleSpawn){
+    for(const key of ['cwd','model','effort','worktree_name'])
+      scheduleSpawn[key]=draftValue(`${draftKey}:${key}`,scheduleSpawn[key]||'');
+  }
   const zone=source.created_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';
   scheduleView={id:source.id||null,operation:null,sid:sid||source.target_session_id||'',
     agentId:agentId||source.target_agent_id||'',inputId:inputId||null,
     kind:source.kind||((spawnSpec||source.spawn_spec)?'new_session':'at_time'),
-    message:message||source.message||(input?.value||''),zone,
-    localTime:source.local_time||localInputAt(source.trigger_at,zone)||defaultScheduleTime(),
-    fold:source.trigger_fold,choices:null,usageKey:'',spawnSpec:spawnSpec||source.spawn_spec||null};
+    message:draftValue(`${draftKey}:message`,initialMessage),zone,draftKey,
+    localTime:draftValue(`${draftKey}:time`,source.local_time||localInputAt(source.trigger_at,zone)||defaultScheduleTime()),
+    fold:source.trigger_fold,choices:null,usageKey:'',spawnSpec:scheduleSpawn};
   if(source.usage_account_id)scheduleView.usageKey=[source.target_provider,source.usage_account_id,source.usage_window_id].join('|');
   const stacked=anyOverlay();
   $('#scheduleview').style.display='flex';$('#scheduletitle').textContent=source.id?'Edit Outbox message':
@@ -663,13 +784,13 @@ function renderSchedule(){
       ${sessions.map(item=>`<option value="${esc(item.session_id)}" ${item.session_id===v.sid?'selected':''}>${esc((item.provider==='codex'?'Codex · ':'Claude · ')+(item.title||item.project))}</option>`).join('')}</select>
     ${agents.length?`<label class="nflab">target</label><select class="nfsel" onchange="scheduleSet('agentId',this.value)"><option value="">Session</option>${agents.map(agent=>`<option value="${esc(agent.agent_id)}" ${agent.agent_id===v.agentId?'selected':''}>Subagent · ${esc(agent.description||agent.agent_type||agent.agent_id)}</option>`).join('')}</select>`:''}`:
     `<label class="nflab">provider</label><select class="nfsel" onchange="scheduleView.spawnSpec.provider=this.value;renderSchedule()"><option value="claude" ${spawn.provider==='claude'?'selected':''}>Claude Code</option><option value="codex" ${spawn.provider==='codex'?'selected':''}>Codex CLI</option></select>
-     <label class="nflab">directory</label><input class="nfin" value="${esc(spawn.cwd||'')}" oninput="scheduleView.spawnSpec.cwd=this.value">
-     <div class="nfrow"><div class="nfcol"><label class="nflab">model</label><input class="nfin" value="${esc(spawn.model||'')}" placeholder="default" oninput="scheduleView.spawnSpec.model=this.value"></div>
-     <div class="nfcol"><label class="nflab">effort</label><input class="nfin" value="${esc(spawn.effort||'')}" placeholder="default" oninput="scheduleView.spawnSpec.effort=this.value"></div></div>
+     <label class="nflab">directory</label><input class="nfin" data-draft-key="${esc(v.draftKey+':cwd')}" value="${esc(spawn.cwd||'')}" oninput="scheduleView.spawnSpec.cwd=this.value">
+     <div class="nfrow"><div class="nfcol"><label class="nflab">model</label><input class="nfin" data-draft-key="${esc(v.draftKey+':model')}" value="${esc(spawn.model||'')}" placeholder="default" oninput="scheduleView.spawnSpec.model=this.value"></div>
+     <div class="nfcol"><label class="nflab">effort</label><input class="nfin" data-draft-key="${esc(v.draftKey+':effort')}" value="${esc(spawn.effort||'')}" placeholder="default" oninput="scheduleView.spawnSpec.effort=this.value"></div></div>
      ${spawn.provider==='codex'?`<label class="nflab">mode</label><select class="nfsel" onchange="scheduleView.spawnSpec.mode=this.value"><option value="plan" ${spawn.mode==='plan'?'selected':''}>Plan</option><option value="default" ${spawn.mode==='default'?'selected':''}>Default</option></select>`:
-       `<label class="nfcheck"><input type="checkbox" ${spawn.worktree?'checked':''} onchange="scheduleView.spawnSpec.worktree=this.checked;renderSchedule()"><span>new git worktree</span></label>${spawn.worktree?`<input class="nfin" value="${esc(spawn.worktree_name||'')}" placeholder="worktree name (optional)" oninput="scheduleView.spawnSpec.worktree_name=this.value">`:''}`}`}
-    <label class="nflab">message</label><textarea class="nfin" maxlength="2000" oninput="scheduleView.message=this.value">${esc(v.message)}</textarea>
-    ${v.kind==='at_time'||isNew?`<div class="scheduletime"><label><span class="nflab">local date and time</span><input class="nfin" type="datetime-local" value="${esc(v.localTime)}" onchange="scheduleView.localTime=this.value;scheduleView.choices=null"></label><span class="schedulezone">${esc(v.zone)}</span></div>`:''}
+       `<label class="nfcheck"><input type="checkbox" ${spawn.worktree?'checked':''} onchange="scheduleView.spawnSpec.worktree=this.checked;renderSchedule()"><span>new git worktree</span></label>${spawn.worktree?`<input class="nfin" data-draft-key="${esc(v.draftKey+':worktree_name')}" value="${esc(spawn.worktree_name||'')}" placeholder="worktree name (optional)" oninput="scheduleView.spawnSpec.worktree_name=this.value">`:''}`}`}
+    <label class="nflab">message</label><textarea class="nfin" data-draft-key="${esc(v.draftKey+':message')}" maxlength="2000" oninput="scheduleView.message=this.value">${esc(v.message)}</textarea>
+    ${v.kind==='at_time'||isNew?`<div class="scheduletime"><label><span class="nflab">local date and time</span><input class="nfin" data-draft-key="${esc(v.draftKey+':time')}" type="datetime-local" value="${esc(v.localTime)}" onchange="scheduleView.localTime=this.value;scheduleView.choices=null"></label><span class="schedulezone">${esc(v.zone)}</span></div>`:''}
     ${v.kind==='usage_reset'?`<label class="nflab">account and usage window</label><select class="nfsel" onchange="scheduleView.usageKey=this.value">${usage.map(item=>`<option value="${esc(item.value)}" ${item.value===v.usageKey?'selected':''}>${esc(item.label)}</option>`).join('')}</select>${usage.length?'':'<div class="schedulewarn">No fresh reset evidence is available.</div>'}`:''}
     ${v.choices?`<div class="schedulewarn">That clock time occurs twice. Choose which occurrence:<select class="nfsel" onchange="scheduleView.fold=Number(this.value)">${v.choices.map((choice,index)=>`<option value="${choice.fold}">${index?'Second':'First'} occurrence · UTC offset ${esc(choice.offset)}</option>`).join('')}</select></div>`:''}
     <div id="schedulemsg" class="actmsg"></div><div class="schedulesubmit"><button class="pbtn" onclick="dismissOverlay()">Cancel</button><button class="pbtn send" onclick="submitSchedule()">${v.id?(v.operation?'Create retry':'Save changes'):'Schedule'}</button></div></div>`;
@@ -695,6 +816,9 @@ async function submitSchedule(){
   if(!result.ok){if(result.code==='ambiguous_time'){v.choices=result.choices;v.fold=result.choices?.[0]?.fold;renderSchedule();return;}msg.textContent='✗ '+(result.error||'failed');return;}
   mergeOutboxResult(result);
   const input=v.inputId&&document.getElementById(v.inputId);if(input)input.value='';
+  clearDraftPrefix(v.draftKey+':');
+  if(v.inputId)clearDraft(composerDraftKey(v.sid),relayDraftKey(v.sid,v.agentId));
+  if(v.kind==='new_session')clearDraft('new:directory','new:worktree','new:message');
   dismissOverlay();await loadOutbox(true);render(last,true);
 }
 
@@ -890,9 +1014,19 @@ function briefingBudget(item){
 function briefingGroup(title,items,renderer=briefingItem){
   if(!items?.length)return'';return`<section class="briefgroup"><h3>${esc(title)} <span>${items.length}</span></h3>${items.map(renderer).join('')}</section>`;
 }
-function openBriefingSource(kind,id){
+function safeGithubUrl(value){try{
+  const url=new URL(String(value||''));
+  return url.protocol==='https:'&&/^[A-Za-z0-9.-]+$/.test(url.hostname)?url.href:'';
+}catch(_){return'';}}
+function openGithub(value){const url=safeGithubUrl(value);if(url)window.open(url,'_blank','noopener');return Boolean(url);}
+async function openBriefingSource(kind,id){
   if(kind==='session'&&id){openSession(id);return;}
-  if(kind==='repository'&&id){openRepository(id,id);return;}
+  if(kind==='repository'&&id){
+    let item=(workstreamData.workstreams||[]).find(row=>row.root===id);
+    if(!item){await loadWorkstreams(true);item=(workstreamData.workstreams||[]).find(row=>row.root===id);}
+    if(openGithub(item?.repository?.github_url))return;
+    navigateTo('workstreams');return;
+  }
   if(kind==='outbox'){openOutbox();return;}
   if(kind==='budget'){navigateTo('insights');return;}
   if(kind==='settings')navigateTo('settings');
@@ -939,7 +1073,7 @@ let notificationActionState=pushActionFallback?{busy:false,
   message:`${pushActionFallback==='snooze'?'Snooze':'Mute'} from the notification did not complete. Review the current state and try again.`,
   error:true}:{busy:false,message:'',error:false};
 pushActionFallback='';
-let notificationHistoryQuery='',notificationHistoryProvider='',notificationHistoryKind='';
+let notificationHistoryQuery=draftValue('filter:notification-history'),notificationHistoryProvider='',notificationHistoryKind='';
 let notificationHistoryWorkstream='',notificationHistorySession='',notificationHistoryAge='';
 function notificationBucket(item){
   if(item.state==='snoozed')return'snoozed';
@@ -1144,7 +1278,7 @@ function renderNotifications(){
   if(notificationSection==='history'){
     const workstreams=[...new Set(notificationItems.map(item=>item.workstream_id).filter(Boolean))].sort();
     const sessions=[...new Set(notificationItems.map(item=>item.session_id).filter(Boolean))].sort();
-    status.innerHTML=`<label class="notificationsearch"><span>⌕</span><input value="${esc(notificationHistoryQuery)}" placeholder="Filter history" oninput="notificationHistoryQuery=this.value;renderNotifications()"></label>
+    status.innerHTML=`<label class="notificationsearch"><span>⌕</span><input data-draft-key="filter:notification-history" value="${esc(notificationHistoryQuery)}" placeholder="Filter history" oninput="notificationHistoryQuery=this.value;renderNotifications()"></label>
       <select aria-label="notification provider" onchange="notificationHistoryProvider=this.value;renderNotifications()"><option value="">All providers</option>${['claude','codex'].map(value=>`<option value="${value}" ${notificationHistoryProvider===value?'selected':''}>${value}</option>`).join('')}</select>
       <select aria-label="notification kind" onchange="notificationHistoryKind=this.value;renderNotifications()"><option value="">All kinds</option>${Object.entries(notificationKinds).map(([value,label])=>`<option value="${value}" ${notificationHistoryKind===value?'selected':''}>${esc(label)}</option>`).join('')}</select>
       <select aria-label="notification workstream" onchange="notificationHistoryWorkstream=this.value;renderNotifications()"><option value="">All workstreams</option>${workstreams.map(value=>`<option value="${esc(value)}" ${notificationHistoryWorkstream===value?'selected':''}>${esc(value)}</option>`).join('')}</select>
@@ -1307,9 +1441,19 @@ async function withNativeRequestLock(sid,nonce,work){
   finally{nativeRequestLocks.delete(key);uiRefresh();}
 }
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
-function optimisticList(sid){
+function optimisticBucket(sid){
   if(!optimisticMessages.has(sid))optimisticMessages.set(sid,[]);
   return optimisticMessages.get(sid);
+}
+function optimisticList(sid){
+  const list=optimisticBucket(sid);
+  for(const queued of offlineMessages){
+    if(queued.sid!==sid||list.some(item=>item.queueId===queued.id))continue;
+    list.push({id:++optimisticSequence,queueId:queued.id,sid,text:queued.text,kind:'text',
+      imageIds:[...(queued.imageIds||[])],imageCount:(queued.imageIds||[]).length,
+      status:'queued',baseCount:queued.baseCount,created:queued.created});
+  }
+  return list;
 }
 function canonicalCount(messages,item){
   if(item.kind==='answer')return(messages||[]).filter(message=>
@@ -1318,18 +1462,23 @@ function canonicalCount(messages,item){
   return(messages||[]).filter(message=>message.role==='user'&&
     normalizedMessage(message.text)===wanted).length;
 }
-function addOptimistic(sid,text,kind='text'){
-  const feedbackStarted=performance.now();
-  const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
-  const item={id:++optimisticSequence,sid,text:String(text||''),kind,status:'sending',
-    baseCount:canonicalCount(messages,{kind,text}),created:Date.now()};
-  optimisticList(sid).push(item);
-  setTimeout(()=>{
-    const current=optimisticList(sid).find(entry=>entry.id===item.id);
+function armOptimisticTimeout(item){
+  clearTimeout(item.confirmTimer);
+  item.confirmTimer=setTimeout(()=>{
+    const current=optimisticList(item.sid).find(entry=>entry.id===item.id);
     if(current&&current.status==='sending'){
       current.status='failed';current.error='Not confirmed after 15 seconds';uiRefresh();
     }
   },15000);
+}
+function addOptimistic(sid,text,kind='text',status='sending',queueId=null,baseCount=null,imageIds=[]){
+  const feedbackStarted=performance.now();
+  const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
+  const item={id:++optimisticSequence,queueId,sid,text:String(text||''),kind,status,
+    imageIds:[...(imageIds||[])],imageCount:(imageIds||[]).length,
+    baseCount:baseCount==null?canonicalCount(messages,{kind,text}):baseCount,created:Date.now()};
+  optimisticBucket(sid).push(item);
+  if(status==='sending')armOptimisticTimeout(item);
   const openConvo=sessionView?.sid===sid&&!sessionView.closed&&$('#sbody .aconvo');
   if(openConvo){
     openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
@@ -1358,6 +1507,7 @@ function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
 function visibleOptimistic(sid,messages){
   const list=optimisticList(sid);
   const keep=list.filter(item=>{
+    if(item.status==='queued')return true;
     if(canonicalCount(messages,item)>item.baseCount)return false;
     return true;
   });
@@ -1368,18 +1518,20 @@ function restoreOptimistic(sid,id){
   const list=optimisticList(sid),item=list.find(entry=>entry.id===id);
   optimisticMessages.set(sid,list.filter(entry=>entry.id!==id));
   if(item?.kind==='answer'){delete answered[sid];uiRefresh();return;}
+  if(item?.imageIds?.length)restoreImageDraftIds(sid,item.imageIds);
   uiRefresh();
   requestAnimationFrame(()=>{
     const input=document.getElementById('sft-'+sid)||document.getElementById('vft-'+sid)||
       document.getElementById('ft-'+sid);
-    if(input){input.value=item?.text||'';input.focus();}
+    if(input){input.value=item?.text||'';setDraft(composerDraftKey(sid),input.value);input.focus();}
   });
 }
 function optimisticItemHtml(item){
   return`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
-    <span class="crole">you</span>${item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
+    <span class="crole">you</span>${item.status==='queued'?`<span class="delivery queued" aria-label="queued offline" title="queued until Fleet reconnects">↥</span>`:
+      item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
       item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">!</button>`:''}
-    <div class="cbody"><p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
+    <div class="cbody">${item.imageCount?`<div class="image-receipt">🖼 ${item.imageCount} image${item.imageCount===1?'':'s'}</div>`:''}<p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
 }
 function optimisticHtml(sid,messages){
   return visibleOptimistic(sid,messages).map(item=>optimisticItemHtml(item)).join('');
@@ -1421,13 +1573,17 @@ function cardResponseFeedback(s){
   const messages=((ctxCache[s.session_id]||{}).messages)||[];
   const answers=visibleOptimistic(s.session_id,messages).filter(item=>item.kind==='answer');
   const answer=answers.length?answers[answers.length-1]:null;
+  const queuedMessages=visibleOptimistic(s.session_id,messages).filter(item=>item.queueId);
+  const queued=queuedMessages.length?queuedMessages[queuedMessages.length-1]:null;
   const action=quickResponses.get(s.session_id)||null;
-  const item=!answer?action:!action?answer:(answer.created>=action.created?answer:action);
+  const item=[answer,queued,action].filter(Boolean).sort((a,b)=>a.created-b.created).at(-1);
   if(!item)return'';
   const status=item.status==='confirmed'||item.status==='sent'?'sent':item.status;
-  const verb=status==='sending'?'Submitting':status==='failed'?'Failed':'Submitted';
-  const icon=status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
-    status==='failed'?(item.kind==='answer'
+  const verb=status==='queued'?'Queued offline':status==='sending'?(item.kind==='text'?'Sending':'Submitting'):
+    status==='failed'?'Failed':'Submitted';
+  const icon=status==='queued'?`<span class="delivery queued" aria-label="queued offline">↥</span>`:
+    status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
+    status==='failed'?(item.kind==='answer'||item.kind==='text'
       ?`<button class="delivery failed" title="${esc(item.error||'Submission failed')} — restore" aria-label="submission failed; restore response" onclick="event.stopPropagation();restoreOptimistic('${s.session_id}',${item.id})">!</button>`
       :`<span class="delivery failed" title="${esc(item.error||'Submission failed')}" aria-label="submission failed">!</span>`)
       :`<span class="delivery sent" aria-label="response submitted">✓</span>`;
@@ -1506,7 +1662,6 @@ function overflowMenu(key,s,kind='session',done=false){
     : Boolean(s?.capabilities?.interrupt);
   const canClose=Boolean(lifecycle&&s?.capabilities?.close);
   const canHandoff=Boolean(s?.session_id&&['session','viewer','closed'].includes(kind));
-  const canRepo=Boolean(s?.cwd&&['session','viewer','closed','subagent'].includes(kind));
   return`<span class="ovwrap">
     <button class="ovbtn" aria-label="${label}" aria-haspopup="menu" aria-expanded="${open?'true':'false'}"
       onclick="toggleOverflow(event,'${key}')">⋮</button>
@@ -1527,8 +1682,6 @@ function overflowMenu(key,s,kind='session',done=false){
       </span><span class="ovsep"></span>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
-      ${canRepo?`<button class="ovitem" role="menuitem" onclick="closeOverflow();openRepository('',decodeURIComponent('${enc(s.cwd)}'))">
-        <span>Repository outcome</span><small>changes · tests · PR</small></button>`:''}
       ${canHandoff?`<span class="ovsep"></span>
         <button class="ovitem" role="menuitem" onclick="closeOverflow();openHandoff(decodeURIComponent('${enc(s.session_id)}'),'claude')">
           <span>Continue in Claude</span><small>new session</small></button>
@@ -1550,6 +1703,7 @@ function overflowMenu(key,s,kind='session',done=false){
 // A handoff creates a separate provider-native session. Fleet stores only the
 // source/destination identity and delivery status; the editable body is not kept.
 let handoffView=null,handoffPushed=false,handoffOpenAfterBack=null;
+const handoffDraftPrefix=(sid,target)=>`handoff:${sid}:${target}:`;
 function handoffCatalog(provider){
   return ((((last||{}).models_by_provider||{})[provider])||[]).map(item=>
     typeof item==='string'?{id:item,name:item,efforts:[]} : item);
@@ -1571,6 +1725,7 @@ function updateHandoffArtifacts(path,checked){
   const marker=/\[Selected artifact references\][\s\S]*?\[End artifact references\]/;
   handoffView.draft=marker.test(handoffView.draft)
     ?handoffView.draft.replace(marker,section):handoffView.draft+'\n\n'+section;
+  setDraft(handoffDraftPrefix(handoffView.sid,handoffView.target)+'message',handoffView.draft);
   if(textarea)textarea.value=handoffView.draft;
 }
 function renderHandoff(){
@@ -1586,13 +1741,13 @@ function renderHandoff(){
   root.innerHTML=`<div class="handofflayout">
     <section class="handoffeditor"><div class="handoffnotice"><b>Independent session</b><span>The source keeps running. Fleet creates one exact ${provider==='claude'?'Claude Code':'Codex CLI'} destination and sends this editable message to it.</span></div>
       <label class="handofflabel" for="handoffpreview"><span>Message to send</span><small>${handoffView.draft.length.toLocaleString()} / 30,000</small></label>
-      <textarea id="handoffpreview" maxlength="30000" oninput="handoffView.draft=this.value;this.previousElementSibling.querySelector('small').textContent=this.value.length.toLocaleString()+' / 30,000'">${esc(handoffView.draft)}</textarea>
+      <textarea id="handoffpreview" data-draft-key="${esc(handoffDraftPrefix(handoffView.sid,provider)+'message')}" maxlength="30000" oninput="handoffView.draft=this.value;this.previousElementSibling.querySelector('small').textContent=this.value.length.toLocaleString()+' / 30,000'">${esc(handoffView.draft)}</textarea>
     </section>
     <aside class="handoffoptions"><h3>New coding session</h3>
       <label class="nflab">provider</label><select class="nfsel" onchange="changeHandoffProvider(this.value)">
         <option value="claude" ${provider==='claude'?'selected':''}>Claude Code</option>
         <option value="codex" ${provider==='codex'?'selected':''}>Codex CLI</option></select>
-      <label class="nflab">directory</label><input class="nfin" value="${esc(defaults.cwd||'')}"
+      <label class="nflab">directory</label><input class="nfin" data-draft-key="${esc(handoffDraftPrefix(handoffView.sid,provider)+'cwd')}" value="${esc(defaults.cwd||'')}"
         oninput="handoffView.defaults.cwd=this.value" autocomplete="off">
       ${artifacts.length?`<label class="nflab">artifact references</label><div class="handoffartifacts">${artifacts.map(item=>
         `<label class="handoffartifact"><input type="checkbox" ${handoffView.selected.has(item.path)?'checked':''} ${item.missing?'disabled':''}
@@ -1606,7 +1761,7 @@ function renderHandoff(){
           <option value="plan" ${defaults.mode==='plan'?'selected':''}>Plan</option><option value="default" ${defaults.mode==='default'?'selected':''}>Default</option></select>`:''}
         <label class="nfcheck"><input type="checkbox" ${defaults.worktree?'checked':''}
           onchange="handoffView.defaults.worktree=this.checked;renderHandoff()"><span>start in a new Git worktree</span></label>
-        ${defaults.worktree?`<label class="nflab">worktree name</label><input class="nfin" maxlength="40" value="${esc(defaults.worktree_name||'')}"
+        ${defaults.worktree?`<label class="nflab">worktree name</label><input class="nfin" data-draft-key="${esc(handoffDraftPrefix(handoffView.sid,provider)+'worktree')}" maxlength="40" value="${esc(defaults.worktree_name||'')}"
           placeholder="optional" oninput="handoffView.defaults.worktree_name=this.value">`:''}
       </details>
       <button class="pbtn send handoffsubmit" ${handoffView.busy?'disabled':''} onclick="submitHandoff(false)">${handoffView.busy?'Creating and sending…':`Start ${provider==='claude'?'Claude':'Codex'} and send`}</button>
@@ -1622,7 +1777,10 @@ async function loadHandoff(){
     const r=await fetch(`/api/handoff?sid=${encodeURIComponent(view.sid)}&provider=${encodeURIComponent(view.target)}`,{cache:'no-store'});
     const d=await r.json();if(!r.ok||!d.ok)throw new Error(r.status===403?'This device needs Fleet’s action token to read and send handoffs':(d.error||'handoff unavailable'));
     if(handoffView!==view)return;
-    view.data=d;view.draft=d.preview||'';view.defaults={...(d.defaults||{})};
+    const prefix=handoffDraftPrefix(view.sid,view.target);
+    view.data=d;view.draft=draftValue(prefix+'message',d.preview||'');view.defaults={...(d.defaults||{})};
+    view.defaults.cwd=draftValue(prefix+'cwd',view.defaults.cwd||'');
+    view.defaults.worktree_name=draftValue(prefix+'worktree',view.defaults.worktree_name||'');
     view.selected=new Set((d.artifacts||[]).filter(item=>!item.missing).map(item=>item.path));
   }catch(error){if(handoffView===view)view.error=String(error.message||error);}
   finally{if(handoffView===view){view.loading=false;renderHandoff();}}
@@ -1667,6 +1825,7 @@ async function submitHandoff(retry){
     view.destination=d.destination_session_id||d.session_id||view.destination;
     view.retryable=Boolean(d.retryable);
     if(!r.ok||!d.ok)throw new Error(d.error||'handoff failed');
+    clearDraftPrefix(handoffDraftPrefix(view.sid,view.target));
     view.status='Sent ✓ — opening the exact destination';view.error='';
     await tick();
     if(handoffView===view)setTimeout(()=>openHandoffDestination(true),150);
@@ -1692,123 +1851,6 @@ function handoffLinksHtml(s){
     title="${esc(link.status+(link.error?' — '+link.error:''))}" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${enc(link.session_id)}'))">${link.direction==='from'?'continued in':'continued from'} ${esc(link.provider)} · ${esc(link.status)}</button>`).join('')}</div>`;
 }
 
-// ---- repository outcomes --------------------------------------------------
-// Reads are cached, bounded Git/GitHub argv probes. Mutations always use the
-// revision from this editable preview and a second confirmation interstitial.
-let repoView=null,repoPushed=false;
-function repoSignal(state){
-  return({passed:'passed',failed:'failed',running:'running',unknown:'unknown',
-    not_observed:'not observed',stale:'stale',unavailable:'unavailable'})[state]||state||'not observed';
-}
-function updateRepoSelection(path,checked){
-  if(!repoView)return;checked?repoView.selected.add(path):repoView.selected.delete(path);
-  renderRepository();
-}
-function renderRepository(){
-  const root=$('#repobody');if(!repoView||!root)return;
-  if(repoView.loading&&!repoView.data){root.innerHTML='<div class="ctxload">Reading repository evidence…</div>';return;}
-  if(repoView.error&&!repoView.data){root.innerHTML=`<div class="destinationempty"><span>!</span><b>Repository unavailable</b><p>${esc(repoView.error)}</p><button class="pbtn" onclick="loadRepository(true)">retry</button></div>`;return;}
-  const d=repoView.data||{},actions=d.actions||{},commit=actions.commit||{},push=actions.push||{},
-    create=actions.pr_create_draft||{},ready=actions.pr_mark_ready||{},pr=d.pr||{},tests=d.tests||{};
-  const files=d.files||[],selected=repoView.selected||new Set();
-  const checks=pr.checks||{};
-  const branch=d.detached?'detached HEAD':(d.branch||'branch unavailable');
-  const worktrees=d.worktrees||[d.worktree].filter(Boolean);
-  root.innerHTML=`<div class="repolayout">
-    <section class="reposummary">
-      <div class="repostatus"><span><small>Branch</small><b>${esc(branch)}</b></span>
-        <span><small>Changes</small><b class="${d.dirty?'warn':'ok'}">${d.dirty?`${files.length} file${files.length===1?'':'s'}`:'clean'}</b></span>
-        <span><small>Sync</small><b>${d.ahead||0} ahead · ${d.behind||0} behind</b></span>
-        <span><small>Tests/build</small><b class="${tests.state==='failed'?'bad':tests.state==='passed'?'ok':''}">${esc(repoSignal(tests.state))}</b></span>
-        <span><small>Pull request</small><b>${pr.state==='ok'?`#${esc(String(pr.number))}${pr.is_draft?' · draft':' · ready'}`:esc(repoSignal(pr.state==='none'?'not_observed':pr.state))}</b></span></div>
-      <div class="repoevidence"><span>Observed ${d.observed_at?fmtAge(Math.max(0,Date.now()/1000-d.observed_at))+' ago':'now'}${d.cached?' · cached':''}</span>
-        ${tests.command?`<code title="${esc(tests.command)}">${esc(tests.command)}</code>`:'<span>no test/build command observed in session transcripts</span>'}
-        ${pr.state==='ok'?`<span>${checks.total||0} checks · ${checks.passed||0} passed · ${checks.pending||0} pending · ${checks.failed||0} failed</span>`:''}
-        ${pr.error?`<span class="repoerror">${esc(pr.error)}</span>`:''}</div>
-      ${worktrees.length>1?`<label class="repolabel">Worktree<select onchange="changeRepositoryWorktree(this.value)">${worktrees.map(path=>`<option value="${esc(path)}" ${path===d.worktree?'selected':''}>${esc(path)}</option>`).join('')}</select></label>`:`<div class="repopath">${esc(d.worktree||'')}</div>`}
-      ${repoView.status?`<div class="reporesult ${repoView.failed?'bad':'ok'}">${esc(repoView.status)}</div>`:''}
-      ${(d.recent_actions||[]).length?`<div class="repohistory"><b>Recent actions</b>${d.recent_actions.map(item=>`<span class="${item.status==='failed'?'bad':'ok'}"><strong>${esc(String(item.kind||'').replaceAll('_',' '))}</strong><small>${esc(item.status)} · ${fmtAge(Math.max(0,Date.now()/1000-(item.finished_at||item.started_at||0)))} ago</small>${item.error?`<em>${esc(item.error)}</em>`:''}</span>`).join('')}</div>`:''}
-    </section>
-    <section class="repoactions">
-      <article class="repoaction"><div><h3>Commit</h3><p>Review the exact files and edit the message before committing.</p></div>
-        <div class="repofiles">${files.length?files.map(file=>`<label><input type="checkbox" ${selected.has(file.path)?'checked':''} ${file.conflict||file.staged?'disabled':''}
-          onchange="updateRepoSelection(decodeURIComponent('${enc(file.path)}'),this.checked)"><span><code>${esc(file.status)}</code>${esc(file.path)}${file.staged?'<small>staged</small>':''}${file.untracked?'<small>new</small>':''}</span></label>`).join(''):'<span class="repoempty">Working tree is clean.</span>'}</div>
-        <label class="repolabel">Commit message<textarea id="repocommit" maxlength="1000" oninput="repoView.commitMessage=this.value">${esc(repoView.commitMessage||commit.default_message||'')}</textarea></label>
-        <small class="reponote">The commit includes selected files plus anything already staged in this worktree.</small>
-        <button class="pbtn send" ${!commit.enabled||!selected.size||repoView.busy?'disabled':''} onclick="confirmRepoCommit()">Commit ${selected.size||''} file${selected.size===1?'':'s'}</button>
-        ${!commit.enabled&&commit.reason?`<small class="repoerror">${esc(commit.reason)}</small>`:''}</article>
-      <article class="repoaction"><div><h3>Push</h3><p>${push.remote?`Push ${push.ahead||0} commit${push.ahead===1?'':'s'} to ${esc(push.remote)}/${esc(push.branch||'')}.`:'No push destination is configured.'}</p></div>
-        <button class="pbtn send" ${!push.enabled||repoView.busy?'disabled':''} onclick="confirmRepoPush()">Push</button>
-        ${!push.enabled&&push.reason?`<small class="repoerror">${esc(push.reason)}</small>`:''}</article>
-      <article class="repoaction"><div><h3>Draft pull request</h3><p>Fleet always creates a draft. It never merges.</p></div>
-        <label class="repolabel">Title<input id="reprtitle" maxlength="200" value="${esc(repoView.prTitle||create.title||'')}" oninput="repoView.prTitle=this.value"></label>
-        <label class="repolabel">Base branch<input id="reprbase" maxlength="200" value="${esc(repoView.prBase||create.base||'main')}" oninput="repoView.prBase=this.value"></label>
-        <label class="repolabel">Body<textarea id="reprbody" maxlength="20000" oninput="repoView.prBody=this.value">${esc(repoView.prBody||create.body||'')}</textarea></label>
-        <button class="pbtn send" ${!create.enabled||repoView.busy?'disabled':''} onclick="confirmRepoDraftPr()">Create draft PR</button>
-        ${!create.enabled&&create.reason?`<small class="repoerror">${esc(create.reason)}</small>`:''}</article>
-      <article class="repoaction"><div><h3>Ready for review</h3><p>${pr.state==='ok'?`PR #${esc(String(pr.number))} · ${esc(pr.title||'')}`:'No pull request is attached to this branch.'}</p></div>
-        <button class="pbtn send" ${!ready.enabled||repoView.busy?'disabled':''} onclick="confirmRepoReady()">Mark ready</button>
-        ${!ready.enabled&&ready.reason?`<small class="repoerror">${esc(ready.reason)}</small>`:''}</article>
-    </section></div>`;
-}
-async function loadRepository(force=false){
-  const view=repoView;if(!view)return;view.loading=true;view.error='';renderRepository();
-  const q=new URLSearchParams({root:view.root||'',worktree:view.worktree||'',force:force?'1':'0'});
-  try{const r=await fetch('/api/repo?'+q,{cache:'no-store'}),d=await r.json();
-    if(repoView!==view)return;if(!r.ok||!d.ok)throw new Error(r.status===403?'This device needs Fleet’s action token for repository details':(d.error||'repository unavailable'));
-    view.data=d;view.root=d.root;view.worktree=d.worktree;
-    const paths=new Set((d.files||[]).filter(file=>!file.conflict).map(file=>file.path));
-    if(!view.selectionInitialized){view.selected=paths;view.selectionInitialized=true;}
-    else view.selected=new Set([...view.selected].filter(path=>paths.has(path)));
-    if(!view.commitMessage)view.commitMessage=d.actions?.commit?.default_message||'';
-    if(!view.prTitle)view.prTitle=d.actions?.pr_create_draft?.title||'';
-    if(!view.prBase)view.prBase=d.actions?.pr_create_draft?.base||'main';
-  }catch(error){if(repoView===view)view.error=String(error.message||error);}
-  finally{if(repoView===view){view.loading=false;renderRepository();}}
-}
-function openRepository(root,worktree){
-  const stacked=anyOverlay();repoView={root,worktree,data:null,selected:new Set(),selectionInitialized:false,
-    commitMessage:'',prTitle:'',prBody:'',prBase:'',loading:true,busy:false,error:'',status:'',failed:false};
-  $('#repoview').style.display='flex';
-  if(stacked){repoPushed=true;history.pushState({fdRepo:1},'');}else syncOverlayHistory();
-  loadRepository();
-}
-function closeRepository(){repoView=null;$('#repoview').style.display='none';$('#repobody').innerHTML='';}
-function changeRepositoryWorktree(path){if(!repoView)return;repoView.worktree=path;repoView.data=null;
-  repoView.selectionInitialized=false;repoView.commitMessage='';repoView.status='';loadRepository(true);}
-async function runRepoAction(type,payload={}){
-  const view=repoView;if(!view||view.busy||!view.data)return;view.busy=true;view.failed=false;
-  view.status='Running '+type.replaceAll('_',' ')+'…';renderRepository();
-  try{const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      type,root:view.data.root,worktree:view.data.worktree,revision:view.data.revision,...payload})});
-    const d=await r.json();if(repoView!==view)return;
-    if(d.snapshot)view.data=d.snapshot;
-    if(!r.ok||!d.ok)throw new Error(d.error||'repository action failed');
-    view.status=(d.summary||type.replaceAll('_',' ')+' completed')+' ✓';view.failed=false;
-    view.selectionInitialized=false;view.selected=new Set();
-    view.commitMessage='';
-    await loadWorkstreams(true);
-  }catch(error){if(repoView===view){view.status=String(error.message||error);view.failed=true;}}
-  finally{if(repoView===view){view.busy=false;renderRepository();}}
-}
-function confirmRepoCommit(){
-  if(!repoView?.data)return;const input=$('#repocommit');if(input)repoView.commitMessage=input.value;
-  const paths=[...repoView.selected];askConfirm('Commit selected files?',
-    `<b>${paths.length} file${paths.length===1?'':'s'}</b> will be staged and committed in <code>${esc(repoView.data.worktree)}</code>.<br><br>${esc(repoView.commitMessage)}`,
-    'commit',()=>runRepoAction('git_commit',{paths,message:repoView.commitMessage}));
-}
-function confirmRepoPush(){const p=repoView?.data?.actions?.push;if(!p)return;askConfirm('Push this branch?',
-  `Pushes <b>${p.ahead||0} commit${p.ahead===1?'':'s'}</b> to <code>${esc(p.remote)}/${esc(p.branch)}</code>. No force push is used.`,
-  'push',()=>runRepoAction('git_push'));}
-function confirmRepoDraftPr(){
-  if(!repoView)return;repoView.prTitle=$('#reprtitle')?.value||repoView.prTitle;
-  repoView.prBase=$('#reprbase')?.value||repoView.prBase;repoView.prBody=$('#reprbody')?.value||repoView.prBody;
-  askConfirm('Create draft pull request?',`Creates a <b>draft</b> from <code>${esc(repoView.data.branch)}</code> into <code>${esc(repoView.prBase)}</code>.<br><br>${esc(repoView.prTitle)}`,
-    'create draft',()=>runRepoAction('pr_create_draft',{title:repoView.prTitle,base:repoView.prBase,body:repoView.prBody}));
-}
-function confirmRepoReady(){const pr=repoView?.data?.pr;if(!pr)return;askConfirm('Mark pull request ready?',
-  `PR <b>#${esc(String(pr.number))}</b> will leave draft state and request review. Fleet will not merge it.`,
-  'mark ready',()=>runRepoAction('pr_mark_ready',{number:pr.number}));}
 const terminalActions=new Map();
 function terminalButton(s,card=false){
   if(!s)return'';
@@ -1833,6 +1875,8 @@ let viewerChatOpen=false,viewerQOpen=true,viewerPath=null;
 function singleQBlock(s,p,pre){
   const sid=s.session_id;
   const q=p.questions[0],ms=q.multiSelect,n=(q.options||[]).length;
+  const otherKey=questionDraftPrefix(sid,p.nonce)+'other:0';
+  if(otherDraft[sid]==null)otherDraft[sid]=q.secret?'':draftValue(otherKey);
   const sel=multiSel[sid]=multiSel[sid]||new Set();
   const locked=nativeRequestLocked(sid,p.nonce);
   return`<div class="ptool"><span class="ptlabel">${esc(q.header||'question')} — waiting on you</span>
@@ -1842,7 +1886,7 @@ function singleQBlock(s,p,pre){
     ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
         ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
+    ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${q.secret?'':`data-draft-key="${esc(otherKey)}"`} ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
       value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
       ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
       ${ms?'':`<button class="pbtn send" ${locked?'disabled':''} onclick="sendOther('${sid}','${p.nonce}',${n},'${pre}')">answer</button>`}</div>`:''}
@@ -1898,9 +1942,9 @@ function renderViewerBar(force){
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
+    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" data-draft-key="${esc(composerDraftKey(viewerSid))}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
-      onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()"></textarea>
+      onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(viewerSid)))}</textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
     <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
@@ -1944,14 +1988,13 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
 let histPushed=false,schedulePushed=false,settingsPushed=false;
-const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#repoview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
+const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
   if(settingsPushed){settingsPushed=false;closeSettings();return;}
   if(schedulePushed){schedulePushed=false;closeSchedule();return;}
-  if(repoPushed){repoPushed=false;closeRepository();return;}
   if(handoffPushed){
     handoffPushed=false;
     const destination=handoffOpenAfterBack;handoffOpenAfterBack=null;
@@ -1961,7 +2004,7 @@ window.addEventListener('popstate',()=>{
   }
   if(histPushed){
     histPushed=false;
-    closeConfirm();closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
+    closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
     return;
   }
   const destination=hashDestination();notificationDetailId=destination.detail;
@@ -1973,11 +2016,10 @@ function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
   if(settingsPushed)return history.back();
-  if(repoPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeRepository();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();}
+  else{closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
@@ -2195,6 +2237,7 @@ function openSession(sid){
   $('#sview').style.display='flex';
   $('#stitle2').innerHTML=sessTitleBlock(session);
   const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   delete body.dataset.renderKey;
   syncOverlayHistory();
   requestAnimationFrame(()=>{if(sessionView?.sid===sid&&!sessionView.closed)renderSession(true);});
@@ -2205,6 +2248,7 @@ function openClosed(sid){
   sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
   const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
+  $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   delete body.dataset.renderKey;
   syncOverlayHistory();
   requestAnimationFrame(()=>{if(sessionView?.sid===sid&&sessionView.closed)renderClosed(true);});
@@ -2221,7 +2265,28 @@ async function loadClosedMeta(sid){
 function closeSession(){
   closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
   $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
+  $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   $('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
+}
+function sessionActivityHtml(s){
+  const mainWorking=['running','stalled'].includes(s.state);
+  const agents=(s.agents||[]).filter(agent=>!['done','ended'].includes(agent.state));
+  if(!mainWorking&&!agents.length)return'';
+  const mainSlow=s.state==='stalled';
+  const signals=[mainWorking?`<span class="worksignal"><i class="workpulse${mainSlow?' slow':''}" aria-hidden="true"></i>${mainSlow?'Main session is slow':'Main session working'}</span>`:'',
+    agents.length?`<span class="worksignal"><i class="worksubicon" aria-hidden="true">⇶</i>${agents.length} active subagent${agents.length===1?'':'s'}</span>`:''].filter(Boolean);
+  const rows=[];
+  if(mainWorking)rows.push(`<span><b>Main session</b><small>${mainSlow?'Slow — may still be working':'Working'}</small></span>`);
+  for(const agent of agents)rows.push(`<span><b>${esc(agent.description||agent.agent_type||agent.agent_id||'Subagent')}</b><small>${agent.state==='stalled'?'Slow — may still be working':'Working'}</small></span>`);
+  return`<div class="workactivity" role="status" aria-live="polite"><details><summary>${signals.join('<em>│</em>')}</summary>
+    <div class="workdetails">${rows.join('')}</div></details></div>`;
+}
+function renderSessionActivity(s){
+  const host=$('#sactivity');if(!host)return;
+  const html=sessionActivityHtml(s),key=[s.state,...(s.agents||[]).map(agent=>
+    `${agent.agent_id||''}:${agent.state||''}:${agent.description||agent.agent_type||''}`)].join('|');
+  if(host.dataset.renderKey===key&&Boolean(host.innerHTML)===Boolean(html))return;
+  host.innerHTML=html;host.dataset.renderKey=key;
 }
 async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
@@ -2285,6 +2350,7 @@ function renderSession(force){
     (spawnProvisional&&spawnProvisional.id===sessionView.sid?provisionalSessionObject():null);
   if(!s){closeSession();return;}          // session died while open
   if(s.provisional)return renderProvisionalSession(s);
+  renderSessionActivity(s);
   ensureCtx(s.session_id,ctxVersion(s));
   const c=ctxCache[s.session_id];
   const ae=document.activeElement;
@@ -2303,7 +2369,7 @@ function renderSession(force){
   const wantBottom=sessionOpened||old.atBottom;
   sessionOpened=false;
   const optimisticItems=visibleOptimistic(s.session_id,(c&&c.messages)||[]);
-  const optimisticRevision=optimisticItems.map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
+  const optimisticRevision=optimisticItems.map(item=>`${item.id}:${item.status}:${item.imageCount||0}:${item.error||''}`).join('|');
   const bodyKey=`session:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${optimisticRevision}`;
   if(body.dataset.renderKey!==bodyKey){
     const optimisticOnly=optimisticItems.map(item=>optimisticItemHtml(item)).join('');
@@ -2333,12 +2399,13 @@ function renderSession(force){
     ${handoffLinksHtml(s)}
     ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
     ${statusLineHtml(s.status_line,'session:'+s.session_id)}
-    ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
+    ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
       oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
-      onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()"></textarea>
-      <span class="sendpair"><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div>`:''}
+      onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(s.session_id)))}</textarea>
+      <span class="sendpair"><label class="pbtn attach" title="attach up to 4 images" aria-label="attach images">＋<input type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="chooseImages('${s.session_id}',this)"></label><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div><div class="image-drafts" id="imgdraft-${s.session_id}"></div>`:''}
     <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
     <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
+  if(s.capabilities?.submit)void renderImageDrafts(s.session_id);
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
   if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
@@ -2420,8 +2487,8 @@ function renderAgent(force){
         ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
         :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
       ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}
-      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
-        onkeydown="composerKey(event,sendRelay)"></textarea>
+      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" data-draft-key="${esc(relayDraftKey(agentView.sid,agentView.aid))}" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
+        onkeydown="composerKey(event,sendRelay)">${esc(draftValue(relayDraftKey(agentView.sid,agentView.aid)))}</textarea>
         <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
       ${agentRelayHtml(agentView.sid,agentView.aid)}
       <div class="actmsg" id="amsg"></div>
@@ -2451,7 +2518,8 @@ function agentRelayHtml(sid,aid){
 }
 function restoreRelay(){
   if(!agentView)return;const key=agentRelayKey(agentView.sid,agentView.aid),item=agentRelays.get(key);
-  agentRelays.delete(key);renderAgent(true);requestAnimationFrame(()=>{const input=$('#aft');if(input){input.value=item?.text||'';input.focus();}});
+  agentRelays.delete(key);setDraft(relayDraftKey(agentView.sid,agentView.aid),item?.text||'');renderAgent(true);
+  requestAnimationFrame(()=>{const input=$('#aft');if(input){input.value=item?.text||'';input.focus();}});
 }
 async function sendRelay(){
   if(!agentView)return;
@@ -2460,7 +2528,7 @@ async function sendRelay(){
   const sid=agentView.sid,aid=agentView.aid,key=agentRelayKey(sid,aid);
   if(agentRelays.get(key)?.status==='sending')return;
   const feedbackStarted=performance.now();
-  if(inp)inp.value='';agentRelays.set(key,{text:v,status:'sending',error:''});renderAgent(true);
+  if(inp)inp.value='';clearDraft(relayDraftKey(sid,aid));agentRelays.set(key,{text:v,status:'sending',error:''});renderAgent(true);
   recordInputFeedback(feedbackStarted,'relay');
   const result=await act(sid,{type:'relay',agent_id:aid,text:v},'amsg');
   const current=agentRelays.get(key);if(!current)return;
@@ -2616,7 +2684,7 @@ const readerWidth=()=>setg().reader_width==='centered'?'centered':'fit';
 function applyReaderWidth(){document.documentElement.dataset.readerWidth=readerWidth();}
 
 function cardCls(s){
-  if(s.ui_group==='needs_you')return s.reason_label==='Fix needed'?'stalled':'needs';
+  if(s.ui_group==='needs_you')return ['Fix needed','Limit reached'].includes(s.reason_label)?'stalled':'needs';
   if(s.ui_group==='available')return'idle';
   if(s.ui_group==='history')return'dorm';
   return s.reason_label==='Slow'?'stalled':'';
@@ -2628,7 +2696,7 @@ function cardUsesFixedPeekHeight(s){
   if(s.provisional||open.has(s.session_id)||expandedPeeks.has(s.session_id))return false;
   const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
   const running=s.ui_group==='working'&&(s.agents||[]).some(a=>!['done','ended'].includes(a.state));
-  const answerFeedback=(optimisticMessages.get(s.session_id)||[]).some(item=>item.kind==='answer');
+  const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.queueId);
   return!pending&&!s.error&&!s.reply_requested&&!running&&!pinActions.has(s.session_id)&&
     !quickResponses.has(s.session_id)&&!answerFeedback;
 }
@@ -2800,7 +2868,7 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
-let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null;
+let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null,settingsRenderFrame=0;
 function uiRefresh(){render(last,true);if(settingsOpen)renderSettings();}
 function openSettings(){
   if(settingsOpen)return;
@@ -2810,7 +2878,11 @@ function openSettings(){
   settingsOpen=true;
   $('#settingsview').style.display='flex';
   $('#settings').scrollTop=0;
-  renderSettings();
+  $('#settings').innerHTML='<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> loading settings…</div>';
+  cancelAnimationFrame(settingsRenderFrame);
+  settingsRenderFrame=requestAnimationFrame(()=>{
+    settingsRenderFrame=0;if(settingsOpen)renderSettings();
+  });
   loadPushState(true);
   loadBudgets();
   loadWorkstreams();
@@ -2819,6 +2891,7 @@ function openSettings(){
 }
 function closeSettings(){
   const restore=settingsReturnState;settingsReturnState=null;
+  cancelAnimationFrame(settingsRenderFrame);settingsRenderFrame=0;
   settingsOpen=false;
   $('#settingsview').style.display='none';
   $('#settings').innerHTML='';
@@ -2939,7 +3012,12 @@ async function toggleMute(sid,mute){
 function mqBlock(s,p,pre){
   const sid=s.session_id;
   let st=mqSel[sid];
-  if(!st||st.nonce!==p.nonce)st=mqSel[sid]={nonce:p.nonce,qi:0,a:{},other:{}};
+  if(!st||st.nonce!==p.nonce){
+    st=mqSel[sid]={nonce:p.nonce,qi:0,a:{},other:{}};
+    (p.questions||[]).forEach((question,index)=>{
+      if(!question.secret)st.other[index]=draftValue(questionDraftPrefix(sid,p.nonce)+`other:${index}`);
+    });
+  }
   const qs=p.questions;
   if(st.qi>=qs.length)st.qi=qs.length-1;
   const qi=st.qi,q=qs[qi],ms=!!q.multiSelect;
@@ -2959,7 +3037,7 @@ function mqBlock(s,p,pre){
     <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
     ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
-    ${q.allowOther!==false?`<div class="freetext"><input ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
+    ${q.allowOther!==false?`<div class="freetext"><input ${q.secret?'':`data-draft-key="${esc(questionDraftPrefix(sid,p.nonce)+`other:${qi}`)}"`} ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
       oninput="mqOther('${sid}',${qi},this.value)"></div>`:''}
     <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
     <div class="pbtns"><button class="pbtn send" ${locked?'disabled':''} onclick="mqSend('${sid}','${p.nonce}','${pre}')">submit all answers</button></div>`;
@@ -2998,6 +3076,8 @@ function elicitationBlock(s,p,pre){
   const sid=s.session_id;
   const locked=nativeRequestLocked(sid,p.nonce);
   const draft=elicitDraft[sid]=elicitDraft[sid]||{};
+  for(const field of p.fields||[])if(!field.secret&&!['select','boolean'].includes(field.type)&&draft[field.name]==null)
+    draft[field.name]=draftValue(questionDraftPrefix(sid,p.nonce)+`field:${field.name}`);
   const fields=(p.fields||[]).map((f,i)=>{
     const key=enc(f.name),value=draft[f.name];
     if(f.type==='select'&&f.multiSelect)return`<div class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}</div>
@@ -3008,7 +3088,7 @@ function elicitationBlock(s,p,pre){
       ${(f.options||[]).map(o=>`<option value="${enc(JSON.stringify(o.value))}" ${String(value)===String(o.value)?'selected':''}>${esc(o.label)}</option>`).join('')}</select></label>`;
     if(f.type==='boolean')return`<label class="setrow"><input type="checkbox" ${value?'checked':''}
       onchange="elicitBool('${sid}','${key}',this.checked)">${esc(f.label)}</label>`;
-    return`<label class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}<input ${f.secret?'type="password"':''}
+    return`<label class="qtext"><b>${esc(f.label)}</b>${f.required?' *':''}<input ${f.secret?'type="password"':`data-draft-key="${esc(questionDraftPrefix(sid,p.nonce)+`field:${f.name}`)}"`}
       value="${esc(value??'')}" oninput="elicitText('${sid}','${key}',this.value)"></label>`;
   }).join('');
   const safeUrl=String(p.url||'').startsWith('https://')||String(p.url||'').startsWith('http://');
@@ -3139,8 +3219,14 @@ async function act(sid,payload,pre='msg',optimisticId=null){
   const requestStarted=performance.now();
   const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
   const quickId=isQuick?beginQuickResponse(sid,payload):null;
-  const setMessage=text=>{const el=document.getElementById(pre+'-'+sid)||document.getElementById(pre);
+  const setMessage=text=>{if(pre===false||pre==null)return null;
+    const el=document.getElementById(pre+'-'+sid)||document.getElementById(pre);
     if(el)el.textContent=text;return el;};
+  if(fleetOffline){
+    const error='Offline — your draft is saved. Reconnect before sending.';
+    setMessage('✗ '+error);if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,error);
+    return{ok:false,error,offline:true};
+  }
   if(payload.type!=='ping')setMessage('sending…');
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3152,9 +3238,10 @@ async function act(sid,payload,pre='msg',optimisticId=null){
       d.ok&&['option','multiq'].includes(payload.type));
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
     const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
-    if(!d.ok&&!el&&quickId==null&&payload.type!=='focus')alert(d.error||'failed');
+    if(!d.ok&&!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
       answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
+      clearDraftPrefix(questionDraftPrefix(sid,payload.nonce));
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
       uiRefresh();
     }
@@ -3165,8 +3252,9 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
     if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
     const el=setMessage('✗ '+e);
-    if(!el&&quickId==null&&payload.type!=='focus')alert('request failed: '+e);
-    return {ok:false,error:String(e)};
+    if(!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert('request failed: '+e);
+    setFleetOffline(true);
+    return {ok:false,error:String(e),network_error:true};
   }
 }
 function pendingQuestion(sid){
@@ -3380,18 +3468,158 @@ function copyTxt(ev,el){
 function sendPerm(sid,nonce,choice,pre='msg'){
   return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'permission',nonce,choice},pre));
 }
-function sendText(sid,ftPre='ft',msgPre='msg'){
+function imageType(file){
+  const mime=String(file?.type||'').toLowerCase();
+  if(['image/jpeg','image/png','image/gif','image/webp','image/heic','image/heif'].includes(mime))return mime;
+  const ext=String(file?.name||'').toLowerCase().split('.').pop();
+  return ext==='heic'?'image/heic':ext==='heif'?'image/heif':'';
+}
+async function chooseImages(sid,input){
+  const message=document.getElementById('smsg-'+sid),current=imageDraftIds(sid);
+  const files=[...(input?.files||[])];if(input)input.value='';
+  if(current.length>=IMAGE_MAX_COUNT){if(message)message.textContent='Remove an image before adding another.';return;}
+  let added=0;
+  for(const file of files.slice(0,IMAGE_MAX_COUNT-current.length)){
+    const type=imageType(file);
+    if(!type){if(message)message.textContent='Use JPEG, PNG, GIF, WebP, HEIC, or HEIF images.';continue;}
+    if(!file.size||file.size>IMAGE_MAX_BYTES){if(message)message.textContent='Each image must be 10 MB or smaller.';continue;}
+    const id=offlineMessageId();
+    try{await putImage({id,sid:String(sid),name:String(file.name||'image').slice(0,120),
+      type,size:file.size,created:Date.now(),blob:file});current.push(id);added++;}
+    catch(error){if(message)message.textContent='Could not save this image on the device.';console.warn(error);break;}
+  }
+  setImageDraftIds(sid,current);await renderImageDrafts(sid);
+  if(message&&added)message.textContent=`${added} image${added===1?'':'s'} attached`;
+  void pruneImages();
+}
+async function renderImageDrafts(sid){
+  const target=document.getElementById('imgdraft-'+sid),ids=imageDraftIds(sid);if(!target)return;
+  if(!ids.length){target.innerHTML='';return;}
+  const records=(await Promise.all(ids.map(id=>getImage(id).catch(()=>null)))).filter(Boolean);
+  if(!document.getElementById('imgdraft-'+sid))return;
+  const missing=ids.filter(id=>!records.some(record=>record.id===id));
+  if(missing.length)setImageDraftIds(sid,ids.filter(id=>!missing.includes(id)));
+  target.innerHTML=records.map(record=>`<span class="image-draft">🖼 <span>${esc(record.name||'image')}</span><small>${Math.max(1,Math.round(record.size/1024))} KB</small><button type="button" aria-label="remove ${esc(record.name||'image')}" onclick="removeImageDraft(decodeURIComponent('${enc(sid)}'),'${record.id}')">×</button></span>`).join('');
+}
+async function removeImageDraft(sid,id){
+  setImageDraftIds(sid,imageDraftIds(sid).filter(value=>value!==id));await deleteImage(id).catch(()=>{});
+  await renderImageDrafts(sid);
+}
+async function uploadImages(sid,imageIds){
+  const uploadIds=[];
+  for(const id of imageIds){
+    const record=await getImage(id).catch(()=>null);
+    if(!record)return{ok:false,error:'An attached image is no longer stored on this device.'};
+    try{
+      const url=`/api/upload-image?sid=${encodeURIComponent(sid)}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(record.name||'image')}`;
+      const response=await fetch(url,{method:'POST',headers:{'Content-Type':record.type},body:record.blob});
+      const result=await response.json();
+      if(!response.ok||!result.ok)return{ok:false,error:result.error||'Image upload failed'};
+      uploadIds.push(result.upload_id);
+    }catch(error){setFleetOffline(true);return{ok:false,error:String(error),network_error:true};}
+  }
+  return{ok:true,uploadIds};
+}
+async function sendText(sid,ftPre='ft',msgPre='msg'){
   const inp=document.getElementById(ftPre+'-'+sid);
-  const v=(inp&&inp.value||'').trim();
-  if(!v)return;
+  const v=(inp&&inp.value||'').trim(),imageIds=imageDraftIds(sid);
+  if(!v&&!imageIds.length)return;
+  const text=v||(imageIds.length===1?'Please inspect the attached image.':'Please inspect the attached images.');
   const cmd=(v.startsWith('/')||v.startsWith('$'))?(cmdCache[sid]||[]).find(c=>c.name===v.split(/\s+/)[0]):null;
+  const el=document.getElementById(msgPre+'-'+sid)||document.getElementById(msgPre);
+  if(imageIds.length&&(v.startsWith('/')||v.startsWith('$'))){if(el)el.textContent='Send commands and images separately.';return;}
+  if(fleetOffline){
+    if(v.startsWith('/')||v.startsWith('$')){
+      if(el)el.textContent='offline — command draft saved; reconnect to run it';
+      return;
+    }
+    const queued=queueOfflineText(sid,text,imageIds);
+    if(!queued){if(el)el.textContent='offline queue is full — draft kept here';return;}
+    slashClose();if(inp)inp.value='';clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid);
+    if(el)el.textContent='queued offline — sends automatically after reconnection';
+    return;
+  }
   if(cmd&&cmd.danger&&!confirm(`${cmd.name} destroys this session's conversation state.\n\n${cmd.desc}\n\nSend it?`))return;
   slashClose();
-  if(inp)inp.value='';        // clear NOW: the round-trip is the terminal's, not yours
+  if(inp)inp.value='';clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid); // sending is the only automatic clear
   if(cmd&&cmd.execution==='action')return act(sid,{type:cmd.action},msgPre);
   if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
-  const optimisticId=addOptimistic(sid,v,'text');
-  act(sid,{type:'text',text:v},msgPre,optimisticId);
+  const optimisticId=addOptimistic(sid,text,'text','sending',null,null,imageIds);
+  if(!imageIds.length)return act(sid,{type:'text',text},msgPre,optimisticId);
+  if(el)el.textContent='uploading images…';
+  const uploaded=await uploadImages(sid,imageIds);
+  if(!uploaded.ok){
+    if(uploaded.network_error&&offlineMessages.length<100){
+      queueOfflineText(sid,text,imageIds,optimisticId);if(el)el.textContent='queued offline — sends automatically after reconnection';return;
+    }
+    updateOptimistic(sid,optimisticId,false,uploaded.error);if(el)el.textContent='✗ '+uploaded.error;return;
+  }
+  const result=await act(sid,{type:'image_text',text,upload_ids:uploaded.uploadIds},msgPre,optimisticId);
+  if(result.ok)void deleteImages(imageIds);
+}
+
+let offlineFlushBusy=false;
+function queueOfflineText(sid,text,imageIds=[],existingOptimisticId=null){
+  if(offlineMessages.length>=100)return null;
+  const messages=(ctxCache[sid]&&ctxCache[sid].messages)||[];
+  const entry={id:offlineMessageId(),sid,text:String(text),imageIds:[...(imageIds||[])],created:Date.now(),
+    baseCount:canonicalCount(messages,{kind:'text',text})};
+  offlineMessages.push(entry);persistOfflineMessages();
+  const existing=existingOptimisticId!=null;
+  // Do not call optimisticList before linking an existing row: that function
+  // materializes every unlinked queue record and would create a duplicate.
+  let item=existingOptimisticId==null?null:optimisticBucket(sid).find(candidate=>candidate.id===existingOptimisticId);
+  if(item){clearTimeout(item.confirmTimer);item.queueId=entry.id;item.status='queued';delete item.error;}
+  else{optimisticList(sid);item=optimisticList(sid).find(candidate=>candidate.queueId===entry.id);}
+  if(item){
+    const openConvo=sessionView?.sid===sid&&!sessionView.closed&&$('#sbody .aconvo');
+    if(openConvo){
+      const current=existing?openConvo.querySelector(`[data-optimistic-id="${item.id}"]`):null;
+      if(current)current.outerHTML=optimisticItemHtml(item);
+      else openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
+      $('#sbody').scrollTop=$('#sbody').scrollHeight;}
+  }
+  uiRefresh();
+  return entry;
+}
+function removeOfflineMessage(id){
+  const length=offlineMessages.length;
+  offlineMessages=offlineMessages.filter(item=>item.id!==id);
+  if(offlineMessages.length!==length)persistOfflineMessages();
+}
+async function flushOfflineMessages(){
+  if(fleetOffline||offlineFlushBusy||!offlineMessages.length)return;
+  offlineFlushBusy=true;
+  try{
+    while(!fleetOffline&&offlineMessages.length){
+      const queued=offlineMessages[0];
+      const item=optimisticList(queued.sid).find(candidate=>candidate.queueId===queued.id);
+      if(!item){removeOfflineMessage(queued.id);continue;}
+      item.baseCount=canonicalCount((ctxCache[queued.sid]?.messages)||[],item);
+      item.status='sending';delete item.error;armOptimisticTimeout(item);uiRefresh();
+      let payload={type:'text',text:queued.text};
+      if(queued.imageIds?.length){
+        const uploaded=await uploadImages(queued.sid,queued.imageIds);
+        if(uploaded.network_error){clearTimeout(item.confirmTimer);item.status='queued';delete item.error;uiRefresh();break;}
+        if(!uploaded.ok){removeOfflineMessage(queued.id);clearTimeout(item.confirmTimer);item.status='failed';item.error=uploaded.error;uiRefresh();continue;}
+        payload={type:'image_text',text:queued.text,upload_ids:uploaded.uploadIds};
+      }
+      const result=await act(queued.sid,payload,false,item.id);
+      if(result.offline){
+        clearTimeout(item.confirmTimer);item.status='queued';delete item.error;uiRefresh();break;
+      }
+      removeOfflineMessage(queued.id);
+      if(result.network_error){
+        clearTimeout(item.confirmTimer);item.status='failed';
+        item.error='Connection dropped while sending. Fleet did not retry because delivery is unknown; restore to send again.';
+        uiRefresh();break;
+      }
+      if(!result.ok){
+        clearTimeout(item.confirmTimer);item.status='failed';item.error=result.error||'Send rejected';uiRefresh();
+      }
+      if(result.ok&&queued.imageIds?.length)void deleteImages(queued.imageIds);
+    }
+  }finally{offlineFlushBusy=false;}
 }
 
 // ---- slash-command autocomplete -------------------------------------------
@@ -3445,10 +3673,11 @@ function slashPick(sid,pre,name){
   const inp=document.getElementById(pre+'-'+sid);
   if(!inp)return;
   inp.value=decodeURIComponent(name)+' ';   // trailing space: args go right here
+  setDraft(composerDraftKey(sid),inp.value);
   slashClose();
   inp.focus();
 }
-let historyFilter='',historyAccess='all',historyProvider='all';
+let historyFilter=draftValue('filter:history'),historyAccess='all',historyProvider='all';
 let historyData={ok:true,items:[],next_cursor:0,total:0};
 let historyLoading=false,historyLoadedAt=0,historyAbort=null,historyFilterTimer=null;
 let closedIds=new Set();
@@ -3611,7 +3840,7 @@ function renderWorkstreams(f){
         <span>${esc(cost)} · ${esc(context)}</span></div>
       <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
       <div class="worksignals"><span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>${esc(String(item.budget_state||'not_configured').replaceAll('_',' '))}</b></span>
-        ${item.kind==='git'?`<button class="repoopen" onclick="openRepository(decodeURIComponent('${enc(item.root)}'),decodeURIComponent('${enc(repository.worktree||item.worktree||item.root)}'))">Repository</button>`:''}</div>
+        ${safeGithubUrl(repository.github_url)?`<a class="repoopen" href="${esc(safeGithubUrl(repository.github_url))}" target="_blank" rel="noopener">GitHub ↗</a>`:''}</div>
       ${expanded?`<div class="workdetail"><div class="worktrees"><b>Worktrees</b>${(item.worktrees||[]).map(path=>`<code>${esc(path)}</code>`).join('')}</div>
         <div class="worksessions">${(item.sessions||[]).map(workstreamSessionRow).join('')}</div></div>`:''}</section>`;
   }).join('');
@@ -3681,7 +3910,7 @@ async function loadHistory(reset=false){
   }
 }
 function queueHistoryFilter(value){
-  historyFilter=value;clearTimeout(historyFilterTimer);
+  historyFilter=value;setDraft('filter:history',value);clearTimeout(historyFilterTimer);
   historyFilterTimer=setTimeout(()=>loadHistory(true),180);
 }
 function historyItems(f){
@@ -3713,7 +3942,8 @@ function filterChips(kind,current,items){
 // ---- new session -----------------------------------------------------------
 // form state lives in globals: the 2s poll re-renders this section, so anything
 // held only in the DOM (typed path, status line) would be wiped mid-use
-let newOpen=false,newProvider='claude',newDir='',newModel='',newEffort='',newMode='plan',newPermissionMode='default',newWt=true,newWtName='',newMessage='',spawnWait=null,spawnMsg='';
+let newOpen=false,newProvider='claude',newDir=draftValue('new:directory'),newModel='',newEffort='',newMode='plan',newPermissionMode='default',newWt=true,
+  newWtName=draftValue('new:worktree'),newMessage=draftValue('new:message'),spawnWait=null,spawnMsg='';
 let spawnProvisional=null;
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 function spawnSnapshot(){
@@ -3774,6 +4004,7 @@ function restoreSpawnForm(){
   newProvider=p.spec.provider;newDir=p.spec.cwd;newModel=p.spec.model;newEffort=p.spec.effort;
   newMode=p.spec.mode;newPermissionMode=p.spec.permission_mode||'default';newWt=p.spec.worktree;
   newWtName=p.spec.worktree_name;newMessage=p.spec.message;
+  setDraft('new:directory',newDir);setDraft('new:worktree',newWtName);setDraft('new:message',newMessage);
   const sid=p.id;spawnProvisional=null;spawnWait=null;newOpen=true;spawnMsg='';
   if(sessionView?.sid===sid)closeSession();
   render(last,true);
@@ -3792,7 +4023,7 @@ function retrySpawn(){
 function changeNewProvider(value){
   newProvider=value;newModel='';spawnForecast=null;queueSpawnForecast(0);render(last,true);
 }
-function changeNewDirectory(value){newDir=value;queueSpawnForecast(120);}
+function changeNewDirectory(value){newDir=value;setDraft('new:directory',value);queueSpawnForecast(120);}
 function changeNewModel(value){newModel=value;queueSpawnForecast(0);}
 function newSection(){
   const dirs=(last&&last.recent_dirs)||[];
@@ -3822,7 +4053,7 @@ function newSection(){
       <option value="">— pick a recent directory —</option>
       ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
     </select>
-    <input class="nfin" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
+    <input class="nfin" data-draft-key="new:directory" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
       oninput="changeNewDirectory(this.value)" autocomplete="off">
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
@@ -3853,10 +4084,10 @@ function newSection(){
     </div>
     ${newProvider==='claude'?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
       onchange="newWt=this.checked;render(last,true)"><span>new git worktree</span></label>
-    ${newWt?`<input class="nfin" placeholder="worktree name (optional)" value="${esc(newWtName)}"
+    ${newWt?`<input class="nfin" data-draft-key="new:worktree" placeholder="worktree name (optional)" value="${esc(newWtName)}"
       oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
     <label class="nflab">initial message <span style="text-transform:none;letter-spacing:0">(optional now, required to schedule)</span></label>
-    <textarea class="nfin nfmessage" maxlength="2000" placeholder="What should this session work on?" oninput="newMessage=this.value">${esc(newMessage)}</textarea>
+    <textarea class="nfin nfmessage" data-draft-key="new:message" maxlength="2000" placeholder="What should this session work on?" oninput="newMessage=this.value">${esc(newMessage)}</textarea>
     ${spawnForecastHtml()}
     <div class="nfactions"><button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
       <button class="pbtn sendoption nfgo" onclick="doScheduleNew()">schedule session</button></div>
@@ -3871,7 +4102,7 @@ async function doSpawn(){
   const spec=spawnSnapshot();
   const id='spawn-'+(globalThis.crypto?.randomUUID?.()||String(Date.now()));
   spawnProvisional={id,spec,status:'starting',error:'',canRetry:false,serverSessionId:null};
-  spawnMsg='';newMessage='';newOpen=false;
+  spawnMsg='';newOpen=false;
   openSession(id);render(last,true);
   recordInputFeedback(feedbackStarted,'spawn');
   await startSpawn(spec,spawnProvisional);
@@ -3888,6 +4119,7 @@ async function startSpawn(spec,provisional){
     if(spawnProvisional!==provisional)return;
     if(!r.ok||!d.ok){provisional.status='failed';provisional.error=d.error||'Session could not be started';
       provisional.canRetry=true;render(last,true);return;}
+    clearDraft('new:directory','new:worktree','new:message');newMessage='';
     provisional.serverSessionId=d.session_id;provisional.status='discovering';provisional.trustPrompt=!!d.trust_prompt;
     // Both providers return the exact native session identity. Never guess by cwd:
     // a sibling session in the same repo must not be opened by mistake.
@@ -3936,7 +4168,7 @@ function historySection(f){
   return`<div class="historybox">
     <div class="historycount">${historyCount(f)}</div>
     <div class="historytools">
-      <div class="freetext"><input placeholder="Filter by title, project, branch, provider, or state"
+      <div class="freetext"><input data-draft-key="filter:history" placeholder="Filter by title, project, branch, provider, or state"
         value="${esc(historyFilter)}" oninput="queueHistoryFilter(this.value)"></div>
       ${filterChips('Access',historyAccess,[['all','All'],['continue','Continue'],['view','View only'],['reopen','Reopen']])}
       ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
@@ -4198,6 +4430,15 @@ function insightsSection(){
 
 let last=null;
 let pollSequence=0,pollApplied=0,pollController=null;
+let fleetOffline=false;
+function setFleetOffline(offline){
+  fleetOffline=Boolean(offline);document.documentElement.dataset.offline=fleetOffline?'true':'false';
+  const stale=$('#stale');if(!stale)return;
+  if(fleetOffline){
+    stale.textContent='offline — showing the last local snapshot; drafts are saved and messages can queue until reconnection';
+    stale.style.display='block';
+  }
+}
 function render(f,force){
   if(!f||!f.sessions)return;
   const renderStarted=performance.now();
@@ -4281,19 +4522,32 @@ async function tick(){
     const payload=Number(r.headers.get('X-Fleet-Payload-Bytes')||r.headers.get('Content-Length'));
     if(Number.isFinite(payload))perfRecord('poll_payload_bytes',payload);
     const next=await r.json();
+    if(!r.ok)throw new Error(next.error||`Fleet returned ${r.status}`);
     if(sequence<pollApplied||sequence!==pollSequence)return;
     pollApplied=sequence;last=next;
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
-    $('#stale').style.display='none';
-    render(last);
+    setFleetOffline(r.headers.get('X-Fleet-Offline')==='1');
+    if(!fleetOffline)$('#stale').style.display='none';
+    try{render(last);}
+    catch(renderError){
+      console.error('Fleet Dash render failed; server remains reachable',renderError);
+      const stale=$('#stale');
+      stale.textContent='display error — server is still reachable; showing the last usable screen';
+      stale.style.display='block';
+      return;
+    }
     if(currentRoute==='now'||$('#outboxview').style.display==='flex')loadOutbox();
     if(notificationPollingEnabled)loadNotifications(true);
     if(currentRoute==='notifications'&&notificationSection==='briefing')loadBriefing();
     if(currentRoute==='insights')loadBudgets();
     if(currentRoute==='history'&&Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
-  }catch(e){if(e.name!=='AbortError'&&sequence===pollSequence){console.error('Fleet Dash render/poll failed',e);$('#stale').style.display='block';}}
+    if(!fleetOffline)void flushOfflineMessages();
+  }catch(e){if(e.name!=='AbortError'&&sequence===pollSequence){console.error('Fleet Dash render/poll failed',e);setFleetOffline(true);}}
   finally{if(pollController===controller)pollController=null;if(sequence===pollSequence)perfRecord('poll_ms',performance.now()-pollStarted);}
 }
+$('#nowfilter').value=nowFilter;
+$('#searchquery').value=draftValue('filter:search');
+$('#workfilter').value=workFilter;
 navigateTo(currentRoute,false,Boolean(notificationDetailId));
 tick().finally(()=>{
   const start=()=>initFleetPwa();
@@ -4301,6 +4555,7 @@ tick().finally(()=>{
   else setTimeout(start,250);
 });
 setInterval(tick,2000);
+window.addEventListener('online',()=>tick());
 setInterval(()=>{if(currentRoute==='search')loadSearchStatus();},5000);
 setInterval(()=>{if(currentRoute==='workstreams')loadWorkstreams();},8000);
 fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})

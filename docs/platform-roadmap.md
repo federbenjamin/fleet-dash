@@ -12,7 +12,7 @@ Status: M0–M12 complete on `design/push-notification-redesign`.
 | M3 — Action inbox and Workstreams | Complete · 2026-07-16 | Stable provider-neutral action IDs, safe persistent bulk triage, canonical repo/worktree grouping on a lazy API, honest unavailable evidence, saved destination filters, 96 Python tests, 48 deterministic desktop/mobile browser tests, and 4 running-daemon browser checks. |
 | M4 — State evidence | Complete · 2026-07-16 | Pure placement classifier, bounded evidence facts, durable transition journal/API, full-chat evidence rail, recent external-completion handling, and last-good Codex outage recovery. |
 | M5 — Provider handoff | Complete · 2026-07-16 | Redacted indexed preview, exact provider-native identity, editable desktop/mobile UI, selectable artifacts and advanced controls, durable bidirectional links, safe retry, 108 Python tests, 56 deterministic browser checks, and 6 safe running-daemon checks. |
-| M6 — Repository outcome center | Complete · 2026-07-16 | Cached argv-only Git evidence, lazy explicit-repository GitHub evidence, transcript-derived test/build state, confirmed commit/push/draft-PR/mark-ready actions, durable outcomes, 121 Python tests, 64 deterministic browser checks, 8 safe running-daemon checks, and a real temporary-repository commit/push smoke. |
+| M6 — Repository outcome center | Complete · 2026-07-16; in-app center retired · 2026-07-17 | Cached argv-only Git evidence and transcript-derived outcomes remain available to Workstreams. GitHub now opens externally; duplicated GitHub/Git/PR pages and action forms were removed from Fleet. |
 | M7 — Message Outbox and light automations | Complete · 2026-07-16 | Durable SQLite outbox, four one-time send modes, atomic claim/lease recovery, exact target/account/session validation, central responsive UI, 139 Python tests, 70 deterministic browser checks, 10 safe running-daemon checks, and a real create/cancel smoke with no message dispatched. |
 | M8 — Briefings, budgets, and forecasts | Complete · 2026-07-16 | Durable per-device briefings, reviewed history, source links, mute-aware quiet/scheduled digests, persistent notification failures, scoped cumulative budgets, optional fail-closed future-spawn limits, honest mixed-provider measurement, action-inbox alerts, 156 Python tests, 74 deterministic browser checks, and 12 live checks. |
 | M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
@@ -88,6 +88,10 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-020 | Fleet Notification Center is the notification source of truth. Standards-based Web Push is the only automatic external transport; ntfy is manual legacy only and never a fallback or duplicate destination. | M12 |
 | DEC-021 | External notifications disclose only generic state and elapsed time. Push may Open Fleet or directly Snooze the exact event/Mute the exact session; every consequential action opens Fleet for current-state review. | M12 |
 | DEC-022 | Only confirmed Needs-you requests, approvals, provider/delivery failures, and prolonged stalls push. One unresolved reminder after 15 minutes is the maximum; session mute persists across devices until manual unmute. | M12 |
+| DEC-023 | One provider usage/rate/context limit blocks only its session. It never prevents the HTTP server from starting or labels the whole dashboard unreachable. | M10 |
+| DEC-024 | GitHub information opens the canonical external GitHub URL. Fleet does not duplicate a repository or pull-request page. | M6 |
+| DEC-025 | Non-secret text drafts remain device-local until send/manual deletion. Ordinary messages sent while Fleet is known offline queue locally and flush FIFO only after a live reconnect; unknown delivery outcomes never auto-retry. | M1/M10 |
+| DEC-026 | Full-chat image attachments support Claude and Codex. Device blobs and server-normalized copies are private, session-scoped, metadata-stripped, and expire after 24 hours; pre-dispatch uploads may retry, but unknown provider delivery never does. | M1/M10 |
 
 ### Navigation, presentation, and interaction
 
@@ -112,7 +116,9 @@ the current source and running app; a checked box or this document's prose is no
 | UX-017 | Full chat and subagent chat expose an adaptive operational status strip; Markdown and chat headers avoid duplicated metadata; nested overlays always stack above chat evidence. | M11 |
 | UX-018 | Every asynchronous control paints a pressed/optimistic/loading state immediately, rejects duplicate submissions, ignores stale responses, and keeps an inline restore/retry path on failure. | M11 |
 | UX-019 | Notifications provides Needs action, Updates, Snoozed, Problems, Briefing, and History with an unread badge, exact event deep links, responsive navigation, and per-device read state. Now retains only the live Action Inbox. | M12 |
-| UX-020 | Fleet is an installable mobile/desktop PWA with explicit install, permission, subscription, test-delivery, reconnect, unsupported, and delivery-health states. Private API and transcript data are never cached offline. | M12 |
+| UX-020 | Fleet is an installable mobile/desktop PWA with explicit install, permission, subscription, test-delivery, reconnect, unsupported, and delivery-health states. It caches only the token-free shell and last exact `/api/fleet` snapshot; every other private API and transcript response remains network-only. | M12 |
+| UX-021 | Every non-secret text field restores its local draft after navigation/reload. Known-offline ordinary messages show a durable queued receipt and flush in order after a live reconnect; commands remain unsent drafts. | M1/M10 |
+| UX-022 | The full-chat composer opens the mobile camera/photo library or desktop image picker, keeps up to four 10 MB image drafts across reloads, shows attached-image receipts, and flushes image messages after reconnect without duplicating provider dispatch. | M1/M10 |
 
 ### Intelligent global search
 
@@ -167,8 +173,8 @@ the current source and running app; a checked box or this document's prose is no
 | --- | --- | --- |
 | REPO-001 | Cache bounded, timed, argv-only probes for branch/worktree, dirty state, diffstat, upstream/ahead/behind, commits, PR/check/review state, and observed test/build results. | M6 |
 | REPO-002 | Distinguish observed passing/failing/stale/not observed. GitHub/provider/network failure never turns an unknown into success and never blocks the fleet. | M6 |
-| REPO-003 | Commit shows files and editable message then confirms; push shows remote/branch/ahead then confirms; draft PR shows editable title/body/base; mark-ready re-reads state and separately confirms. | M6 |
-| REPO-004 | All mutations require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, retry/error UI, and no free-form shell. | M6 |
+| REPO-003 | Workstreams show bounded local outcome evidence and one validated external GitHub link. Fleet exposes no in-app repository/PR detail page or duplicate commit/push/PR forms. | M6 |
+| REPO-004 | Retained compatibility mutation endpoints require auth, canonical repo confinement, enum/length/path validation, bounded progress, durable outcome, and no free-form shell; no current UI exposes them. | M6 |
 | REPO-005 | Never offer or execute merge, automatic commit/push/PR readiness, or history rewrite. | M6 |
 
 ### Message Outbox and light automations
@@ -494,16 +500,12 @@ roots, and a TTL cache. They collect:
 
 Provider or GitHub failure marks the cached result stale and leaves the other provider operational.
 
-### Actions
+### Presentation and compatibility actions
 
-- Commit: preview changed files and editable message, then confirm.
-- Push: show destination remote/branch and ahead count, then confirm.
-- Create draft PR: editable title/body/base, always draft.
-- Mark ready: separate explicit confirmation after current PR state is re-read.
-- Merge: never offered.
-
-Actions require authentication, run only inside the canonical repository, stream bounded progress,
-record outcomes, and cannot accept free-form shell commands.
+Workstreams retain the bounded local summary and expose one validated external **GitHub ↗** link.
+Fleet no longer renders repository/PR detail pages or commit, push, draft-PR, and mark-ready forms.
+The authenticated argv-only mutation endpoints remain temporarily for compatibility; no current UI
+calls them. Merge remains unavailable.
 
 ## Message Outbox and light automations
 
@@ -776,6 +778,10 @@ wrong-session protection, and mobile acceptance tests pass.
 - Add cached Git/GitHub/test outcome probes and Workstream/session presentation.
 - Add confirmed commit, push, draft-PR, and mark-ready actions.
 
+Current amendment (2026-07-17): the in-app Repository outcome page and mutation forms were retired.
+Workstreams keep bounded local evidence and open GitHub externally. The verification below records
+the historical M6 gate, not the current UI contract.
+
 Verification:
 
 - `python3 -m unittest discover -s tests -p 'test_*.py'` — 121 passed, including clean/dirty,
@@ -794,7 +800,7 @@ Verification:
 - Live after restart: `/api/workstreams` returned in 0.011 s from the repository cache; an explicit
   `federbenjamin/fleet-dash` GitHub detail lookup returned in 0.702 s and honestly reported that the
   current branch has no PR. The bulk Workstreams route deliberately skips per-repository GitHub
-  network calls; opening Repository outcome performs the bounded full lookup.
+  network calls. The former Repository outcome UI that performed the full lookup is now retired.
 
 Commit: `Add repository and pull-request outcome center`.
 

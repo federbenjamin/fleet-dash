@@ -37,7 +37,7 @@
       <div class="desthead"><div><h1>Now</h1><p>What needs attention and what is moving.</p></div>
         <button class="headprimary" onclick="newOpen=true;render(last,true);document.getElementById('newsess').scrollIntoView({behavior:'smooth'})">+ New session</button></div>
       <div class="commandbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="nowfilter" placeholder="Filter sessions" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="nowfilter" data-draft-key="filter:now" placeholder="Filter sessions" autocomplete="off"
           oninput="setNowFilter(this.value)"></label>
         <div class="commandchips" aria-label="Session state filter">
           <button data-now-filter="all" onclick="setNowState('all')">All</button>
@@ -85,7 +85,7 @@
       <div class="desthead"><div><h1>Search</h1><p>Claude, Codex, subagents, and delivered artifacts on this Mac.</p></div>
         <button class="headsecondary" id="search-rebuild" onclick="rebuildSearch()">Rebuild index</button></div>
       <div class="searchbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="searchquery" placeholder="Search every transcript" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="searchquery" data-draft-key="filter:search" placeholder="Search every transcript" autocomplete="off"
           oninput="queueSearch(true)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
         <div class="searchfilters">
           <label><span>Provider</span><select id="searchprovider" onchange="runSearch(true)">
@@ -104,7 +104,7 @@
     <section class="destination" id="route-workstreams" data-destination="workstreams" hidden>
       <div class="desthead"><div><h1>Workstreams</h1><p>Sessions grouped by repository and project.</p></div></div>
       <div class="commandbar" role="search">
-        <label class="commandinput"><span>⌕</span><input id="workfilter" placeholder="Filter repositories, branches, providers, or sessions" autocomplete="off"
+        <label class="commandinput"><span>⌕</span><input id="workfilter" data-draft-key="filter:workstreams" placeholder="Filter repositories, branches, providers, or sessions" autocomplete="off"
           oninput="setWorkFilter(this.value)"></label>
         <div class="commandchips" aria-label="Workstream state filter">
           <button data-work-filter="all" onclick="setWorkState('all')">All</button>
@@ -160,7 +160,7 @@
 <div id="sview">
   <div id="shead2"><button id="sclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="stitle2"></span>
     <span id="sctrl"></span></div>
-  <div id="sworkspace"><div id="sbody"></div><aside id="sevidence" aria-label="Session state evidence"></aside></div>
+  <div id="sworkspace"><div id="schat"><div id="sbody"></div><div id="sactivity"></div></div><aside id="sevidence" aria-label="Session state evidence"></aside></div>
   <div id="sact"></div>
 </div>
 <div id="handoffview">
@@ -168,11 +168,6 @@
     onclick="dismissOverlay()">←</button><span id="handofftitle"><b>Continue in another session</b>
     <small>Independent session · exact destination</small></span></div>
   <div id="handoffbody"></div>
-</div>
-<div id="repoview">
-  <div id="repohead"><button id="repoclose" aria-label="back" onclick="dismissOverlay()">←</button>
-    <span id="repotitle"><b>Repository outcome</b><small>Git, tests, and pull requests</small></span></div>
-  <div id="repobody"></div>
 </div>
 <div id="outboxview">
   <div id="outboxhead"><button aria-label="back" onclick="dismissOverlay()">←</button>

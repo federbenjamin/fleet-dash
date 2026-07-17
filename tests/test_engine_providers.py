@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail,
+from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, load_config,
                     classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
@@ -167,6 +167,23 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(second["diagnostics"]["scan_samples"], 2)
         self.assertGreaterEqual(second["diagnostics"]["scan_p95_ms"], 0)
 
+    def test_stall_default_migrates_exact_old_default_once(self):
+        migration_base = os.path.join(self.tmp.name, "migration")
+        os.makedirs(migration_base)
+        path = os.path.join(migration_base, "config.json")
+        with open(path, "w") as handle:
+            json.dump({"stall_seconds": 240, "act_token": "existing"}, handle)
+        with mock.patch.object(engine_module, "BASE", migration_base):
+            migrated = load_config()
+        self.assertEqual(migrated["stall_seconds"], 600)
+        self.assertTrue(migrated["_stall_default_v2"])
+
+        with open(path, "w") as handle:
+            json.dump({"stall_seconds": 900, "act_token": "existing"}, handle)
+        with mock.patch.object(engine_module, "BASE", migration_base):
+            custom = load_config()
+        self.assertEqual(custom["stall_seconds"], 900)
+
     def test_new_claude_registry_session_is_interactive_before_first_transcript(self):
         os.unlink(self.transcript)
         fleet = self.engine.scan()
@@ -179,6 +196,52 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(session["cost"])
         self.assertEqual(self.engine.session_context("same"), {
             "ok": True, "messages": [], "files": [], "starting": True})
+
+    def test_private_image_upload_is_normalized_scoped_and_resolved_server_side(self):
+        private = b"camera=private;gps=private"
+        fake_jpeg = (b"\xff\xd8\xff\xe1" + (len(private) + 2).to_bytes(2, "big") +
+                     private + b"\xff\xda\x00\x02\xff\xd9")
+        self.assertNotIn(private, self.engine._strip_jpeg_metadata(fake_jpeg))
+        self.engine.scan()
+        image_path = os.path.join(os.path.dirname(__file__), "..", "static", "icons",
+                                  "fleet-192.png")
+        with open(image_path, "rb") as handle:
+            data = handle.read()
+        uploaded = self.engine.store_image_upload(
+            "codex:same", "opaque_image_1", "../../phone.png", "image/png", data)
+        self.assertTrue(uploaded["ok"], uploaded)
+        self.assertEqual(uploaded["name"], "phone.png")
+        paths, error = self.engine._resolve_image_uploads(
+            "codex:same", ["opaque_image_1"])
+        self.assertIsNone(error)
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].startswith(os.path.join(self.base, "uploads") + os.sep))
+        self.assertEqual(stat.S_IMODE(os.stat(paths[0]).st_mode), 0o600)
+        denied, error = self.engine._resolve_image_uploads("same", ["opaque_image_1"])
+        self.assertIsNone(denied)
+        self.assertIn("another session", error)
+
+        result = self.engine.act({"type": "image_text", "session_id": "codex:same",
+                                  "text": "Inspect", "upload_ids": ["opaque_image_1"]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.codex.actions[-1]["image_paths"], paths)
+        claude_upload = self.engine.store_image_upload(
+            "same", "opaque_image_3", "phone.png", "image/png", data)
+        self.assertTrue(claude_upload["ok"], claude_upload)
+        writes = []
+        self.engine._tty_cache[os.getpid()] = "ttys999"
+        with mock.patch.object(self.engine, "_iterm_write",
+                               side_effect=lambda tty, steps, step_delay=None:
+                               writes.append((tty, steps, step_delay)) or {"ok": True}):
+            claude_result = self.engine.act({"type": "image_text", "session_id": "same",
+                "text": "Inspect in Claude", "upload_ids": ["opaque_image_3"]})
+        self.assertTrue(claude_result["ok"])
+        self.assertIn("Inspect in Claude", writes[0][1][0][0])
+        self.assertIn(os.path.join(self.base, "uploads", "opaque_image_3.jpg"),
+                      writes[0][1][0][0])
+        mismatch = self.engine.store_image_upload(
+            "codex:same", "opaque_image_2", "fake.jpg", "image/jpeg", data)
+        self.assertFalse(mismatch["ok"])
 
     def test_large_nul_path_probe_keeps_only_a_bounded_sample(self):
         probe = self.engine._bounded_nul_paths([
@@ -1144,6 +1207,10 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual((provider_error["ui_group"], provider_error["reason_label"],
                           provider_error["winning_rule"]),
                          ("needs_you", "Fix needed", "placement.provider.error"))
+        provider_limit = organized(state="blocked", error="Usage limit reached")
+        self.assertEqual((provider_limit["ui_group"], provider_limit["reason_label"],
+                          provider_limit["winning_rule"]),
+                         ("needs_you", "Limit reached", "placement.provider.limit"))
 
         reply = organized(state="turn_done", _latest_prose={"role": "assistant",
                            "text": "Which layout should I use?"})

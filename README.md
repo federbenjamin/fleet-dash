@@ -40,7 +40,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   a fixed bottom bar; History, Insights, and Settings live under More. The URL hash preserves destinations
   across refresh and browser/native back gestures. Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
-  filters whose named saved views remain on this device.
+  filters whose named saved views remain on this device. Settings and History paint their visible
+  destination immediately, then do heavier rendering/fetch work on the next frame.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
   canonical cwd, missing or unknown locations stay separate, and symlink/nested-repository cases do
@@ -48,7 +49,17 @@ the provider's native control path. Built 2026-07-13; still evolving.
   measured or partial cost, latest outcome, and its filtered sessions. Git changes, tests, PR state,
   and budgets say **not observed/not configured** until their later evidence systems measure them.
   Repository grouping is loaded through `/api/workstreams` only while that destination is open, so
-  it does not enlarge or delay the two-second `/api/fleet` poll.
+  it does not enlarge or delay the two-second `/api/fleet` poll. Recognized GitHub repositories expose
+  one external **GitHub ↗** link; Fleet does not duplicate GitHub repository or pull-request pages.
+- **Durable local drafts:** unsent composer, relay, handoff, scheduling, new-session, question-other,
+  and filter text survives polling, navigation, and reloads on that device. A draft clears only when
+  its action is accepted for sending or the user deletes the text. Password/secret answers are never
+  persisted. If Fleet is known to be offline, ordinary messages pressed Send enter a bounded local
+  queue, appear immediately as **Queued offline**, and send in order after a live fleet poll confirms
+  reconnection. Commands stay as drafts until online. The full-chat composer also accepts up to four
+  JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
+  device storage, can queue offline with their message, and are removed locally after delivery or
+  after 24 hours.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
   including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
@@ -202,6 +213,10 @@ the provider without affecting Claude sessions.
   expands usage details on tap. Missing provider data is omitted; completed agents and closed
   sessions keep their last known values. Tapping a main tree total opens the main-plus-children
   breakdown. No Git fetch or transcript rescan occurs when the strip opens.
+- **Sticky full-chat work footer** at the bottom of the conversation history while the main session
+  or any child subagent is active. Main and child work have separate symbols and counts; tapping the
+  footer expands the active names and distinguishes ordinary work from slow-but-still-possible work.
+  It disappears only when neither the main session nor a child is active.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
@@ -306,7 +321,9 @@ the provider without affecting Claude sessions.
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
   never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
   newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
-  Send/Relay button remains available. Structured-question answers use the selected option labels and the
+  Send/Relay button remains available. The full-chat **＋** button opens the phone camera/photo
+  picker (or desktop file picker); selected images are shown beside the composer and delivered to
+  either Claude or Codex with the message. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.
@@ -381,10 +398,13 @@ applet types into the iTerm session matched by tty). Finished agent runs and clo
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
-Fleet is also an installable PWA. Its root-scoped service worker refreshes public shell assets from
-the network first and keeps only a versioned offline fallback, so installed apps cannot remain stuck
-on old routing code. API responses, transcripts, notification data, settings, and token-bearing
-navigation stay network-only; offline navigation renders only **Reconnect to your tailnet**. Web Push delivery runs
+Fleet is also an installable PWA. Its root-scoped service worker refreshes the app shell from the
+network first and keeps the last successful `/api/fleet` snapshot on that device. After temporary
+connection loss or a reload, Fleet opens the cached dashboard immediately as explicitly offline and
+read-only except for its device-local ordinary-message queue. Queued messages send in order after a
+live fleet poll confirms reconnection; a connection drop during an attempted send requires manual
+restore so Fleet cannot duplicate a message with an unknown outcome. Conversation-detail,
+notification, settings, action, search, and token-bearing responses stay network-only. Web Push delivery runs
 in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
 and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
 file disables delivery instead of silently replacing keys and breaking registered devices. Its
@@ -438,7 +458,7 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |
 | `search_discover_seconds` | 2 | filesystem discovery cadence for new/changed transcript sources |
 | `search_batch_rows` | 250 | bounded JSONL rows committed per worker batch |
-| `stall_seconds` | 240 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
+| `stall_seconds` | 600 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
 | `dormant_seconds` | 7200 | quiet sessions demote to dormant |
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |

@@ -401,12 +401,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     reuses `fleet.briefingDevice.v1`; re-registration preserves its read cursor and preferences.
     `FleetOperations` keeps the shared ledger mode 0600 because it now holds encrypted-push
     subscription credentials.
-    `/sw.js` has root scope but caches only the explicit versioned public shell list. Navigations and
-    shell assets are network-first, with cached public assets and the content-free tailnet reconnect
-    page as offline fallbacks. Never make unhashed shell assets cache-first: an unchanged worker then
-    strands installed apps on old routing code. Bump `SHELL_CACHE` for structural shell changes so
-    already-installed apps replace the old cache on activation. `/api/*`, transcripts, notifications,
-    settings, token-bearing URLs, and conversation content are always network-only.
+    `/sw.js` has root scope. Navigations and shell assets are network-first; the worker caches the
+    token-free root shell plus the explicit versioned assets. The only cached API response is the last
+    successful exact `/api/fleet` snapshot, stored under a fixed key on that device. Offline fallback
+    adds `X-Fleet-Offline: 1`; the client renders the snapshot read-only, preserves drafts, and never
+    mistakes it for current provider state. Never make unhashed shell assets cache-first. Bump
+    `SHELL_CACHE` for structural shell changes. All other `/api/*` responses—including actions,
+    conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
 45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
     card uses the measured fixed frame `117px + preview_session_lines × 17.4px` (or zero preview
     rows when session peeks are disabled), with its More control anchored at the bottom. Never put
@@ -472,6 +473,50 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     notification visible and opens current Fleet detail without putting the capability in a URL.
     The separate legacy flag enables only one manually invoked generic ntfy test route; provider
     scans never dispatch it and it is never a Web Push fallback or duplicate path.
+49. **One provider limit blocks one session, never the dashboard.** App Server error payloads are
+    string-or-object; normalize them to bounded scalar text before storing or rendering. Recognized
+    rate/usage/quota/context limits set only that thread to `blocked`, disable its submit capability,
+    and place it in Needs you as **Limit reached**. A client render exception is a display error, not
+    “server unreachable.” The HTTP server binds before the first provider scan so one slow/malformed
+    session cannot remove the dashboard during startup.
+50. **Non-secret text drafts are device-local and send-cleared.** `fleet.drafts.v1` stores bounded
+    composer, relay, handoff, schedule, new-session, request-Other/form, and filter text. Poll renders,
+    overlays, navigation, and reloads must restore it. Empty input deletes its key immediately;
+    successful send/schedule/handoff/spawn/request acceptance clears the owning key/prefix. Failed or
+    failed delivery preserves/restores the text. Never attach a draft key to a password or provider-
+    declared secret field, and never put drafts in a server API.
+51. **GitHub is an external destination, not a Fleet detail page.** Repository observation projects a
+    validated canonical HTTPS `github_url`. Workstreams render it as a normal external link so the OS
+    may open the GitHub app or website. Briefing repository links use the same URL. Do not restore the
+    `#repoview` overlay, session-menu Repository outcome entry, or duplicated GitHub/Git/PR form UI.
+52. **Known-offline ordinary messages use a device-local queue.** `fleet.offlineMessages.v1` stores at
+    most 100 bounded messages and renders a persistent **Queued offline** receipt. A successful,
+    non-cached `/api/fleet` poll is the only reconnect signal that may start the FIFO flush. Slash
+    commands and skills stay as drafts because their semantics may be destructive. Remove a queue row
+    after provider acceptance or a known rejection. If the connection drops after dispatch begins,
+    remove it from automatic retry and show a manual restore failure: delivery is unknown and an
+    automatic retry could duplicate the message. Never send from the service worker.
+53. **Full-chat work activity is independent of transcript output.** `#sactivity` is a non-overlay
+    footer below the `#sbody` scroll area, so it remains visible without covering messages. Show the
+    main indicator for session `running`/`stalled`, and a separate count for every child not in
+    `done`/`ended`; either signal may appear alone. The expandable detail names active children and
+    labels stalled work as slow, not stopped. Preserve the native `<details>` open state across polls
+    by replacing its HTML only when the main/child state signature changes.
+54. **Phone images are private, scoped attachments—not client paths.** The full-chat composer stores
+    at most four 10 MB JPEG/PNG/GIF/WebP/HEIC/HEIF blobs in lazy IndexedDB and keeps only opaque draft/
+    queue ids in localStorage. `/api/upload-image` is token-gated, rejects chunked or oversized bodies,
+    validates magic bytes, ignores the client filename for path construction, normalizes through fixed-
+    argv `sips`, and removes every JPEG APP/COM metadata segment (including EXIF GPS/XMP). Files and
+    0600 metadata live under the 0700 `fleet-dash/uploads` directory, are bound to one live interactive
+    session, and expire after 24 hours. `image_text` resolves ids server-side: Codex receives native
+    `localImage` inputs; Claude receives only Fleet-managed absolute paths in injected text. Image
+    uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
+    service worker never caches image bytes.
+55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
+    existing loading-spinner pattern before building the full settings tree. History navigation must
+    reveal the already-rendered destination before starting its fetch/render in the next animation
+    frame. Keep both deferrals: synchronously rebuilding these surfaces produced 265–947 ms desktop
+    first-feedback outliers even though their network work was asynchronous.
 
 ## Dev workflow
 
@@ -517,7 +562,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
-  `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/settings` +
+  `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/upload-image` + `/api/settings` +
   `/api/search/rebuild` + notification read/snooze/wake/mute/retry and
   device/subscription/test routes are token-gated.
   Settings persists the manual `legacy_ntfy_enabled` switch, range-validated UI/session thresholds
@@ -540,7 +585,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   (`open`/`infoOpen`/`doneOpen`/`filesOpen` plus route/filter globals) re-applied at render —
   a full innerHTML re-render destroys native `<details>` state otherwise.
 - `static/manifest.webmanifest` + `static/sw.js` + `static/offline.html` + `static/icons/` — stable
-  install identity, root-scoped network/private-data boundary, shell-only offline guidance, and
+  install identity, root-scoped network/private-data boundary, cached last-fleet offline view, and
   regular/maskable PWA artwork. Bump the service-worker cache name when changing its shell contract.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
   `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
