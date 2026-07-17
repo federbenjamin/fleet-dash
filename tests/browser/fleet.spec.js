@@ -1865,6 +1865,19 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
     action.type === 'option' && action.session_id === 'claude-one' && action.nonce === 'rev-6')).toBe(true);
 });
 
+test('push fallback opens exact current state and direct close stays inside Notifications', async ({ page }) => {
+  await reset(page, 'base');
+  await page.goto('/?push_action=snooze#notifications/evt-6-question');
+  await expect(page).toHaveURL(/\/#notifications\/evt-6-question$/);
+  await expect(page.locator('#notificationdetail')).toContainText('Claude needs one answer');
+  await expect(page.locator('#notificationdetail')).toContainText(
+    'Snooze from the notification did not complete');
+  await expect(page.getByRole('button', {name: 'Snooze 15m'})).toBeVisible();
+  await page.getByRole('button', {name: 'close notification detail'}).click();
+  await expect(page).toHaveURL(/#notifications$/);
+  await expect(page.locator('#notificationdetail')).not.toHaveClass(/open/);
+});
+
 test('PWA shell stays private and device settings remain redacted', async ({ page }) => {
   await reset(page, 'base');
   const manifest = await (await page.request.get('/static/manifest.webmanifest')).json();

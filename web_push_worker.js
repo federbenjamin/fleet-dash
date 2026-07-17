@@ -140,19 +140,28 @@ function validatePayload(value) {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 2_048) fail('invalid payload');
   let parsed;
   try { parsed = JSON.parse(value); } catch (_) { fail('invalid payload'); }
-  exactKeys(parsed, new Set(['version', 'event_id', 'title', 'body', 'url', 'unread', 'capabilities']));
+  exactKeys(parsed, new Set(['version', 'event_id', 'kind', 'title', 'body', 'tag', 'url',
+    'actions', 'capabilities', 'unread', 'cursor']));
   if (parsed.version !== 1 || typeof parsed.event_id !== 'string' || parsed.event_id.length > 100
+      || !['question', 'approval', 'form', 'reply', 'failure', 'stall', 'notification'].includes(parsed.kind)
       || typeof parsed.title !== 'string' || parsed.title.length > 80
       || typeof parsed.body !== 'string' || parsed.body.length > 180
+      || typeof parsed.tag !== 'string' || !/^[0-9a-f]{24}$/.test(parsed.tag)
       || typeof parsed.url !== 'string' || parsed.url.length > 180
-      || !Number.isInteger(parsed.unread) || parsed.unread < 0 || parsed.unread > 999) {
+      || parsed.url !== `/#notifications/${parsed.event_id}`
+      || !Array.isArray(parsed.actions) || parsed.actions.length > 2
+      || !Number.isInteger(parsed.unread) || parsed.unread < 0 || parsed.unread > 999
+      || !Number.isInteger(parsed.cursor) || parsed.cursor < 0) {
     fail('invalid payload');
   }
-  if (parsed.capabilities !== undefined) {
-    exactKeys(parsed.capabilities, new Set(['snooze', 'mute']));
-    for (const value of Object.values(parsed.capabilities)) {
-      if (typeof value !== 'string' || value.length > 2_048) fail('invalid capability');
-    }
+  const actions = new Set(parsed.actions);
+  if (actions.size !== parsed.actions.length
+      || [...actions].some(action => !['snooze', 'mute'].includes(action))) fail('invalid action');
+  exactKeys(parsed.capabilities, new Set(['snooze', 'mute']));
+  if (Object.keys(parsed.capabilities).length !== actions.size) fail('invalid capability');
+  for (const action of actions) {
+    const value = parsed.capabilities[action];
+    if (typeof value !== 'string' || value.length > 2_048) fail('invalid capability');
   }
   return value;
 }

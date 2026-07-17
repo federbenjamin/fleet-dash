@@ -81,6 +81,15 @@ class BriefingTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def qualify_push_device(self, device_id="phone", preferences=None):
+        self.ops.notification_register_device(
+            device_id, device_id.title(), "test", push_subscription(),
+            preferences=preferences)
+        delivery = self.ops.notification_create_test_delivery(device_id)
+        self.assertEqual(self.ops.notification_claim_delivery()["id"], delivery["id"])
+        self.ops.notification_finish_delivery(delivery["id"], {"ok": True, "status": 201})
+        return delivery
+
     def test_completion_artifact_and_repository_events_dedupe_across_restart(self):
         first = fleet(self.clock, [session()])
         self.ops.observe(first, self.workstream)
@@ -565,6 +574,123 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(duplicate["generation"], 1)
         self.assertEqual(self.ops.notification_delivery_diagnostics()["queued"], 1)
 
+    def test_production_policy_requires_test_and_hard_excludes_informational_events(self):
+        self.ops.notification_register_device(
+            "untested", "Untested", "test", push_subscription())
+        self.qualify_push_device("phone")
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        claim = self.ops.notification_claim_delivery()
+        self.assertEqual(claim["device_id"], "phone")
+        self.assertEqual(claim["purpose"], "initial")
+        self.assertEqual(claim["event"]["kind"], "question")
+        self.assertIsNone(self.ops.notification_claim_delivery())
+
+        self.ops.notification_finish_delivery(claim["id"], {"ok": True, "status": 201})
+        self.clock.advance(10)
+        self.ops.observe(fleet(self.clock, [session(group="available",
+            normalized_state="turn_done", state="turn_done", convo_v=2)]), self.workstream)
+        with sqlite3.connect(self.path) as db:
+            purposes = db.execute("""SELECT e.kind,d.purpose FROM notification_deliveries d
+                JOIN notification_events e ON e.id=d.event_id
+                WHERE d.purpose!='test'""").fetchall()
+        self.assertEqual(purposes, [("question", "initial")])
+
+    def test_production_policy_applies_delay_and_one_global_reminder_wave(self):
+        self.qualify_push_device("phone", {"kinds": ["question"],
+            "minimum_severity": "warning", "initial_delay_seconds": 30})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        self.clock.advance(30)
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        initial = self.ops.notification_claim_delivery()
+        self.assertEqual(initial["purpose"], "initial")
+        self.ops.notification_finish_delivery(initial["id"], {"ok": True, "status": 201})
+
+        self.clock.advance(899)
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        reminder = self.ops.notification_claim_delivery()
+        self.assertEqual(reminder["purpose"], "reminder")
+        self.ops.notification_finish_delivery(reminder["id"], {"ok": True, "status": 201})
+        self.clock.advance(3600)
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        with sqlite3.connect(self.path) as db:
+            purposes = db.execute("""SELECT purpose,COUNT(*) FROM notification_deliveries
+                WHERE purpose!='test' GROUP BY purpose ORDER BY purpose""").fetchall()
+        self.assertEqual(purposes, [("initial", 1), ("reminder", 1)])
+
+    def test_snooze_replaces_reminder_with_one_wake_and_mute_suppresses_all_devices(self):
+        self.qualify_push_device("phone")
+        self.qualify_push_device("desktop")
+        current = fleet(self.clock, actions=[action()])
+        self.ops.observe(current, self.workstream)
+        first = self.ops.notification_claim_delivery()
+        second = self.ops.notification_claim_delivery()
+        self.ops.notification_finish_delivery(first["id"], {"ok": True, "status": 201})
+        self.ops.notification_finish_delivery(second["id"], {"ok": True, "status": 201})
+        event = self.ops.notification_snapshot("phone")["events"][0]
+        self.ops.notification_snooze(
+            event["id"], event["source_revision"], self.clock() + 900)
+        self.clock.advance(900)
+        current = fleet(self.clock, actions=[action()])
+        self.ops.observe(current, self.workstream)
+        wake_one = self.ops.notification_claim_delivery()
+        wake_two = self.ops.notification_claim_delivery()
+        self.assertEqual({wake_one["purpose"], wake_two["purpose"]}, {"snooze_wake"})
+        self.ops.notification_finish_delivery(wake_one["id"], {"ok": True, "status": 201})
+        self.ops.notification_finish_delivery(wake_two["id"], {"ok": True, "status": 201})
+        self.clock.advance(1800)
+        current = fleet(self.clock, actions=[action()])
+        self.ops.observe(current, self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+
+        next_current = fleet(self.clock, actions=[action(nonce="ask-2")])
+        self.ops.notification_set_session_mute("s1", "claude", True)
+        self.ops.observe(next_current, self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        self.assertTrue(self.ops.notification_session_muted("s1"))
+
+    def test_provider_failure_requires_two_matching_scans(self):
+        failed = {"claude": {"ok": False, "error": "adapter unavailable"}}
+        self.ops.observe(fleet(self.clock, providers=failed), self.workstream)
+        self.assertFalse(any(item["kind"] == "failure" and item["state"] == "active"
+                             for item in self.ops.notification_snapshot("browser")["events"]))
+        self.clock.advance(2)
+        self.ops.observe(fleet(self.clock, providers=failed), self.workstream)
+        self.assertTrue(any(item["kind"] == "failure" and item["state"] == "active"
+                            for item in self.ops.notification_snapshot("browser")["events"]))
+
+    def test_terminal_delivery_failure_notifies_only_another_healthy_tested_device(self):
+        path = os.path.join(self.tmp.name, "delivery-failure.db")
+        ops = FleetOperations(path, clock=self.clock, delivery_retry_delays=(0,),
+                              delivery_jitter=lambda delay: delay)
+        for device in ("phone", "desktop"):
+            ops.notification_register_device(
+                device, device.title(), "test", push_subscription())
+            test_delivery = ops.notification_create_test_delivery(device)
+            ops.notification_claim_delivery()
+            ops.notification_finish_delivery(test_delivery["id"], {"ok": True, "status": 201})
+        current = fleet(self.clock, actions=[action()])
+        ops.observe(current, self.workstream)
+        first, second = ops.notification_claim_delivery(), ops.notification_claim_delivery()
+        phone = first if first["device_id"] == "phone" else second
+        desktop = second if phone is first else first
+        ops.notification_finish_delivery(desktop["id"], {"ok": True, "status": 201})
+        self.clock.advance(1)
+        ops.notification_finish_delivery(phone["id"], {"ok": False, "status": 503})
+        retry = ops.notification_claim_delivery()
+        self.assertEqual(retry["id"], phone["id"])
+        ops.notification_finish_delivery(phone["id"], {"ok": False, "status": 503})
+        self.clock.advance(1)
+        ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        problem_push = ops.notification_claim_delivery()
+        self.assertEqual(problem_push["event"]["kind"], "failure")
+        self.assertEqual(problem_push["device_id"], "desktop")
+        self.assertIsNone(ops.notification_claim_delivery())
+
     def test_push_delivery_retry_after_lease_reclaim_and_exhaustion(self):
         retry_path = os.path.join(self.tmp.name, "retry.db")
         ops = FleetOperations(
@@ -620,6 +746,10 @@ class BriefingTests(unittest.TestCase):
         self.ops.notification_register_device(
             "phone", "Phone", "iOS",
             push_subscription("https://web.push.apple.com/Qreplacement"))
+        replacement = self.ops.notification_create_test_delivery("phone")
+        self.ops.notification_claim_delivery()
+        self.ops.notification_finish_delivery(
+            replacement["id"], {"ok": True, "status": 201})
         retried = self.ops.notification_retry_delivery(queued["id"])
         self.assertEqual(retried["status"], "queued")
 

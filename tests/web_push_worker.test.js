@@ -25,8 +25,10 @@ function state() {
 
 function payload() {
   return JSON.stringify({version: 1, event_id: 'evt-fixture',
+    kind: 'question', tag: '0123456789abcdef01234567',
     title: 'Fleet needs you', body: 'A coding session needs your response.',
-    url: '/#notifications/evt-fixture', unread: 3});
+    url: '/#notifications/evt-fixture', actions: ['snooze'],
+    capabilities: {snooze: 'signed-capability'}, unread: 3, cursor: 7});
 }
 
 function fakeRequest(status, headers = {}, capture = {}) {

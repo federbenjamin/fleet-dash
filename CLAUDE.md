@@ -421,8 +421,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     jittered retry for timeout/429/5xx, Retry-After, and helper failure. A 404/410 or revoked
     permission scrubs the subscription and disables the device. Public status contains only the
     VAPID public key, helper state/restart count, and queue aggregates; endpoint, subscription keys,
-    private keys, and raw errors never cross a read API. N1–N3 stay dark: only the explicit Settings
-    test queues delivery until N5 enables production policy.
+    private keys, and raw errors never cross a read API. A successful Settings test qualifies that
+    exact subscription; changing the subscription clears qualification until a new test succeeds.
 47. **Notification Center owns durable interruption history; Now owns live actions.** The old Now
     Briefing block must not return: Briefing is an on-demand section beside Needs action, Updates,
     Snoozed, Problems, and History. `GET /api/notifications` is action-token protected and projects
@@ -436,6 +436,26 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     attempts. Desktop is a list/detail split; mobile detail is a fixed drawer above the bottom bar.
     Delivery failures may expose bounded device name/platform/status/timestamps and retryability,
     never endpoint, origin, subscription material, keys, or raw errors.
+48. **Production Web Push is purpose-bounded and capability-authenticated.** The policy sweep runs in
+    the same short transaction as canonical event reconciliation and may enqueue only `question`,
+    `approval`, `form`, `reply`, confirmed `failure`, or threshold-crossed `stall` events. A target
+    device must be enabled, permission-granted, subscription-present, explicitly test-qualified,
+    healthy, preference-eligible, and behind the event's sequence; informational/completion/spend/
+    budget/fleet-quiet events never push. Delivery rows persist an explicit `initial`, `reminder`,
+    `snooze_wake`, `manual_retry`, or `test` purpose plus source revision. An event gets one initial
+    per eligible device and one global reminder wave 15 minutes after the first successful initial;
+    stalls never remind. Snooze suppresses queued initial/reminder work, consumes the reminder, and
+    permits one wake wave. Mute is session-wide and must update both `muted_sessions` config and the
+    notification DB before future claims. Every schedule, claim, retry, and mutation revalidates
+    current event/device/mute state. The encrypted payload is generic, uses a hashed tag and exact
+    `#notifications/<event>` link, and carries only Open plus optional Snooze/Mute capabilities.
+    Capabilities are HMAC-signed for one event/device/action, expire after ten minutes, persist only a
+    consumed JTI hash, and are accepted solely by credential-omitting
+    `/api/push/capability-action`; that route ignores `act_token` and returns one generic rejection
+    for malformed, expired, replayed, or stale tokens. A failed shortcut keeps the system
+    notification visible and opens current Fleet detail without putting the capability in a URL.
+    Automatic ntfy dispatch is off unless the separate legacy flag is explicitly true; it is never a
+    Web Push fallback or duplicate path.
 
 ## Dev workflow
 

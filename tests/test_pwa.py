@@ -37,7 +37,7 @@ class PwaContractTest(unittest.TestCase):
         self.assertIn('url.pathname.startsWith(\'/api/\')', worker)
         self.assertIn("request.mode === 'navigate'", worker)
         self.assertIn("fetch(request).catch(() => caches.match('/static/offline.html'))", worker)
-        self.assertIn("const SHELL_CACHE = 'fleet-shell-n4-v1'", worker)
+        self.assertIn("const SHELL_CACHE = 'fleet-shell-n5-v1'", worker)
         self.assertIn("fetch(request).then(response =>", worker)
         self.assertIn("catch(() => caches.match(request))", worker)
         self.assertNotIn("'/api/", worker.split("const SHELL_ASSETS", 1)[1].split("];", 1)[0])

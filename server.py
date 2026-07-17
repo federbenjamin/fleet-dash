@@ -52,7 +52,8 @@ def poll_loop(eng):
             if search:
                 search.ensure_process()
             fleet = eng.scan()
-            eng.check_notifications(fleet)
+            if eng.cfg.get("legacy_ntfy_enabled") is True:
+                eng.check_notifications(fleet)
         except Exception as e:
             print(f"poll error: {e}", file=sys.stderr, flush=True)
         time.sleep(eng.cfg["poll_seconds"])
@@ -143,8 +144,30 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
-                         "/api/push/test", "/api/push/device-settings"):
+                         "/api/push/test", "/api/push/device-settings",
+                         "/api/push/capability-action"):
             return self.reply(404, "text/plain", b"not found")
+        if route == "/api/push/capability-action":
+            if self.headers.get("Transfer-Encoding") or \
+               self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() \
+               != "application/json":
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "notification capability is unavailable"}')
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                if n <= 0 or n > 4096:
+                    raise ValueError("invalid capability body")
+                self.connection.settimeout(5)
+                action = json.loads(self.rfile.read(n))
+                if (not isinstance(action, dict) or set(action) != {"capability"} or
+                        not isinstance(action.get("capability"), str)):
+                    raise ValueError("invalid capability body")
+            except Exception:
+                return self.reply(400, "application/json",
+                                  b'{"ok": false, "error": "notification capability is unavailable"}')
+            result = self.eng.push_capability_action(action)
+            status = 200 if result.get("ok") else 409
+            return self.reply(status, "application/json", json.dumps(result).encode())
         if not self.token_ok():
             print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
                   file=sys.stderr, flush=True)

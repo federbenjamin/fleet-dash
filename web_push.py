@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import glob
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import os
 import queue
@@ -26,6 +29,68 @@ KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 class WebPushError(RuntimeError):
     """A bounded runtime/configuration failure safe to project without secrets."""
+
+
+class ActionCapabilityCodec:
+    """Mint and verify compact ten-minute, single-action HMAC capabilities."""
+
+    def __init__(self, encoded_secret, *, clock=time.time):
+        try:
+            padded = str(encoded_secret) + "=" * (-len(str(encoded_secret)) % 4)
+            self.secret = base64.urlsafe_b64decode(padded.encode("ascii"))
+        except (UnicodeEncodeError, binascii.Error, ValueError):
+            raise WebPushError("Web Push action secret is invalid")
+        if len(self.secret) < 32:
+            raise WebPushError("Web Push action secret is invalid")
+        self.clock = clock
+
+    @staticmethod
+    def _encode(value):
+        return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode(value):
+        if not isinstance(value, str) or len(value) > 1800 or not KEY_RE.fullmatch(value):
+            raise WebPushError("notification capability is unavailable")
+        try:
+            return base64.urlsafe_b64decode((value + "=" * (-len(value) % 4)).encode("ascii"))
+        except (UnicodeEncodeError, binascii.Error, ValueError):
+            raise WebPushError("notification capability is unavailable")
+
+    def mint(self, event_id, device_id, action):
+        if action not in ("snooze", "mute"):
+            raise WebPushError("notification capability is unavailable")
+        payload = {"v": 1, "e": str(event_id), "d": str(device_id), "a": action,
+                   "x": int(self.clock()) + 600, "j": secrets.token_urlsafe(16)}
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        signature = hmac.new(self.secret, raw, hashlib.sha256).digest()
+        return self._encode(raw) + "." + self._encode(signature)
+
+    def verify(self, token):
+        if not isinstance(token, str) or len(token) > 2048 or token.count(".") != 1:
+            raise WebPushError("notification capability is unavailable")
+        encoded, supplied = token.split(".", 1)
+        raw, signature = self._decode(encoded), self._decode(supplied)
+        expected = hmac.new(self.secret, raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, signature):
+            raise WebPushError("notification capability is unavailable")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            raise WebPushError("notification capability is unavailable")
+        if (not isinstance(value, dict) or set(value) != {"v", "e", "d", "a", "x", "j"} or
+                value.get("v") != 1 or value.get("a") not in ("snooze", "mute") or
+                not isinstance(value.get("e"), str) or not 1 <= len(value["e"]) <= 100 or
+                not isinstance(value.get("d"), str) or not 1 <= len(value["d"]) <= 80 or
+                not isinstance(value.get("j"), str) or not 16 <= len(value["j"]) <= 80 or
+                not isinstance(value.get("x"), int)):
+            raise WebPushError("notification capability is unavailable")
+        now = self.clock()
+        if value["x"] < now or value["x"] > now + 620:
+            raise WebPushError("notification capability is unavailable")
+        return {"event_id": value["e"], "device_id": value["d"], "action": value["a"],
+                "expires_at": value["x"],
+                "jti_hash": hashlib.sha256(value["j"].encode("utf-8")).hexdigest()}
 
 
 def _safe_env(node_path):
@@ -347,6 +412,7 @@ class WebPushService:
         self.lock = threading.RLock()
         self.helper = None
         self.public_key = None
+        self.action_codec = None
         self.runtime_state = "starting"
         self.runtime_error = None
 
@@ -375,6 +441,7 @@ class WebPushService:
         vapid = store.load_or_create()
         with self.lock:
             self.public_key = vapid["vapid_public_key"]
+            self.action_codec = ActionCapabilityCodec(vapid["action_secret"], clock=self.clock)
         helper = self.helper_factory(
             node, self.worker_path, vapid=vapid, subject=self._subject(),
             allowed_origins=self.config.get("web_push_allowed_origins") or [])
@@ -386,8 +453,7 @@ class WebPushService:
         if old and old is not helper:
             old.stop()
 
-    @staticmethod
-    def _payload(claim):
+    def _payload(self, claim):
         event = claim["event"]
         if event.get("push_test"):
             title, body = "Fleet notification test", "Web Push delivery is working."
@@ -397,16 +463,39 @@ class WebPushService:
             title, body = "Fleet needs attention", "A coding session may be stalled."
         else:
             title, body = "Fleet needs attention", "A provider or delivery needs review."
+        tag = hashlib.sha256(claim["event_id"].encode()).hexdigest()[:24]
+        actions, capabilities = [], {}
+        with self.lock:
+            codec = self.action_codec
+        if not event.get("push_test") and codec:
+            actions.append("snooze")
+            capabilities["snooze"] = codec.mint(
+                claim["event_id"], claim["device_id"], "snooze")
+            if event.get("session_id"):
+                actions.append("mute")
+                capabilities["mute"] = codec.mint(
+                    claim["event_id"], claim["device_id"], "mute")
         payload = {"version": 1, "event_id": claim["event_id"],
-                   "title": title, "body": body,
+                   "kind": event.get("kind"), "title": title, "body": body, "tag": tag,
                    "url": "/#notifications/" + claim["event_id"],
-                   "unread": int(event.get("unread") or 0)}
+                   "actions": actions, "capabilities": capabilities,
+                   "unread": int(event.get("unread") or 0),
+                   "cursor": int(event.get("cursor") or 0)}
         encoded = json.dumps(payload, separators=(",", ":"))
         forbidden = ("prompt", "command", "file_path", "branch", "cost", "account",
                      str(event.get("session_id") or ""))
         if len(encoded.encode()) > 2048 or any(item and item in encoded for item in forbidden):
             raise WebPushError("Web Push payload privacy validation failed")
         return encoded
+
+    def capability_action(self, token, *, mute_callback=None):
+        with self.lock:
+            codec = self.action_codec
+        if not codec:
+            raise WebPushError("notification capability is unavailable")
+        claims = codec.verify(token)
+        return self.operations.notification_consume_capability(
+            claims, mute_callback=mute_callback)
 
     def _run(self):
         while not self.stop_event.is_set():

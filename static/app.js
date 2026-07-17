@@ -18,9 +18,13 @@ function recordInputFeedback(started,flow='input'){
   perfRecord('input_feedback_ms',elapsed);
   perfRecord(`feedback_${String(flow).replace(/[^a-z0-9_]+/gi,'_').toLowerCase()}_ms`,elapsed);
 }
-(()=>{const m=location.search.match(/[?&]token=([0-9a-f]+)/);
-  if(m){document.cookie=`act_token=${m[1]};path=/;max-age=31536000;SameSite=Lax`;
-        history.replaceState(null,'',location.pathname+location.hash);}})();
+let pushActionFallback=(()=>{const value=new URLSearchParams(location.search).get('push_action');
+  return ['snooze','mute'].includes(value)?value:'';})();
+(()=>{const url=new URL(location.href),token=url.searchParams.get('token');
+  if(token&&/^[0-9a-f]+$/.test(token))
+    document.cookie=`act_token=${token};path=/;max-age=31536000;SameSite=Lax`;
+  if(token||pushActionFallback){url.searchParams.delete('token');url.searchParams.delete('push_action');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);}})();
 const open=new Set();
 const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
@@ -35,6 +39,11 @@ function hashDestination(){
   return{route:validRoutes.has(route)?route:'now',detail};
 }
 const initialDestination=hashDestination();
+if(initialDestination.detail&&!(history.state&&history.state.eventId)){
+  const detailHash=`#notifications/${encodeURIComponent(initialDestination.detail)}`;
+  history.replaceState({fdRoute:'notifications'},'','#notifications');
+  history.pushState({fdRoute:'notifications',eventId:initialDestination.detail},'',detailHash);
+}
 let currentRoute=initialDestination.route,notificationDetailId=initialDestination.detail;
 let nowFilter='',nowState='all',workFilter='',workState='all';
 const NAV_SIDE_KEY='fleet.navSide.v1';
@@ -951,6 +960,32 @@ function updateNotificationBadges(){
   if(unread&&typeof navigator.setAppBadge==='function')navigator.setAppBadge(unread).catch(()=>{});
   else if(!unread&&typeof navigator.clearAppBadge==='function')navigator.clearAppBadge().catch(()=>{});
 }
+let notificationReconcileBusy=false;
+async function reconcileSystemNotifications(){
+  if(notificationReconcileBusy||!('serviceWorker'in navigator))return;
+  notificationReconcileBusy=true;
+  try{
+    const registration=await navigator.serviceWorker.ready,worker=registration.active;
+    if(!worker)return;
+    const channel=new MessageChannel();
+    const ids=await new Promise(resolve=>{
+      const timer=setTimeout(()=>resolve([]),1200);
+      channel.port1.onmessage=event=>{clearTimeout(timer);resolve(event.data?.eventIds||[]);};
+      worker.postMessage({type:'fleet-displayed-notifications'},[channel.port2]);
+    });
+    const resolved=[];
+    await Promise.all(ids.slice(0,20).map(async id=>{
+      try{
+        const response=await fetch('/api/notifications?'+notificationParams(null,id),{cache:'no-store'});
+        const data=await response.json(),item=(data.events||[])[0];
+        if(response.ok&&data.ok&&item&&['resolved','expired'].includes(item.state))resolved.push(id);
+      }catch(_){ }
+    }));
+    worker.postMessage({type:'fleet-notification-state',resolvedIds:resolved,
+      unread:Number(notificationData.unread)||0,cursor:Number(notificationData.event_cursor)||0});
+  }catch(_){ }
+  finally{notificationReconcileBusy=false;}
+}
 function setNotificationSection(section){
   if(!['needs','updates','snoozed','problems','briefing','history'].includes(section))return;
   const started=performance.now();notificationSection=section;notificationDetailId=null;
@@ -982,6 +1017,7 @@ async function loadNotifications(reset=true,force=false){
     notificationItems=reset?(data.events||[]):notificationItems.concat(data.events||[]);
     notificationData={...data,events:notificationItems};notificationLoadedAt=Date.now();
     updateNotificationBadges();
+    void reconcileSystemNotifications();
     if(notificationDetailId){
       const listed=notificationItems.find(item=>item.id===notificationDetailId);
       if(listed)notificationDetail=listed;
@@ -1004,13 +1040,18 @@ async function loadNotificationDetail(id,push=false){
     if(notificationDetailId!==id)return;notificationDetail=item;
     const index=notificationItems.findIndex(value=>value.id===id);
     if(index>=0)notificationItems[index]=item;else notificationItems.unshift(item);
+    if(pushActionFallback){notificationActionState={busy:false,
+      message:`${pushActionFallback==='snooze'?'Snooze':'Mute'} from the notification did not complete. Review the current state and try again.`,
+      error:true};pushActionFallback='';}
     if(item.unread)void markNotificationsRead(item.sequence,false);
+    void reconcileSystemNotifications();
   }catch(error){if(notificationDetailId===id)notificationDetailError=String(error.message||error);}
   finally{if(notificationDetailId===id){notificationDetailLoading=false;renderNotifications();}}
 }
 function openNotification(id){loadNotificationDetail(id,true);}
 function closeNotificationDetail(){
-  if(location.hash.startsWith('#notifications/')){history.back();return;}
+  if(location.hash.startsWith('#notifications/')&&history.state?.eventId){history.back();return;}
+  if(location.hash.startsWith('#notifications/'))history.replaceState({fdRoute:'notifications'},'','#notifications');
   notificationDetailId=null;notificationDetail=null;notificationDetailError='';renderNotifications();
 }
 async function notificationPost(path,payload,success){

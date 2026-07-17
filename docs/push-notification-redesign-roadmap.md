@@ -574,6 +574,8 @@ registered at N4 completion; N0b subsequently passed on installed macOS and iPho
 
 ### N5 — Production policy, deep links, and reversible push actions
 
+Status: Complete · 2026-07-17
+
 - Switch production trigger selection to the settled table and remove periodic bucket repeats.
 - Add one-reminder budget, snooze wake processing, mute-until-unmuted, minimal payload renderer,
   event-specific deep links, action capabilities, and progressive action fallback.
@@ -582,6 +584,24 @@ registered at N4 completion; N0b subsequently passed on installed macOS and iPho
 
 Exit: stale pushes cannot expose stale controls; no event repeats beyond policy; Snooze/Mute work from
 supported notification clients and remain first-class after Open everywhere else.
+
+Evidence: production enqueue now has a hard actionable/failure/stall allowlist, per-device severity
+and delay policy, test-delivery qualification, cursor suppression, one global reminder budget,
+snooze-wake replacement, and indefinite session mute. Every enqueue and claim revalidates the
+canonical event revision and current device policy. Payloads contain only generic state, an opaque
+event link, a hashed replacement tag, unread/cursor metadata, and ten-minute event/device/action-
+scoped Snooze/Mute capabilities. Capability use is POST-only, HMAC-authenticated, atomically
+one-use, and recorded only as a JTI hash; failure retains the system notification and opens the exact
+Fleet event for fallback. Automatic legacy ntfy dispatch is off unless explicitly enabled.
+
+The 218-test Python suite, ten Node transport/service-worker tests, and six targeted desktop/mobile
+Notification Center checks passed. Unit coverage includes policy exclusion, reminder exhaustion,
+snooze wake, mute suppression, provider-failure confirmation, nonrecursive delivery failures,
+capability tamper/expiry/replay, payload privacy, and the unauthenticated capability-only route.
+Installed macOS and iPhone clients received fresh production question, approval, and reply pushes;
+the user confirmed the resulting native notification interaction worked. The full Playwright shell
+run was not accepted as evidence because Chromium targets crashed before Notification navigation
+under host memory pressure; the same Notification-focused cases passed in isolation.
 
 ### N6 — ntfy retirement, observability, and release gate
 

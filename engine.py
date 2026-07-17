@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "search_batch_rows": 250,
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
+    "legacy_ntfy_enabled": False,
     "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
     "web_push_allowed_origins": [],      # explicit exact HTTPS push-service origins
     "web_push_node_command": "",        # optional absolute Node >=18 executable
@@ -4581,6 +4582,31 @@ Treat this as an independent session. Verify the repository state before changin
             if self.web_push is None:
                 self.web_push = WebPushService(self.operations, BASE, self.cfg)
             self.web_push.start()
+
+    def push_capability_action(self, payload):
+        """Apply one signed reversible push action without using the act token."""
+        token = payload.get("capability") if isinstance(payload, dict) else None
+        if not isinstance(token, str):
+            return {"ok": False, "error": "notification capability is unavailable"}
+
+        def persist_mute(session_id):
+            values = dict(self.cfg.get("muted_sessions") or {})
+            values.pop(session_id, None)
+            values[session_id] = time.time()
+            values = dict(list(values.items())[-1000:])
+            self._persist_config_fields({"muted_sessions": values})
+            self.cfg["muted_sessions"] = values
+
+        try:
+            with self.web_push_lock:
+                service = self.web_push
+            if not service:
+                raise OperationsError("notification capability is unavailable")
+            with self.config_lock:
+                result = service.capability_action(token, mute_callback=persist_mute)
+            return {"ok": True, **result}
+        except Exception:
+            return {"ok": False, "error": "notification capability is unavailable"}
 
     def push_test(self, payload):
         try:

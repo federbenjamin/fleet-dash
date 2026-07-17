@@ -180,6 +180,31 @@ class ServerHandlerTest(unittest.TestCase):
                 self.assertEqual(replies[0], (200, {"ok": True}))
                 self.assertEqual(calls, [(method, payload)])
 
+    def test_push_capability_route_ignores_act_token_and_accepts_only_capability_body(self):
+        calls = []
+        handler = self.handler("/api/push/capability-action")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "secret"},
+            push_capability_action=lambda action: calls.append(action) or {"ok": True})
+        payload = json.dumps({"capability": "signed-token"}).encode()
+        handler.headers = {"X-Act-Token": "wrong", "Content-Type": "application/json",
+                           "Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        replies = []
+        handler.reply = lambda code, ctype, data: replies.append((code, json.loads(data)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True})])
+        self.assertEqual(calls, [{"capability": "signed-token"}])
+
+        bad = json.dumps({"capability": "signed-token", "event_id": "evt-forged"}).encode()
+        handler.headers["Content-Length"] = str(len(bad))
+        handler.rfile = io.BytesIO(bad)
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 400)
+        self.assertEqual(calls, [{"capability": "signed-token"}])
+
     def test_push_subscription_post_never_logs_subscription_material(self):
         handler = self.handler("/api/push/subscription")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)

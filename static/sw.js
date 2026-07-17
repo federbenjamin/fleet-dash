@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'fleet-shell-n4-v1';
+const SHELL_CACHE = 'fleet-shell-n5-v1';
 const SHELL_ASSETS = [
   '/static/fleet.css',
   '/static/app.js',
@@ -54,29 +54,52 @@ function boundedText(value, limit) {
 
 function payloadFrom(event) {
   if (!event.data) return null;
-  let payload;
-  try { payload = event.data.json(); } catch (_) { return null; }
+  let payload,raw;
+  try {
+    raw = event.data.text();
+    if (new TextEncoder().encode(raw).length > 2048) return null;
+    payload = JSON.parse(raw);
+  } catch (_) { return null; }
   if (!payload || payload.version !== 1) return null;
   const eventId = boundedText(payload.event_id, 100);
+  const kind = boundedText(payload.kind, 20);
   const title = boundedText(payload.title, 80);
   const body = boundedText(payload.body, 180);
-  if (!eventId || !title || !body || !/^evt-[A-Za-z0-9_-]+$/.test(eventId)) return null;
+  const tag = boundedText(payload.tag, 24);
+  if (!eventId || !title || !body || !/^evt-[A-Za-z0-9_-]+$/.test(eventId)
+      || !['question','approval','form','reply','failure','stall','notification'].includes(kind)
+      || !/^[0-9a-f]{24}$/.test(tag)) return null;
   const target = new URL('/#notifications/' + encodeURIComponent(eventId), self.location.origin);
-  if (payload.url) {
-    let supplied;
-    try { supplied = new URL(payload.url, self.location.origin); } catch (_) { return null; }
-    if (supplied.origin !== self.location.origin || supplied.pathname !== '/' ||
-        !supplied.hash.startsWith('#notifications/')) return null;
-    target.hash = supplied.hash;
-  }
+  let supplied;
+  try { supplied = new URL(payload.url, self.location.origin); } catch (_) { return null; }
+  if (supplied.origin !== self.location.origin || supplied.pathname !== '/' || supplied.search ||
+      supplied.hash !== '#notifications/' + encodeURIComponent(eventId)) return null;
+  if (!Array.isArray(payload.actions) || payload.actions.length > 2 ||
+      new Set(payload.actions).size !== payload.actions.length ||
+      payload.actions.some(action => !['snooze','mute'].includes(action))) return null;
+  if (!payload.capabilities || typeof payload.capabilities !== 'object' ||
+      Array.isArray(payload.capabilities) ||
+      Object.keys(payload.capabilities).some(action => !payload.actions.includes(action)) ||
+      Object.keys(payload.capabilities).length !== payload.actions.length) return null;
   const capabilities = {};
-  for (const action of ['snooze', 'mute']) {
-    const token = payload.capabilities && boundedText(payload.capabilities[action], 2048);
-    if (token) capabilities[action] = token;
+  for (const action of payload.actions) {
+    const token = boundedText(payload.capabilities[action], 2048);
+    if (!token) return null;
+    capabilities[action] = token;
   }
-  return {eventId, title, body, target: target.href, capabilities,
+  return {eventId, kind, title, body, tag, target: target.href, capabilities,
     unread: Number.isInteger(payload.unread) && payload.unread >= 0 && payload.unread <= 999
-      ? payload.unread : null};
+      ? payload.unread : null,
+    cursor: Number.isInteger(payload.cursor) && payload.cursor >= 0 ? payload.cursor : null};
+}
+
+let badgeCursor = 0;
+function applyBadge(unread,cursor) {
+  if (unread === null || cursor === null || cursor < badgeCursor || !self.navigator) return Promise.resolve();
+  badgeCursor = cursor;
+  if (unread === 0 && self.navigator.clearAppBadge) return self.navigator.clearAppBadge();
+  if (self.navigator.setAppBadge) return self.navigator.setAppBadge(unread);
+  return Promise.resolve();
 }
 
 self.addEventListener('push', event => {
@@ -91,15 +114,14 @@ self.addEventListener('push', event => {
       body: payload.body,
       icon: '/static/icons/fleet-192.png',
       badge: '/static/icons/fleet-192.png',
-      tag: 'fleet:' + payload.eventId,
+      tag: 'fleet:' + payload.tag,
       renotify: false,
       requireInteraction: true,
       actions,
       data: {eventId: payload.eventId, target: payload.target,
         capabilities: payload.capabilities}
     }),
-    payload.unread !== null && self.navigator && self.navigator.setAppBadge
-      ? self.navigator.setAppBadge(payload.unread) : Promise.resolve()
+    applyBadge(payload.unread,payload.cursor)
   ]));
 });
 
@@ -125,6 +147,7 @@ self.addEventListener('notificationclick', event => {
   }
   event.waitUntil(fetch('/api/push/capability-action', {
     method: 'POST',
+    credentials: 'omit',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({capability})
   }).then(async response => {
@@ -132,7 +155,34 @@ self.addEventListener('notificationclick', event => {
     const result = await response.json();
     if (!result.ok) throw new Error('capability rejected');
     event.notification.close();
-  }).catch(() => openFleet(target)));
+  }).catch(() => {
+    const fallback = new URL(target);
+    fallback.searchParams.set('push_action',event.action);
+    return openFleet(fallback.href);
+  }));
+});
+
+self.addEventListener('notificationclose', () => {});
+
+self.addEventListener('message', event => {
+  const data = event.data || {};
+  if (data.type === 'fleet-displayed-notifications') {
+    event.waitUntil(self.registration.getNotifications().then(notifications => {
+      const ids = notifications.map(item => item.data && item.data.eventId).filter(Boolean).slice(0,20);
+      if (event.ports && event.ports[0]) event.ports[0].postMessage({eventIds: ids});
+    }));
+    return;
+  }
+  if (data.type !== 'fleet-notification-state' || !Array.isArray(data.resolvedIds)) return;
+  const resolved = new Set(data.resolvedIds.filter(id => typeof id === 'string' &&
+    /^evt-[A-Za-z0-9_-]+$/.test(id)).slice(0,20));
+  event.waitUntil(Promise.all([
+    applyBadge(Number.isInteger(data.unread) ? data.unread : null,
+      Number.isInteger(data.cursor) ? data.cursor : null),
+    self.registration.getNotifications().then(notifications => notifications.forEach(item => {
+      if (resolved.has(item.data && item.data.eventId)) item.close();
+    }))
+  ]));
 });
 
 self.addEventListener('pushsubscriptionchange', event => {

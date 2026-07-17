@@ -62,8 +62,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   subscription, rename or pause this device, disconnect it, and queue a real test push without
   making the Settings request wait for the push provider.
   Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
-  The same page retains per-category toggles for the legacy ntfy pushes (waiting-on-you,
-  stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
+  The same page retains the old per-category rules for the manually enabled legacy ntfy
+  integration (waiting-on-you, stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
   seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
   **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
   notification opens the dashboard). It also selects the per-device desktop navigation side and
@@ -390,6 +390,14 @@ and action keys once in ignored `push-secrets.json` with mode 0600; an invalid o
 file disables delivery instead of silently replacing keys and breaking registered devices. Its
 pinned DNS lookup supports Node 18–24 and prefers a validated IPv4 address on dual-stack hosts when
 the Mac has no IPv6 route, while retaining IPv6-only support.
+Only current Needs-you questions/approvals/forms/reply requests, confirmed provider or delivery
+failures, and prolonged stalls enter the external policy. A registered device must first pass its
+explicit test push. Each event gets one initial delivery per eligible device and at most one
+15-minute reminder wave; Snooze replaces that reminder with one wake, while session Mute suppresses
+every device until manual unmute. Lock-screen payloads contain generic state and an opaque exact-event
+link only. Snooze/Mute shortcuts use ten-minute, single-use signed capabilities; they never carry the
+reusable dashboard token. Clients without system action buttons open the exact event with the same
+controls at the top of Fleet.
 
 ## Manual setup — already done on this Mac
 
@@ -415,9 +423,10 @@ Nothing to redo unless something breaks; listed for disaster recovery:
    **Fleet app & Web Push**. Notification permission is requested only from the explicit Enable
    button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
 5. Click **Send test**. Fleet queues the encrypted minimal test immediately; Settings then reports
-   device delivery health. The current dark migration sends only explicit tests. The existing ntfy
-   transport remains available until the production-policy switch; it is not an automatic Web Push
-   fallback.
+   device delivery health and qualifies that exact subscription for production delivery. Replacing
+   a browser subscription requires a fresh successful test. Web Push is the only automatic external
+   path; ntfy is disabled unless its separate legacy integration is explicitly enabled and is never
+   a fallback.
 
 ## Config (`config.json`)
 
@@ -435,7 +444,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `awaiting_input_notify_seconds` | 180 | blocked-on-you push debounce |
 | `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
-| `notify` | all true | per-category push toggles (needs_you/stall/spend/fleet_quiet) — the ⚙ panel edits this |
+| `notify` | all true | per-category rules used only by the manually enabled legacy ntfy integration |
+| `legacy_ntfy_enabled` | false | manually enable legacy ntfy; it never duplicates or backs up Web Push |
 | `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle; persists until manual unmute |
 | `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
