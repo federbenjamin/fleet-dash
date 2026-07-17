@@ -112,9 +112,20 @@ function isGlobalAddress(address) {
 
 async function resolveGlobal(hostname, lookup = dns.lookup) {
   const records = await lookup(hostname, {all: true, verbatim: true});
-  const global = records.find(record => isGlobalAddress(record.address));
-  if (!global) fail('endpoint did not resolve to a global address');
-  return global;
+  const global = records.filter(record => isGlobalAddress(record.address));
+  if (!global.length) fail('endpoint did not resolve to a global address');
+  // Apple commonly returns AAAA records first. Pinning that first record breaks
+  // delivery on otherwise-online Macs without an IPv6 default route. Prefer a
+  // validated IPv4 address when both families exist, while retaining an IPv6
+  // fallback for IPv6-only networks.
+  return global.find(record => record.family === 4) || global[0];
+}
+
+function pinnedLookup(record) {
+  return (_host, options, callback) => {
+    if (options && options.all) callback(null, [record]);
+    else callback(null, record.address, record.family);
+  };
 }
 
 function retryAfter(value, now = Date.now()) {
@@ -196,7 +207,7 @@ async function sendJob(job, state, dependencies = {}) {
   }
   const options = {protocol: 'https:', hostname: endpoint.hostname, port: 443,
     path: endpoint.pathname + endpoint.search, method: 'POST', headers,
-    lookup: (_host, _options, callback) => callback(null, resolved.address, resolved.family),
+    lookup: pinnedLookup(resolved),
     servername: endpoint.hostname, rejectUnauthorized: true};
   return requestOnce(options, details.body, dependencies.request || https.request);
 }
@@ -265,5 +276,5 @@ if (require.main === module) {
   }
 }
 
-module.exports = {initialize, isGlobalAddress, normalizeExtraOrigin, resolveGlobal,
+module.exports = {initialize, isGlobalAddress, normalizeExtraOrigin, pinnedLookup, resolveGlobal,
   retryAfter, sendJob, validatePayload, validateSubscription};

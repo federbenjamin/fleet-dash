@@ -74,6 +74,16 @@ test('global address validation rejects SSRF destinations', () => {
   assert.equal(worker.isGlobalAddress('2606:4700:4700::1111'), true);
 });
 
+test('global resolution prefers reachable IPv4 while retaining IPv6-only support', async () => {
+  const ipv6 = {address: '2606:4700:4700::1111', family: 6};
+  const ipv4 = {address: '8.8.8.8', family: 4};
+  assert.deepEqual(await worker.resolveGlobal('push.example', async () => [ipv6, ipv4]), ipv4);
+  assert.deepEqual(await worker.resolveGlobal('push.example', async () => [ipv6]), ipv6);
+  await assert.rejects(worker.resolveGlobal('push.example', async () => [
+    {address: '127.0.0.1', family: 4},
+  ]));
+});
+
 test('subscription and payload validation reject hostile fields', () => {
   for (const endpoint of ['http://fcm.googleapis.com/push', 'https://127.0.0.1/push',
     'https://user:pass@fcm.googleapis.com/push', 'https://internal.example.test/push',
@@ -105,6 +115,9 @@ test('send builds an encrypted pinned HTTPS request with generated headers only'
   assert.deepEqual(await new Promise((resolve, reject) => capture.options.lookup(
     'fcm.googleapis.com', {}, (error, address, family) => error ? reject(error) :
       resolve({address, family}))), {address: '8.8.8.8', family: 4});
+  assert.deepEqual(await new Promise((resolve, reject) => capture.options.lookup(
+    'fcm.googleapis.com', {all: true}, (error, addresses) => error ? reject(error) :
+      resolve(addresses))), [{address: '8.8.8.8', family: 4}]);
 });
 
 test('retry-after and permanent subscription statuses map without response bodies', async () => {

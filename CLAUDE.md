@@ -409,7 +409,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     speaks bounded JSONL to one restart/backoff-managed `web_push_worker.js`. The worker validates a
     fixed/exact push-origin allowlist, resolves only global addresses, pins the chosen address into a
     TLS-verified HTTPS request, permits no redirect/proxy/custom client headers, and uses
-    `web-push.generateRequestDetails` rather than its network sender. HTTP actions and provider scans
+    `web-push.generateRequestDetails` rather than its network sender. The pinning lookup callback
+    supports both the legacy single-address form and Node 24's `all:true` record-array form. When a
+    host is dual-stack, prefer a validated IPv4 record because this Mac may have AAAA DNS answers
+    without an IPv6 route; retain the validated IPv6 fallback for IPv6-only networks. HTTP actions
+    and provider scans
     only persist/coalesce jobs; the background thread claims SQLite leases and applies bounded
     jittered retry for timeout/429/5xx, Retry-After, and helper failure. A 404/410 or revoked
     permission scrubs the subscription and disables the device. Public status contains only the

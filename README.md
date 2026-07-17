@@ -386,7 +386,9 @@ assets. API responses, transcripts, notification data, settings, and token-beari
 network-only; offline navigation renders only **Reconnect to your tailnet**. Web Push delivery runs
 in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
 and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
-file disables delivery instead of silently replacing keys and breaking registered devices.
+file disables delivery instead of silently replacing keys and breaking registered devices. Its
+pinned DNS lookup supports Node 18–24 and prefers a validated IPv4 address on dual-stack hosts when
+the Mac has no IPv6 route, while retaining IPv6-only support.
 
 ## Manual setup — already done on this Mac
 
