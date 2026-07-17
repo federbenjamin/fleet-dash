@@ -32,7 +32,9 @@ def main():
     assert status == 200 and result.get("ok") is True, result
     assert isinstance(result.get("events"), list)
     raw = json.dumps(result).lower()
-    for forbidden in ("subscription_json", "p256dh", '"auth"', "endpoint_origin"):
+    for forbidden in ("subscription_json", "p256dh", '"auth"', "endpoint_origin",
+                      '"event_key"', '"source_id"', '"reminder_budget"',
+                      '"last_push_at"', '"payload_json"'):
         assert forbidden not in raw, forbidden
     print("live notifications smoke: ok · events", len(result["events"]),
           "· unread", result.get("unread"), "· active", result.get("active"))

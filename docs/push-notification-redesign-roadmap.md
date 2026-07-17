@@ -45,7 +45,7 @@ Claude/Codex/operations event
 
 1. Fleet is an installable PWA on mobile and desktop. Standards-based Web Push is the primary and
    only automatic external delivery path.
-2. ntfy is retained only as a manually enabled legacy integration. It is never an automatic
+2. ntfy is retained only as one manually invoked, fixed-copy legacy test. It is never an automatic
    fallback and never receives duplicate deliveries from the Web Push path.
 3. Lock-screen content is minimal by default. It never includes prompt text, question options,
    commands, tools, file paths, branch names, costs, account identities, or transcript excerpts.
@@ -426,9 +426,8 @@ GET  /api/push/devices             redacted registered-device list and health
 POST /api/push/device-settings     name, enabled, kind/severity preferences
 ```
 
-`/api/fleet` carries only aggregate notification counts and redacted current-device health needed by
-navigation/settings. Notification pages, history, device lists, and delivery failures are paged on
-demand.
+`/api/fleet` carries no notification event, device, subscription, or delivery detail. Notification
+counts/pages, history, device health, and delivery failures come from authenticated, on-demand APIs.
 
 ## Implementation milestones
 
@@ -592,7 +591,7 @@ canonical event revision and current device policy. Payloads contain only generi
 event link, a hashed replacement tag, unread/cursor metadata, and ten-minute event/device/action-
 scoped Snooze/Mute capabilities. Capability use is POST-only, HMAC-authenticated, atomically
 one-use, and recorded only as a JTI hash; failure retains the system notification and opens the exact
-Fleet event for fallback. Automatic legacy ntfy dispatch is off unless explicitly enabled.
+Fleet event for fallback. Legacy ntfy has no automatic dispatch path.
 
 The 218-test Python suite, ten Node transport/service-worker tests, and six targeted desktop/mobile
 Notification Center checks passed. Unit coverage includes policy exclusion, reminder exhaustion,
@@ -605,6 +604,8 @@ under host memory pressure; the same Notification-focused cases passed in isolat
 
 ### N6 — ntfy retirement, observability, and release gate
 
+Status: Complete · 2026-07-17
+
 - Disable ntfy by default and remove it from automatic dispatch. Preserve it behind a clearly labeled
   Legacy integration switch with no fallback/duplication semantics.
 - Migrate Settings copy, README setup, CLAUDE.md invariants, platform roadmap, diagnostics, and
@@ -615,6 +616,27 @@ under host memory pressure; the same Notification-focused cases passed in isolat
 
 Exit: Web Push is the only default transport; real iPhone/macOS app-closed delivery and exact deep
 links pass; daemon restart loses no jobs; all docs and legacy migration behavior agree.
+
+Evidence: automatic ntfy dispatch and its obsolete category/digest settings are gone. The remaining
+Legacy panel can issue one token-gated fixed-copy manual test only; it has no click URL, fallback, or
+duplicate semantics. `/api/fleet` no longer carries notification/device detail. Notification and
+delivery projections expose explicit allowlists, Web Push/runtime failure telemetry is bounded and
+redacted, current retry state is distinct from lifetime history, and startup forces config/log/
+SQLite sidecars to 0600 while sanitizing known historical log secrets in place.
+
+The 223-test Python suite and 11 Node transport/service-worker tests passed. Restart coverage retains
+queued/retrying/snoozed-wake work, scrubs an expired subscription, and rejects capability replay after
+a fresh store. The saturation gate filled the bounded worker queue while keeping observe and
+Notification reads within 5 ms of baseline. Ten targeted desktop/mobile browser checks passed for
+canonical state, retry/reconnect, exact fallback, private shell/cache boundaries, manual Legacy test,
+and the named latency inventory. The restarted live daemon passed API, Notification, push-runtime,
+and privacy smokes; the privacy scan covered API/error bodies, full log history, SQLite files, and
+file modes without printing secrets. Browser storage/Cache Storage/DOM sentinel checks also passed.
+
+Live p95 was 26.143 ms for `/api/fleet`, 4.981 ms for Notification Center reads, and 1.532 ms for
+authenticated no-op actions. Incremental canonical projection was 2.202 ms p95 against the 5 ms gate
+and enqueue was 2.063 ms p95 against the 25 ms gate. Installed macOS/iPhone app-closed delivery,
+badges, exact opens, and the final native N5 interaction were confirmed by the user.
 
 ## Requirements catalogue
 
@@ -638,7 +660,7 @@ links pass; daemon restart loses no jobs; all docs and legacy migration behavior
 | PRIV-001 | Default external title/body reveal only generic state and elapsed time; forbidden prompt/tool/path/branch/cost/account content has deterministic negative tests. | N5 |
 | POLICY-001 | Only settled actionable/failure/stall categories push; informational events remain in Fleet; one 15-minute reminder is the maximum. | N5 |
 | POLICY-002 | Snooze replaces reminder timing; Mute is session-wide until manual unmute and never hides in-app state. | N5 |
-| LEG-001 | ntfy is opt-in legacy only and is never an automatic fallback or duplicate destination. | N6 |
+| LEG-001 | ntfy exposes one opt-in fixed-copy manual test only and is never automatic, a fallback, or a duplicate destination. | N6 |
 | QUAL-NTF-001 | Desktop/mobile deterministic tests, fake push endpoints, restart/saturation tests, real iPhone/macOS app-closed delivery, and latency/privacy gates pass. | N0–N6 |
 
 ## Verification matrix
@@ -670,8 +692,8 @@ links pass; daemon restart loses no jobs; all docs and legacy migration behavior
 ### Performance gates
 
 - Notification event projection adds less than 5 ms to engine scan p95 on the existing live corpus.
-- `/api/fleet` p95 and payload remain within the existing M11 contract; only aggregate counts/current-
-  device health are added.
+- `/api/fleet` p95 and payload remain within the existing M11 contract; notification/device detail is
+  excluded and fetched only from authenticated on-demand APIs.
 - Notification Center first feedback is under 100 ms p95; routine local pages/actions are under
   250 ms p95.
 - Enqueue transaction is under 25 ms p95. Remote delivery latency is measured separately.
@@ -684,10 +706,11 @@ links pass; daemon restart loses no jobs; all docs and legacy migration behavior
    remain unchanged.
 2. N4 exposes Notification Center using canonical events but still does not change external dispatch.
 3. N5 enables Web Push policy only for devices that explicitly completed setup and test delivery.
-4. N6 disables automatic ntfy dispatch. Existing ntfy configuration stays readable and can be
-   manually re-enabled as Legacy; it is never selected automatically after Web Push failure.
-5. Rollback disables Web Push enqueue/worker and restores the pre-switch ntfy dispatch flag without
-   deleting event/device/delivery history or rewriting schema. No downgrade redispatches history.
+4. N6 removes automatic ntfy dispatch. Existing ntfy configuration stays readable only for the
+   explicit fixed-copy manual Legacy test; it is never selected after Web Push failure.
+5. Rollback disables Web Push enqueue/worker without deleting event/device/delivery history or
+   rewriting schema. It does not silently restore an automatic external transport or redispatch
+   history; doing that would require an explicit reviewed release.
 
 ## Explicit non-goals
 

@@ -35,8 +35,9 @@ assert isinstance(config["public_key"], str) and 80 <= len(config["public_key"])
 assert config["delivery"] == "ready", config
 assert set(config["helper"]) == {"ready", "restarts", "state"}
 assert config["helper"]["ready"] is True
-assert set(config["queue"]) == {
-    "queued", "failed", "subscription_expired", "oldest_pending_seconds", "statuses"}
+assert {"queued", "failed", "subscription_expired", "oldest_pending_seconds", "statuses",
+        "next_retry_seconds", "last_success_at", "last_failure_at",
+        "sent_latency_p95_seconds", "pending_by_purpose"} <= set(config["queue"])
 
 status, _, body = fetch("/api/push/devices?device=live-smoke", TOKEN)
 assert status == 200, status
@@ -47,9 +48,13 @@ for secret_name in ("subscription_json", "endpoint_origin", "p256dh", '"auth"', 
 
 status, _, body = fetch("/api/diagnostics", TOKEN)
 assert status == 200, status
-diagnostics = json.loads(body)["web_push"]
-assert set(diagnostics) == {"configured", "delivery", "helper", "queue"}
+all_diagnostics = json.loads(body)
+diagnostics = all_diagnostics["web_push"]
+assert set(diagnostics) == {"configured", "delivery", "helper", "runtime", "queue"}
 assert diagnostics["configured"] is True and diagnostics["delivery"] == "ready"
+assert set(all_diagnostics["legacy_ntfy"]) == {
+    "enabled", "configured", "automatic", "last_attempt_at", "statuses"}
+assert all_diagnostics["legacy_ntfy"]["automatic"] is False
 redacted = json.dumps(diagnostics, sort_keys=True).lower()
 for secret_name in ("private", "public_key", "subscription_json", '"subscription":',
                     "endpoint_origin", '"endpoint":', "p256dh", '"auth"'):

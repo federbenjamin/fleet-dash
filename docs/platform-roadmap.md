@@ -1,7 +1,6 @@
 # Fleet Dash platform roadmap
 
-Status: M0–M11 complete; M12 approved for sequential implementation on
-`design/push-notification-redesign`.
+Status: M0–M12 complete on `design/push-notification-redesign`.
 
 ## Implementation progress
 
@@ -19,11 +18,12 @@ Status: M0–M11 complete; M12 approved for sequential implementation on
 | M9 — Optimization pass | Complete · 2026-07-16 | Paginated History/conversations, bounded diagnostics, stable Workstream caching, transactional search counts, a 165 KB live fleet response, 3.521 ms fleet API p95, and 91.734/58.278 ms desktop/mobile first-useful-render p95. |
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 | M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
-| M12 — Notification Center and Web Push | In progress · N0–N5 complete · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center; real installed macOS/iPhone app-closed delivery, badges, exact deep links, production policy, bounded reminders, Snooze/Mute capabilities, and minimal lock-screen payloads. N6 release hardening is next. |
+| M12 — Notification Center and Web Push | Complete · N0–N6 · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center; installed macOS/iPhone app-closed delivery, badges, exact deep links, production policy, bounded reminders, Snooze/Mute capabilities, minimal lock-screen payloads, manual-only legacy ntfy, restart/saturation/privacy gates, and live p95 contracts. |
 
 Completion here records the milestone gate, not proof by assertion. M10 reopened the M0–M10
 catalogue rows, verified the current implementation and tests, and recorded the source/runtime
-limitations. M12 remains planned until its dedicated gates have current implementation evidence.
+limitations. M12 completion records its dedicated deterministic, live, real-device, privacy, and
+latency evidence rather than treating roadmap status as proof.
 
 This roadmap turns Fleet Dash from a session list into a local operations desk for supervising
 Claude Code and Codex work. It preserves one shared application, provider-independent sessions,
@@ -593,7 +593,7 @@ History; reading advances only the current device's cursor and never deletes evi
 
 Web Push interrupts only for the selected actionable/failure policy in DEC-022. Fleet quiet,
 completion, spend, budget, artifact, and routine repository outcomes remain in Notification Center.
-ntfy becomes an explicitly enabled legacy integration and never receives automatic fallback or
+ntfy becomes an explicitly enabled fixed-copy manual test and never receives automatic fallback or
 duplicate delivery. Muted sessions keep their in-app events but suppress external delivery until
 manual unmute.
 
@@ -1074,7 +1074,7 @@ responsive, deterministic, and live evidence. The daemon is running the M11 engi
 
 ### M12 — Notification Center and Web Push
 
-Implementation started 2026-07-16; N0a/N0b and N1–N5 are complete, with N6 next. The
+Implemented 2026-07-16/17; N0a/N0b and N1–N6 are complete. The
 approved implementation contract, requirements catalogue, migration order, and release gates live in
 [`docs/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
 
@@ -1093,12 +1093,17 @@ approved implementation contract, requirements catalogue, migration order, and r
 - **N5 — Production policy and actions (complete):** enabled the selected event policy, one
   reminder, minimal payloads, exact deep links, and one-use Snooze/Mute capabilities; deterministic
   privacy/replay gates and installed macOS/iPhone production delivery passed.
-- **N6 — Legacy retirement and release:** make ntfy manual legacy only, complete migration/docs,
-  prove restart/saturation/privacy/latency behavior, and pass real app-closed delivery gates.
+- **N6 — Legacy retirement and release (complete):** ntfy is fixed-copy manual-test-only; migration,
+  diagnostics, docs, restart/saturation/privacy/latency gates, and real app-closed delivery passed.
 
 Exit: Web Push is Fleet's only automatic external transport; Notification Center is the canonical
 durable inbox; no push discloses work content or performs a consequential action; real iPhone and
 macOS app-closed delivery, exact deep links, restart recovery, privacy, and latency gates pass.
+
+Final N6 evidence: 223 Python and 11 Node tests; ten targeted desktop/mobile notification and named
+latency checks; live API/Notification/push/privacy smokes; `/api/fleet` 26.143 ms p95, Notification
+reads 4.981 ms p95, no-op actions 1.532 ms p95, canonical projection 2.202 ms p95, and enqueue
+2.063 ms p95. Installed iPhone/macOS delivery and final native interaction were user-confirmed.
 
 ## Verification matrix
 

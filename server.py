@@ -17,7 +17,7 @@ GET /api/history paginated closed-session metadata
 GET /api/diagnostics authenticated latency, payload, and memory measurements
 """
 from collections import defaultdict, deque
-import json, os, resource, subprocess, sys, time, threading, secrets
+import hashlib, json, os, resource, subprocess, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -51,9 +51,7 @@ def poll_loop(eng):
             search = getattr(eng, "search", None)
             if search:
                 search.ensure_process()
-            fleet = eng.scan()
-            if eng.cfg.get("legacy_ntfy_enabled") is True:
-                eng.check_notifications(fleet)
+            eng.scan()
         except Exception as e:
             print(f"poll error: {e}", file=sys.stderr, flush=True)
         time.sleep(eng.cfg["poll_seconds"])
@@ -145,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
                          "/api/push/test", "/api/push/device-settings",
-                         "/api/push/capability-action"):
+                         "/api/push/capability-action", "/api/legacy-ntfy/test"):
             return self.reply(404, "text/plain", b"not found")
         if route == "/api/push/capability-action":
             if self.headers.get("Transfer-Encoding") or \
@@ -186,9 +184,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
         if route == "/api/settings":
             result = self.eng.update_settings(action)
-            audit = dict(action)
-            if audit.get("dashboard_url"):
-                audit["dashboard_url"] = "[URL omitted]"
+            audit = {"ok": bool(result.get("ok")), "field_count": min(len(action), 1000)}
             print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/notifications/read":
@@ -208,9 +204,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/push/subscription":
             result = self.eng.push_subscription(action)
-            audit = {"device_id": action.get("device_id"),
-                     "remove": bool(action.get("remove")),
-                     "permission_state": action.get("permission_state")}
+            device_ref = hashlib.sha256(
+                str(action.get("device_id") or "").encode()).hexdigest()[:12]
+            audit = {"ok": bool(result.get("ok")), "device_ref": device_ref,
+                     "operation": "remove" if action.get("remove") else "register"}
             print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/push/device-settings":
@@ -219,6 +216,10 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/push/test":
             result = self.eng.push_test(action)
             return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/legacy-ntfy/test":
+            result = self.eng.legacy_ntfy_test()
+            status = 200 if result.get("ok") else 409
+            return self.reply(status, "application/json", json.dumps(result).encode())
         if route == "/api/search/rebuild":
             search = getattr(self.eng, "search", None)
             try:
@@ -321,6 +322,9 @@ class Handler(BaseHTTPRequestHandler):
                 push_diagnostics = getattr(self.eng, "push_diagnostics", None)
                 if push_diagnostics:
                     out["web_push"] = push_diagnostics()
+                legacy_diagnostics = getattr(self.eng, "legacy_ntfy_diagnostics", None)
+                if legacy_diagnostics:
+                    out["legacy_ntfy"] = legacy_diagnostics()
                 return self.reply(200, "application/json", json.dumps(out).encode())
             search = getattr(self.eng, "search", None)
             if not search:

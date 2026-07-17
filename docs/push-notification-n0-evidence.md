@@ -1,6 +1,6 @@
 # M12 N0 — Web Push compatibility evidence
 
-Status: automated compatibility and baselines complete; real-device gates pending
+Status: complete; automated and installed iPhone/macOS gates passed
 
 Date: 2026-07-16/17
 
@@ -43,19 +43,21 @@ node tests/browser_baseline.js http://127.0.0.1:8377/ 16 --assert-contract
 node tests/web_push_probe.mjs --self-test
 ```
 
-## Real-device release gate
+## Real-device release evidence
 
-The following evidence cannot be simulated and remains required before production push triggers
-switch away from ntfy:
+- Installed iPhone and macOS Fleet apps registered through the real private HTTPS origin only after
+  the explicit **Enable notifications** action; both remained healthy in Fleet's redacted device
+  projection.
+- With both apps closed, fresh encrypted production notifications arrived with generic title/body
+  and a nonzero app-icon badge.
+- Tapping each native notification launched the installed Fleet app into the exact current
+  Notification Center event.
+- Production question, approval, and reply deliveries passed on both devices. The user confirmed the
+  native interaction and final state after the N5 Snooze/Mute action flow.
+- The same action failure has a deterministic exact-event fallback on clients that omit or cannot
+  complete system action buttons.
 
-- iPhone Home Screen install through the actual Tailscale HTTPS origin.
-- Permission granted only after the explicit **Enable notifications** tap.
-- App-closed Lock Screen delivery and exact deep-link open.
-- macOS installed-app delivery with the browser/app closed.
-- Snooze and Mute action rendering where supported; exact-event Open fallback where actions are not
-  rendered.
-
-Run the disposable probe with:
+The disposable compatibility probe remains available for future runtime upgrades:
 
 ```bash
 node tests/web_push_probe.mjs --subject mailto:fleet-dash@localhost.invalid

@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'fleet-shell-n5-v1';
+const SHELL_CACHE = 'fleet-shell-n6-v1';
 const SHELL_ASSETS = [
   '/static/fleet.css',
   '/static/app.js',
@@ -37,19 +37,31 @@ self.addEventListener('fetch', event => {
     event.respondWith(fetch(request).catch(() => caches.match('/static/offline.html')));
     return;
   }
-  if (SHELL_PATHS.has(url.pathname)) {
+  if (!url.search && !url.hash && SHELL_PATHS.has(url.pathname)) {
     event.respondWith(fetch(request).then(response => {
       if (response.ok) {
         const copy = response.clone();
-        event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.put(request, copy)));
+        event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.put(url.pathname, copy)));
       }
       return response;
-    }).catch(() => caches.match(request)));
+    }).catch(() => caches.match(url.pathname)));
   }
 });
 
 function boundedText(value, limit) {
   return typeof value === 'string' && value.length <= limit ? value : '';
+}
+
+function genericCopy(kind, title, body) {
+  if (['question','approval','form','reply'].includes(kind))
+    return title === 'Fleet needs you' && body === 'A coding session needs your response.';
+  if (kind === 'stall')
+    return title === 'Fleet needs attention' && body === 'A coding session may be stalled.';
+  if (kind === 'failure')
+    return title === 'Fleet needs attention' && body === 'A provider or delivery needs review.';
+  return kind === 'notification' && (
+    (title === 'Fleet notification test' && body === 'Web Push delivery is working.') ||
+    (title === 'Fleet needs attention' && body === 'A provider or delivery needs review.'));
 }
 
 function payloadFrom(event) {
@@ -68,6 +80,7 @@ function payloadFrom(event) {
   const tag = boundedText(payload.tag, 24);
   if (!eventId || !title || !body || !/^evt-[A-Za-z0-9_-]+$/.test(eventId)
       || !['question','approval','form','reply','failure','stall','notification'].includes(kind)
+      || !genericCopy(kind,title,body)
       || !/^[0-9a-f]{24}$/.test(tag)) return null;
   const target = new URL('/#notifications/' + encodeURIComponent(eventId), self.location.origin);
   let supplied;
@@ -176,13 +189,9 @@ self.addEventListener('message', event => {
   if (data.type !== 'fleet-notification-state' || !Array.isArray(data.resolvedIds)) return;
   const resolved = new Set(data.resolvedIds.filter(id => typeof id === 'string' &&
     /^evt-[A-Za-z0-9_-]+$/.test(id)).slice(0,20));
-  event.waitUntil(Promise.all([
-    applyBadge(Number.isInteger(data.unread) ? data.unread : null,
-      Number.isInteger(data.cursor) ? data.cursor : null),
-    self.registration.getNotifications().then(notifications => notifications.forEach(item => {
-      if (resolved.has(item.data && item.data.eventId)) item.close();
-    }))
-  ]));
+  event.waitUntil(self.registration.getNotifications().then(notifications => notifications.forEach(item => {
+    if (resolved.has(item.data && item.data.eventId)) item.close();
+  })));
 });
 
 self.addEventListener('pushsubscriptionchange', event => {

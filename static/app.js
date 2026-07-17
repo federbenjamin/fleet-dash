@@ -935,7 +935,10 @@ let notificationItems=[],notificationSection='needs',notificationLoading=false;
 let notificationPollingEnabled=document.cookie.split(';').some(item=>item.trim().startsWith('act_token='));
 let notificationError='',notificationLoadedAt=0,notificationAbort=null,notificationSequence=0;
 let notificationDetail=null,notificationDetailLoading=false,notificationDetailError='';
-let notificationActionState={busy:false,message:'',error:false};
+let notificationActionState=pushActionFallback?{busy:false,
+  message:`${pushActionFallback==='snooze'?'Snooze':'Mute'} from the notification did not complete. Review the current state and try again.`,
+  error:true}:{busy:false,message:'',error:false};
+pushActionFallback='';
 let notificationHistoryQuery='',notificationHistoryProvider='',notificationHistoryKind='';
 let notificationHistoryWorkstream='',notificationHistorySession='',notificationHistoryAge='';
 function notificationBucket(item){
@@ -981,8 +984,7 @@ async function reconcileSystemNotifications(){
         if(response.ok&&data.ok&&item&&['resolved','expired'].includes(item.state))resolved.push(id);
       }catch(_){ }
     }));
-    worker.postMessage({type:'fleet-notification-state',resolvedIds:resolved,
-      unread:Number(notificationData.unread)||0,cursor:Number(notificationData.event_cursor)||0});
+    worker.postMessage({type:'fleet-notification-state',resolvedIds:resolved});
   }catch(_){ }
   finally{notificationReconcileBusy=false;}
 }
@@ -1040,9 +1042,6 @@ async function loadNotificationDetail(id,push=false){
     if(notificationDetailId!==id)return;notificationDetail=item;
     const index=notificationItems.findIndex(value=>value.id===id);
     if(index>=0)notificationItems[index]=item;else notificationItems.unshift(item);
-    if(pushActionFallback){notificationActionState={busy:false,
-      message:`${pushActionFallback==='snooze'?'Snooze':'Mute'} from the notification did not complete. Review the current state and try again.`,
-      error:true};pushActionFallback='';}
     if(item.unread)void markNotificationsRead(item.sequence,false);
     void reconcileSystemNotifications();
   }catch(error){if(notificationDetailId===id)notificationDetailError=String(error.message||error);}
@@ -1063,6 +1062,7 @@ async function notificationPost(path,payload,success){
     notificationActionState={busy:false,message:success,error:false};await loadNotifications(true,true);
     if(notificationDetailId)await loadNotificationDetail(notificationDetailId,false);
   }catch(error){notificationActionState={busy:false,message:String(error.message||error),error:true};renderNotifications();}
+  finally{perfRecord('notification_action_completion_ms',performance.now()-started);}
 }
 function snoozeNotification(id,revision,choice){
   const now=new Date(),until=new Date(now);
@@ -1104,10 +1104,12 @@ function notificationRow(item){
     <small>${esc(item.summary||'')}</small><em>${esc(meta)}</em></span><span class="notificationchev">›</span></button>`;
 }
 function deliveryProblemRow(item){
-  const label=item.status==='subscription_expired'?'Reconnect '+(item.display_name||'device'):'Delivery failed';
+  const pending=['queued','sending','retrying'].includes(item.status);
+  const label=item.status==='subscription_expired'?'Reconnect '+(item.display_name||'device'):
+    pending?'Delivery retry pending':'Delivery failed';
   return`<article class="notificationrow problems deliveryproblem"><span class="notificationspine"></span><span class="notificationcopy"><span><b>${esc(label)}</b></span>
-    <small>${item.status==='subscription_expired'?'The browser subscription expired. Reconnect before retrying.':`Attempt ${item.attempt||0}${item.remote_status?` · HTTP ${item.remote_status}`:''}`}</small>
-    <em>${esc([item.platform,notificationTime(item)].filter(Boolean).join(' · '))}</em></span><span class="deliveryactions">${item.can_retry?`<button onclick="retryNotificationDelivery(decodeURIComponent('${enc(item.id)}'))">Retry</button>`:`<button onclick="navigateTo('settings')">Reconnect</button>`}</span></article>`;
+    <small>${item.status==='subscription_expired'?'The browser subscription expired. Reconnect before retrying.':pending?'A retry is queued; the problem clears after a confirmed delivery.':`Attempt ${item.attempt||0}${item.remote_status?` · HTTP ${item.remote_status}`:''}`}</small>
+    <em>${esc([item.platform,notificationTime(item)].filter(Boolean).join(' · '))}</em></span><span class="deliveryactions">${item.can_retry?`<button onclick="retryNotificationDelivery(decodeURIComponent('${enc(item.id)}'))">Retry</button>`:pending?'<span>Waiting</span>':`<button onclick="navigateTo('settings')">Reconnect</button>`}</span></article>`;
 }
 function notificationDetailHtml(item){
   if(notificationDetailLoading)return'<div class="notificationdetailstate"><span class="delivery sending">◌</span> Checking current state…</div>';
@@ -2832,24 +2834,18 @@ function closeSettings(){
 function renderSettings(){
   const el=$('#settings');
   if(!settingsOpen){el.innerHTML='';return;}
-  const nt=(last&&last.notify)||{};
   const st=(last&&last.settings)||{};
   const num=(k,step)=>`<input type="number" value="${st[k]??''}" min="0" step="${step}"
     onchange="setNum('${k}',this.value)">`;
-  const row=(k,lbl,tail)=>`<label class="setrow"><input type="checkbox" ${nt[k]!==false?'checked':''}
-    onchange="setNotify('${k}',this.checked)">${lbl}${tail?`<span class="setnum"> — ${tail}</span>`:''}</label>`;
-  el.innerHTML=`<div class="setpanel">${pushSettingsHtml()}<div class="dhead">legacy ntfy rules</div>
-    ${row('needs_you','waiting on you',`after ${num('awaiting_input_notify_seconds',30)} s blocked`)}
-    ${row('stall','session stalled',`frozen > ${num('stall_seconds',30)} s (also drives the chip)`)}
-    ${row('spend','spend threshold',`every $ ${num('spend_threshold_usd',1)}`)}
-    ${row('fleet_quiet','fleet gone quiet',`idle ${num('fleet_quiet_minutes',1)} min first (0 = right away)`)}
-    ${row('scheduled_digest','daily briefing push','off by default')}
-    <div class="digestsettings"><label><span>Daily time</span><input type="time" value="${esc(st.digest_schedule_time||'09:00')}"
-      onchange="setStr('digest_schedule_time',this.value)"></label><label><span>IANA timezone</span><input value="${esc(st.digest_schedule_zone||Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC')}"
-      onchange="setStr('digest_schedule_zone',this.value)"></label></div>
-    <div class="setnum" style="padding:6px 0 2px">tap-target for pushes (opens on tap; blank = none)</div>
-    <div class="freetext" style="margin-top:0"><input placeholder="https://your-mac.tailnet.ts.net"
-      value="${esc(st.dashboard_url||'')}" onchange="setStr('dashboard_url',this.value)"></div>
+  el.innerHTML=`<div class="setpanel">${pushSettingsHtml()}<div class="dhead">Legacy ntfy</div>
+    <label class="setrow"><input type="checkbox" ${st.legacy_ntfy_enabled===true?'checked':''}
+      onchange="setBool('legacy_ntfy_enabled',this.checked)">Enable manual legacy tests</label>
+    <div class="sethint">Manual test delivery only. Fleet never sends automatic, fallback, or duplicate ntfy alerts.${st.legacy_ntfy_configured?'':' Add ntfy_server and ntfy_topic to config.json first.'}</div>
+    <div class="pushactions" style="margin-top:8px"><button onclick="testLegacyNtfy()"
+      ${legacyNtfyBusy||st.legacy_ntfy_enabled!==true||!st.legacy_ntfy_configured?'disabled':''}>${legacyNtfyBusy?'<span class="delivery sending">◌</span> Queuing…':'Send legacy test'}</button></div>
+    ${legacyNtfyMessage?`<div class="${legacyNtfyError?'pusherror':'pushnotice'}" role="status">${esc(legacyNtfyMessage)}</div>`:''}
+    <div class="dhead" style="margin-top:12px">session state</div>
+    <label class="setrow">Mark a running session stalled after <span class="setnum">${num('stall_seconds',30)} seconds without progress</span></label>
     <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
     <div class="dhead" style="margin-top:12px">desktop navigation</div>
     <div class="setchoice" role="group" aria-label="Desktop navigation side">
@@ -2897,13 +2893,6 @@ function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg'){
     return{ok:false,error:String(error.message||error)};
   }).finally(()=>{if(settingQueues.get(key)===request)settingQueues.delete(key);});
 }
-async function setNotify(k,v){
-  const previous=last?.notify?.[k];
-  if(last){last.notify=last.notify||{};last.notify[k]=v;}uiRefresh();
-  return queueSetting('notify:'+k,{notify:{[k]:v}},d=>{if(last)last.notify=d.notify;},()=>{
-    if(last){last.notify=last.notify||{};last.notify[k]=previous;}
-  });
-}
 async function setNum(k,v){
   const value=parseFloat(v),previous=last?.settings?.[k];
   if(last?.settings)last.settings[k]=value;uiRefresh();
@@ -2924,6 +2913,20 @@ async function setStr(k,v){
   return queueSetting(k,{[k]:v},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
     if(last?.settings)last.settings[k]=previous;
   });
+}
+let legacyNtfyBusy=false,legacyNtfyMessage='',legacyNtfyError=false;
+async function testLegacyNtfy(){
+  if(legacyNtfyBusy)return;const started=performance.now();legacyNtfyBusy=true;
+  legacyNtfyMessage='';legacyNtfyError=false;renderSettings();
+  recordInputFeedback(started,'legacy_ntfy_test');
+  try{
+    const response=await fetch('/api/legacy-ntfy/test',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}'});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Legacy test failed');
+    legacyNtfyMessage='Legacy test queued';
+  }catch(error){legacyNtfyMessage=String(error.message||error);legacyNtfyError=true;}
+  finally{legacyNtfyBusy=false;renderSettings();}
 }
 async function toggleMute(sid,mute){
   const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);if(!s)return;

@@ -4,6 +4,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from briefing import FleetOperations, OperationsError
 
@@ -321,14 +322,32 @@ class BriefingTests(unittest.TestCase):
 
         current = fleet(self.clock)
         snap = self.ops.briefing_snapshot(current, "phone")
-        self.assertTrue(any("network down" in item["summary"]
-                            for item in snap["sections"]["attention"]))
+        self.assertNotIn("network down", repr(snap))
+        self.assertFalse(any(item.get("id") == "new"
+                             for item in snap["sections"]["attention"]))
+        self.ops.observe(current, self.workstream)
+        history = self.ops.notification_snapshot("phone")["events"]
+        self.assertTrue(any(item["title"] == "Legacy ntfy test failed"
+                            and item["state"] == "resolved" for item in history))
         self.assertIsNone(self.ops.fleet_activity_transition(2))
         self.clock.advance(10)
         quiet_since = self.ops.fleet_activity_transition(0)
         self.assertEqual(quiet_since, self.clock())
         restarted = FleetOperations(self.path, clock=self.clock)
         self.assertEqual(restarted.fleet_activity_transition(0), quiet_since)
+
+    def test_unchanged_notification_projection_uses_zero_io_path(self):
+        current = fleet(self.clock, [session()])
+        self.ops.observe(current, self.workstream)
+        with mock.patch.object(self.ops, "_reconcile_notification_events",
+                               wraps=self.ops._reconcile_notification_events) as reconcile:
+            self.clock.advance(2)
+            current["t"] = self.clock()
+            self.ops.observe(current, self.workstream)
+            reconcile.assert_not_called()
+            changed = fleet(self.clock, [session(muted=True)])
+            self.ops.observe(changed, self.workstream)
+            reconcile.assert_called_once()
 
     def test_quiet_digest_reports_muted_omissions_without_dropping_in_app_event(self):
         self.ops.observe(fleet(self.clock, [session(muted=True)]), self.workstream)
@@ -454,6 +473,8 @@ class BriefingTests(unittest.TestCase):
     def test_notification_snapshot_projects_mute_and_redacted_delivery_problem(self):
         ops = FleetOperations(os.path.join(self.tmp.name, "problems.db"), clock=self.clock,
                               delivery_retry_delays=(1,), delivery_jitter=lambda delay: delay)
+        self.assertEqual(os.stat(os.path.join(self.tmp.name, "problems.db")).st_mode & 0o777,
+                         0o600)
         ops.notification_register_device("phone", "Phone", "iOS", push_subscription())
         delivery = ops.notification_create_test_delivery("phone")
         ops.notification_claim_delivery()
@@ -479,6 +500,9 @@ class BriefingTests(unittest.TestCase):
         projected = next(item for item in ops.notification_snapshot("phone")["events"]
                          if item.get("session_id") == "muted-session")
         self.assertTrue(projected["muted"])
+        for private_key in ("event_key", "source_id", "source_type", "reminder_budget",
+                            "last_push_at", "payload_json"):
+            self.assertNotIn(private_key, projected)
 
     def test_push_subscription_boundary_and_redacted_device_lifecycle(self):
         rejected = [
@@ -753,6 +777,65 @@ class BriefingTests(unittest.TestCase):
         retried = self.ops.notification_retry_delivery(queued["id"])
         self.assertEqual(retried["status"], "queued")
 
+    def test_push_restart_matrix_preserves_snooze_retry_expiry_and_capability_use(self):
+        self.qualify_push_device("phone")
+        current = fleet(self.clock, actions=[action()])
+        self.ops.observe(current, self.workstream)
+        event = self.ops.notification_snapshot("phone")["events"][0]
+        self.ops.notification_snooze(
+            event["id"], event["source_revision"], self.clock() + 900)
+
+        restarted = FleetOperations(
+            self.path, clock=self.clock, delivery_retry_delays=(5,),
+            delivery_jitter=lambda delay: delay)
+        self.assertEqual(restarted.notification_snapshot("phone")["events"][0]["state"],
+                         "snoozed")
+        self.assertIsNone(restarted.notification_claim_delivery())
+        self.clock.advance(900)
+        current = fleet(self.clock, actions=[action()])
+        restarted.observe(current, self.workstream)
+        after_wake = FleetOperations(
+            self.path, clock=self.clock, delivery_retry_delays=(5,),
+            delivery_jitter=lambda delay: delay)
+        wake = after_wake.notification_claim_delivery()
+        self.assertEqual(wake["purpose"], "snooze_wake")
+        after_wake.notification_finish_delivery(wake["id"], {"ok": True, "status": 201})
+        self.assertIsNone(after_wake.notification_claim_delivery())
+
+        retry = after_wake.notification_create_test_delivery("phone")
+        self.assertEqual(after_wake.notification_claim_delivery()["id"], retry["id"])
+        after_wake.notification_finish_delivery(
+            retry["id"], {"ok": False, "status": 503, "code": "http_503"})
+        before_due = FleetOperations(
+            self.path, clock=self.clock, delivery_retry_delays=(5,),
+            delivery_jitter=lambda delay: delay)
+        self.assertIsNone(before_due.notification_claim_delivery())
+        self.clock.advance(5)
+        self.assertEqual(before_due.notification_claim_delivery()["id"], retry["id"])
+        before_due.notification_finish_delivery(retry["id"], {"ok": True, "status": 201})
+
+        before_due.notification_register_device(
+            "expired", "Expired", "iOS", push_subscription())
+        expired = before_due.notification_create_test_delivery("expired")
+        self.assertEqual(before_due.notification_claim_delivery()["id"], expired["id"])
+        before_due.notification_finish_delivery(expired["id"], {"ok": False, "status": 410})
+        after_expiry = FleetOperations(self.path, clock=self.clock)
+        device = after_expiry.notification_devices_snapshot("expired")["current_device"]
+        self.assertEqual((device["health"], device["permission_state"]),
+                         ("disabled", "expired"))
+        with sqlite3.connect(self.path) as db:
+            stored = db.execute("""SELECT subscription_json,endpoint_origin
+                FROM notification_devices WHERE id='expired'""").fetchone()
+        self.assertEqual(stored, ("{}", ""))
+
+        claims = {"event_id": event["id"], "device_id": "phone", "action": "mute",
+                  "jti_hash": "a" * 64, "expires_at": self.clock() + 600}
+        self.assertEqual(after_expiry.notification_consume_capability(claims)["action"],
+                         "mute")
+        replay_process = FleetOperations(self.path, clock=self.clock)
+        with self.assertRaisesRegex(OperationsError, "unavailable"):
+            replay_process.notification_consume_capability(claims)
+
     def test_push_queue_bound_rejects_new_work_without_evicting_existing(self):
         bounded_path = os.path.join(self.tmp.name, "bounded.db")
         bounded = FleetOperations(bounded_path, clock=self.clock, delivery_queue_limit=1)
@@ -763,7 +846,7 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(bounded.notification_delivery_status(first["id"])["status"],
                          "queued")
 
-    def test_legacy_notification_table_migrates_transactionally_and_still_dispatches(self):
+    def test_legacy_notification_table_migrates_as_scrubbed_history_only(self):
         other = os.path.join(self.tmp.name, "legacy.db")
         with sqlite3.connect(other) as db:
             db.execute("""CREATE TABLE notification_deliveries(
@@ -771,18 +854,24 @@ class BriefingTests(unittest.TestCase):
                 title TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
                 error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
             db.execute("""INSERT INTO notification_deliveries VALUES(
-                'old','needs_you','Waiting','Old work','sent',NULL,1,1)""")
+                'old','needs_you','Waiting','Old work','failed',
+                'https://ntfy.test/private-topic?token=secret',1,1)""")
         migrated = FleetOperations(other, clock=self.clock)
         with sqlite3.connect(other) as db:
-            legacy = db.execute("""SELECT event_key,status
+            legacy = db.execute("""SELECT event_key,status,error
                 FROM notification_deliveries_legacy""").fetchall()
             columns = {row[1] for row in
                        db.execute("PRAGMA table_info(notification_deliveries)").fetchall()}
-        self.assertEqual(legacy, [("old", "sent")])
+        self.assertEqual(legacy, [("old", "failed", "Legacy ntfy delivery failed")])
         self.assertIn("event_id", columns)
         self.assertNotIn("event_key", columns)
+        briefing = migrated.briefing_snapshot(fleet(self.clock), "desktop")
+        self.assertNotIn("private-topic", repr(briefing))
+        self.assertFalse(any(item.get("id") == "old"
+                             for item in briefing["sections"]["attention"]))
         self.assertTrue(migrated.notification_claim(
-            "new", "needs_you", "Waiting", "New work", dispatch=True))
+            "new", "legacy_test", "Fleet legacy notification test",
+            "Manual ntfy delivery is working.", dispatch=True))
         migrated.notification_status("new", "sent")
         restarted = FleetOperations(other, clock=self.clock)
         self.assertFalse(restarted.notification_claim(

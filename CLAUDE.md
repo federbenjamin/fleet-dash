@@ -103,9 +103,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    A task id can resume, so a terminal notice applies only when its timestamp is at or after the
    child transcript's newest row; later child output supersedes it. The *presence* of the parent's
    ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
-8. **First scan is seed-only for ntfy** (`Engine.seeded`) — never push pre-existing states at
-   daemon start. Spend pushes fire only on the highest crossed multiple.
-   The M12 dark migration keeps legacy ntfy claims in `notification_deliveries_legacy` and writes
+8. **Legacy ntfy is manual-test-only.** Provider scans and daemon startup never dispatch ntfy.
+   The single token-gated test route emits fixed generic copy only when the explicit legacy switch
+   and topic are configured; it has no click URL, automatic category, fallback, or duplicate path.
+   The M12 migration keeps historical ntfy claims in `notification_deliveries_legacy` and writes
    canonical lifecycle rows to `notification_events`; the two identities must not be conflated.
    Canonical identities use the full provider/session/native revision, never truncated session IDs,
    transcript mtimes, or repeat buckets. Informational events are resolved observations; per-device
@@ -419,10 +420,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     and provider scans
     only persist/coalesce jobs; the background thread claims SQLite leases and applies bounded
     jittered retry for timeout/429/5xx, Retry-After, and helper failure. A 404/410 or revoked
-    permission scrubs the subscription and disables the device. Public status contains only the
+    permission scrubs the subscription and disables the device. Authenticated status contains only the
     VAPID public key, helper state/restart count, and queue aggregates; endpoint, subscription keys,
     private keys, and raw errors never cross a read API. A successful Settings test qualifies that
     exact subscription; changing the subscription clears qualification until a new test succeeds.
+    Startup forces config/log/database sidecars to 0600 and scrubs known current/legacy action,
+    VAPID, token, topic, and dashboard secrets from the existing log in place; replacing the log
+    inode would strand launchd's open file descriptor and is not equivalent.
 47. **Notification Center owns durable interruption history; Now owns live actions.** The old Now
     Briefing block must not return: Briefing is an on-demand section beside Needs action, Updates,
     Snoozed, Problems, and History. `GET /api/notifications` is action-token protected and projects
@@ -435,7 +439,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     require the exact source revision. Badges count canonical active/unread events, never delivery
     attempts. Desktop is a list/detail split; mobile detail is a fixed drawer above the bottom bar.
     Delivery failures may expose bounded device name/platform/status/timestamps and retryability,
-    never endpoint, origin, subscription material, keys, or raw errors.
+    never endpoint, origin, subscription material, keys, or raw errors. Canonical reconciliation is
+    incremental: its signature contains only push-relevant actions, mutes, eligible stalls, provider
+    failures, and the in-process Briefing generation. An unchanged signature performs no projection
+    I/O; a provider failure bypasses the cache until corroborated, and daemon restart always runs one
+    full reconciliation.
 48. **Production Web Push is purpose-bounded and capability-authenticated.** The policy sweep runs in
     the same short transaction as canonical event reconciliation and may enqueue only `question`,
     `approval`, `form`, `reply`, confirmed `failure`, or threshold-crossed `stall` events. A target
@@ -454,8 +462,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `/api/push/capability-action`; that route ignores `act_token` and returns one generic rejection
     for malformed, expired, replayed, or stale tokens. A failed shortcut keeps the system
     notification visible and opens current Fleet detail without putting the capability in a URL.
-    Automatic ntfy dispatch is off unless the separate legacy flag is explicitly true; it is never a
-    Web Push fallback or duplicate path.
+    The separate legacy flag enables only one manually invoked generic ntfy test route; provider
+    scans never dispatch it and it is never a Web Push fallback or duplicate path.
 
 ## Dev workflow
 
@@ -486,7 +494,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 ## File map (repo)
 
 - `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
-  counters), Engine (scan/state/ledger/ntfy/act/hook_pending/session_context/file_content/
+  counters), Engine (scan/state/ledger/manual legacy-ntfy test/act/hook_pending/session_context/file_content/
   insights/commands/compacting_secs), spend CLI (`spend --cwd|--session`, used by the global
   `/subagent-spend` command). GET `/api/insights?days=N` aggregates agent_runs + session_runs
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
@@ -504,13 +512,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/settings` +
   `/api/search/rebuild` + notification read/snooze/wake/mute/retry and
   device/subscription/test routes are token-gated.
-  Settings persists the
-  `notify` toggles, the `NUM_KEYS` thresholds (range-validated; `stall_seconds` also drives
-  the stalled STATE, not just the push), `muted_sessions` (sid → ts, persists until manual unmute),
+  Settings persists the manual `legacy_ntfy_enabled` switch, range-validated UI/session thresholds
+  (`stall_seconds` also drives the stalled STATE), `muted_sessions` (sid → ts, persists until manual unmute),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
-  `Engine.update_settings`. Muted sessions skip all per-session pushes.
-  Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
-  transition (`Engine.quiet_since`), not on a time-bucket dedupe).
+  `Engine.update_settings`. Muted sessions skip all per-session Web Push deliveries.
 - `search_index.py` — isolated incremental Claude/Codex transcript and saved-subagent parser,
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
@@ -582,7 +587,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
-- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `ledger.db`, `search.db*`, `pending/`,
+- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`,
+  `ledger.db`, `search.db*`, `pending/`,
   `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
 
 ## Outside-repo touchpoints (document changes to these here)
@@ -595,7 +601,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
   per variant; deny=Esc chosen because it cancels every variant).
 - Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
-- Tailscale serve + phone onboarding (user-side), ntfy topic subscribe.
+- Tailscale serve + installed-PWA onboarding remain user-side.
 - Fable pricing placeholder in `config.json` rates.
 - Claude VS Code sessions: no tty → view-only by design. ChatGPT Desktop/Codex VS Code transcripts
   are also view-only because their App Server is separate from Fleet's canonical Codex daemon.

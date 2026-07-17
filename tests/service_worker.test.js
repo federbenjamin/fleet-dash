@@ -15,7 +15,7 @@ function payload(overrides = {}) {
 }
 
 function harness(fetchImpl = async () => ({ok: true, json: async () => ({ok: true})})) {
-  const listeners = new Map(), shown = [], opened = [], badge = [], displayed = [];
+  const listeners = new Map(), shown = [], opened = [], badge = [], displayed = [], cacheWrites = [];
   const self = {
     location: {origin: 'https://fleet.test'},
     addEventListener(type, listener) { listeners.set(type, listener); },
@@ -34,16 +34,18 @@ function harness(fetchImpl = async () => ({ok: true, json: async () => ({ok: tru
     }
   };
   const context = {self, URL, URLSearchParams, TextEncoder, Set, Promise,
-    fetch: fetchImpl, caches: {open: async () => ({addAll: async () => {}}),
+    fetch: fetchImpl, caches: {open: async () => ({
+      put: async key => cacheWrites.push(typeof key === 'string' ? key : key.url)}),
       keys: async () => [], match: async () => null}, console};
   vm.runInNewContext(source, context, {filename: 'sw.js'});
   async function dispatch(type, event = {}) {
-    const waits = [];
+    const waits = [],responses = [];
     event.waitUntil = promise => waits.push(Promise.resolve(promise));
+    event.respondWith = promise => responses.push(Promise.resolve(promise));
     listeners.get(type)(event);
-    await Promise.all(waits);
+    await Promise.all(responses);await Promise.all(waits);
   }
-  return {dispatch, shown, opened, badge, displayed};
+  return {dispatch, shown, opened, badge, displayed, cacheWrites};
 }
 
 test('push validates and renders only the generic exact-event snapshot', async () => {
@@ -60,8 +62,21 @@ test('push validates and renders only the generic exact-event snapshot', async (
 
   await app.dispatch('push', {data: {text: () => payload({
     url: '/#notifications/evt-other', body: 'private /path main $84 account'})}});
+  await app.dispatch('push', {data: {text: () => payload({
+    body: 'A private prompt that still uses a valid exact event URL.'})}});
   await app.dispatch('push', {data: {text: () => 'x'.repeat(2049)}});
   assert.equal(app.shown.length, 1);
+});
+
+test('shell caching rejects query-bearing keys', async () => {
+  const response = {ok: true, clone: () => response};
+  const app = harness(async () => response);
+  await app.dispatch('fetch', {request: {method: 'GET', mode: 'no-cors',
+    url: 'https://fleet.test/static/app.js?token=private'}});
+  assert.deepEqual(app.cacheWrites, []);
+  await app.dispatch('fetch', {request: {method: 'GET', mode: 'no-cors',
+    url: 'https://fleet.test/static/app.js'}});
+  assert.deepEqual(app.cacheWrites, ['/static/app.js']);
 });
 
 test('capability action omits credentials and closes only after success', async () => {
@@ -93,7 +108,7 @@ test('failed capability stays visible and opens exact recoverable fallback', asy
   assert.doesNotMatch(app.opened[0], /signed-mute/);
 });
 
-test('canonical reconciliation closes only explicitly resolved events and clears badge', async () => {
+test('canonical reconciliation closes only explicitly resolved events', async () => {
   const app = harness();
   let activeClosed = 0, resolvedClosed = 0;
   app.displayed.push(
@@ -103,5 +118,5 @@ test('canonical reconciliation closes only explicitly resolved events and clears
     resolvedIds: ['evt-resolved'], unread: 0, cursor: 9}});
   assert.equal(activeClosed, 0);
   assert.equal(resolvedClosed, 1);
-  assert.deepEqual(app.badge, [0]);
+  assert.deepEqual(app.badge, []);
 });

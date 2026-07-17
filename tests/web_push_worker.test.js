@@ -95,6 +95,9 @@ test('subscription and payload validation reject hostile fields', () => {
   const extra = JSON.parse(payload());
   extra.prompt = 'secret';
   assert.throws(() => worker.validatePayload(JSON.stringify(extra)));
+  const privateCopy = JSON.parse(payload());
+  privateCopy.body = 'A private prompt with /path, branch, account, and cost data.';
+  assert.throws(() => worker.validatePayload(JSON.stringify(privateCopy)));
   assert.throws(() => worker.validatePayload('x'.repeat(2_049)));
 });
 

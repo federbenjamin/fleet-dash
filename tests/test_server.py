@@ -81,13 +81,12 @@ class ServerHandlerTest(unittest.TestCase):
         Handler._do_POST(handler)
         self.assertEqual(replies[0][0], 413)
 
-    def test_settings_audit_does_not_log_action_urls(self):
+    def test_settings_audit_logs_only_field_names(self):
         handler = self.handler("/api/settings")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
         handler.eng = SimpleNamespace(cfg={"act_token": "token"},
                                       update_settings=lambda action: {"ok": True})
-        payload = json.dumps({"dashboard_url":
-                              "http://127.0.0.1:8377/?token=secret-value"}).encode()
+        payload = json.dumps({"reader_width": "secret-value"}).encode()
         handler.headers = {"X-Act-Token": "token",
                            "Content-Length": str(len(payload))}
         handler.rfile = io.BytesIO(payload)
@@ -95,7 +94,7 @@ class ServerHandlerTest(unittest.TestCase):
         audit = io.StringIO()
         with redirect_stderr(audit):
             Handler._do_POST(handler)
-        self.assertIn("[URL omitted]", audit.getvalue())
+        self.assertIn("field_count", audit.getvalue())
         self.assertNotIn("secret-value", audit.getvalue())
 
     def test_notifications_route_requires_auth_and_forwards_bounded_query(self):
@@ -205,6 +204,28 @@ class ServerHandlerTest(unittest.TestCase):
         self.assertEqual(replies[0][0], 400)
         self.assertEqual(calls, [{"capability": "signed-token"}])
 
+    def test_legacy_ntfy_test_is_token_gated_and_has_no_client_payload(self):
+        handler = self.handler("/api/legacy-ntfy/test")
+        handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
+        calls = []
+        handler.eng = SimpleNamespace(
+            cfg={"act_token": "secret"},
+            legacy_ntfy_test=lambda: calls.append(True) or {"ok": True, "queued": True})
+        handler.headers = {"Content-Length": "2"}
+        handler.rfile = io.BytesIO(b"{}")
+        replies = []
+        handler.reply = lambda code, ctype, data: replies.append((code, json.loads(data)))
+        Handler._do_POST(handler)
+        self.assertEqual(replies[0][0], 403)
+        self.assertEqual(calls, [])
+
+        handler.headers["X-Act-Token"] = "secret"
+        handler.rfile = io.BytesIO(b"{}")
+        replies.clear()
+        Handler._do_POST(handler)
+        self.assertEqual(replies, [(200, {"ok": True, "queued": True})])
+        self.assertEqual(calls, [True])
+
     def test_push_subscription_post_never_logs_subscription_material(self):
         handler = self.handler("/api/push/subscription")
         handler.connection = SimpleNamespace(settimeout=lambda _seconds: None)
@@ -213,7 +234,8 @@ class ServerHandlerTest(unittest.TestCase):
             cfg={"act_token": "token"},
             push_subscription=lambda payload: captured.append(payload) or
                 {"ok": True, "device": {"id": payload["device_id"]}})
-        payload = json.dumps({"device_id": "phone-1", "subscription": {
+        payload = json.dumps({"device_id": "secret-device-sentinel",
+            "permission_state": "secret-permission-sentinel", "subscription": {
             "endpoint": "https://web.push.apple.com/private-endpoint",
             "keys": {"p256dh": "private-key", "auth": "private-auth"}}}).encode()
         handler.headers = {"X-Act-Token": "token", "Content-Length": str(len(payload))}
@@ -228,6 +250,8 @@ class ServerHandlerTest(unittest.TestCase):
         self.assertNotIn("private-endpoint", audit.getvalue())
         self.assertNotIn("private-key", audit.getvalue())
         self.assertNotIn("private-auth", audit.getvalue())
+        self.assertNotIn("secret-device-sentinel", audit.getvalue())
+        self.assertNotIn("secret-permission-sentinel", audit.getvalue())
 
 
 if __name__ == "__main__":

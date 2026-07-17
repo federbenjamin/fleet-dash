@@ -1926,9 +1926,29 @@ test('PWA shell stays private and device settings remain redacted', async ({ pag
   expect(JSON.stringify(state.push_devices)).not.toContain('private-p256dh');
   expect(JSON.stringify(state.push_devices)).not.toContain('private-auth');
   expect(JSON.stringify(state.push_devices)).not.toContain('fcm.googleapis.com');
+  const privacy = await page.evaluate(async () => {
+    const cacheEntries = [];
+    for (const key of await caches.keys()) {
+      const cache = await caches.open(key);
+      for (const request of await cache.keys()) {
+        const response = await cache.match(request);
+        cacheEntries.push({url: request.url, body: await response.text()});
+      }
+    }
+    return {url: location.href, dom: document.documentElement.innerHTML,
+      local: Object.fromEntries(Object.entries(localStorage)),
+      session: Object.fromEntries(Object.entries(sessionStorage)),
+      indexedDb: indexedDB.databases ? (await indexedDB.databases()).map(item => item.name) : [],
+      cacheEntries};
+  });
+  const retained = JSON.stringify(privacy);
+  for (const secret of ['abcdef123456', 'private-p256dh', 'private-auth',
+    'fcm.googleapis.com/fcm/send/private']) expect(retained).not.toContain(secret);
+  expect(privacy.session).toEqual({});
+  expect(privacy.indexedDb).toEqual([]);
 });
 
-test('budget editor, scheduled digest, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
+test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
   await reset(page, 'base');
   await goTo(page, 'settings');
   await page.locator('.budgetsettingsfold summary').click();
@@ -1944,10 +1964,13 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
   await providerBudget.locator('select').nth(1).selectOption('codex');
   await providerBudget.locator('select').nth(2).selectOption('tokens');
   await providerBudget.locator('input[type="number"]').fill('50000');
-  await page.locator('.setrow:has-text("daily briefing push") input[type="checkbox"]').check();
-  await page.locator('.digestsettings input[type="time"]').fill('08:30');
-  await page.locator('.digestsettings input:not([type="time"])').fill('America/New_York');
-  await page.locator('.digestsettings input:not([type="time"])').press('Tab');
+  await expect(page.locator('#settings')).not.toContainText('waiting on you');
+  await expect(page.locator('#settings')).not.toContainText('daily briefing push');
+  await page.getByLabel('Enable manual legacy tests').check();
+  await expect.poll(async () => (await fixtureState(page)).settings.legacy_ntfy_enabled)
+    .toBe(true);
+  await page.getByRole('button', { name: 'Send legacy test' }).click();
+  await expect(page.locator('#settings')).toContainText('Legacy test queued');
   await page.getByRole('button', { name: 'Save budgets' }).click();
   await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
   const state = await fixtureState(page);
@@ -1955,9 +1978,7 @@ test('budget editor, scheduled digest, honest token scope, and spawn forecast wo
     limit_value: 10000, block_spawns: true});
   expect(state.budgets[1]).toMatchObject({scope_type: 'provider', scope_id: 'codex',
     metric: 'tokens', limit_value: 50000, block_spawns: false});
-  expect(state.notify.scheduled_digest).toBe(true);
-  expect(state.settings.digest_schedule_time).toBe('08:30');
-  expect(state.settings.digest_schedule_zone).toBe('America/New_York');
+  expect(state.actions.some(item => item.type === 'legacy_ntfy_test')).toBe(true);
 
   await page.locator('#setclose').click();
   await goTo(page, 'now');

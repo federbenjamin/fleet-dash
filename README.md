@@ -62,15 +62,13 @@ the provider's native control path. Built 2026-07-13; still evolving.
   subscription, rename or pause this device, disconnect it, and queue a real test push without
   making the Settings request wait for the push provider.
   Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
-  The same page retains the old per-category rules for the manually enabled legacy ntfy
-  integration (waiting-on-you, stalled, spend threshold, fleet quiet), **their thresholds** (blocked seconds, stall
-  seconds — this one also drives the "stalled" chip, $ step, fleet-idle minutes), and the
-  **push tap-target** (`dashboard_url` — set it to your Tailscale URL and tapping a
-  notification opens the dashboard). It also selects the per-device desktop navigation side and
+  A separate **Legacy ntfy** panel can send one generic manual test when explicitly enabled and
+  configured. It has no automatic categories, fallback, duplicates, content-bearing payload, or
+  tap target. The page also selects the per-device desktop navigation side and
   **Fit the screen** or **Centered · fixed width** for every full-screen reading surface. Server
   settings persist to `config.json`; the navigation side stays in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
-  pushes (waiting/stalled/spend) without touching the fleet-wide categories. Mutes persist
+  Web Push deliveries without hiding its canonical in-app notifications. Mutes persist
   across daemon restarts until manually unmuted.
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
@@ -425,8 +423,8 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 5. Click **Send test**. Fleet queues the encrypted minimal test immediately; Settings then reports
    device delivery health and qualifies that exact subscription for production delivery. Replacing
    a browser subscription requires a fresh successful test. Web Push is the only automatic external
-   path; ntfy is disabled unless its separate legacy integration is explicitly enabled and is never
-   a fallback.
+   path. The separate legacy ntfy switch permits only a generic manual test; it is never automatic,
+   a fallback, or a duplicate destination.
 
 ## Config (`config.json`)
 
@@ -441,24 +439,22 @@ Nothing to redo unless something breaks; listed for disaster recovery:
 | `stall_seconds` | 240 | frozen-mid-turn threshold (long Bash gates freeze transcripts!) |
 | `dormant_seconds` | 7200 | quiet sessions demote to dormant |
 | `turn_done_window_seconds` | 900 | how long "done ✓" persists before fading to idle |
-| `awaiting_input_notify_seconds` | 180 | blocked-on-you push debounce |
-| `spend_threshold_usd` | 5 | per-session push threshold (fires per multiple) |
 | `question_file_pair_seconds` | 300 | max age of a delivered file to pair as "read first" on a question |
-| `notify` | all true | per-category rules used only by the manually enabled legacy ntfy integration |
-| `legacy_ntfy_enabled` | false | manually enable legacy ntfy; it never duplicates or backs up Web Push |
-| `fleet_quiet_minutes` | 0 | how long the fleet must stay fully idle before the quiet push (0 = on transition) |
+| `legacy_ntfy_enabled` | false | allow one generic manual ntfy test; never automatic/fallback/duplicate |
 | `muted_sessions` | {} | session_id → mute-ts map behind the 🔔 card toggle; persists until manual unmute |
 | `pinned_sessions` | [] | persisted session ids relocated into the Pinned section in stable pin order; new pins append at the bottom |
 | `reply_available` | {} | session id → conversation revision explicitly marked available |
 | `read_sessions` | {} | session id → opened conversation revision for the New response badge |
 | `rates` | — | $/1M by family. **`fable` is a PLACEHOLDER (opus rates) — fix when published** |
 | `permission_keys` | 1/2/Esc | keystrokes for allow/always/deny (empty value = Esc) |
-| `dashboard_url` | "" | ntfy `Click` target — tapping a push opens this URL (⚙ panel edits it) |
-| `ntfy_server`/`ntfy_topic` | ntfy.sh / fleet-… | push channel (empty topic = disabled) |
+| `ntfy_server`/`ntfy_topic` | ntfy.sh / "" | manual legacy test destination; empty topic = unavailable |
 | `web_push_allowed_origins` | [] | optional exact HTTPS push-service origins added by the local operator; never client-supplied |
 | `web_push_node_command` | "" | optional absolute Node 18+ executable; otherwise resolved without shell startup files |
-| `web_push_subject` | "" | optional VAPID HTTPS or `mailto:` subject; defaults to the HTTPS dashboard URL or a local Fleet contact |
+| `web_push_subject` | "" | optional credential-free VAPID HTTPS or `mailto:` contact |
 | `act_token` | generated | device token for the act endpoint |
+
+Retired automatic-ntfy keys may remain in an older `config.json` for migration compatibility, but
+Fleet no longer reads them for dispatch and Settings rejects attempts to change them.
 
 Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
 (dashboard/static asset changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.

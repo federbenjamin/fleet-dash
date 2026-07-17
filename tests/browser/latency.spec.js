@@ -127,8 +127,13 @@ test('named interaction inventory meets first-feedback and local completion budg
   const native = await page.evaluate(() => window.__fleetPerf.summary().native_focus_ms);
   expect(native.count, 'native focus sample count').toBeGreaterThanOrEqual(SAMPLE_COUNT);
   expect(native.p95, 'fixture native completion p95').toBeLessThan(250);
+  const notificationCompletion = await page.evaluate(
+    () => window.__fleetPerf.summary().notification_action_completion_ms);
+  expect(notificationCompletion.count, 'notification completion sample count')
+    .toBeGreaterThanOrEqual(SAMPLE_COUNT);
+  expect(notificationCompletion.p95, 'notification action completion p95').toBeLessThan(250);
   await test.info().attach('named-latency-results', {
-    body: Buffer.from(JSON.stringify({ results, native }, null, 2)),
+    body: Buffer.from(JSON.stringify({ results, native, notificationCompletion }, null, 2)),
     contentType: 'application/json',
   });
 });

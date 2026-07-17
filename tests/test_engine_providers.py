@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import threading
@@ -313,6 +314,8 @@ class EngineProviderTest(unittest.TestCase):
                          {"b": 0, "c": 1, "a": 2})
         with open(os.path.join(self.base, "config.json")) as handle:
             stored = json.load(handle)
+        self.assertEqual(os.stat(os.path.join(self.base, "config.json")).st_mode & 0o777,
+                         0o600)
         self.assertEqual(stored["working_order"], ["b", "c", "a"])
         self.assertTrue(self.engine.update_settings({"preview_agents": True})["ok"])
         with open(os.path.join(self.base, "config.json")) as handle:
@@ -557,39 +560,26 @@ class EngineProviderTest(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("not a file this session delivered", error)
 
-    def test_notifications_skip_unknown_codex_cost_and_muted_sessions(self):
+    def test_legacy_ntfy_is_manual_generic_and_disabled_by_default(self):
+        self.engine.cfg["ntfy_topic"] = "private-topic"
+        self.engine.cfg["ntfy_server"] = "https://ntfy.example.test"
         sent = []
-        self.engine.once = lambda *args: sent.append(args)
-        session = codex_session()
-        session.update(state="needs_you", quiet_s=1000, muted=True,
-                       pending={"kind": "permission", "tool": "command"})
-        fleet = {"sessions": [session], "totals": {"busy": 0, "agents_running": 0,
-                                                     "sessions": 1}}
-        self.engine.check_notifications(fleet)
+        self.engine._send_legacy_ntfy_test = lambda key: sent.append(key)
+        self.assertFalse(self.engine.legacy_ntfy_test()["ok"])
         self.assertEqual(sent, [])
-
-    def test_scheduled_digest_dispatches_after_restart_due_time_and_dedupes(self):
-        self.engine.cfg["notify"] = {**self.engine.cfg["notify"],
-                                      "scheduled_digest": True,
-                                      "fleet_quiet": False}
-        self.engine.cfg["digest_schedule_time"] = "00:00"
-        self.engine.cfg["digest_schedule_zone"] = "UTC"
-        sent = []
-        self.engine.ntfy = lambda *args, **kwargs: sent.append(args)
-        snapshot = {"sessions": [], "totals": {"busy": 0, "agents_running": 0,
-                                                  "sessions": 0}}
-        self.engine.check_notifications(snapshot)
+        enabled = self.engine.update_settings({"legacy_ntfy_enabled": True})
+        self.assertEqual(enabled, {"ok": True, "legacy_ntfy_enabled": True})
+        queued = self.engine.legacy_ntfy_test()
+        self.assertTrue(queued["ok"])
         self.assertEqual(len(sent), 1)
-        self.assertTrue(sent[0][0].startswith("digest:UTC:"))
-
-        restarted = Engine(dict(self.engine.cfg))
-        restarted.codex = self.codex
-        duplicate = []
-        restarted.ntfy = lambda *args, **kwargs: duplicate.append(args)
-        restarted.check_notifications(snapshot)
-        self.assertEqual(duplicate, [])
-        if restarted.db:
-            restarted.db.close()
+        self.assertTrue(sent[0].startswith("legacy-test:"))
+        self.assertEqual(self.engine.operations.legacy_notification_diagnostics()
+                         ["statuses"]["queued"], 1)
+        fleet = self.engine.scan()
+        self.assertTrue(fleet["settings"]["legacy_ntfy_enabled"])
+        self.assertTrue(fleet["settings"]["legacy_ntfy_configured"])
+        self.assertNotIn("notify", fleet)
+        self.assertNotIn("dashboard_url", fleet["settings"])
 
     def test_token_cookie_requires_exact_cookie_name_and_value(self):
         def check(cookie="", header=""):
@@ -758,18 +748,19 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(self.engine.cfg["reader_width"], "centered")
 
     def test_settings_validation_is_atomic_strict_and_concurrency_safe(self):
-        before_notify = copy.deepcopy(self.engine.cfg["notify"])
+        before_notify = copy.deepcopy(self.engine.cfg.get("notify"))
         rejected = self.engine.update_settings({
             "notify": {"needs_you": False}, "reader_width": "left"})
         self.assertFalse(rejected["ok"])
-        self.assertEqual(self.engine.cfg["notify"], before_notify)
+        self.assertEqual(self.engine.cfg.get("notify"), before_notify)
         config_path = os.path.join(self.base, "config.json")
         if os.path.exists(config_path):
             with open(config_path) as handle:
                 self.assertNotEqual((json.load(handle).get("notify") or {}).get("needs_you"), False)
 
         for patch in ({"preview_agents": "false"},
-                      {"notify": {"needs_you": "false"}},
+                      {"notify": {"needs_you": False}},
+                      {"legacy_ntfy_enabled": "true"},
                       {"mute_session": "same", "muted": 1},
                       {"pin_session": "same", "pinned": "yes"},
                       {"unknown_setting": True},
@@ -1172,40 +1163,60 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(organized["ui_group"], "available")
         self.assertTrue(organized["pinned"])
 
-    def test_digest_and_budget_settings_persist_without_copying_budgets_to_config(self):
-        self.engine.cfg["notify"] = {"needs_you": True}
-        migrated = self.engine.scan()["notify"]
-        self.assertFalse(migrated["scheduled_digest"])
-        self.assertTrue(migrated["stall"])
+    def test_budget_settings_persist_without_copying_budgets_to_config(self):
         saved = self.engine.update_settings({
-            "notify": {"scheduled_digest": True},
-            "digest_schedule_time": "08:30",
-            "digest_schedule_zone": "America/New_York",
+            "legacy_ntfy_enabled": True,
             "budgets": [{"id": "fleet-token", "scope_type": "fleet",
                          "metric": "tokens", "limit_value": 50000,
                          "block_spawns": False}],
         })
         self.assertTrue(saved["ok"])
-        self.assertTrue(saved["notify"]["scheduled_digest"])
         self.assertEqual(saved["budgets"][0]["id"], "fleet-token")
         with open(os.path.join(self.base, "config.json")) as handle:
             config = json.load(handle)
-        self.assertEqual(config["digest_schedule_time"], "08:30")
-        self.assertEqual(config["digest_schedule_zone"], "America/New_York")
         self.assertNotIn("budgets", config)
         self.engine.scan()
         budget = self.engine.budgets_snapshot()["budgets"][0]
         self.assertEqual((budget["metric"], budget["measurement_scope"]),
                          ("tokens", "partial"))
 
-        invalid = self.engine.update_settings({"digest_schedule_zone": "Not/AZone"})
-        self.assertFalse(invalid["ok"])
-        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
-        overlong = self.engine.update_settings({"digest_schedule_zone": "A" * 121})
-        self.assertFalse(overlong["ok"])
-        self.assertEqual(self.engine.cfg["digest_schedule_zone"], "America/New_York")
+        for retired in ({"digest_schedule_zone": "America/New_York"},
+                        {"dashboard_url": "https://fleet.test/?token=private"},
+                        {"spend_threshold_usd": 10}):
+            self.assertFalse(self.engine.update_settings(retired)["ok"])
         self.assertFalse(self.engine.update_settings(
             {"mute_session": "", "muted": True})["ok"])
+
+    def test_engine_start_scrubs_known_secrets_from_runtime_log(self):
+        log_path = os.path.join(self.base, "fleet-dash.log")
+        secret_path = os.path.join(self.base, "push-secrets.json")
+        values = {
+            "vapid_private_key": "private-vapid-material-1234567890",
+            "action_secret": "private-action-material-1234567890",
+        }
+        with open(secret_path, "w") as handle:
+            json.dump(values, handle)
+        os.chmod(secret_path, 0o600)
+        config = dict(self.engine.cfg)
+        config.update({"act_token": "private-act-token-1234",
+                       "dashboard_url": "https://fleet.example/private-token"})
+        with open(log_path, "wb") as handle:
+            handle.write(("before private-act-token-1234 "
+                          "https://fleet.example/private-token "
+                          "private-vapid-material-1234567890 "
+                          "private-action-material-1234567890 after\n").encode())
+        replacement = Engine(config)
+        try:
+            with open(log_path, "rb") as handle:
+                scrubbed = handle.read()
+            self.assertIn(b"before", scrubbed)
+            self.assertIn(b"after", scrubbed)
+            for secret in (config["act_token"], config["dashboard_url"], *values.values()):
+                self.assertNotIn(secret.encode(), scrubbed)
+            self.assertEqual(stat.S_IMODE(os.lstat(log_path).st_mode), 0o600)
+        finally:
+            if replacement.db:
+                replacement.db.close()
 
     def test_explicit_hard_budget_blocks_new_spawns_but_not_existing_work(self):
         self.engine.update_settings({"budgets": [{

@@ -154,6 +154,22 @@ function validatePayload(value) {
       || !Number.isInteger(parsed.cursor) || parsed.cursor < 0) {
     fail('invalid payload');
   }
+  const genericCopy = (
+    ['question', 'approval', 'form', 'reply'].includes(parsed.kind)
+      && parsed.title === 'Fleet needs you'
+      && parsed.body === 'A coding session needs your response.'
+  ) || (parsed.kind === 'stall'
+      && parsed.title === 'Fleet needs attention'
+      && parsed.body === 'A coding session may be stalled.')
+    || (parsed.kind === 'failure'
+      && parsed.title === 'Fleet needs attention'
+      && parsed.body === 'A provider or delivery needs review.')
+    || (parsed.kind === 'notification' && (
+      (parsed.title === 'Fleet notification test'
+        && parsed.body === 'Web Push delivery is working.')
+      || (parsed.title === 'Fleet needs attention'
+        && parsed.body === 'A provider or delivery needs review.')));
+  if (!genericCopy) fail('invalid payload');
   const actions = new Set(parsed.actions);
   if (actions.size !== parsed.actions.length
       || [...actions].some(action => !['snooze', 'mute'].includes(action))) fail('invalid action');

@@ -3,7 +3,9 @@ import json
 import os
 import sqlite3
 import stat
+import statistics
 import tempfile
+import threading
 import time
 import unittest
 
@@ -50,12 +52,87 @@ class FakeHelper:
                 "state": "ready" if self.ready else "unavailable"}
 
 
+class BlockingHelper:
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, _job, timeout=15):
+        self.entered.set()
+        self.release.wait(timeout)
+        return {"ok": True, "status": 201, "code": "http_201"}
+
+    def stop(self):
+        self.release.set()
+
+    def status(self):
+        return {"ready": True, "restarts": 0, "state": "ready"}
+
+
 class WebPushTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_vapid_subject_never_inherits_dashboard_credentials_or_query(self):
+        service = WebPushService(None, self.tmp.name, {
+            "dashboard_url": "https://fleet.example.test/path?token=private#fragment"})
+        self.assertEqual(service._subject(), "https://fleet.example.test")
+        for subject in ("https://user:secret@fleet.example.test",
+                        "https://fleet.example.test/?token=private",
+                        "https://fleet.example.test/#private"):
+            service.config = {"web_push_subject": subject}
+            with self.subTest(subject=subject), self.assertRaises(WebPushError):
+                service._subject()
+
+    def test_saturated_blocked_worker_does_not_hold_operations_or_read_paths(self):
+        path = os.path.join(self.tmp.name, "saturation.db")
+        operations = FleetOperations(path, delivery_queue_limit=30)
+        operations.notification_register_device(
+            "phone", "Phone", "test", subscription())
+        qualified = operations.notification_create_test_delivery("phone")
+        operations.notification_claim_delivery()
+        operations.notification_finish_delivery(
+            qualified["id"], {"ok": True, "status": 201})
+        snapshot = {"t": time.time(), "sessions": [], "closed": [],
+            "actions": [{"action_id": "action-1", "session_id": "session-1",
+                "provider": "claude", "kind": "question", "request": "Choose",
+                "delivery_state": "Awaiting response", "reason": "Question waiting",
+                "revision": "rev-1", "pending_nonce": "ask-1", "title": "Session",
+                "access": "interactive", "muted": False}],
+            "providers": {"claude": {"ok": True}},
+            "settings": {"stall_seconds": 240},
+            "totals": {"sessions": 0, "busy": 0, "agents_running": 0}}
+        workstream = lambda _cwd: {"workstream_id": "ws"}
+        operations.observe(snapshot, workstream)
+
+        def sample():
+            observe, reads = [], []
+            for _ in range(20):
+                started = time.perf_counter()
+                operations.observe(snapshot, workstream)
+                observe.append((time.perf_counter() - started) * 1000)
+                started = time.perf_counter()
+                operations.notification_snapshot("browser", limit=20)
+                reads.append((time.perf_counter() - started) * 1000)
+            return statistics.quantiles(observe, n=20)[18], statistics.quantiles(reads, n=20)[18]
+
+        baseline = sample()
+        for _ in range(29):
+            operations.notification_create_test_delivery("phone")
+        helper = BlockingHelper()
+        service = WebPushService(operations, self.tmp.name, {})
+        service.helper = helper
+        service.runtime_state = "ready"
+        service.start()
+        self.assertTrue(helper.entered.wait(2))
+        saturated = sample()
+        service.stop()
+        service.thread.join(timeout=2)
+        self.assertLess(saturated[0] - baseline[0], 5, (baseline, saturated))
+        self.assertLess(saturated[1] - baseline[1], 5, (baseline, saturated))
 
     def test_secret_store_is_atomic_private_and_never_regenerates_corruption(self):
         path = os.path.join(self.tmp.name, "push-secrets.json")

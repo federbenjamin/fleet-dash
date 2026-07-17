@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fleet-dash engine: scans live Claude Code sessions + their subagent
-transcripts into a fleet snapshot; maintains the spend ledger; fires ntfy.
+transcripts into a fleet snapshot; maintains the spend ledger and notifications.
 
 Data sources (all local, read-only):
   ~/.claude/sessions/<pid>.json          live-session registry (CLI-maintained)
@@ -10,9 +10,8 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, datetime as dt
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, mmap, stat
 from collections import deque
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
@@ -35,18 +34,11 @@ CLAUDE_USAGE_PREFS = os.path.join(
 DEFAULT_CONFIG = {
     "poll_seconds": 2,
     "stall_seconds": 240,
-    "awaiting_input_notify_seconds": 180,
     "dormant_seconds": 7200,
     "turn_done_window_seconds": 900,
     "agent_done_quiet_seconds": 5,
     "agent_idle_done_seconds": 30,      # settled-but-no-end_turn agent: done after this
-    "spend_threshold_usd": 5.0,
     "question_file_pair_seconds": 300,
-    "notify": {"needs_you": True, "stall": True, "spend": True,
-               "fleet_quiet": True, "scheduled_digest": False},
-    "fleet_quiet_minutes": 0,           # fleet must be fully idle this long before the push
-    "digest_schedule_time": "09:00",   # local wall time; push stays off until enabled
-    "digest_schedule_zone": "UTC",
     "muted_sessions": {},               # session_id -> mute ts; persists until manual unmute
     "pinned_sessions": [],               # shared watchlist, stable insertion order
     "working_order": [],                 # stable entry order while sessions remain Working
@@ -64,10 +56,9 @@ DEFAULT_CONFIG = {
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "legacy_ntfy_enabled": False,
-    "dashboard_url": "",                # if set, pushes open it on tap (ntfy Click header)
     "web_push_allowed_origins": [],      # explicit exact HTTPS push-service origins
     "web_push_node_command": "",        # optional absolute Node >=18 executable
-    "web_push_subject": "",             # HTTPS URL or mailto; dashboard_url is preferred default
+    "web_push_subject": "",             # optional HTTPS URL or mailto VAPID contact
     # last-message peeks: on/off + how many lines each is allowed
     "preview_sessions": True,
     "preview_session_lines": 2,
@@ -88,6 +79,96 @@ DEFAULT_CONFIG = {
 }
 
 
+def _write_private_json(path, payload):
+    """Atomically replace a secret-bearing JSON file with owner-only permissions."""
+    temp_path = f"{path}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(temp_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            fd = -1
+            json.dump(payload, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600, follow_symlinks=False)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _scrub_private_log(path, values):
+    """Redact known runtime secrets in place without replacing launchd's open inode."""
+    secrets_to_remove = []
+    for value in values:
+        if isinstance(value, str) and len(value) >= 8:
+            encoded = value.encode("utf-8")
+            if encoded not in secrets_to_remove:
+                secrets_to_remove.append(encoded)
+    if not secrets_to_remove:
+        return
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                return
+            if opened.st_size:
+                with mmap.mmap(fd, 0, access=mmap.ACCESS_WRITE) as mapped:
+                    changed = False
+                    for secret in secrets_to_remove:
+                        offset = 0
+                        while True:
+                            offset = mapped.find(secret, offset)
+                            if offset < 0:
+                                break
+                            mapped[offset:offset + len(secret)] = b"*" * len(secret)
+                            offset += len(secret)
+                            changed = True
+                    if changed:
+                        mapped.flush()
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return
+
+
+def _runtime_log_secrets(cfg):
+    values = [cfg.get("act_token"), cfg.get("ntfy_topic"), cfg.get("dashboard_url"),
+              cfg.get("web_push_subject")]
+    secret_path = os.path.join(BASE, "push-secrets.json")
+    try:
+        info = os.lstat(secret_path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32768:
+            return values
+        fd = os.open(secret_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or
+                    not stat.S_ISREG(opened.st_mode)):
+                return values
+            stored = json.loads(os.read(fd, 32769).decode("utf-8"))
+        finally:
+            os.close(fd)
+        if isinstance(stored, dict):
+            values.extend((stored.get("vapid_private_key"), stored.get("action_secret")))
+    except (OSError, ValueError, TypeError):
+        pass
+    return values
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     path = os.path.join(BASE, "config.json")
@@ -104,8 +185,7 @@ def load_config():
         raw["act_token"] = secrets.token_hex(16)
     merged = dict(DEFAULT_CONFIG)
     merged.update(raw)
-    with open(path, "w") as f:
-        json.dump(merged, f, indent=2)
+    _write_private_json(path, merged)
     return merged
 
 
@@ -992,6 +1072,14 @@ class Tail:
 class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
+        _scrub_private_log(os.path.join(BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
+        for runtime_name in ("config.json", "fleet-dash.log"):
+            runtime_path = os.path.join(BASE, runtime_name)
+            try:
+                if not os.path.islink(runtime_path):
+                    os.chmod(runtime_path, 0o600, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
         self.tails = {}                 # path -> Tail
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
@@ -1000,10 +1088,7 @@ class Engine:
         self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
         self._cleanup_lock = threading.Lock()
         self.db = None
-        self.notified = {}              # dedupe keys -> t
-        self.seeded = False             # first pass registers pre-existing states silently
-        self.prev_fleet_busy = None
-        self.quiet_since = None         # when the fleet last went fully idle
+        self.pending_seen = {}          # pending nonce -> first-observed timestamp
         self.lock = threading.Lock()
         self.config_lock = threading.RLock()
         self.db_lock = threading.RLock()
@@ -1844,8 +1929,10 @@ class Engine:
                 paired = self._paired_files(mt, q_ts)
                 if paired:
                     pending["files"] = paired
-            if pending and pending["nonce"] not in self.notified:
-                self.notified[pending["nonce"]] = now
+            if pending and pending["nonce"] not in self.pending_seen:
+                self.pending_seen[pending["nonce"]] = now
+                if len(self.pending_seen) > 5000:
+                    self.pending_seen = dict(list(self.pending_seen.items())[-2500:])
                 print(f"pending first seen: {sid[:8]} {pending['kind']} nonce={pending['nonce'][:24]}",
                       file=sys.stderr, flush=True)
 
@@ -2039,15 +2126,14 @@ class Engine:
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(self.codex_scan_error or self.codex.error),
                                     "error": self.codex_scan_error or self.codex.error}},
-            "notify": {**DEFAULT_CONFIG["notify"], **(self.cfg.get("notify") or {})},
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
-                         ("awaiting_input_notify_seconds", "stall_seconds",
-                          "spend_threshold_usd", "fleet_quiet_minutes", "dashboard_url",
-                          "digest_schedule_time", "digest_schedule_zone",
-                          "preview_sessions", "preview_session_lines",
+                         ("stall_seconds", "preview_sessions", "preview_session_lines",
                           "preview_agents", "preview_agent_lines", "reader_width",
-                          "pinned_sessions", "dismissed_actions")},
+                          "pinned_sessions", "dismissed_actions",
+                          "legacy_ntfy_enabled")},
         }
+        fleet["settings"]["legacy_ntfy_configured"] = bool(
+            self.cfg.get("ntfy_topic") and self.cfg.get("ntfy_server"))
         try:
             fleet["outbox_summary"] = self.outbox.counts()
         except Exception as exc:
@@ -2303,7 +2389,6 @@ class Engine:
     def _persist_config_fields(self, changed):
         """Merge internal/UI state into config.json without dropping secret fields."""
         path = os.path.join(BASE, "config.json")
-        temp_path = path + ".tmp"
         with self.config_lock:
             try:
                 with open(path) as handle:
@@ -2311,9 +2396,7 @@ class Engine:
             except Exception:
                 raw = {}
             raw.update(changed)
-            with open(temp_path, "w") as handle:
-                json.dump(raw, handle, indent=2)
-            os.replace(temp_path, path)
+            _write_private_json(path, raw)
 
     def stable_working_order(self, sessions):
         """Append new Working entries; never reorder incumbents by activity."""
@@ -4451,7 +4534,7 @@ Treat this as an independent session. Verify the repository state before changin
                     "configured": False, "public_key": None, "delivery": "starting",
                     "helper": {"ready": False, "restarts": 0, "state": "starting"},
                     "queue": self.operations.notification_delivery_diagnostics()}
-            return {"ok": True, "feature": "dark",
+            return {"ok": True, "feature": "production",
                     "configured": bool(runtime.get("configured")),
                     "public_key": runtime.get("public_key"),
                     "delivery": runtime.get("delivery") or "unavailable",
@@ -4479,7 +4562,13 @@ Treat this as an independent session. Verify the repository state before changin
                 "helper": {"ready": False, "restarts": 0, "state": "starting"},
                 "queue": self.operations.notification_delivery_diagnostics()}
         return {key: runtime.get(key) for key in
-                ("configured", "delivery", "helper", "queue")}
+                ("configured", "delivery", "helper", "runtime", "queue")}
+
+    def legacy_ntfy_diagnostics(self):
+        out = self.operations.legacy_notification_diagnostics()
+        return {"enabled": self.cfg.get("legacy_ntfy_enabled") is True,
+                "configured": bool(self.cfg.get("ntfy_topic") and
+                                   self.cfg.get("ntfy_server")), **out}
 
     def push_subscription(self, payload):
         try:
@@ -5410,16 +5499,16 @@ Treat this as an independent session. Verify the repository state before changin
                 "dialog appeared, grant it and retry"}
 
     # ---------------------------------------------------------------- ntfy
-    def ntfy(self, key, title, body, tags="robot", priority="default"):
+    def _send_legacy_ntfy_test(self, key):
         topic = self.cfg.get("ntfy_topic")
         if not topic:
             self.operations.notification_status(key, "disabled")
             return
         url = f"{self.cfg['ntfy_server'].rstrip('/')}/{topic}"
-        headers = {"Title": title, "Tags": tags, "Priority": priority}
-        if self.cfg.get("dashboard_url"):
-            headers["Click"] = self.cfg["dashboard_url"]
-        req = urllib.request.Request(url, data=body.encode(), method="POST", headers=headers)
+        headers = {"Title": "Fleet legacy notification test", "Tags": "test_tube",
+                   "Priority": "default"}
+        req = urllib.request.Request(
+            url, data=b"Manual ntfy delivery is working.", method="POST", headers=headers)
         threading.Thread(target=lambda: self._post(key, req), daemon=True).start()
 
     def _post(self, key, req):
@@ -5427,77 +5516,32 @@ Treat this as an independent session. Verify the repository state before changin
             with urllib.request.urlopen(req, timeout=10):
                 pass
             self.operations.notification_status(key, "sent")
-        except Exception as exc:
-            self.operations.notification_status(key, "failed", str(exc))
+        except Exception:
+            self.operations.notification_status(
+                key, "failed", "Legacy ntfy delivery failed")
 
-    def check_notifications(self, fleet):
-        cfg, now = self.cfg, time.time()
-        on = cfg.get("notify") or {}      # per-category toggles (dashboard ⚙ settings)
-        for s in fleet["sessions"]:
-            if s.get("muted"):            # 🔕 on the card: no per-session pushes
-                continue
-            key_base = s["session_id"][:8]
-            if on.get("stall", True) and s["state"] == "stalled" and s["quiet_s"] > cfg["stall_seconds"]:
-                self.once(f"stall:{key_base}:{s['quiet_s'] // 300}", "Session stalled",
-                          f"{s['name']}: frozen {s['quiet_s']}s mid-turn", "warning", "high")
-            if on.get("needs_you", True) and s.get("ui_group") == "needs_you" \
-               and s["quiet_s"] > cfg["awaiting_input_notify_seconds"]:
-                p = s.get("pending") or {}
-                what = f" — {s.get('reason_label') or 'response needed'}"
-                if p.get("kind") == "question" and p.get("questions"):
-                    q0 = p["questions"][0]
-                    what += f": {q0.get('header') or 'question'} — {q0.get('question', '')}"
-                elif p.get("kind") == "permission":
-                    what += f": {p.get('tool', '')}"
-                self.once(f"await:{key_base}:{int(s['quiet_s']) // 1800}", "Waiting on you",
-                          f"{s['name']}: waiting {s['quiet_s'] // 60}m{what}"[:400],
-                          "hourglass_flowing_sand")
-            measured_cost = ((s.get("cost") or 0) + (s.get("agent_cost") or 0)
-                             if s.get("capabilities", {}).get("exact_cost") else None)
-            mult = int(measured_cost / cfg["spend_threshold_usd"]) if measured_cost else 0
-            if on.get("spend", True) and mult >= 1:   # only the highest crossed threshold, once
-                self.once(f"spend:{key_base}:{mult}", "Spend threshold",
-                          f"{s['name']}: ${measured_cost:.2f} "
-                          f"(crossed ${cfg['spend_threshold_usd'] * mult:.0f})", "moneybag", "high")
-        busy = fleet["totals"]["busy"] + fleet["totals"]["agents_running"]
-        self.quiet_since = self.operations.fleet_activity_transition(busy, now)
-        if on.get("fleet_quiet", True) and busy == 0 and self.quiet_since \
-           and now - self.quiet_since >= float(cfg.get("fleet_quiet_minutes") or 0) * 60 \
-           and fleet["totals"]["sessions"] > 0:
-            # keyed on the episode start: one push per quiet stretch
-            self.once(f"quiet:{int(self.quiet_since)}", "Fleet quiet",
-                      self.operations.quiet_digest(self.quiet_since), "white_check_mark",
-                      force=True)
-        if on.get("scheduled_digest", False):
-            try:
-                zone_name = str(cfg.get("digest_schedule_zone") or "UTC")
-                local = dt.datetime.fromtimestamp(now, ZoneInfo(zone_name))
-                hour, minute = [int(part) for part in
-                                str(cfg.get("digest_schedule_time") or "09:00").split(":", 1)]
-                due = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if local >= due:
-                    start = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-                    self.once(f"digest:{zone_name}:{local.date().isoformat()}",
-                              "Fleet daily briefing", self.operations.quiet_digest(start),
-                              "clipboard", force=True)
-            except (ValueError, ZoneInfoNotFoundError):
-                pass
-        self.prev_fleet_busy = busy
-        self.seeded = True
+    def legacy_ntfy_test(self):
+        """Queue one generic legacy delivery; ntfy never receives automatic events."""
+        if self.cfg.get("legacy_ntfy_enabled") is not True:
+            return {"ok": False, "error": "Legacy ntfy is disabled"}
+        if not self.cfg.get("ntfy_topic") or not self.cfg.get("ntfy_server"):
+            return {"ok": False, "error": "Legacy ntfy is not configured"}
+        key = "legacy-test:" + uuid.uuid4().hex
+        if not self.operations.notification_claim(
+                key, "legacy_test", "Fleet legacy notification test",
+                "Manual ntfy delivery is working.", dispatch=True):
+            return {"ok": False, "error": "Legacy ntfy test could not be queued"}
+        self._send_legacy_ntfy_test(key)
+        return {"ok": True, "queued": True}
 
-    NOTIFY_KEYS = ("needs_you", "stall", "spend", "fleet_quiet", "scheduled_digest")
     #                key                              type  min  max
-    NUM_KEYS = {"awaiting_input_notify_seconds": (int,   0,    86400),
-                "stall_seconds":                 (int,   30,   86400),
-                "spend_threshold_usd":           (float, 0.5,  10000),
-                "fleet_quiet_minutes":           (float, 0,    1440),
+    NUM_KEYS = {"stall_seconds":                 (int,   30,   86400),
                 "preview_session_lines":         (int,   1,    6),
                 "preview_agent_lines":           (int,   1,    6)}
-    BOOL_KEYS = ("preview_sessions", "preview_agents")
+    BOOL_KEYS = ("preview_sessions", "preview_agents", "legacy_ntfy_enabled")
 
     def update_settings(self, patch):
-        """Persist dashboard-editable settings: notify toggles, notification
-        thresholds, session pins, read state, and per-session mutes."""
+        """Persist dashboard-editable layout, legacy, session, and budget settings."""
         if not isinstance(patch, dict):
             return {"ok": False, "error": "settings patch must be an object"}
         with self.config_lock:
@@ -5505,8 +5549,7 @@ Treat this as an independent session. Verify the repository state before changin
 
     def _update_settings(self, patch):
         allowed = (set(self.NUM_KEYS) | set(self.BOOL_KEYS) | {
-            "notify", "reader_width", "dashboard_url", "digest_schedule_time",
-            "digest_schedule_zone", "mute_session", "muted", "pin_session", "pinned",
+            "reader_width", "mute_session", "muted", "pin_session", "pinned",
             "mark_available_session", "mark_read_session", "revision", "bulk_triage",
             "budgets"})
         unknown = sorted(str(key) for key in patch if key not in allowed)
@@ -5520,18 +5563,6 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "revision requires a session marker"}
         staged = copy.deepcopy(self.cfg)
         changed = {}
-        nt = patch.get("notify")
-        if nt is not None:
-            if not isinstance(nt, dict):
-                return {"ok": False, "error": "notify must be an object"}
-            cur = {**DEFAULT_CONFIG["notify"], **(staged.get("notify") or {})}
-            for k, v in nt.items():
-                if k not in self.NOTIFY_KEYS:
-                    return {"ok": False, "error": f"unknown notification field: {k}"}
-                if not isinstance(v, bool):
-                    return {"ok": False, "error": f"notify.{k} must be boolean"}
-                cur[k] = v
-            staged["notify"] = changed["notify"] = cur
         for k, (typ, lo, hi) in self.NUM_KEYS.items():
             if k in patch:
                 if isinstance(patch[k], bool):
@@ -5553,29 +5584,6 @@ Treat this as an independent session. Verify the repository state before changin
             if width not in ("fit", "centered"):
                 return {"ok": False, "error": "reader_width must be fit or centered"}
             staged["reader_width"] = changed["reader_width"] = width
-        if "dashboard_url" in patch:
-            u = str(patch["dashboard_url"] or "").strip()
-            if len(u) > 300 or any(ord(char) < 32 for char in u):
-                return {"ok": False, "error": "dashboard_url is too long or invalid"}
-            if u and (not u.startswith(("http://", "https://")) or
-                      re.fullmatch(r"https?://[^\s/]+(?:/.*)?", u) is None):
-                return {"ok": False, "error": "dashboard_url must start with http(s)://"}
-            staged["dashboard_url"] = changed["dashboard_url"] = u
-        if "digest_schedule_time" in patch:
-            wall = str(patch.get("digest_schedule_time") or "").strip()
-            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", wall):
-                return {"ok": False, "error": "digest_schedule_time must be HH:MM"}
-            staged["digest_schedule_time"] = changed["digest_schedule_time"] = wall
-        if "digest_schedule_zone" in patch:
-            zone = str(patch.get("digest_schedule_zone") or "").strip()
-            if len(zone) > 120 or any(ord(char) < 32 for char in zone):
-                return {"ok": False,
-                        "error": "digest_schedule_zone is too long or invalid"}
-            try:
-                ZoneInfo(zone)
-            except ZoneInfoNotFoundError:
-                return {"ok": False, "error": "digest_schedule_zone must be an IANA timezone"}
-            staged["digest_schedule_zone"] = changed["digest_schedule_zone"] = zone
         ms = patch.get("mute_session")
         if "mute_session" in patch:
             if (not isinstance(ms, str) or not ms.strip() or len(ms) > 300 or
@@ -5686,18 +5694,6 @@ Treat this as an independent session. Verify the repository state before changin
             self._persist_config_fields(persisted)
             self.cfg.update(persisted)
         return {"ok": True, **changed}
-
-    def once(self, key, title, body, tags="robot", priority="default", force=False):
-        if key in self.notified:
-            return
-        self.notified[key] = time.time()
-        if len(self.notified) > 5000:
-            self.notified.clear()
-        if self.operations.notification_claim(
-                key, key.split(":", 1)[0], title, body,
-                dispatch=self.seeded or bool(force)):
-            self.ntfy(key, title, body, tags, priority)
-
 
 # ---------------------------------------------------------------- one-shots
 

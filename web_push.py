@@ -14,6 +14,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
@@ -415,6 +416,33 @@ class WebPushService:
         self.action_codec = None
         self.runtime_state = "starting"
         self.runtime_error = None
+        self.runtime_transition_at = self.clock()
+        self.runtime_last_success_at = None
+        self.runtime_last_failure_at = None
+        self.runtime_failure_counts = {}
+
+    def _runtime_failure(self, state, code, message):
+        now = self.clock()
+        with self.lock:
+            changed = state != self.runtime_state or code != self.runtime_error
+            self.runtime_state = state
+            self.runtime_error = code
+            self.runtime_last_failure_at = now
+            self.runtime_failure_counts[code] = int(
+                self.runtime_failure_counts.get(code) or 0) + 1
+            if changed:
+                self.runtime_transition_at = now
+        if changed:
+            print(f"Web Push {message} ({code})", file=sys.stderr, flush=True)
+
+    def _runtime_success(self):
+        now = self.clock()
+        with self.lock:
+            if self.runtime_state != "ready" or self.runtime_error is not None:
+                self.runtime_transition_at = now
+            self.runtime_state = "ready"
+            self.runtime_error = None
+            self.runtime_last_success_at = now
 
     @property
     def worker_path(self):
@@ -424,10 +452,14 @@ class WebPushService:
         value = str(self.config.get("web_push_subject") or "").strip()
         if not value:
             dashboard = str(self.config.get("dashboard_url") or "").strip()
-            value = dashboard if dashboard.startswith("https://") else \
-                "mailto:fleet-dash@localhost.invalid"
+            parsed_dashboard = urlsplit(dashboard)
+            value = (f"https://{parsed_dashboard.netloc}"
+                     if parsed_dashboard.scheme == "https" and parsed_dashboard.hostname
+                     and not parsed_dashboard.username and not parsed_dashboard.password else
+                     "mailto:fleet-dash@localhost.invalid")
         parsed = urlsplit(value)
-        if parsed.scheme == "https" and parsed.hostname:
+        if (parsed.scheme == "https" and parsed.hostname and not parsed.username
+                and not parsed.password and not parsed.query and not parsed.fragment):
             return value
         if parsed.scheme == "mailto" and parsed.path:
             return value
@@ -450,6 +482,7 @@ class WebPushService:
             old, self.helper = self.helper, helper
             self.runtime_state = "ready"
             self.runtime_error = None
+            self.runtime_transition_at = self.clock()
         if old and old is not helper:
             old.stop()
 
@@ -505,9 +538,8 @@ class WebPushService:
                 try:
                     self._bootstrap()
                 except Exception:
-                    with self.lock:
-                        self.runtime_state = "unavailable"
-                        self.runtime_error = "Web Push runtime is unavailable"
+                    self._runtime_failure(
+                        "unavailable", "bootstrap_unavailable", "runtime unavailable")
                     self.wake_event.wait(30)
                     self.wake_event.clear()
                     continue
@@ -517,6 +549,7 @@ class WebPushService:
                 claim = self.operations.notification_claim_delivery(
                     self.config.get("web_push_allowed_origins") or [])
             except Exception:
+                self._runtime_failure("degraded", "claim_failed", "queue claim failed")
                 self.wake_event.wait(1)
                 self.wake_event.clear()
                 continue
@@ -529,18 +562,24 @@ class WebPushService:
                     "subscription": claim["subscription"], "payload": self._payload(claim),
                     "ttl": 300, "urgency": "high",
                     "topic": hashlib.sha256(claim["event_id"].encode()).hexdigest()[:24]})
-                with self.lock:
-                    self.runtime_state = "ready"
-                    self.runtime_error = None
             except Exception:
                 result = {"ok": False, "retryable": True, "code": "helper_unavailable"}
-                with self.lock:
-                    self.runtime_state = "degraded"
-                    self.runtime_error = "Web Push helper is restarting"
+                self._runtime_failure(
+                    "degraded", "helper_unavailable", "helper unavailable")
             try:
                 self.operations.notification_finish_delivery(claim["id"], result)
             except (OperationsError, OSError):
-                pass
+                self._runtime_failure(
+                    "degraded", "finish_failed", "result persistence failed")
+            else:
+                if result.get("ok"):
+                    self._runtime_success()
+                else:
+                    code = str(result.get("code") or "delivery_failed").lower()
+                    if not re.fullmatch(r"[a-z0-9_]{1,40}", code):
+                        code = "delivery_failed"
+                    self._runtime_failure(
+                        "ready", code, "delivery attempt failed")
 
     def start(self):
         with self.lock:
@@ -569,7 +608,13 @@ class WebPushService:
                 "ready": False, "restarts": 0, "state": self.runtime_state}
             public_key = self.public_key
             state = self.runtime_state
+            runtime = {"state": state, "reason_code": self.runtime_error,
+                       "transition_at": self.runtime_transition_at,
+                       "last_success_at": self.runtime_last_success_at,
+                       "last_failure_at": self.runtime_last_failure_at,
+                       "failure_counts": dict(self.runtime_failure_counts)}
         return {"configured": bool(public_key), "public_key": public_key,
                 "delivery": "ready" if helper_status["ready"] else state,
                 "helper": helper_status,
+                "runtime": runtime,
                 "queue": self.operations.notification_delivery_diagnostics()}

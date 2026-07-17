@@ -213,14 +213,11 @@ def fresh_state():
                      "evidence_summary": "Provider signal: codex state idle; Last activity: 3s quiet",
                      "revision": "1:1", "winning_rule": "placement.default.available",
                      "suppressed_rules": [], "confidence": "confirmed", "evidence": []}]},
-            "notify": {"needs_you": True, "stall": True, "spend": True,
-                       "fleet_quiet": True, "scheduled_digest": False},
-            "settings": {"awaiting_input_notify_seconds": 180, "stall_seconds": 240,
-                "spend_threshold_usd": 5, "fleet_quiet_minutes": 0, "dashboard_url": "",
-                "digest_schedule_time": "09:00", "digest_schedule_zone": "UTC",
+            "settings": {"stall_seconds": 240,
                 "preview_sessions": True, "preview_session_lines": 2,
                 "preview_agents": False, "preview_agent_lines": 1,
-            "reader_width": "fit", "pinned_sessions": []},
+                "reader_width": "fit", "pinned_sessions": [],
+                "legacy_ntfy_enabled": False, "legacy_ntfy_configured": True},
             "reply_available": {}, "read_sessions": {}, "dismissed_actions": {},
             "repo": repo, "repo_actions": [], "outbox": [], "budgets": [],
             "briefing_reviewed": {}, "push_devices": {},
@@ -619,7 +616,6 @@ def fleet():
                           "codex": {"ok": not bool(STATE.get("codex_error")),
                                     "error": STATE.get("codex_error")}},
             "ledger": copy.deepcopy(STATE.get("ledger") or {"ok": True}),
-            "notify": copy.deepcopy(STATE["notify"]),
             "settings": copy.deepcopy(STATE["settings"]),
             "page_v": 1}
 
@@ -888,7 +884,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json_reply({"ok": True, "devices": devices,
                             "current_device": current, "registered": len(devices),
                             "enabled": sum(item.get("enabled") is True for item in devices)})
-                    return self.json_reply({"ok": True, "feature": "dark", "configured": True,
+                    return self.json_reply({"ok": True, "feature": "production", "configured": True,
                         "public_key": "BErt812-TgTDdRIdV-OWO4wuFeaDBBA3j8jvS4JtMHcY1sxINPdwC3iYMeJOV245gdZZoyYWQ_Mh48zA64LKNns",
                         "delivery": "ready", "helper": {"ready": True, "restarts": 0,
                             "state": "ready"},
@@ -1182,7 +1178,8 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
-                         "/api/push/test", "/api/push/device-settings") \
+                         "/api/push/test", "/api/push/device-settings",
+                         "/api/legacy-ntfy/test") \
                     and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
             if route == "/api/push/subscription":
@@ -1227,6 +1224,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply({"ok": True, "delivery": {"id": "push-fixture",
                     "event_id": "evt-fixture", "device_id": device["id"],
                     "generation": 1, "status": "queued", "attempt": 0}})
+            if route == "/api/legacy-ntfy/test":
+                if STATE["settings"].get("legacy_ntfy_enabled") is not True:
+                    return self.json_reply(
+                        {"ok": False, "error": "Legacy ntfy is disabled"}, 409)
+                STATE["actions"].append({"type": "legacy_ntfy_test"})
+                return self.json_reply({"ok": True, "queued": True})
             if route == "/api/notifications/read":
                 device_id = str(payload.get("device_id") or "default")
                 cursor = int(payload.get("cursor") or 0)
@@ -1286,15 +1289,9 @@ class Handler(BaseHTTPRequestHandler):
                                 if item["session_id"] == payload.get("mute_session")), None)
                 if session:
                     session["muted"] = bool(payload.get("muted"))
-                if isinstance(payload.get("notify"), dict):
-                    STATE["notify"].update({key: bool(value) for key,value in payload["notify"].items()
-                                            if key in STATE["notify"]})
-                    payload["notify"] = copy.deepcopy(STATE["notify"])
                 for key in ("reader_width", "preview_sessions", "preview_session_lines",
-                            "preview_agents", "preview_agent_lines", "digest_schedule_time",
-                            "digest_schedule_zone", "awaiting_input_notify_seconds",
-                            "stall_seconds", "spend_threshold_usd", "fleet_quiet_minutes",
-                            "dashboard_url"):
+                            "preview_agents", "preview_agent_lines", "stall_seconds",
+                            "legacy_ntfy_enabled"):
                     if key in payload:
                         STATE["settings"][key] = payload[key]
                 if "budgets" in payload:

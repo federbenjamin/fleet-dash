@@ -66,9 +66,11 @@ def main():
     assert set(budgets["measurement_labels"]) == {
         "exact", "partial", "token_only", "unavailable"}
     assert "budget_summary" in fleet
-    assert "scheduled_digest" in fleet["notify"]
-    assert "digest_schedule_time" in fleet["settings"]
-    assert "digest_schedule_zone" in fleet["settings"]
+    assert "notify" not in fleet
+    assert fleet["settings"]["legacy_ntfy_enabled"] in (True, False)
+    assert fleet["settings"]["legacy_ntfy_configured"] in (True, False)
+    for retired in ("dashboard_url", "digest_schedule_time", "digest_schedule_zone"):
+        assert retired not in fleet["settings"]
     for action in fleet.get("actions") or []:
         if action.get("kind") == "budget":
             assert action.get("primary_action") == "view_budget"
