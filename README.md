@@ -595,7 +595,10 @@ same request/result files. The staging applet receives its own one-time iTerm au
 
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
-- Claude VS Code extension sessions have no tty → view-only (injection reports "no terminal").
+- Claude background forks can report no controlling tty through `ps` while still keeping their
+  live iTerm pseudo-terminal open. Fleet validates fd 0/1/2 with `lsof` as a fallback and keeps
+  those sessions interactive. A true Claude VS Code extension session has no `/dev/ttys…` route
+  and remains view-only (injection reports "no terminal").
 - ChatGPT Desktop and Codex VS Code do not expose their private App Server endpoint to Fleet Dash, so
   those transcripts are view-only. Managed Codex threads can open an attached TUI on Fleet's shared
   socket, but Fleet cannot focus an already-open Codex terminal tab.

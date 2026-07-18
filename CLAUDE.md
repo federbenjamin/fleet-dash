@@ -232,7 +232,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the Claude card's desktop-only **Terminal** button (`.deskonly`, hidden
-    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless).
+    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless). A Claude `kind:bg`
+    fork may retain `/dev/ttys…` on fd 0/1/2 while `ps -o tty` reports `??`; `_tty_for_pid`
+    therefore falls back to fixed-argv `lsof -d 0,1,2` and accepts only an exact
+    `/dev/ttys[0-9A-Za-z]+` path. Keep that fallback shared by act and close—otherwise valid
+    background sessions advertise Send but every injection fails as falsely headless.
 26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
     `Engine.claude_usage_profiles` watches
     `~/Library/Preferences/HamedElfayome.Claude-Usage.plist` by mtime/size and projects ONLY profile
