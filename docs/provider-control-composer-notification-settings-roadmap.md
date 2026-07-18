@@ -1,8 +1,8 @@
 # Provider control, mobile composer, and notification settings roadmap
 
 Status: Implementation complete on `fix/provider-control-recovery`; isolated staging API/read-only
-browser smoke passes. Staging provider probes, installed-device checks, draft PR, and production
-promotion remain.
+browser smoke passes. Draft PR [#9](https://github.com/federbenjamin/fleet-dash/pull/9) is clean and
+mergeable. Staging provider probes, installed-device checks, and production promotion remain.
 
 Date: 2026-07-17
 
