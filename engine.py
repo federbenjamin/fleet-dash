@@ -1135,6 +1135,7 @@ class Engine:
         self.velocity = {}              # path -> deque[(t, total_tokens)]
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
+        self._codex_terminal_routes_cache = (0.0, {})
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
         self._claude_background = None  # lazy official `claude attach` bridge
         self._claude_background_error = None
@@ -2435,6 +2436,11 @@ class Engine:
                 session["capabilities"] = {
                     **(session.get("capabilities") or {}), "submit": False,
                     "interrupt": False, "takeover": False, "close": False}
+        # App Server turn ownership and terminal reachability are separate facts.
+        # A live TUI attached to Fleet's exact socket remains a safe text/focus
+        # route even when App Server reports an active-turn ownership mismatch.
+        self._apply_codex_terminal_routes(
+            codex_sessions, self._codex_terminal_routes())
         sessions.extend(codex_sessions)
         phase("codex")
         muted = self.cfg.get("muted_sessions") or {}
@@ -4938,6 +4944,111 @@ Treat this as an independent session. Verify the repository state before changin
                 return tty
         return ""
 
+    def _codex_terminal_routes(self, force=False):
+        """Find exact Codex TUIs attached to Fleet's own App Server socket.
+
+        A transcript, cwd, or ``source=vscode`` is not route evidence. The process
+        must have a real tty and its argv must contain all three exact values:
+        ``codex resume``, Fleet's Unix socket, and one canonical thread UUID.
+        Multiple ttys for the same UUID are ambiguous and remain app-server-only.
+        """
+        now = time.monotonic()
+        cached_at, cached = self._codex_terminal_routes_cache
+        if now - cached_at < 2 and (cached or not force):
+            return dict(cached)
+        try:
+            from codex_adapter import codex_control_socket
+            expected_socket = os.path.realpath(codex_control_socket())
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,tty=,command="], capture_output=True,
+                text=True, timeout=2)
+            output = result.stdout or ""
+            if result.returncode or len(output) > 2_000_000:
+                raise RuntimeError("bounded Codex terminal lookup failed")
+        except Exception:
+            routes = dict(cached) if now - cached_at < 10 else {}
+            self._codex_terminal_routes_cache = (now, routes)
+            return routes
+
+        candidates = {}
+        for line in output.splitlines():
+            match = re.match(r"^\s*(\d+)\s+(\S+)\s+(.+)$", line)
+            if not match:
+                continue
+            pid, tty, command = int(match.group(1)), match.group(2), match.group(3)
+            if not re.fullmatch(r"ttys[0-9A-Za-z]+", tty):
+                continue
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                continue
+            try:
+                resume_index = argv.index("resume")
+            except ValueError:
+                continue
+            if not any(os.path.basename(part).lower() == "codex"
+                       for part in argv[:resume_index]):
+                continue
+            remote = ""
+            for index, part in enumerate(argv):
+                if part == "--remote" and index + 1 < len(argv):
+                    remote = argv[index + 1]
+                    break
+                if part.startswith("--remote="):
+                    remote = part.split("=", 1)[1]
+                    break
+            if not remote.startswith("unix://") or \
+                    os.path.realpath(remote[len("unix://"):]) != expected_socket:
+                continue
+            thread_id = ""
+            candidate = argv[-1] if resume_index + 1 < len(argv) else ""
+            try:
+                canonical = str(uuid.UUID(candidate))
+            except (ValueError, AttributeError):
+                canonical = ""
+            if canonical and canonical == candidate.lower():
+                thread_id = canonical
+            if thread_id:
+                candidates.setdefault(thread_id, []).append(
+                    {"tty": f"/dev/{tty}", "pid": pid})
+
+        routes = {}
+        for thread_id, matches in candidates.items():
+            ttys = {item["tty"] for item in matches}
+            if len(ttys) == 1:
+                routes[thread_id] = max(matches, key=lambda item: item["pid"])
+        self._codex_terminal_routes_cache = (now, routes)
+        return dict(routes)
+
+    def _codex_terminal_route(self, thread_id, force=False):
+        try:
+            canonical = str(uuid.UUID(str(thread_id or "")))
+        except (ValueError, AttributeError):
+            return None
+        return self._codex_terminal_routes(force=force).get(canonical)
+
+    @staticmethod
+    def _apply_codex_terminal_routes(sessions, routes):
+        """Expose only capabilities proved by an exact attached Fleet TUI."""
+        for session in sessions:
+            route = routes.get(str(session.get("native_session_id") or ""))
+            if not route:
+                continue
+            unavailable = (session.get("state") in ("blocked", "error", "stale") or
+                           bool(session.get("pending")))
+            capabilities = dict(session.get("capabilities") or {})
+            capabilities.update(
+                submit=not unavailable, queue_submit=False, focus_terminal=True,
+                focus_terminal_mode="focus", focus_terminal_label="open",
+                focus_terminal_reason="Bring the attached Codex terminal to the front")
+            session.update(
+                capabilities=capabilities, terminal_attached=True,
+                queue_accepting=False, headless=False, read_only=False,
+                read_only_reason=None,
+                control_state=("terminal_active" if session.get("state") in
+                               ("running", "stalled", "needs_you") else
+                               "terminal_idle"))
+
     @staticmethod
     def _is_background_claude(reg):
         return str((reg or {}).get("kind") or "").lower() in ("bg", "background")
@@ -5501,9 +5612,14 @@ Treat this as an independent session. Verify the repository state before changin
             action["image_paths"] = image_paths
         # Queue-owned image paths are server-internal and already confined by
         # OutboxManager. Do not send them through public act(), which accepts
-        # opaque upload IDs only.
-        result = (self.codex.act(action) if image_paths and
-                  record.get("target_provider") == "codex" else self.act(action))
+        # opaque upload IDs only. An exact attached Codex TUI can still receive
+        # those paths through the same terminal transport as direct messages.
+        if image_paths and record.get("target_provider") == "codex":
+            route = self._codex_terminal_route(self.codex.native(sid), force=True)
+            result = (self._write_codex_terminal(action, route) if route else
+                      self.codex.act(action))
+        else:
+            result = self.act(action)
         return {"ok": bool(result.get("ok")), "provider": record.get("target_provider"),
                 "session_id": sid, "accepted": bool(result.get("ok")),
                 "error": result.get("error"), "code": result.get("code"),
@@ -5530,6 +5646,35 @@ Treat this as an independent session. Verify the repository state before changin
         except Exception as exc:
             print(f"Codex recovery queue failed: {exc}", file=sys.stderr, flush=True)
             return {"ok": False, "error": "message could not be saved to the recovery queue"}
+
+    def _write_codex_terminal(self, action, route):
+        """Type a bounded message into one server-discovered attached Codex TUI."""
+        if not route or not route.get("tty"):
+            return {"ok": False, "error": "attached Codex terminal is unavailable",
+                    "code": "provider_control_unavailable", "queueable": True}
+        typ = str(action.get("type") or "")
+        if typ not in ("text", "image_text"):
+            return {"ok": False, "error": "unsupported Codex terminal action"}
+        text = str(action.get("text") or "")[:2000].strip()
+        if typ == "image_text":
+            paths = [str(path) for path in (action.get("image_paths") or []) if path]
+            if not paths:
+                return {"ok": False, "error": "no images"}
+            text = text or ("Please inspect the attached image." if len(paths) == 1 else
+                            "Please inspect the attached images.")
+            text += "\n\nImages attached through Fleet:\n" + "\n".join(
+                f"- {path}" for path in paths)
+        if not text:
+            return {"ok": False, "error": "empty text"}
+        # Keep the same TUI popup guard as Claude terminal injection.
+        if text.startswith("/") and " " not in text:
+            text += " "
+        result = self._iterm_write(route["tty"], [(text, True)], step_delay=0.05)
+        if result.get("ok"):
+            result.update(transport="codex_terminal",
+                          session_id=str(action.get("session_id") or ""),
+                          accepted=True)
+        return result
 
     def _outbox_spawn(self, record):
         spec = dict(record.get("spawn_spec") or {})
@@ -5614,6 +5759,10 @@ Treat this as an independent session. Verify the repository state before changin
             if action.get("type") == "close" and action.get("cleanup_ticket") and \
                not self._cleanup_ticket_matches(action.get("cleanup_ticket"), sid):
                 return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            if action.get("type") in ("text", "image_text"):
+                route = self._codex_terminal_route(self.codex.native(sid), force=True)
+                if route:
+                    return self._write_codex_terminal(action, route)
             if action.get("type") in ("text", "image_text") and session and \
                     (session.get("capabilities") or {}).get("queue_submit"):
                 return self._queue_codex_recovery(action)
@@ -6041,6 +6190,14 @@ Treat this as an independent session. Verify the repository state before changin
         from codex_adapter import codex_command, codex_control_socket
         sid = str(action.get("session_id") or "")
         tid = self.codex.native(sid)
+        route = self._codex_terminal_route(tid, force=True)
+        if route:
+            result = self._iterm_write(
+                route["tty"], [("__FOCUS__", False)], step_delay=0.05)
+            if result.get("ok"):
+                result.update(session_id=sid, shared_runtime=True,
+                              transport="codex_terminal", focused=True)
+            return result
         session = next((item for item in self.codex.sessions()
                         if item.get("session_id") == sid), None)
         if not session or not session.get("capabilities", {}).get("focus_terminal"):

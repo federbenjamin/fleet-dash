@@ -633,6 +633,94 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(command.endswith(" same"))
         self.assertEqual(self.codex.actions, [])
 
+    def test_codex_terminal_discovery_requires_exact_socket_uuid_and_unique_tty(self):
+        thread_id = "019f6bb5-1a72-7041-a7f2-afab571271d9"
+        socket_path = os.path.join(self.tmp.name, "fleet-codex.sock")
+        exact = (f" 101 ttys001 /opt/homebrew/bin/node /opt/codex resume --remote "
+                 f"unix://{socket_path} {thread_id}\n")
+        duplicate_child = (f" 102 ttys001 /opt/codex resume --remote "
+                           f"unix://{socket_path} {thread_id}\n")
+        wrong_socket = (f" 103 ttys002 /opt/codex resume --remote "
+                        f"unix://{socket_path}-other {thread_id}\n")
+        headless = (f" 104 ?? /opt/codex resume --remote "
+                    f"unix://{socket_path} {thread_id}\n")
+        self.engine._codex_terminal_routes_cache = (0.0, {})
+        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+             mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
+                 returncode=0, stdout=exact + duplicate_child + wrong_socket + headless)):
+            routes = self.engine._codex_terminal_routes(force=True)
+        self.assertEqual(routes, {thread_id: {"tty": "/dev/ttys001", "pid": 102}})
+
+        ambiguous = exact + (f" 105 ttys003 /opt/codex resume --remote "
+                             f"unix://{socket_path} {thread_id}\n")
+        self.engine._codex_terminal_routes_cache = (0.0, {})
+        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+             mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
+                 returncode=0, stdout=ambiguous)):
+            self.assertEqual(self.engine._codex_terminal_routes(force=True), {})
+
+    def test_live_codex_terminal_flushes_recovery_queue_without_app_server_control(self):
+        thread_id = "019f6bb5-1a72-7041-a7f2-afab571271d9"
+        sid = "codex:" + thread_id
+        session = codex_session()
+        session.update(session_id=sid, native_session_id=thread_id, state="stalled",
+                       control_state="reconnecting", queue_accepting=True,
+                       read_only=False, headless=False, external=True)
+        session["capabilities"].update(submit=False, queue_submit=True,
+                                       focus_terminal=False)
+        self.codex.session = session
+        routes = {}
+        self.engine._codex_terminal_routes = lambda force=False: dict(routes)
+
+        disconnected = self.engine.scan()
+        before = next(item for item in disconnected["sessions"]
+                      if item["session_id"] == sid)
+        self.assertTrue(before["capabilities"]["queue_submit"])
+        queued = self.engine.act({"type": "text", "session_id": sid,
+                                  "text": "Queued exact work",
+                                  "client_request_id": "terminal-route-recovery"})
+        self.assertTrue(queued["queued"])
+        self.assertEqual(self.engine.outbox.get(queued["outbox_id"])["state"],
+                         "waiting_provider")
+
+        routes[thread_id] = {"tty": "/dev/ttys001", "pid": 101}
+        connected = self.engine.scan()
+        after = next(item for item in connected["sessions"]
+                     if item["session_id"] == sid)
+        self.assertTrue(after["terminal_attached"])
+        self.assertTrue(after["capabilities"]["submit"])
+        self.assertFalse(after["capabilities"]["queue_submit"])
+        self.assertEqual(after["access"], "interactive")
+        self.assertEqual(after["control_state"], "terminal_active")
+
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        self.engine.run_outbox()
+        row = self.engine.outbox.get(queued["outbox_id"])
+        self.assertEqual(row["state"], "sent")
+        self.assertEqual(writes, [
+            ("/dev/ttys001", [("Queued exact work", True)], 0.05)])
+        self.assertEqual(self.codex.actions, [])
+
+    def test_codex_focus_uses_existing_exact_terminal_route(self):
+        thread_id = "019f6bb5-1a72-7041-a7f2-afab571271d9"
+        sid = "codex:" + thread_id
+        self.codex.session = {**codex_session(), "session_id": sid,
+                              "native_session_id": thread_id}
+        self.engine._codex_terminal_route = lambda value, force=False: {
+            "tty": "/dev/ttys001", "pid": 101}
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        result = self.engine.act({"type": "focus", "session_id": sid})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["focused"])
+        self.assertEqual(result["transport"], "codex_terminal")
+        self.assertEqual(writes, [
+            ("/dev/ttys001", [("__FOCUS__", False)], 0.05)])
+        self.assertEqual(self.codex.actions, [])
+
     def test_codex_spawn_starts_visible_initial_hi(self):
         with mock.patch.object(engine_module, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({

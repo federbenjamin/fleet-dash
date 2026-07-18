@@ -612,7 +612,9 @@ class OutboxManager:
             return "block", "The exact target session is no longer live", None
         if session.get("provider_stale") or session.get("stale"):
             return "retry", "Provider state is stale", session
-        if session.get("read_only") or session.get("external") or session.get("access") == "view_only":
+        terminal_attached = bool(session.get("terminal_attached"))
+        if (session.get("read_only") or session.get("external") or
+                session.get("access") == "view_only") and not terminal_attached:
             return "block", session.get("read_only_reason") or "The target is view only", session
         capabilities = session.get("capabilities") or {}
         if record.get("kind") == "provider_reconnect":

@@ -300,6 +300,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
     headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
     server creates a second runtime agent.
+    A live terminal is a separate, narrowly proved transport—not ownership evidence. Discover it
+    only from a bounded process listing whose argv contains `codex resume`, the exact Fleet Unix
+    socket, and one canonical thread UUID on a real TTY. Parent/child processes on the same TTY are
+    one route; two distinct TTYs are ambiguous and enable nothing. That route may enable only text,
+    image-path text, and focus. It must never enable close, interrupt, approval, archive, compact,
+    review, takeover, or ownership, and its process/TTY details never enter the API. Prefer that
+    terminal route over App Server submission when present, including during an active-turn owner
+    mismatch, and let recovery-outbox messages flush when the exact route appears.
     Optional metadata must never poison or block the critical `thread/list` refresh. Read model
     choices from Codex's bounded, credential-free `~/.codex/models_cache.json`; never put automatic
     `model/list` calls on Fleet's shared control WebSocket. A `thread/read` failure is a per-session
@@ -512,6 +520,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Removing a device deletes its redacted registration/read cursor and suppresses its queued jobs;
     historical delivery rows retain only the opaque device id. Disconnecting the current device may
     instead preserve its redacted row so it can reconnect with its read position intact.
+    Settings explains this model in a collapsed field guide and gives every expanded event kind and
+    control a one-line definition. Severity labels are user-facing thresholds: All events maps to
+    `info`, Warning or Critical maps to `warning`, and Critical only maps to `critical`. Briefing
+    severities must normalize before entering `notification_events`: `success` → `info` and `high`
+    → `critical`; existing rows are migrated at DB initialization. Never let an unranked Briefing
+    severity silently make an enabled event ineligible for push.
     The separate legacy flag enables only one manually invoked generic ntfy test route; provider
     scans never dispatch it and it is never a Web Push fallback or duplicate path.
 49. **One provider limit blocks one session, never the dashboard.** App Server error payloads are

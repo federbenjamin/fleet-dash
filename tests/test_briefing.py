@@ -642,6 +642,59 @@ class BriefingTests(unittest.TestCase):
                 WHERE d.purpose!='test'""").fetchall()
         self.assertEqual(purposes, [("question", "initial")])
 
+    def test_briefing_severity_maps_success_to_info_and_high_to_critical(self):
+        self.qualify_push_device("phone")
+        policy = self.ops.notification_policy_snapshot()
+        completion = next(item for item in policy["kinds"]
+                          if item["kind"] == "completion")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "completion",
+            "expected_revision": completion["revision"],
+            "patch": {"mode": "once", "minimum_severity": "info"}})
+        budget = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                      if item["kind"] == "budget")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "budget",
+            "expected_revision": budget["revision"],
+            "patch": {"mode": "once", "minimum_severity": "critical"}})
+        self.ops.replace_budgets([{"id": "critical-budget", "scope_type": "fleet",
+            "metric": "tokens", "limit_value": 1}])
+
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, [session()]), self.workstream)
+        critical_delivery = self.ops.notification_claim_delivery()
+        self.assertEqual(critical_delivery["event"]["kind"], "budget")
+        with sqlite3.connect(self.path) as db:
+            critical_severity = db.execute(
+                "SELECT severity FROM notification_events WHERE id=?",
+                (critical_delivery["event_id"],)).fetchone()[0]
+        self.assertEqual(critical_severity, "critical")
+        self.ops.notification_finish_delivery(
+            critical_delivery["id"], {"ok": True, "status": 201})
+
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, [session(group="available",
+            normalized_state="turn_done", state="turn_done", convo_v=2)]), self.workstream)
+        completion_delivery = self.ops.notification_claim_delivery()
+        self.assertEqual(completion_delivery["event"]["kind"], "completion")
+        with sqlite3.connect(self.path) as db:
+            completion_severity = db.execute(
+                "SELECT severity FROM notification_events WHERE id=?",
+                (completion_delivery["event_id"],)).fetchone()[0]
+        self.assertEqual(completion_severity, "info")
+        self.ops.notification_finish_delivery(
+            completion_delivery["id"], {"ok": True, "status": 201})
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE notification_events SET severity='success' WHERE id=?",
+                       (completion_delivery["event_id"],))
+            db.execute("UPDATE notification_events SET severity='high' WHERE id=?",
+                       (critical_delivery["event_id"],))
+        FleetOperations(self.path, clock=self.clock)
+        with sqlite3.connect(self.path) as db:
+            migrated = dict(db.execute(
+                "SELECT id,severity FROM notification_events WHERE id IN (?,?)",
+                (completion_delivery["event_id"], critical_delivery["event_id"])).fetchall())
+        self.assertEqual(migrated[completion_delivery["event_id"]], "info")
+        self.assertEqual(migrated[critical_delivery["event_id"]], "critical")
+
     def test_global_policy_applies_delay_and_one_reminder_wave_to_all_devices(self):
         self.qualify_push_device("phone", {"kinds": ["question"],
             "minimum_severity": "warning", "initial_delay_seconds": 30})

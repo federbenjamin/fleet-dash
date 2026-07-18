@@ -2164,13 +2164,27 @@ test('notification policy controls every kind, warns on aggressive cadence, and 
   await expect(page.locator('.policyanswer')).toContainText('Push on');
   await expect(page.locator('.policyanswer')).toContainText('Last delivery: sent · Quick build finished');
   await expect(page.locator('.policyrule')).toHaveCount(12);
-  const question = page.locator('.policyrule').filter({hasText:'Question'});
+  const guide = page.locator('.policyguide');
+  await expect(guide).toContainText('What these settings mean');
+  await guide.locator('summary').click();
+  await expect(guide).toHaveAttribute('open', '');
+  await expect(guide).toContainText('Info');
+  await expect(guide).toContainText('Warning');
+  await expect(guide).toContainText('Critical');
+  await expect(guide).toContainText('session mute');
+  const question = page.locator('.policyrule[data-policy-kind="question"]');
   await question.locator('summary').click();
   await expect(question).toContainText('Once + reminder');
+  await expect(question).toContainText('waiting for one answer from you');
+  await expect(question.getByLabel('Minimum severity')).toHaveValue('info');
+  await expect(question.getByLabel('Minimum severity').locator('option').nth(0)).toHaveText(
+    'All events (Info, Warning, or Critical)');
+  await expect(question).toContainText('does not change sound, color, or presentation');
   await question.getByLabel('Apply this change to 1 active event').check();
   await question.getByLabel('Cadence').selectOption('repeat');
   await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
     action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.mode).toBe('repeat');
+  await expect(page.locator('.policyguide')).toHaveAttribute('open', '');
   const beforeInvalidDuration = (await fixtureState(page)).actions.filter(action =>
     action.type==='notification_policy'&&action.kind==='question').length;
   await page.locator('#policy-question-repeat_interval_seconds-amount').evaluate(input => { input.value = '1'; });

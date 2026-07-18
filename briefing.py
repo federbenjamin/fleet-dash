@@ -50,6 +50,7 @@ PUSHABLE_KINDS = set(NOTIFICATION_KINDS)
 INFORMATIONAL_NOTIFICATION_KINDS = {
     "completion", "artifact", "outcome", "budget", "measurement", "notification"}
 PUSH_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
+PUSH_SEVERITY_ALIASES = {"success": "info", "high": "critical"}
 PUSH_DELIVERY_PURPOSES = {"initial", "reminder", "snooze_wake", "manual_retry", "test"}
 NOTIFICATION_POLICY_MODES = {"off", "once", "remind_once", "repeat"}
 DEFAULT_KIND_POLICY = {
@@ -221,6 +222,9 @@ class FleetOperations:
             db.execute("""UPDATE notification_events
                 SET title='Legacy ntfy test failed', summary='Legacy ntfy delivery failed'
                 WHERE source_type='briefing' AND source_id LIKE 'notification-failed:%'""")
+            db.execute("""UPDATE notification_events SET severity=CASE severity
+                WHEN 'success' THEN 'info' WHEN 'high' THEN 'critical' END
+                WHERE severity IN ('success','high')""")
             db.execute("""CREATE TABLE IF NOT EXISTS notification_devices(
                 id TEXT PRIMARY KEY, display_name TEXT NOT NULL, platform TEXT,
                 subscription_json TEXT NOT NULL, endpoint_origin TEXT NOT NULL,
@@ -744,6 +748,10 @@ class FleetOperations:
         state = self._text(spec.get("state"), 20)
         if kind not in NOTIFICATION_KINDS or state not in NOTIFICATION_STATES:
             raise OperationsError("invalid notification event")
+        raw_severity = self._text(spec.get("severity"), 20) or "info"
+        severity = PUSH_SEVERITY_ALIASES.get(raw_severity, raw_severity)
+        if severity not in NOTIFICATION_SEVERITIES:
+            raise OperationsError("invalid notification severity")
         row = db.execute("SELECT * FROM notification_events WHERE event_key=?",
                          (event_key,)).fetchone()
         if row:
@@ -759,7 +767,7 @@ class FleetOperations:
             changed = any((
                 row["kind"] != kind,
                 row["state"] != next_state,
-                row["severity"] != self._text(spec.get("severity"), 20),
+                row["severity"] != severity,
                 row["title"] != self._text(spec.get("title"), 160),
                 row["summary"] != self._text(spec.get("summary"), 800),
                 row["source_revision"] != self._text(spec.get("source_revision"), 320),
@@ -770,7 +778,7 @@ class FleetOperations:
                     title=?,summary=?,provider=?,session_id=?,workstream_id=?,source_type=?,
                     source_id=?,source_revision=?,changed_at=?,resolved_at=?,snoozed_until=?,
                     reminder_budget=?,payload_json=? WHERE event_key=?""", (
-                    kind, next_state, self._text(spec.get("severity"), 20) or "info",
+                    kind, next_state, severity,
                     self._text(spec.get("title"), 160), self._text(spec.get("summary"), 800),
                     self._text(spec.get("provider"), 30) or None,
                     self._text(spec.get("session_id"), 320) or None,
@@ -794,7 +802,7 @@ class FleetOperations:
             resolved_at,snoozed_until,reminder_budget,last_push_at,payload_json)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             event_id, sequence, event_key, kind, state,
-            self._text(spec.get("severity"), 20) or "info",
+            severity,
             self._text(spec.get("title"), 160), self._text(spec.get("summary"), 800),
             self._text(spec.get("provider"), 30) or None,
             self._text(spec.get("session_id"), 320) or None,

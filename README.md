@@ -108,7 +108,8 @@ Fleet Dash owns one detached App Server as the canonical Codex runtime. It start
 WebSocket-over-Unix protocol at `~/.claude/fleet-dash/codex-app-server.sock`. The detached listener
 survives a Fleet web daemon restart and is reused instead of duplicated. (`codex app-server daemon
 start` is not used: that manager requires Codex's standalone installer, while this machine uses the
-npm CLI.) Fleet never scrapes the Codex TUI. App Server remains the only control surface. For an
+npm CLI.) Fleet never scrapes the Codex TUI. App Server remains the canonical runtime control
+surface; an exact TUI attached to that socket is also a bounded text/focus transport. For an
 explicitly pinned external thread, Fleet may defensively observe a small allowlist of lifecycle and
 visible-message events in its local `~/.codex/sessions` rollout so the view-only card can track work
 that the separate Desktop/VS Code App Server reports only as `notLoaded`.
@@ -123,7 +124,10 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
 - A terminal started with
   `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
   is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
-  active turn without resuming a second agent. The card's **attach** button opens this TUI form.
+  active turn without resuming a second agent. If that exact command is running on one real TTY,
+  Fleet can send through and focus the existing terminal even while App Server reports a transient
+  turn-owner mismatch. The card's **attach** button opens this TUI form only when no exact attached
+  terminal already exists.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
   transcripts through paginated `thread/list`, puts active work under **Working** and inactive work
   in **Session history**, and exposes them as view-only. Pinned external threads also observe local
@@ -514,7 +518,12 @@ Once + reminder, or Repeat until resolved, with bounded delay, interval, maximum
 severity, and optional quiet-hours bypass. Changing an Off rule does not backfill existing active
 events unless you explicitly select **Apply this change**. Session mute and event snooze always
 override the global rule; a muted session stays muted until manually unmuted in Settings → Sessions.
-The section also shows the exact next due push and the most recent delivery outcome.
+The section also shows the exact next due push and the most recent delivery outcome. Expand **What
+these settings mean** for the delivery precedence and severity guide; every expanded event rule
+defines the event and explains each visible control. **All events** admits Info, Warning, and
+Critical; **Warning or Critical** excludes Info; **Critical only** admits only Critical. Routine
+successes normalize to Info, while severe budget, repository, and scheduled-delivery failures
+normalize to Critical.
 
 ## Config (`config.json`)
 
@@ -623,8 +632,8 @@ same request/result files. The staging applet receives its own one-time iTerm au
   Code extension session has neither that background-job identity nor a terminal route and remains
   view-only.
 - ChatGPT Desktop and Codex VS Code do not expose their private App Server endpoint to Fleet Dash, so
-  those transcripts are view-only. Managed Codex threads can open an attached TUI on Fleet's shared
-  socket, but Fleet cannot focus an already-open Codex terminal tab.
+  those transcripts are view-only. Fleet can send through and focus a Codex TUI only when its
+  process command names the exact Fleet socket and canonical thread UUID on one unambiguous TTY.
 - Codex App Server has no direct client-to-subagent input/stop RPC or per-thread currency-cost field.
   Fleet Dash exposes the corresponding parent-mediated/unavailable states and never substitutes zero
   as a measurement.
