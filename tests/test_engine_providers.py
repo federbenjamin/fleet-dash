@@ -487,7 +487,7 @@ class EngineProviderTest(unittest.TestCase):
         codex = next(item for item in fleet["sessions"] if item["provider"] == "codex")
         self.assertEqual((codex["state"], codex["provider_stale"],
                           codex["state_confidence"], codex["access"]),
-                         ("stale", True, "stale", "view_only"))
+                         ("stale", True, "stale", "interactive"))
         self.assertFalse(fleet["providers"]["codex"]["ok"])
         self.assertIn("Codex crashed", fleet["providers"]["codex"]["error"])
 
@@ -1145,7 +1145,7 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual((organized["state"], organized["normalized_state"],
                           organized["ui_group"], organized["state_confidence"],
                           organized["access"]),
-                         ("stale", "running", "working", "stale", "view_only"))
+                         ("stale", "running", "working", "stale", "interactive"))
         self.assertIn("stale", [fact["kind"] for fact in organized["state_evidence"]])
 
     def test_state_journal_deduplicates_recovers_and_pages(self):

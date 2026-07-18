@@ -116,6 +116,12 @@ test('responsive application shell routes, filters, and follows browser back', a
 });
 
 test('out-of-order fleet and Insights responses cannot overwrite newer state', async ({ page }) => {
+  // This test needs Playwright's page.route to own /api/fleet. A service worker
+  // can win registration during the setup idle callback and bypass page.route,
+  // which tests the browser cache instead of response ordering.
+  await page.addInitScript(() => {
+    navigator.serviceWorker.register=async()=>{throw new Error('disabled for route-order test');};
+  });
   await reset(page);
   const baseFleet = await (await page.request.get('/api/fleet')).json();
   let fleetCalls = 0;
@@ -129,13 +135,15 @@ test('out-of-order fleet and Insights responses cannot overwrite newer state', a
         body: JSON.stringify(snapshot) });
     } catch (_) { /* the stale request is intentionally aborted */ }
   });
-  await page.evaluate(() => {
-    tick();
-    setTimeout(() => tick(), 20);
+  await page.evaluate(async () => {
+    const first=tick();
+    await new Promise(resolve=>setTimeout(resolve,20));
+    const second=tick();
+    await Promise.allSettled([first,second]);
   });
+  expect(fleetCalls).toBeGreaterThanOrEqual(2);
   await expect.poll(() => page.evaluate(() =>
     last.sessions.find(item => item.session_id === 'claude-one')?.title)).toBe('fresh poll result');
-  expect(fleetCalls).toBeGreaterThanOrEqual(2);
   await page.unroute('**/api/fleet');
 
   const insightsPayload = days => ({ ok: true,
@@ -325,7 +333,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   }
 
   await reset(page, 'usage-warning');
-  await expect(page.locator('#usagechip')).toHaveText('Usage · 96%');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
   await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
@@ -569,7 +577,7 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(page.locator('[data-sid="claude-one"]')).toContainText('Claude parser fix');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(codex).toContainText('Codex parity work');
-  await expect(page.locator('#usagechip')).toHaveText('Usage');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('Claude Code');
@@ -987,7 +995,7 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
-  await expect(page.locator('#sact textarea[placeholder^="send a message"]')).toBeVisible();
+  await expect(page.locator('#sact textarea[placeholder="send message"]')).toBeVisible();
   const strip=page.locator('#sact .statusstrip');
   await expect(strip).toContainText('claude · high');
   await expect(strip).not.toContainText('Ctx:');
@@ -1288,9 +1296,35 @@ test('message composers use Return for newlines and an explicit modified Return 
     type: 'relay', text: 'Relay line\nMore detail' });
 });
 
+test('mobile chat keeps a docked composer and dismisses it on a vertical history drag', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile interaction');
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const composer=page.locator('#sft-codex\\:thread-one');
+  await composer.focus();
+  await expect(page.locator('#sact')).toHaveClass(/composer-active/);
+  await expect(page.locator('#sact .session-context')).toBeHidden();
+  const bounds=await page.locator('#sview').boundingBox();
+  expect(Math.round(bounds.y+bounds.height)).toBeLessThanOrEqual(844);
+  await page.locator('#sbody').evaluate(body=>{
+    const touch=(type,x,y)=>{
+      const event=new Event(type,{bubbles:true,cancelable:true});
+      Object.defineProperty(event,'touches',{value:type==='touchend'?[]:[{clientX:x,clientY:y}]});
+      body.dispatchEvent(event);
+    };
+    touch('touchstart',100,500);touch('touchmove',102,450);touch('touchend',102,450);
+  });
+  await expect(composer).not.toBeFocused();
+  await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
+});
+
 test('phone images persist across reload and send through the owning provider', async ({ page }) => {
   await reset(page);
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(page.locator('#sact').getByRole('menu')).toBeHidden();
+  await page.locator('#sact').getByRole('button',{name:'message options'}).click();
+  await expect(page.locator('#sact').getByRole('menuitem',{name:'Send picture'})).toBeVisible();
+  await expect(page.locator('#sact').getByRole('menuitem',{name:'Schedule message'})).toBeVisible();
   const image={name:'phone-photo.png',mimeType:'image/png',
     buffer:Buffer.from([137,80,78,71,13,10,26,10,0,0,0,0])};
   await page.locator('#sact input[type="file"]').setInputFiles(image);
@@ -1843,7 +1877,8 @@ test('message Outbox schedules exact session delivery and exposes durable centra
   await page.locator('[data-sid="codex:thread-one"] .primarybtn').click();
   await expect(page.locator('#sview')).toBeVisible();
   await page.locator('#sft-codex\\:thread-one').fill('Send this when the Codex session is available');
-  await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
+  await page.locator('#sact').getByRole('button', { name: 'message options' }).click();
+  await page.locator('#sact').getByRole('menuitem', { name: 'Schedule message' }).click();
   await expect(page.locator('#scheduleview')).toBeVisible();
   await page.getByRole('button', { name: 'When available', exact: true }).click();
   await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();
@@ -1879,7 +1914,8 @@ test('usage-reset and scheduled-new-session forms keep full target configuration
   await reset(page, 'base');
   await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sft-claude-one').fill('Continue after my Claude usage resets');
-  await page.locator('#sact').getByRole('button', { name: 'delivery options' }).click();
+  await page.locator('#sact').getByRole('button', { name: 'message options' }).click();
+  await page.locator('#sact').getByRole('menuitem', { name: 'Schedule message' }).click();
   await page.getByRole('button', { name: 'When usage resets', exact: true }).click();
   await expect(page.locator('#scheduleview select').last()).toContainText('Claude Code');
   await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();

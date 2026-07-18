@@ -41,6 +41,39 @@ def codex_command(configured=None):
     raise CodexError("codex executable not found; set codex_command in config.json")
 
 
+def _local_model_catalog(path, max_bytes=4 * 1024 * 1024):
+    """Read Codex's bounded, credential-free local model catalog."""
+    with open(path, "rb") as handle:
+        raw = handle.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise CodexError("Codex model cache is unexpectedly large")
+    payload = json.loads(raw)
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise CodexError("Codex model cache has no model catalog")
+    out = []
+    for model in entries[:100]:
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get("slug") or model.get("model") or model.get("id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        efforts = []
+        raw_efforts = (model.get("supported_reasoning_levels") or
+                       model.get("supportedReasoningEfforts") or [])
+        for effort in raw_efforts[:20] if isinstance(raw_efforts, list) else []:
+            value = ((effort.get("effort") or effort.get("reasoningEffort"))
+                     if isinstance(effort, dict) else effort)
+            if isinstance(value, str) and value and value not in efforts:
+                efforts.append(value)
+        display = (model.get("display_name") or model.get("displayName") or
+                   model_id)
+        out.append({"id": model_id, "name": str(display), "efforts": efforts})
+    if not out:
+        raise CodexError("Codex model cache contains no usable models")
+    return out
+
+
 def codex_control_socket():
     """Return Fleet's custom path for Codex's supported Unix transport."""
     configured = os.environ.get("FLEET_DASH_CODEX_SOCKET")
@@ -385,9 +418,17 @@ class CodexAppServer:
         if not waiter["event"].wait(timeout or self.timeout):
             with self.lock:
                 self.pending.pop(rid, None)
+            self.last_error = f"timed out: {method}"
+            self._diagnostic("request_timeout", method)
+            # Session lifecycle timeouts mean this local WebSocket is no longer
+            # trustworthy. Detach only Fleet's client transport so the next
+            # request reconnects to the still-running shared App Server.
+            if str(method).startswith(("thread/", "turn/")):
+                self.close()
             raise CodexError(f"Codex app-server timed out: {method}")
         if "error" in waiter:
             raise CodexError(waiter["error"].get("message", str(waiter["error"])))
+        self.last_error = None
         return waiter.get("result") or {}
 
     def notify(self, method, params=None):
@@ -443,6 +484,11 @@ class CodexAppServer:
             self.last_error = str(exc)
             self._diagnostic("reader_error", exc)
         finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
             with self.lock:
                 waiter_ids = [rid for rid, waiter in self.pending.items()
                               if waiter.get("generation") == reader_generation]
@@ -602,7 +648,8 @@ class CodexAppServer:
 
     def read_thread(self, thread_id):
         return (self.request("thread/read", {"threadId": thread_id,
-                                              "includeTurns": True}).get("thread") or {})
+                                              "includeTurns": True},
+                             timeout=min(self.timeout, 4)).get("thread") or {})
 
     def start_thread(self, cwd, model=None, effort=None):
         params = {"cwd": cwd}
@@ -781,7 +828,8 @@ class CodexAdapter:
     PROVIDER = "codex"
 
     def __init__(self, enabled=True, client=None, state_path=None, clock=None,
-                 stall_seconds=180, external_observer=None):
+                 stall_seconds=180, external_observer=None,
+                 models_cache_path=None):
         self.enabled = enabled
         self.client = client or CodexAppServer()
         self.state_path = state_path
@@ -789,18 +837,29 @@ class CodexAdapter:
         self.stall_seconds = stall_seconds
         self.error = None
         self.error_at = None
-        self._resumed_generation = None
         self._sessions = []
         self._refreshing = False
         self._last_refresh = 0
         self._lock = threading.Lock()
         self._state_lock = threading.RLock()
         self.models = []
+        self._model_error = None
+        self._model_error_at = None
+        self._models_cache_path = os.path.abspath(os.path.expanduser(
+            models_cache_path or "~/.codex/models_cache.json"))
+        self._models_cache_signature = None
+        self._loaded_threads = set()
+        self._loaded_generation = None
+        self._loaded_error = None
+        self._loaded_error_at = None
         self._account = None
         self._account_error = None
         self._account_error_at = None
         self._last_account_refresh = 0
+        self._account_refreshing = False
         self._skills = {}
+        self._detail_errors = {}
+        self._detail_retry_after = {}
         self.external_observer = external_observer
         self._tracked_external = set()
 
@@ -833,15 +892,7 @@ class CodexAdapter:
 
     def _refresh(self):
         try:
-            self._resume_managed()
             threads = self.client.list_threads()
-            loaded = set()
-            if hasattr(self.client, "loaded_thread_ids"):
-                for entry in self.client.loaded_thread_ids():
-                    loaded.add(entry.get("id") if isinstance(entry, dict) else entry)
-                loaded.discard(None)
-            models = self.client.list_models() if hasattr(self.client, "list_models") else []
-            error = None
         except Exception as exc:
             now = self.clock()
             with self._lock:
@@ -853,14 +904,30 @@ class CodexAdapter:
                     session["stale"] = True
                     session["stale_reason"] = self.error
                     session["state"] = "stale"
-                    session["capabilities"] = {
-                        **session.get("capabilities", {}), "submit": False,
-                        "interrupt": False, "takeover": False, "close": False}
                 self._refreshing = False
                 self._last_refresh = now
             return
         now = self.clock()
-        self._refresh_account(now)
+        loaded = set()
+        if hasattr(self.client, "loaded_thread_ids"):
+            try:
+                for entry in self.client.loaded_thread_ids():
+                    loaded.add(entry.get("id") if isinstance(entry, dict) else entry)
+                loaded.discard(None)
+                with self._lock:
+                    self._loaded_threads = set(loaded)
+                    self._loaded_generation = getattr(self.client, "generation", None)
+                    self._loaded_error = None
+                    self._loaded_error_at = None
+            except Exception as exc:
+                with self._lock:
+                    self._loaded_error = str(exc)
+                    self._loaded_error_at = now
+                # Loaded-state discovery is advisory. Never detach owned sessions
+                # or resume every remembered thread because this one call failed.
+                loaded = set()
+        self._refresh_local_models(now)
+        self._schedule_account_refresh(now)
         persisted = self._state()
         modes = dict(persisted.get("modes") or {})
         thread_meta = dict(persisted.get("thread_meta") or {})
@@ -905,12 +972,20 @@ class CodexAdapter:
                     observation = {"error": str(exc), "messages": []}
             detail_error = None
             if is_managed:
-                try:
-                    detail = self.client.read_thread(tid)
-                    if detail:
-                        thread = {**thread, **detail}
-                except Exception as exc:
-                    detail_error = str(exc)
+                retry_at = self._detail_retry_after.get(tid, 0)
+                if now < retry_at:
+                    detail_error = self._detail_errors.get(tid)
+                else:
+                    try:
+                        detail = self.client.read_thread(tid)
+                        if detail:
+                            thread = {**thread, **detail}
+                        self._detail_errors.pop(tid, None)
+                        self._detail_retry_after.pop(tid, None)
+                    except Exception as exc:
+                        detail_error = str(exc)
+                        self._detail_errors[tid] = detail_error
+                        self._detail_retry_after[tid] = now + 30
             live = self.client.thread_state.setdefault(tid, {})
             pending = self._pending(tid, live.get("pending"))
             updated = thread.get("updatedAt") or thread.get("createdAt")
@@ -941,8 +1016,7 @@ class CodexAdapter:
                 (observation or {}).get("active"))
             quiet = max(0, now - updated_epoch)
             turn_error = _error_text(turn_lifecycle.get("error"))
-            provider_error = _error_text(detail_error or live.get("error") or
-                                         thread.get("error") or
+            provider_error = _error_text(live.get("error") or thread.get("error") or
                                          (recorded.get("error") if
                                           isinstance(recorded, dict) else None) or
                                          turn_error)
@@ -950,7 +1024,7 @@ class CodexAdapter:
                        _is_limit_error(provider_error))
             if blocked:
                 state = "blocked"
-            elif detail_error or provider_error or recorded_type == "systemError":
+            elif provider_error or recorded_type == "systemError":
                 state = "error"
             elif pending or flags.intersection({"waitingOnApproval", "waitingOnUserInput"}):
                 state = "needs_you"
@@ -1034,7 +1108,8 @@ class CodexAdapter:
                 "branch": (thread.get("gitInfo") or {}).get("branch"),
                 "model": model, "family": "codex", "effort": effort,
                 "collaboration_mode": mode, "running": None,
-                "last_msg": _last_message(messages, thread.get("preview")),
+                "last_msg": (_last_message(messages, thread.get("preview")) or
+                             (previous_by_tid.get(tid) or {}).get("last_msg")),
                 "_latest_prose": _latest_prose(messages),
                 "repo_outcome": observed_test_outcome(
                     messages, session_id=self.key(tid), provider="codex"),
@@ -1060,7 +1135,7 @@ class CodexAdapter:
                 "convo_v": revision, "files_n": len(files), "agents": agents,
                 "agents_running": agents_running, "agents_total": len(agents),
                 "agent_cost": None, "stale": False,
-                "error": provider_error or None,
+                "error": provider_error or None, "refresh_warning": detail_error,
                 "capabilities": {"submit": is_managed and
                     state not in ("blocked", "error", "stale") and not uncontrolled_active,
                     "interrupt": can_interrupt,
@@ -1151,15 +1226,44 @@ class CodexAdapter:
                     self._forget(tid)
         with self._lock:
             self._sessions = out
-            self.models = [{"id": m.get("model") or m.get("id"),
-                            "name": m.get("displayName") or m.get("model") or m.get("id"),
-                            "efforts": [e.get("reasoningEffort") or e.get("effort") or e
-                                        for e in (m.get("supportedReasoningEfforts") or [])]}
-                           for m in models if m.get("model") or m.get("id")]
-            self.error = error
+            self.error = None
             self.error_at = None
             self._refreshing = False
             self._last_refresh = self.clock()
+
+    def _refresh_local_models(self, now):
+        """Refresh model options from Codex's own cache, never its control socket."""
+        try:
+            stat = os.stat(self._models_cache_path)
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if signature == self._models_cache_signature:
+                return
+            models = _local_model_catalog(self._models_cache_path)
+        except Exception as exc:
+            with self._lock:
+                self._model_error = str(exc)
+                self._model_error_at = now
+            return
+        with self._lock:
+            self.models = models
+            self._models_cache_signature = signature
+            self._model_error = None
+            self._model_error_at = None
+
+    def _schedule_account_refresh(self, now):
+        with self._lock:
+            if self._account_refreshing or now - self._last_account_refresh < 30:
+                return
+            self._account_refreshing = True
+
+        def refresh():
+            try:
+                self._refresh_account(now)
+            finally:
+                with self._lock:
+                    self._account_refreshing = False
+        threading.Thread(target=refresh, daemon=True,
+                         name="fleet-codex-usage").start()
 
     def _refresh_account(self, now):
         if now - self._last_account_refresh < 30:
@@ -1191,6 +1295,30 @@ class CodexAdapter:
                 out.update(stale=True, error=self._account_error,
                            error_at=self._account_error_at)
             return out
+
+    def diagnostics(self):
+        with self._lock:
+            protocol = list(getattr(self.client, "diagnostics", []))
+            counts = {}
+            for item in protocol:
+                kind = str(item.get("kind") or "unknown")
+                counts[kind] = counts.get(kind, 0) + 1
+            return {
+                "provider_error": self.error,
+                "provider_error_at": self.error_at,
+                "model_error": self._model_error,
+                "model_error_at": self._model_error_at,
+                "model_catalog_size": len(self.models),
+                "loaded_error": self._loaded_error,
+                "loaded_error_at": self._loaded_error_at,
+                "account_error": self._account_error,
+                "account_error_at": self._account_error_at,
+                "transport_error": getattr(self.client, "last_error", None),
+                "transport_generation": getattr(self.client, "generation", None),
+                "loaded_threads": len(self._loaded_threads),
+                "visible_sessions": len(self._sessions),
+                "protocol_events": counts,
+            }
 
     def _managed(self):
         state = self._state()
@@ -1279,26 +1407,42 @@ class CodexAdapter:
                 state["thread_meta"] = thread_meta
             self._save_state(state)
 
-    def _resume_managed(self):
-        if not hasattr(self.client, "request"):
-            return
-        generation = getattr(self.client, "generation", 0)
-        if self._resumed_generation == generation:
-            return
-        for tid in self._managed():
+    def _ensure_loaded(self, tid):
+        """Load one owned thread on demand without disturbing active runtimes."""
+        if not hasattr(self.client, "resume_thread"):
+            return {}
+        generation = getattr(self.client, "generation", None)
+        with self._lock:
+            known_loaded = (self._loaded_generation == generation and
+                            tid in self._loaded_threads)
+        if known_loaded:
+            return {}
+        # A reconnected Fleet WebSocket does not mean the shared runtime died.
+        # Ask the runtime before resuming: thread/resume can abort an active turn.
+        if hasattr(self.client, "loaded_thread_ids"):
             try:
-                if hasattr(self.client, "resume_thread"):
-                    thread = self.client.resume_thread(tid)
-                else:
-                    self.client.request("thread/resume", {"threadId": tid})
-                    thread = {}
-                mode = self._modes().get(tid) or "default"
-                if hasattr(self.client, "set_mode") and thread.get("model"):
-                    self.client.set_mode(tid, mode, thread.get("model"),
-                                         thread.get("effort"))
-            except Exception:
-                continue
-        self._resumed_generation = getattr(self.client, "generation", generation)
+                loaded = {entry.get("id") if isinstance(entry, dict) else entry
+                          for entry in self.client.loaded_thread_ids()}
+                loaded.discard(None)
+                with self._lock:
+                    self._loaded_threads = loaded
+                    self._loaded_generation = getattr(self.client, "generation", None)
+                    self._loaded_error = None
+                    self._loaded_error_at = None
+                if tid in loaded:
+                    return {}
+            except Exception as exc:
+                with self._lock:
+                    self._loaded_error = str(exc)
+                    self._loaded_error_at = self.clock()
+                # Do not guess that a thread is unloaded. Let the exact action
+                # return a useful error instead of risking an active-turn abort.
+                return {}
+        thread = self.client.resume_thread(tid)
+        with self._lock:
+            self._loaded_threads.add(tid)
+            self._loaded_generation = getattr(self.client, "generation", None)
+        return thread or {}
 
     def start_thread(self, cwd, model=None, effort=None, mode="plan",
                      initial_text=None):
@@ -1311,6 +1455,9 @@ class CodexAdapter:
         if tid and hasattr(self.client, "set_mode"):
             self.client.set_mode(tid, mode, resolved_model, resolved_effort)
         if tid:
+            with self._lock:
+                self._loaded_threads.add(tid)
+                self._loaded_generation = getattr(self.client, "generation", None)
             now = self.clock()
             meta = {"cwd": cwd, "model": resolved_model, "effort": resolved_effort,
                     "name": thread.get("name"), "created_at": now,
@@ -1568,6 +1715,7 @@ class CodexAdapter:
                     else:
                         self.client.steer_turn(tid, text)
                 else:
+                    self._ensure_loaded(tid)
                     kwargs = {"mode": mode, "model": model, "effort": effort}
                     if inputs:
                         kwargs["inputs"] = inputs
@@ -1583,6 +1731,7 @@ class CodexAdapter:
                 model = session.get("model") or live.get("model")
                 effort = (session.get("effort") or live.get("effort") or
                           ("medium" if mode == "plan" else None))
+                self._ensure_loaded(tid)
                 self.client.set_mode(tid, mode, model, effort)
                 self._remember(tid, mode)
                 with self._lock:
@@ -1612,9 +1761,11 @@ class CodexAdapter:
                     self._sessions = [session for session in self._sessions
                                       if session.get("native_session_id") != tid]
             elif typ == "compact":
+                self._ensure_loaded(tid)
                 self.client.compact(tid)
                 self.client.thread_state.setdefault(tid, {})["compacting"] = 0
             elif typ == "review":
+                self._ensure_loaded(tid)
                 self.client.review(tid)
             elif typ == "skill":
                 name = str(action.get("name") or "")
@@ -1629,6 +1780,7 @@ class CodexAdapter:
                 args = str(action.get("args") or "").strip()
                 if args:
                     inputs.append({"type": "text", "text": args})
+                self._ensure_loaded(tid)
                 self.client.start_turn(
                     tid, "", mode=session.get("collaboration_mode") or "default",
                     model=session.get("model"), effort=session.get("effort"),
@@ -1665,6 +1817,7 @@ class CodexAdapter:
                     with self._lock:
                         session = next((s for s in self._sessions
                                         if s.get("native_session_id") == tid), {})
+                    self._ensure_loaded(tid)
                     self.client.start_turn(tid, relay,
                         mode=session.get("collaboration_mode") or "default",
                         model=session.get("model"), effort=session.get("effort"))

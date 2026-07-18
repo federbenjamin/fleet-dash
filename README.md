@@ -23,7 +23,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
   distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
   totals line. Its **Subagents** filter opens a flat active-child view with each parent breadcrumb,
-  model, state, and latest activity. Each card is headed by the
+  model, state, and latest activity. The Now header carries a compact active-account summary such as
+  **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
   scrolls away past the card's end.
@@ -59,7 +60,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   reconnection. Commands stay as drafts until online. The full-chat composer also accepts up to four
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
   device storage, can queue offline with their message, and are removed locally after delivery or
-  after 24 hours.
+  after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.
+  On phones the composer stays docked immediately above the keyboard, the full-screen view follows
+  the visible iOS viewport, and a vertical drag on conversation history dismisses the keyboard.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
   including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
@@ -131,7 +134,13 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   Independently launched CLI threads that are not connected to Fleet's socket are likewise view-only.
   Child subagent threads never become duplicate top-level cards.
 - Conversation history, prompt submission, interruption, and approval decisions use App Server
-  thread/turn APIs.
+  thread/turn APIs. A transient `thread/read` failure keeps the last conversation and leaves a
+  Fleet-owned thread interactive; a provider-wide list failure keeps its last placement and
+  controls under one stale-data banner. Lifecycle timeouts recycle only Fleet's client connection,
+  not the shared runtime. Detail reads back off after a failure instead of retrying every poll.
+- Model choices come from Codex's bounded, credential-free `~/.codex/models_cache.json` catalog.
+  Fleet does not call `model/list` during session refresh, so a slow model-manager refresh cannot
+  block thread health or detach live chats.
 - Codex thread IDs are stored as `codex:<native-id>` so they cannot collide with Claude IDs.
 - Codex costs display as unavailable rather than being priced with Claude rates. App Server's
   exact per-thread token total and model context-window size drive each card's context gauge.
@@ -172,8 +181,9 @@ the provider without affecting Claude sessions.
   conversation instead of becoming duplicate history rows.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
-- **Usage chip** (inside the Now command box): it normally reads only **Usage**. At 70% it shows the
-  most urgent selected account/window percentage in amber; at 90% it turns red. Tapping opens every
+- **Usage button** (under the Now title): it shows the active Claude account's 5-hour/weekly values
+  and the highest active non-Spark Codex window, for example **Usage · Claude 23/8 · Codex 14**.
+  At 70% any visible selected account/window turns it amber; at 90% it turns red. Tapping opens every
   provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
   middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
   active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads
@@ -323,8 +333,9 @@ the provider without affecting Claude sessions.
   unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
   never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
   newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
-  Send/Relay button remains available. The full-chat **＋** button opens the phone camera/photo
-  picker (or desktop file picker); selected images are shown beside the composer and delivered to
+  Send/Relay button remains available. The full-chat **＋** menu offers **Send picture** and
+  **Schedule message**. The picture action opens the phone camera/photo picker (or desktop file
+  picker); selected images are shown beside the composer and delivered to
   either Claude or Codex with the message. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for

@@ -395,7 +395,7 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
                        "continue", default_confidence))
 
     winning_rule, group, reason, primary, confidence = candidates[0]
-    if external or provider_stale:
+    if external:
         access = "view_only"
         if primary in ("respond", "review", "open", "continue"):
             primary = "view"
@@ -2180,6 +2180,12 @@ class Engine:
             "operations_db": self.operations.diagnostics(),
             "outbox_db": self.outbox.diagnostics(),
         }
+        codex_diagnostics = getattr(self.codex, "diagnostics", None)
+        if codex_diagnostics:
+            try:
+                fleet["diagnostics"]["codex"] = codex_diagnostics()
+            except Exception as exc:
+                fleet["diagnostics"]["codex"] = {"error": str(exc)}
         with self.lock:
             self.snapshot_cache = fleet
         return fleet

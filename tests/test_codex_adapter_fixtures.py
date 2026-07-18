@@ -14,10 +14,12 @@ class FixtureClient:
         self.approvals = {}
         self.fail_list = False
         self.fail_read = False
+        self.fail_loaded = False
         self.fail_account = False
         self.archive_error = None
         self.interrupts = []
         self.loaded = []
+        self.read_calls = []
         self.started_turns = []
         self.steered_turns = []
 
@@ -31,9 +33,12 @@ class FixtureClient:
                  "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]
 
     def loaded_thread_ids(self):
+        if self.fail_loaded:
+            raise RuntimeError("loaded list unavailable")
         return list(self.loaded)
 
     def read_thread(self, thread_id):
+        self.read_calls.append(thread_id)
         if self.fail_read:
             raise RuntimeError("thread read failed")
         return dict(self.details[thread_id])
@@ -97,7 +102,9 @@ class CodexAdapterFixtureTest(unittest.TestCase):
     def adapter(self, threads, now=1000):
         client = FixtureClient(threads)
         adapter = CodexAdapter(client=client, state_path=self.state_path,
-                               clock=lambda: now, stall_seconds=30)
+                               clock=lambda: now, stall_seconds=30,
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
         return adapter, client
 
     def test_every_thread_state_and_external_discovery(self):
@@ -156,7 +163,9 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         observer = Observer()
         adapter = CodexAdapter(client=client, state_path=self.state_path,
                                clock=lambda: 1000, stall_seconds=30,
-                               external_observer=observer)
+                               external_observer=observer,
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
         adapter.track_external(["codex:external"])
         adapter._refresh()
 
@@ -301,8 +310,33 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         session = adapter.sessions()[0]
         self.assertEqual(session["state"], "stale")
         self.assertIn("app-server unavailable", session["stale_reason"])
-        self.assertFalse(session["capabilities"]["submit"])
-        self.assertFalse(session["capabilities"]["close"])
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertTrue(session["capabilities"]["close"])
+
+    def test_detail_read_failure_keeps_owned_session_interactive_with_warning(self):
+        adapter, client = self.adapter([self.thread()])
+        adapter._remember("managed", "default")
+        adapter._refresh()
+        client.fail_read = True
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        self.assertEqual(session["state"], "idle")
+        self.assertFalse(session["read_only"])
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertIn("thread read failed", session["refresh_warning"])
+        adapter._refresh()
+        self.assertEqual(client.read_calls, ["managed", "managed"])
+
+    def test_loaded_list_failure_is_advisory(self):
+        adapter, client = self.adapter([self.thread()])
+        adapter._remember("managed", "default")
+        client.fail_loaded = True
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        self.assertIsNone(adapter.error)
+        self.assertFalse(session["stale"])
+        self.assertTrue(session["capabilities"]["submit"])
+        self.assertIn("loaded list unavailable", adapter.diagnostics()["loaded_error"])
 
     def test_durable_context_fallback_survives_read_failure(self):
         thread = self.thread()
@@ -452,7 +486,9 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(first[0]["capabilities"]["focus_terminal"])
         self.assertEqual(first[0]["capabilities"]["focus_terminal_label"], "starting")
         restarted = CodexAdapter(client=client, state_path=self.state_path,
-                                 clock=lambda: 1000, stall_seconds=30)
+                                 clock=lambda: 1000, stall_seconds=30,
+                                 models_cache_path=os.path.join(
+                                     self.tmp.name, "models-cache.json"))
         restarted._refresh()
         self.assertEqual(restarted.sessions()[0]["native_session_id"], "empty")
 

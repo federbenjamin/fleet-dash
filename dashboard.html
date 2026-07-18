@@ -35,7 +35,8 @@
     <div class="mobilehead"><span class="brandmark">F</span><b id="mobiletitle">Now</b>
       <button id="gear" title="settings" aria-label="settings" onclick="navigateTo('settings')">⚙</button></div>
     <section class="destination" id="route-now" data-destination="now">
-      <div class="desthead"><div><h1>Now</h1><p>What needs attention and what is moving.</p></div>
+      <div class="desthead"><div class="nowtitle"><h1>Now</h1>
+        <button id="usagechip" aria-haspopup="dialog" aria-expanded="false" onclick="toggleUsage()">Usage</button></div>
         <button class="headprimary" onclick="newOpen=true;render(last,true);document.getElementById('newsess').scrollIntoView({behavior:'smooth'})">+ New session</button></div>
       <div class="commandbar" role="search">
         <label class="commandinput"><span>⌕</span><input id="nowfilter" data-draft-key="filter:now" placeholder="Filter sessions" autocomplete="off"
@@ -47,7 +48,6 @@
           <button data-now-filter="available" onclick="setNowState('available')">Available</button>
           <button data-now-filter="subagents" onclick="setNowState('subagents')">Subagents</button>
           <button id="outboxchip" onclick="openOutbox()">Outbox</button>
-          <button id="usagechip" aria-haspopup="dialog" aria-expanded="false" onclick="toggleUsage()">Usage</button>
           <span id="nowsaved" class="savedviews"></span>
           <button class="saveview" onclick="saveCurrentView('now')" title="Save this filter">＋ Save view</button>
         </div>

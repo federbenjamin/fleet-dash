@@ -240,9 +240,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     weekly/Fable-weekly quota percentages and resets, and last-update time. The same profile objects
     also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
-    selected account and its active marker. The Now command-bar chip normally says `Usage`; at 70% it
-    shows the worst selected account/window percentage in amber and at 90% in red. Its popover/sheet
-    contains the full gauges. If the app is absent/unreadable, fall back to the Claude
+    selected account and its active marker. The Now-header button summarizes the active Claude
+    profile's 5-hour/weekly percentages plus the highest active non-Spark Codex bucket as
+    `Usage · Claude X/Y · Codex Z`. Any visible selected account/window drives amber at 70% and red
+    at 90%; the popover/sheet contains the full gauges. If the app is absent/unreadable, fall back to the Claude
     Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
     `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`
@@ -289,6 +290,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
     headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
     server creates a second runtime agent.
+    Optional metadata must never poison or block the critical `thread/list` refresh. Read model
+    choices from Codex's bounded, credential-free `~/.codex/models_cache.json`; never put automatic
+    `model/list` calls on Fleet's shared control WebSocket. A `thread/read` failure is a per-session
+    refresh warning: retain the prior preview, back off detail reads for 30s, and keep an owned
+    session interactive. A lifecycle timeout closes only Fleet's client transport so the next call
+    reconnects to the detached runtime. A provider-wide list outage marks cached state stale but
+    preserves its existing owned capabilities and interactive access. Reconnection is not evidence
+    that a thread is unloaded: check `thread/loaded/list` before an exact on-demand resume and never
+    resume every remembered thread, because `thread/resume` may abort an active turn.
     `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: only
     explicitly pinned external threads consume an allowlist of local lifecycle and visible-message
     events so `notLoaded` does not hide active Desktop/VS Code work. The observer is read-only,
@@ -537,7 +547,16 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     short `.sessionpeek` the configured `preview_session_lines` minimum before stacking those rows
     below it. Keep message content top-aligned and the truncated `...` control bottom-anchored; never
     return unused preview height as a strip of card background.
-
+58. **The mobile full-chat composer follows the visual viewport.** `syncVisualViewport` projects
+    `window.visualViewport.height/offsetTop` into CSS variables used by `#sview`, `#aview`, and
+    `#viewer`; the underlying Now screen must never peek through beside the iOS keyboard. Full-chat
+    actions are split into a scrollable `.session-context` and a non-scrolling `.composer-dock`.
+    Focusing the main composer hides that context strip so chat history gets the remaining height;
+    a vertical drag starting in `#sbody` blurs the composer, while a tap does not. Textareas use 16px
+    type on coarse pointers to prevent iOS focus zoom, auto-grow only to a bounded height, and keep
+    Return as newline-only. The upward **＋** menu is the only full-chat entry point for **Send
+    picture** and **Schedule message**; selecting either closes it. Safari's native keyboard
+    accessory bar is not controllable from a web app, so layout must remain correct with it present.
 ## Dev workflow
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,

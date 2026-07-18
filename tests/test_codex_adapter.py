@@ -1,10 +1,11 @@
+import json
 import unittest
 import os
 import tempfile
 
 from codex_adapter import (CodexAdapter, CodexAppServer, _account_usage, _agents,
-                           _conversation, _files, _usage_cumulative, _usage_total,
-                           _usage_window)
+                           _conversation, _files, _local_model_catalog,
+                           _usage_cumulative, _usage_total, _usage_window)
 
 
 class ResponseClient(CodexAppServer):
@@ -70,7 +71,8 @@ class CodexAdapterTest(unittest.TestCase):
         self.client = FakeClient()
         self.tmp = tempfile.TemporaryDirectory()
         self.adapter = CodexAdapter(client=self.client,
-            state_path=os.path.join(self.tmp.name, "threads.json"))
+            state_path=os.path.join(self.tmp.name, "threads.json"),
+            models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
         self.adapter._remember("thr-1", "default")
 
     def tearDown(self):
@@ -226,6 +228,27 @@ class CodexAdapterTest(unittest.TestCase):
         files = _files(thread, "/work/project")
         self.assertEqual([item["path"] for item in files], ["/work/project/src/app.py"])
         self.assertFalse(files[0]["delivered"])
+
+    def test_local_model_catalog_uses_codex_cache_schema(self):
+        path = os.path.join(self.tmp.name, "models-cache.json")
+        with open(path, "w") as handle:
+            json.dump({"models": [{"slug": "gpt-next",
+                "display_name": "GPT Next",
+                "supported_reasoning_levels": [
+                    {"effort": "low"}, {"effort": "high"}]}]}, handle)
+        self.assertEqual(_local_model_catalog(path), [{
+            "id": "gpt-next", "name": "GPT Next",
+            "efforts": ["low", "high"]}])
+
+    def test_refresh_reads_local_models_without_calling_app_server_model_list(self):
+        path = os.path.join(self.tmp.name, "models-cache.json")
+        with open(path, "w") as handle:
+            json.dump({"models": [{"slug": "gpt-local",
+                                    "display_name": "GPT Local"}]}, handle)
+        self.adapter._models_cache_path = path
+        self.client.list_models = lambda: self.fail("model/list must not be called")
+        self.adapter._refresh()
+        self.assertEqual(self.adapter.models[0]["id"], "gpt-local")
 
 
 if __name__ == "__main__":
