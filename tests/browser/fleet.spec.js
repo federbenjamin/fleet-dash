@@ -848,6 +848,16 @@ test('session card surfaces distinguish active, available, and expanded informat
   await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
   expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
     .toBe(surfaces.card2);
+  const activePeekFrame = await running.evaluate(card => {
+    const peek = card.querySelector('.sessionpeek');
+    const lines = Number(getComputedStyle(card).getPropertyValue('--session-card-lines'));
+    const peekRect = peek.getBoundingClientRect();
+    const agentsRect = card.querySelector('.agents').getBoundingClientRect();
+    return {height: peekRect.height, expected: 13 + lines * 17.4,
+      gapToAgents: agentsRect.top - peekRect.bottom};
+  });
+  expect(activePeekFrame.height).toBeGreaterThanOrEqual(activePeekFrame.expected - 1);
+  expect(activePeekFrame.gapToAgents).toBeLessThan(1);
   const more = running.getByRole('button', { name: /more/ });
   expect(await more.evaluate(el => getComputedStyle(el).paddingTop)).toBe('2px');
   expect(await more.evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(22);

@@ -198,8 +198,10 @@ the provider without affecting Claude sessions.
   characters of the latest session message. That line setting also fixes the height of ordinary
   collapsed session cards, so short/missing messages and poll updates do not move the list.
   Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
-  running subagents grow to fit those controls. Overflow replaces the final collapsed row with a
-  clickable `...`; expanding reveals the full bounded 500-character preview. Tapping a
+  running subagents grow to fit those controls; their collapsed message peek still reserves the
+  configured number of lines, so a short message does not leave a different-sized hole. Overflow
+  replaces the final collapsed row with a clickable `...`; expanding reveals the full bounded
+  500-character preview. Tapping a
   subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
   is the context.
 - **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
