@@ -862,6 +862,7 @@ html.keyboard-open body::after{content:"";position:fixed;inset:0;z-index:49;poin
       padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
 #sact.session-composer,#vact.session-composer{position:relative;z-index:3;display:flex;flex-direction:column;
   padding:0;overflow:hidden}
+#sact.session-composer.question-present{max-height:calc(var(--fleet-visual-height,100dvh) - 56px)}
 #sact.session-composer.tools-open,#vact.session-composer.tools-open{overflow:visible}
 #sact.session-composer .session-context,#vact.session-composer .session-context{flex:1 1 auto;min-height:0;overflow-y:auto;
   padding:8px 12px 0;overscroll-behavior:contain}
@@ -869,6 +870,29 @@ html.keyboard-open body::after{content:"";position:fixed;inset:0;z-index:49;poin
   padding:0 12px calc(10px + env(safe-area-inset-bottom));background:var(--card)}
 #sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
 #sact .dfold{margin-top:10px}
+.question-drawer{display:flex;flex:0 0 auto;min-height:180px;flex-direction:column;overflow:hidden;
+  border:1px solid rgba(210,153,34,.64);border-radius:10px;background:#17150f;
+  box-shadow:0 10px 28px rgba(0,0,0,.18)}
+.question-drawer.collapsed{height:auto!important;min-height:0;background:#14130f}
+.question-drawer.collapsed .question-resizer{display:none}
+.question-drawer.resizing{min-height:72px;user-select:none}.question-drawer.collapse-ready{border-color:var(--blue)}
+.question-resizer{height:22px;display:flex;flex:0 0 22px;align-items:center;justify-content:center;
+  cursor:ns-resize;touch-action:none;outline:none;background:#11151b;border-bottom:1px solid rgba(210,153,34,.2)}
+.question-resizer i{display:block;width:48px;height:4px;border-radius:999px;background:#59616d;
+  box-shadow:0 0 0 1px rgba(255,255,255,.035)}
+.question-resizer:hover i,.question-resizer:focus-visible i,.question-drawer.resizing .question-resizer i{
+  background:var(--blue)}
+.question-drawer-toggle{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;gap:12px;
+  width:100%;min-height:42px;border:0;background:transparent;color:var(--amber);font:inherit;
+  padding:7px 10px;text-align:left;cursor:pointer}
+.question-drawer-toggle span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;
+  font-weight:700;letter-spacing:.1px}.question-drawer-toggle small{color:var(--faint);font-size:9.5px;
+  font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.question-drawer-toggle:hover small,.question-drawer-toggle:focus-visible small{color:var(--blue)}
+.question-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:0 8px 8px;overscroll-behavior:contain;
+  scrollbar-gutter:stable}
+#sact .question-scroll>.pend{margin:0;border:0;border-radius:7px;background:transparent;padding:4px 2px 8px}
+.session-extras:empty{display:none}
 /* one rule for BOTH docked bars: the file strip → send box gap must match, or the
    two full-screen surfaces stop looking like the same screen */
 #sact .stripbox,#vact .stripbox{margin:0 0 8px}
@@ -1347,6 +1371,8 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
     padding:13px 13px calc(18px + env(safe-area-inset-bottom))}
   #sview,#aview,#viewer{inset:auto 0;top:var(--fleet-visual-top,0px);height:var(--fleet-visual-height,100dvh)}
   #sact.session-composer,#vact.session-composer{max-height:58%}
+  #sact.session-composer.question-present{max-height:calc(var(--fleet-visual-height,100dvh) - 52px)}
+  .question-resizer{height:32px;flex-basis:32px}
   :is(#sact,#vact).composer-active .session-context{display:none}
   :is(#sact,#vact) .composer-dock{padding-left:8px;padding-right:8px}
   :is(#sact,#vact) .freetext.composer{gap:6px;margin-top:6px;min-width:0}

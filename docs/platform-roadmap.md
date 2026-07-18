@@ -20,7 +20,7 @@ Status: M0–M12 production-complete. M13 implementation complete on
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 | M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
 | M12 — Notification Center and Web Push | Complete · N0–N6 · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center; installed macOS/iPhone app-closed delivery, badges, exact deep links, production policy, bounded reminders, Snooze/Mute capabilities, minimal lock-screen payloads, manual-only legacy ntfy, restart/saturation/privacy gates, and live p95 contracts. |
-| M13 — Provider control, canonical composer, and global notification controls | Implementation complete; release gates pending · 2026-07-17 | Official Claude background attach/stop transport; connection-generation Codex authority; durable provider-reconnect text/image queue; one full-chat/Markdown composer; section-routed Settings; global per-kind cadence and quiet-hours policy; 265 Python, 11 Node push/privacy, 135 applicable desktop/mobile browser, and 2 named latency checks. Isolated staging read-only smoke passes; provider and installed-device notification/keyboard checks remain release gates. |
+| M13 — Provider control, canonical composer, and global notification controls | Implementation complete; release gates pending · 2026-07-18 | Official Claude background attach/stop transport; connection-generation Codex authority; definitive stale-turn recovery; durable provider-reconnect text/image queue; one full-chat/Markdown composer; poll-stable resizable question drawer; section-routed Settings; global per-kind cadence and quiet-hours policy; 269 Python, 11 Node push/privacy, 137 applicable desktop/mobile browser, and 2 named latency checks. Isolated staging read-only smoke passes; provider and installed-device notification/keyboard checks remain release gates. |
 
 Completion here records the milestone gate, not proof by assertion. M10 reopened the M0–M10
 catalogue rows, verified the current implementation and tests, and recorded the source/runtime
@@ -1131,15 +1131,20 @@ choices, source mapping, and still-open release gates live in
 - Codex control authority is scoped to one App Server connection generation. Direct sends made while
   an owned active turn is temporarily uncontrolled enter the central Outbox with an idempotency key;
   reconnect safely chooses steer, next turn, or continued waiting from authoritative lifecycle state.
+  A definitive provider rejection that the recorded turn no longer exists clears stale Working state
+  and starts the exact payload once; an active-turn mismatch queues instead. Fullscreen questions use
+  a per-question, vertically resizable drawer whose independent reading position survives polling.
 - Full chat and Markdown use one composer renderer. The viewer contains no second conversation;
   mobile keyboard/picker geometry, opaque backdrop, touch bounds, persisted text/images, and
   offline/provider queues have deterministic desktop/mobile coverage.
 - Settings is divided into Notifications, Devices & delivery, Sessions, Appearance, Budgets &
   spawning, and Advanced. Global notification rules cover all 12 canonical kinds and the scheduler
   revalidates revisions across quiet hours, snooze, mute, restart, DST, and worker leases.
-- Verification on the implementation branch: 265 Python tests; 11 Node Web Push/privacy tests; 67
-  applicable desktop and 68 applicable 390×844 browser checks; two complete named latency-inventory
-  runs; isolated staging API/read-only browser smoke; and targeted screenshot inspection. The
+- Verification on the implementation branch: 269 Python tests; 11 Node Web Push/privacy tests; 68
+  applicable desktop and 69 applicable 390×844 browser checks; two complete named latency-inventory
+  runs; isolated staging API/read-only browser smoke; and targeted screenshot inspection. Three
+  unrelated mobile checks timed out only during the 12-minute serialized full-suite run and each
+  passed twice immediately in isolation. The
   in-app visual-QA browser backend was unavailable, so
   installed iPhone keyboard/photo and macOS+iPhone cadence behavior remain explicit staging gates.
 

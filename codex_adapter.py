@@ -593,7 +593,8 @@ class CodexAppServer:
                 turn = params.get("turn") or {}
                 state.update(status="running", turn_id=turn.get("id"),
                              turn_generation=self.generation,
-                             control_lost_at=None, error=None)
+                             control_lost_at=None, no_active_turn_at=None,
+                             error=None)
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
                 status = turn.get("status") or "completed"
@@ -603,7 +604,8 @@ class CodexAppServer:
                                      _is_limit_error(turn_error) else
                                      "error" if failed_status else "idle"),
                              turn_id=None, turn_generation=None, completed_at=now,
-                             turn_status=status, error=turn_error or None)
+                             no_active_turn_at=now, turn_status=status,
+                             error=turn_error or None)
             elif method == "thread/tokenUsage/updated":
                 state["token_usage"] = params.get("tokenUsage") or params.get("usage") or {}
             elif method == "thread/status/changed":
@@ -737,7 +739,8 @@ class CodexAppServer:
             with self.lock:
                 self.thread_state.setdefault(thread_id, {}).update(
                     status="running", turn_id=turn_id,
-                    turn_generation=self.generation, control_lost_at=None)
+                    turn_generation=self.generation, control_lost_at=None,
+                    no_active_turn_at=None)
         return result
 
     def steer_turn(self, thread_id, text, inputs=None):
@@ -747,9 +750,34 @@ class CodexAppServer:
             raise CodexError(
                 "Codex control connection was lost; the message can be queued safely",
                 code="provider_control_unavailable", queueable=True)
-        return self.request("turn/steer", {"threadId": thread_id,
-                                            "expectedTurnId": turn_id,
-                                            "input": inputs or [{"type": "text", "text": text}]})
+        try:
+            return self.request("turn/steer", {"threadId": thread_id,
+                                                "expectedTurnId": turn_id,
+                                                "input": inputs or [{"type": "text", "text": text}]})
+        except CodexError as exc:
+            message = str(exc).lower()
+            no_active = "no active turn to steer" in message
+            changed_turn = ("expected active turn id" in message or
+                            "active turn id mismatch" in message)
+            if not no_active and not changed_turn:
+                raise
+            now = self.clock()
+            with self.lock:
+                state = self.thread_state.setdefault(thread_id, {})
+                state.update(turn_id=None, turn_generation=None,
+                             revision=state.get("revision", 0) + 1)
+                if no_active:
+                    state.update(status="idle", completed_at=now,
+                                 no_active_turn_at=now, control_lost_at=None)
+                else:
+                    state.update(status="running", control_lost_at=now,
+                                 no_active_turn_at=None)
+            if no_active:
+                raise CodexError("Codex turn ended before the message was accepted",
+                                 code="turn_ended") from exc
+            raise CodexError(
+                "Codex active turn changed; the message can be queued safely",
+                code="provider_control_unavailable", queueable=True) from exc
 
     def interrupt(self, thread_id):
         with self.lock:
@@ -1059,8 +1087,14 @@ class CodexAdapter:
             recorded = thread.get("status") or {}
             recorded_type = recorded.get("type") if isinstance(recorded, dict) else recorded
             flags = set(recorded.get("activeFlags") or []) if isinstance(recorded, dict) else set()
-            native_running = live.get("status") == "running" or recorded_type == "active"
             turn_started = turn_lifecycle.get("started_at")
+            no_active_turn_at = _epoch(live.get("no_active_turn_at"))
+            provider_proved_idle = bool(no_active_turn_at and
+                                        (turn_started is None or
+                                         turn_started <= no_active_turn_at))
+            native_running = ((live.get("status") == "running" or
+                               recorded_type == "active") and
+                              not provider_proved_idle)
             observed_running = turn_lifecycle.get("active", False) and (
                 completed_epoch is None or turn_started is None or turn_started > completed_epoch)
             running = native_running or observed_running or bool(
@@ -1772,12 +1806,22 @@ class CodexAdapter:
                 effort = session.get("effort") or live.get("effort")
                 if mode == "plan" and not model:
                     return {"ok": False, "error": "Codex model is unavailable; refresh and try again"}
+                start_after_ended = False
                 if self._owns_active_turn(tid) and hasattr(self.client, "steer_turn"):
-                    if inputs:
-                        self.client.steer_turn(tid, text, inputs=inputs)
-                    else:
-                        self.client.steer_turn(tid, text)
-                else:
+                    try:
+                        if inputs:
+                            self.client.steer_turn(tid, text, inputs=inputs)
+                        else:
+                            self.client.steer_turn(tid, text)
+                        return {"ok": True}
+                    except CodexError as exc:
+                        # The provider definitively rejected this steer before
+                        # accepting input. Starting the same payload is safe;
+                        # mismatched/ambiguous active turns remain queueable.
+                        if exc.code != "turn_ended":
+                            raise
+                        start_after_ended = True
+                if start_after_ended or not self._owns_active_turn(tid):
                     self._ensure_loaded(tid)
                     kwargs = {"mode": mode, "model": model, "effort": effort}
                     if inputs:
@@ -1874,9 +1918,16 @@ class CodexAdapter:
                     return {"ok": False, "error": "agent and message are required"}
                 relay = f"Relay this message to subagent {aid}: {text}"
                 live = self.client.thread_state.get(tid, {})
+                start_after_ended = False
                 if self._owns_active_turn(tid) and hasattr(self.client, "steer_turn"):
-                    self.client.steer_turn(tid, relay)
-                else:
+                    try:
+                        self.client.steer_turn(tid, relay)
+                        return {"ok": True, "relayed_via": "parent"}
+                    except CodexError as exc:
+                        if exc.code != "turn_ended":
+                            raise
+                        start_after_ended = True
+                if start_after_ended or not self._owns_active_turn(tid):
                     with self._lock:
                         session = next((s for s in self._sessions
                                         if s.get("native_session_id") == tid), {})

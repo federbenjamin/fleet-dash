@@ -183,7 +183,8 @@ the provider without affecting Claude sessions.
   of turning every session into a duplicate error card.
 - **Usage button** (under the Now title): it shows the active Claude account's 5-hour/weekly values
   and the highest active non-Spark Codex window, for example **Usage · Claude 23/8 · Codex 14**.
-  At 70% any visible selected account/window turns it amber; at 90% it turns red. Tapping opens every
+  At 70% an active account/window turns it amber; at 90% it turns red. Inactive Claude profiles do
+  not color the button, but retain their own gauge colors inside the panel. Tapping opens every
   provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
   middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
   active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads
@@ -312,6 +313,10 @@ the provider without affecting Claude sessions.
   **answer ⤢** button that opens the full view with the question expanded; the controls
   themselves live in the full-screen views (they used to swamp the fleet list). Permission
   prompts are small, so they still answer inline on the card:
+  - In full chat, a long question has its own scrollable drawer. Its top grip drags upward to
+    nearly fill the area below the title bar or downward into a compact waiting bar. The drawer's
+    size, collapsed state, and reading position survive Fleet's two-second refreshes, so polling
+    cannot snap a question back to the top.
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit), plus an
     **"Other" free-text input** (types your own answer into the TUI's "Type something" row) and
     a **✕ dismiss button** (= the TUI's "Chat about this": the session hears "user declined"
@@ -342,7 +347,10 @@ the provider without affecting Claude sessions.
   If Fleet itself is online but temporarily loses control of a Fleet-owned active Codex turn, the
   exact text/images enter the server Outbox once and show **Waiting for Codex connection**. A safe
   reconnect steers the active turn or starts the next turn after authoritative completion; ambiguous
-  state keeps waiting and never forces a resume or duplicate retry.
+  state keeps waiting and never forces a resume or duplicate retry. If Codex definitively rejects a
+  steer because that recorded turn no longer exists, Fleet clears the stale **working** state and
+  starts the exact payload once as the next turn. A different active-turn id remains queued instead
+  of creating concurrent work.
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.
