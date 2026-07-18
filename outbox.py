@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 PENDING_STATES = {"scheduled", "waiting_availability", "waiting_usage_reset",
                   "waiting_provider"}
 TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancelled"}
+TARGET_RECONNECT_GRACE_SECONDS = 120
 ALL_STATES = PENDING_STATES | TERMINAL_STATES | {"spawning", "sending"}
 KINDS = {"at_time", "when_available", "usage_reset", "new_session",
          "provider_reconnect"}
@@ -126,6 +127,10 @@ class OutboxManager:
             os.path.dirname(os.path.abspath(db_path)), "outbox-images"))
         self.db_connect_ms = deque(maxlen=240)
         self.db_begin_ms = deque(maxlen=240)
+        # Provider discovery is asynchronous at daemon start. One empty fleet
+        # snapshot must never convert a durable exact-session delivery into a
+        # permanent failure.
+        self._missing_targets = {}
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
 
@@ -565,6 +570,7 @@ class OutboxManager:
                 raise OutboxError("only an unclaimed pending message can be cancelled",
                                   code="immutable")
         self._clear_assets_for(outbox_id)
+        self._missing_targets.pop(str(outbox_id), None)
         return self.get(outbox_id)
 
     def retry(self, outbox_id, patch=None):
@@ -623,10 +629,14 @@ class OutboxManager:
         sessions = self._sessions(snapshot)
         sid = record.get("destination_session_id") or record.get("target_session_id")
         session = sessions.get(str(sid or ""))
+        missing_key = str(record.get("id") or sid or "")
         if not session:
-            if record.get("destination_session_id") and self.clock() - record["updated_at"] < 120:
-                return "wait", "Waiting for the new session to register", None
+            first_missing = self._missing_targets.setdefault(missing_key, self.clock())
+            if self.clock() - first_missing < TARGET_RECONNECT_GRACE_SECONDS:
+                return "wait", "Waiting for the exact target to reconnect", None
+            self._missing_targets.pop(missing_key, None)
             return "block", "The exact target session is no longer live", None
+        self._missing_targets.pop(missing_key, None)
         if session.get("provider_stale") or session.get("stale"):
             return "retry", "Provider state is stale", session
         terminal_attached = bool(session.get("terminal_attached"))
@@ -721,6 +731,7 @@ class OutboxManager:
                        (state, now, str(error or "")[:1000] or None,
                         str(reason or "")[:1000] or None, bounded_receipt, destination,
                         now if state == "sent" else None, outbox_id))
+        self._missing_targets.pop(str(outbox_id), None)
 
     def recover_expired(self, snapshot):
         now = self.clock()

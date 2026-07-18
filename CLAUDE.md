@@ -650,7 +650,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     availability signal.** An idle provider whose assistant asks a direct question belongs in
     **Needs you**, but it is immediately writable; making Outbox wait for that card to become
     Available deadlocks the very reply that would clear it. Gate sends on native state, pending
-    requests, compaction, and exact control authority only.
+    requests, compaction, and exact control authority only. Provider discovery is asynchronous after
+    daemon restart: an exact target missing from one snapshot waits through a bounded 120-second
+    reconnect grace and dispatches if it reappears. Only continuous absence beyond that grace may
+    block the delivery.
 
 ## Dev workflow
 

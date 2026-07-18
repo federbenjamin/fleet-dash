@@ -133,6 +133,35 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(sent[0]["target_session_id"], "codex:one")
         self.assertEqual(self.manager.get(item["id"])["state"], "sent")
 
+    def test_missing_target_waits_through_provider_discovery_then_recovers(self):
+        item = self.create()
+        sent = []
+        self.manager.tick(snapshot(), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        waiting = self.manager.get(item["id"])
+        self.assertEqual(waiting["state"], "waiting_availability")
+        self.assertEqual(waiting["blocked_reason"],
+                         "Waiting for the exact target to reconnect")
+        self.assertFalse(sent)
+
+        self.clock.advance(1)
+        self.manager.tick(snapshot(session()), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
+    def test_continuously_missing_target_blocks_after_reconnect_grace(self):
+        item = self.create()
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.clock.advance(119)
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(item["id"])["state"], "waiting_availability")
+        self.clock.advance(2)
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        blocked = self.manager.get(item["id"])
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["blocked_reason"], "The exact target session is no longer live")
+
     def test_reconnected_active_codex_turn_flushes_waiting_delivery(self):
         item = self.create()
         sent = []
@@ -153,9 +182,12 @@ class OutboxTests(unittest.TestCase):
         parent = session("claude-one", provider="claude", agents=[
             {"agent_id": "agent-1", "state": "done"}])
         self.manager.tick(snapshot(read, parent), {}, lambda _: {"ok": True}, lambda _: {})
-        self.assertEqual(self.manager.get(missing["id"])["state"], "blocked")
+        self.assertEqual(self.manager.get(missing["id"])["state"], "waiting_availability")
         self.assertIn("view only", self.manager.get(readonly["id"])["blocked_reason"])
         self.assertIn("finished", self.manager.get(agent["id"])["blocked_reason"])
+        self.clock.advance(121)
+        self.manager.tick(snapshot(read, parent), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(missing["id"])["state"], "blocked")
 
     def test_usage_reset_requires_fresh_post_reset_evidence(self):
         reset = self.clock() + 20
@@ -272,6 +304,9 @@ class OutboxTests(unittest.TestCase):
 
     def test_retry_is_a_new_linked_attempt_and_terminals_stay_immutable(self):
         original = self.create()
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(original["id"])["state"], "waiting_availability")
+        self.clock.advance(121)
         self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
         self.assertEqual(self.manager.get(original["id"])["state"], "blocked")
         retry = self.manager.retry(original["id"], {"target_session_id": "codex:one"})
