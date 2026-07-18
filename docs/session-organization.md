@@ -116,11 +116,12 @@ when the user sends a response or explicitly chooses **Mark available**.
 | `reopenable` | Session history / Reopenable / Reopen |
 | Closed Claude ledger entry with a validated main transcript and cwd | Session history / Reopenable / View or Reopen |
 | Explicitly closed ledger entry without a safe reopen target | Session history / Closed / View |
-| `stale` caused by a provider-wide outage | Preserve the last known card placement and show one provider-level banner |
+| `stale` caused by a provider-wide outage | Preserve the last known card placement and access; an owned interactive session keeps its controls, while an external session remains view-only; show one provider-level banner |
 
 Provider-wide failures are page-level banners. Fleet must not duplicate the same
 outage as a Fix-needed card for every session. A failure isolated to one session is
-still Needs you / Fix needed.
+still Needs you / Fix needed. Stale confidence does not change runtime ownership: a transient
+provider outage cannot turn a Fleet-owned session into View only.
 
 ## Reply detection
 

@@ -267,6 +267,20 @@ class CodexProtocolTest(unittest.TestCase):
                       [item["kind"] for item in client.diagnostics])
         client.close()
 
+    def test_thread_timeout_recycles_only_the_client_transport(self):
+        def handler(process, message):
+            if message.get("method") == "recover":
+                process.emit({"id": message["id"], "result": {"ok": True}})
+
+        client, factory = self.client(handler, timeout=0.03)
+        with self.assertRaisesRegex(CodexError, "timed out: thread/list"):
+            client.request("thread/list")
+        self.assertIsNone(client.proc)
+        self.assertEqual(client.request("recover"), {"ok": True})
+        self.assertIsNone(client.last_error)
+        self.assertEqual(len(factory.processes), 2)
+        client.close()
+
     def test_malformed_json_is_visible_and_reader_continues(self):
         client, factory = self.client()
         client.start()

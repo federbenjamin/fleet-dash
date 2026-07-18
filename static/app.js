@@ -531,9 +531,19 @@ function usageBar(legacy,providers){
     ...codexBuckets.map(bucket=>bucket.used_pct),
   ].filter(value=>Number.isFinite(Number(value))).map(Number);
   const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
+  const activeClaude=claudeProfiles.find(profile=>profile?.active) || claudeProfiles.find(Boolean);
+  const claudeWindows=activeClaude?[activeClaude.five_hour_pct,
+    claude?.show_week===false?null:activeClaude.weekly_pct]
+    .filter(value=>Number.isFinite(Number(value))).map(value=>Math.round(Number(value))):[];
+  const activeCodex=codexBuckets.map(bucket=>Number(bucket.used_pct))
+    .filter(Number.isFinite).sort((a,b)=>b-a)[0];
+  const summaries=[];
+  if(claudeWindows.length)summaries.push(`Claude ${claudeWindows.join('/')}`);
+  if(Number.isFinite(activeCodex))summaries.push(`Codex ${Math.round(activeCodex)}`);
   chip.classList.remove('usagewarn','usagedanger');
   if(worst>=90)chip.classList.add('usagedanger');else if(worst>=70)chip.classList.add('usagewarn');
-  chip.textContent=`Usage${worst>=70?` · ${Math.round(worst)}%`:''}`;
+  chip.textContent=`Usage${summaries.length?` · ${summaries.join(' · ')}`:''}`;
+  chip.title='Claude active account: 5-hour/weekly · Codex: highest active non-Spark window';
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
     ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
       <div class="uhead"><span class="uname">Claude Code</span>
@@ -730,6 +740,33 @@ function defaultScheduleTime(){const date=new Date(Date.now()+3600000),pad=value
   return`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;}
 function scheduleButton(sid,inputId,agentId=''){
   return`<button class="pbtn sendoption" title="schedule or wait to send" aria-label="delivery options" onclick="openSchedule('${sid}','${inputId}','${agentId}')">⌄</button>`;
+}
+function closeComposerMenus(except=null){
+  document.querySelectorAll('.composerplus.open').forEach(menu=>{
+    if(menu===except)return;
+    menu.classList.remove('open');
+    menu.previousElementSibling?.setAttribute('aria-expanded','false');
+    menu.closest('#sact')?.classList.remove('tools-open');
+  });
+}
+function toggleComposerMenu(button,event){
+  event?.stopPropagation();
+  const menu=button?.nextElementSibling;if(!menu)return;
+  const opening=!menu.classList.contains('open');
+  closeComposerMenus(opening?menu:null);
+  menu.classList.toggle('open',opening);button.setAttribute('aria-expanded',String(opening));
+  menu.closest('#sact')?.classList.toggle('tools-open',opening);
+}
+function openComposerSchedule(sid,inputId,agentId=''){
+  closeComposerMenus();
+  openSchedule(sid,inputId,agentId);
+}
+function composerTools(sid,inputId){
+  return`<span class="composertools"><button type="button" class="pbtn composerplusbtn" aria-label="message options" aria-haspopup="menu" aria-expanded="false" onclick="toggleComposerMenu(this,event)">＋</button>
+    <span class="composerplus" role="menu">
+      <label class="composerplusitem" role="menuitem" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.querySelector('input').click()}">▧ <span>Send picture</span><input type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="closeComposerMenus();chooseImages('${sid}',this)"></label>
+      <button type="button" class="composerplusitem" role="menuitem" onclick="openComposerSchedule('${sid}','${inputId}')">◷ <span>Schedule message</span></button>
+    </span></span>`;
 }
 async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,message=''){
   const feedbackStarted=performance.now();
@@ -1497,6 +1534,24 @@ function composerKey(event,send){
   event.preventDefault();
   send();
 }
+function resizeComposer(input){
+  if(!input)return;
+  input.style.height='auto';
+  const limit=matchMedia('(pointer:coarse)').matches?112:140;
+  const height=Math.min(Math.max(input.scrollHeight,42),limit);
+  input.style.height=height+'px';
+  input.style.overflowY=input.scrollHeight>limit?'auto':'hidden';
+}
+function composerInput(input,sid,pre){
+  resizeComposer(input);
+  slashInput(sid,pre);
+}
+function composerFocus(input,sid,pre){
+  input?.closest('#sact')?.classList.add('composer-active');
+  resizeComposer(input);
+  slashInput(sid,pre);
+  requestAnimationFrame(syncVisualViewport);
+}
 function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
   const item=optimisticList(sid).find(entry=>entry.id===id);
   if(!item)return;
@@ -1942,8 +1997,8 @@ function renderViewerBar(force){
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
     ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" data-draft-key="${esc(composerDraftKey(viewerSid))}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
-      oninput="slashInput('${viewerSid}','vft')" onfocus="slashInput('${viewerSid}','vft')"
+    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" data-draft-key="${esc(composerDraftKey(viewerSid))}" rows="2" placeholder="send message" autocomplete="off"
+      oninput="composerInput(this,'${viewerSid}','vft')" onfocus="resizeComposer(this);slashInput('${viewerSid}','vft')"
       onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(viewerSid)))}</textarea>
       <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
     <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
@@ -2014,6 +2069,7 @@ window.addEventListener('popstate',()=>{
 function dismissOverlay(){
   if(usageOpen)return closeUsage();
   if(overflowOpen)return closeOverflow();
+  if(document.querySelector('.composerplus.open'))return closeComposerMenus();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
   if(settingsPushed)return history.back();
   if(handoffPushed)return history.back();
@@ -2025,8 +2081,57 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
   if(usageOpen&&!e.target.closest('#usagepanel')&&!e.target.closest('#usagechip'))closeUsage();
   if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();
+  if(!e.target.closest('.composertools'))closeComposerMenus();
   if($('#mobilemore').classList.contains('open')&&!e.target.closest('#mobilemore')&&!e.target.closest('[data-route="more"]'))closeMobileMore();
 });
+
+// iOS resizes the visual viewport independently from the fixed layout viewport.
+// Keep full-screen reading surfaces fitted to the pixels above the keyboard so
+// the dashboard beneath them can never peek through.
+let visualViewportBaseline=Math.max(1,Math.round(
+  window.visualViewport?.height||window.innerHeight||document.documentElement.clientHeight||1));
+function syncVisualViewport(){
+  const viewport=window.visualViewport;
+  const height=Math.max(1,Math.round(viewport?.height||window.innerHeight));
+  const top=Math.max(0,Math.round(viewport?.offsetTop||0));
+  const layoutHeight=Math.max(height,window.innerHeight||0,document.documentElement.clientHeight||0);
+  const focused=document.activeElement;
+  const editingOverlay=focused&&['INPUT','TEXTAREA','SELECT'].includes(focused.tagName)&&
+    Boolean(focused.closest('#sview,#aview,#viewer'));
+  if(!editingOverlay)visualViewportBaseline=Math.max(height,layoutHeight);
+  const keyboardOpen=editingOverlay&&Math.max(
+    layoutHeight-height-top,visualViewportBaseline-height-top)>80;
+  document.documentElement.style.setProperty('--fleet-visual-height',height+'px');
+  document.documentElement.style.setProperty('--fleet-visual-top',top+'px');
+  document.documentElement.classList.toggle('keyboard-open',keyboardOpen);
+}
+window.visualViewport?.addEventListener('resize',syncVisualViewport);
+window.visualViewport?.addEventListener('scroll',syncVisualViewport);
+window.addEventListener('orientationchange',()=>requestAnimationFrame(syncVisualViewport));
+document.addEventListener('focusout',event=>{
+  if(!event.target.closest?.('#sact .composer'))return;
+  setTimeout(()=>{
+    if(!document.activeElement?.closest?.('#sact .composer'))$('#sact').classList.remove('composer-active');
+    syncVisualViewport();
+  },0);
+},true);
+let chatTouch=null;
+document.addEventListener('touchstart',event=>{
+  const input=document.activeElement;
+  if(!event.target.closest?.('#sbody')||!input?.matches?.('#sact .composer textarea'))return chatTouch=null;
+  const touch=event.touches?.[0];
+  chatTouch=touch?{x:touch.clientX,y:touch.clientY,input}:null;
+},{passive:true,capture:true});
+document.addEventListener('touchmove',event=>{
+  if(!chatTouch)return;
+  const touch=event.touches?.[0];if(!touch)return;
+  const dx=Math.abs(touch.clientX-chatTouch.x),dy=Math.abs(touch.clientY-chatTouch.y);
+  if(dy<10||dy<=dx)return;
+  chatTouch.input.blur();closeComposerMenus();chatTouch=null;
+  requestAnimationFrame(syncVisualViewport);
+},{passive:true,capture:true});
+document.addEventListener('touchend',()=>{chatTouch=null;},{passive:true,capture:true});
+syncVisualViewport();
 
 // ---- full-screen session view ----------------------------------------------
 // Same overlay shape as the subagent view, but this one is a real terminal
@@ -2235,6 +2340,7 @@ function openSession(sid){
   if(session?.new_response)markRead(session);
   sessionView={sid,closed:false};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  syncVisualViewport();
   $('#stitle2').innerHTML=sessTitleBlock(session);
   const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
@@ -2247,6 +2353,7 @@ function openClosed(sid){
   closeViewer();
   sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
   $('#sview').style.display='flex';
+  syncVisualViewport();
   const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   delete body.dataset.renderKey;
@@ -2264,9 +2371,11 @@ async function loadClosedMeta(sid){
 }
 function closeSession(){
   closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
+  closeComposerMenus();
   $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
-  $('#sact').innerHTML='';$('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
+  $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open');
+  $('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
 }
 function sessionActivityHtml(s){
   const mainWorking=['running','stalled'].includes(s.state);
@@ -2302,6 +2411,7 @@ async function renderClosed(){
       ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
         onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
         <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
+  $('#sact').classList.remove('session-composer','composer-active','tools-open');
   $('#sact').innerHTML=closedActions(meta.status_line);
   if(!closedCtx[sid]){
     closedCtx[sid]={fetching:true,messages:[],info:{}};
@@ -2393,19 +2503,22 @@ function renderSession(force){
     </div>`
     :pendingBox(s,'smsg');   // permission prompts render whole
   const act=$('#sact');
+  act.classList.remove('tools-open');
+  act.classList.toggle('session-composer',Boolean(s.capabilities?.submit));
+  if(!s.capabilities?.submit)act.classList.remove('composer-active');
   keepStripScroll(act,()=>{act.innerHTML=`
-    ${qHtml}
-    ${fileStrip(s.session_id,(c&&c.files)||[])}
-    ${handoffLinksHtml(s)}
-    ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${statusLineHtml(s.status_line,'session:'+s.session_id)}
-    ${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" placeholder="send a message  ·  Return newline  ·  ⌘/Ctrl+Return send" autocomplete="off"
-      oninput="slashInput('${s.session_id}','sft')" onfocus="slashInput('${s.session_id}','sft')"
+    <div class="session-context">${qHtml}
+      ${fileStrip(s.session_id,(c&&c.files)||[])}
+      ${handoffLinksHtml(s)}
+      ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+      ${statusLineHtml(s.status_line,'session:'+s.session_id)}</div>
+    <div class="composer-dock">${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" placeholder="send message" autocomplete="off"
+      oninput="composerInput(this,'${s.session_id}','sft')" onfocus="composerFocus(this,'${s.session_id}','sft')"
       onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(s.session_id)))}</textarea>
-      <span class="sendpair"><label class="pbtn attach" title="attach up to 4 images" aria-label="attach images">＋<input type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="chooseImages('${s.session_id}',this)"></label><button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button>${scheduleButton(s.session_id,'sft-'+s.session_id)}</span></div><div class="image-drafts" id="imgdraft-${s.session_id}"></div>`:''}
-    <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
-    <div class="actmsg" id="smsg-${s.session_id}"></div>`;});
-  if(s.capabilities?.submit)void renderImageDrafts(s.session_id);
+      <span class="sendpair">${composerTools(s.session_id,'sft-'+s.session_id)}<button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></span></div><div class="image-drafts" id="imgdraft-${s.session_id}"></div>`:''}
+      <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
+      <div class="actmsg" id="smsg-${s.session_id}"></div></div>`;});
+  if(s.capabilities?.submit){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
   if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
@@ -3551,13 +3664,13 @@ async function sendText(sid,ftPre='ft',msgPre='msg'){
     }
     const queued=queueOfflineText(sid,text,imageIds);
     if(!queued){if(el)el.textContent='offline queue is full — draft kept here';return;}
-    slashClose();if(inp)inp.value='';clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid);
+    slashClose();closeComposerMenus();if(inp){inp.value='';resizeComposer(inp);}clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid);
     if(el)el.textContent='queued offline — sends automatically after reconnection';
     return;
   }
   if(cmd&&cmd.danger&&!confirm(`${cmd.name} destroys this session's conversation state.\n\n${cmd.desc}\n\nSend it?`))return;
-  slashClose();
-  if(inp)inp.value='';clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid); // sending is the only automatic clear
+  slashClose();closeComposerMenus();
+  if(inp){inp.value='';resizeComposer(inp);}clearDraft(composerDraftKey(sid));setImageDraftIds(sid,[]);void renderImageDrafts(sid); // sending is the only automatic clear
   if(cmd&&cmd.execution==='action')return act(sid,{type:cmd.action},msgPre);
   if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
   const optimisticId=addOptimistic(sid,text,'text','sending',null,null,imageIds);
@@ -4008,6 +4121,7 @@ function renderProvisionalSession(s){
     ${failed?'!':`<span class="delivery sending" aria-hidden="true">◌</span>`}
     <div><b>${failed?'Session did not start':p.status==='discovering'?'Finding the new session…':'Starting session…'}</b>
     <span>${failed?esc(p.error||'Startup failed'):'Your message is saved here while Fleet waits for the exact native session.'}</span></div></div></div>`;
+  $('#sact').classList.remove('session-composer','composer-active','tools-open');
   $('#sact').innerHTML=failed?`<div class="spawnrecovery">
     ${p.canRetry?`<button class="pbtn send" onclick="retrySpawn()">retry same session setup</button><button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`:
       p.serverSessionId?`<button class="pbtn send" onclick="keepWaitingForSpawn()">keep waiting</button>`:

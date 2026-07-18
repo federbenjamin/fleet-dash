@@ -41,6 +41,10 @@ html[data-nav-side="right"] #appmain{grid-column:1;grid-row:1}
 .destination[hidden]{display:none!important}
 .desthead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:0 0 16px;padding:0 2px}
 .desthead h1{font-size:22px;line-height:1.2;letter-spacing:-.25px}.desthead p{font-size:11.5px;color:var(--faint);margin-top:3px}
+.nowtitle{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}
+#usagechip{border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--dim);
+  font:600 10.5px/1.2 "SF Mono",Menlo,monospace;padding:5px 8px;cursor:pointer;white-space:nowrap}
+#usagechip:hover{border-color:var(--blue);color:var(--blue);background:#101c2c}
 .headprimary{border:1px solid var(--blue);border-radius:8px;background:#101c2c;color:var(--blue);
   font:inherit;font-size:11.5px;font-weight:700;padding:8px 12px;cursor:pointer;white-space:nowrap}
 .headprimary:hover{background:var(--blue);color:#07111d}
@@ -505,12 +509,24 @@ details.insfold>summary:hover{color:var(--fg)}
 .freetext input,.freetext textarea{flex:1;background:var(--card);border:1px solid var(--line);border-radius:8px;
                 padding:8px 10px;color:var(--fg);font:inherit;font-size:13px}
 .freetext.composer{align-items:flex-end}
-.freetext.composer textarea{min-height:42px;max-height:140px;line-height:1.4;resize:vertical}
+.freetext.composer textarea{min-height:42px;max-height:140px;line-height:1.4;resize:none}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .sendpair{display:flex;gap:6px;flex:0 0 auto}.sendpair .pbtn{white-space:nowrap}
 .pbtn.attach{display:inline-flex;align-items:center;justify-content:center;background:var(--card2);
   border:1px solid var(--line);color:var(--fg);padding-inline:11px;cursor:pointer}
 .pbtn.attach input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.composertools{position:relative;display:inline-flex}.composerplusbtn{width:40px;height:40px;display:inline-flex;
+  align-items:center;justify-content:center;padding:0;background:var(--card2);border:1px solid var(--line);color:var(--fg)}
+.composerplusbtn[aria-expanded="true"]{border-color:var(--blue);color:var(--blue);background:#101c2c}
+.composerplus{display:none;position:absolute;right:0;bottom:calc(100% + 8px);z-index:48;width:190px;
+  padding:5px;background:#11161d;border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 18px 50px rgba(0,0,0,.62)}
+.composerplus.open{display:flex;flex-direction:column}
+.composerplusitem{min-height:44px;display:grid;grid-template-columns:24px minmax(0,1fr);align-items:center;
+  gap:5px;border:0;border-radius:7px;background:transparent;color:var(--fg);font:inherit;font-size:12px;
+  text-align:left;padding:0 10px;cursor:pointer}
+.composerplusitem:hover,.composerplusitem:focus-visible{outline:0;background:var(--card2);color:var(--blue)}
+.composerplusitem input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 .image-drafts{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
 .image-draft{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:5px 7px;
   border:1px solid var(--line);border-radius:8px;background:var(--card2);color:var(--dim);font-size:11px}
@@ -781,6 +797,12 @@ td.r,th.r{text-align:right}
 #sevidence.light .evidenceevent{border-color:#d0d7de}
 #sact{border-top:1px solid var(--line);background:var(--card);
       padding:8px 12px calc(10px + env(safe-area-inset-bottom));max-height:60vh;overflow-y:auto}
+#sact.session-composer{position:relative;z-index:3;display:flex;flex-direction:column;padding:0;overflow:hidden}
+#sact.session-composer.tools-open{overflow:visible}
+#sact.session-composer .session-context{flex:1 1 auto;min-height:0;overflow-y:auto;
+  padding:8px 12px 0;overscroll-behavior:contain}
+#sact.session-composer .composer-dock{position:relative;z-index:2;flex:0 0 auto;
+  padding:0 12px calc(10px + env(safe-area-inset-bottom));background:var(--card)}
 #sact .pend{margin:0 0 8px;border-radius:8px;border:1px solid var(--amber)}
 #sact .dfold{margin-top:10px}
 /* one rule for BOTH docked bars: the file strip → send box gap must match, or the
@@ -1204,7 +1226,8 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   #mobiletitle{flex:1;font-size:14px}
   .desthead{align-items:center;margin-bottom:12px;padding:0 2px}
   .desthead h1{display:none}
-  .desthead p{font-size:11px;margin:0}
+  .nowtitle{gap:0}
+  #usagechip{min-height:34px;max-width:calc(100vw - 130px);overflow:hidden;text-overflow:ellipsis}
   .headprimary{padding:7px 10px}
   .commandbar{top:52px;margin-left:-1px;margin-right:-1px}
   .searchbar{top:52px;margin-left:-1px;margin-right:-1px}
@@ -1260,6 +1283,15 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .workoutcome{grid-template-columns:44px}.worksignals{gap:8px}.worksignals span{flex:1 1 42%}
   #usagepanel{inset:auto 0 0;z-index:68;width:100%;max-height:72dvh;border-width:1px 0 0;border-radius:14px 14px 0 0;
     padding:13px 13px calc(18px + env(safe-area-inset-bottom))}
+  #sview,#aview,#viewer{inset:auto 0;top:var(--fleet-visual-top,0px);height:var(--fleet-visual-height,100dvh)}
+  #sact.session-composer{max-height:58%}
+  #sact.composer-active .session-context{display:none}
+  #sact .composer-dock{padding-left:8px;padding-right:8px}
+  #sact .freetext.composer{gap:6px;margin-top:6px}
+  #sact .freetext.composer textarea{max-height:112px;padding:9px 10px}
+  #sact .sendpair{gap:5px}
+  #sact .pbtn.send{min-height:40px;padding-inline:12px}
+  html.keyboard-open #sact.session-composer .composer-dock{padding-bottom:4px}
   .activeagentcard{grid-template-columns:12px minmax(0,1fr) 14px;padding:10px;gap:8px}
   .activeagentmeta{grid-column:2;align-items:flex-start}.activeagentcard>.aopen{grid-column:3;grid-row:1/3}
   .statusstrip{padding:7px 8px}.status-details{display:none}.statusstrip.expanded .status-details{display:block}
@@ -1278,4 +1310,4 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
 }
 /* iOS Safari auto-zooms any focused input with font-size < 16px — must be the
    LAST rule (ties on specificity with .freetext/.setnum input sizes; later wins) */
-@media (pointer:coarse){input{font-size:16px!important}}
+@media (pointer:coarse){input,textarea,select{font-size:16px!important}}
