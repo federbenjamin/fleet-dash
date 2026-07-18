@@ -5041,11 +5041,17 @@ Treat this as an independent session. Verify the repository state before changin
                 submit=not unavailable, queue_submit=False, focus_terminal=True,
                 focus_terminal_mode="focus", focus_terminal_label="open",
                 focus_terminal_reason="Bring the attached Codex terminal to the front")
+            app_server_active = session.get("control_state") == "connected_active"
             session.update(
                 capabilities=capabilities, terminal_attached=True,
                 queue_accepting=False, headless=False, read_only=False,
                 read_only_reason=None,
-                control_state=("terminal_active" if session.get("state") in
+                # A terminal is an additional focus/fallback route. It must not
+                # replace exact App Server authority recovered after compaction;
+                # doing so sends the next message as terminal input instead of a
+                # canonical turn/steer request.
+                control_state=(session.get("control_state") if app_server_active else
+                               "terminal_active" if session.get("state") in
                                ("running", "stalled", "needs_you") else
                                "terminal_idle"))
 
@@ -5614,16 +5620,124 @@ Treat this as an independent session. Verify the repository state before changin
         # OutboxManager. Do not send them through public act(), which accepts
         # opaque upload IDs only. An exact attached Codex TUI can still receive
         # those paths through the same terminal transport as direct messages.
-        if image_paths and record.get("target_provider") == "codex":
+        if record.get("target_provider") == "codex":
             route = self._codex_terminal_route(self.codex.native(sid), force=True)
             result = (self._write_codex_terminal(action, route) if route else
                       self.codex.act(action))
+        elif image_paths:
+            result = self._write_claude_queued_message(action)
         else:
             result = self.act(action)
         return {"ok": bool(result.get("ok")), "provider": record.get("target_provider"),
                 "session_id": sid, "accepted": bool(result.get("ok")),
                 "error": result.get("error"), "code": result.get("code"),
                 "queueable": bool(result.get("queueable"))}
+
+    def _write_claude_queued_message(self, action):
+        """Deliver queue-owned image paths without accepting client file paths."""
+        sid = str(action.get("session_id") or "")
+        reg = next((item for item in self.live_sessions()
+                    if item.get("sessionId") == sid), None)
+        if not reg:
+            return {"ok": False, "error": "session not live", "queueable": True}
+        paths = [str(path) for path in (action.get("image_paths") or []) if path]
+        if not paths:
+            return {"ok": False, "error": "no images"}
+        text = str(action.get("text") or "")[:2000].strip()
+        text = text or ("Please inspect the attached image." if len(paths) == 1 else
+                        "Please inspect the attached images.")
+        text += "\n\nImages attached through Fleet:\n" + "\n".join(
+            f"- {path}" for path in paths)
+        if text.startswith("/") and " " not in text:
+            text += " "
+        steps = [(text, True)]
+        if self._is_background_claude(reg):
+            return self._write_background_claude(reg, steps, 0.05)
+        tty = self._tty_for_pid(reg["pid"])
+        if not tty:
+            return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
+        return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05)
+
+    @staticmethod
+    def _message_can_send_now(session):
+        """Return true only when provider acceptance means immediate delivery."""
+        if (not session or session.get("pending") or session.get("stale") or
+                session.get("provider_stale")):
+            return False
+        capabilities = session.get("capabilities") or {}
+        if not capabilities.get("submit"):
+            return False
+        active = (session.get("compacting") is not None or
+                  session.get("state") in
+                  ("running", "stalled", "needs_you", "stalled_or_prompt"))
+        # Now placement is an action queue, not provider availability. An idle
+        # session can be in Needs you solely because its last prose asks for a
+        # reply; that reply must start immediately instead of waiting on itself.
+        if not active:
+            return True
+        # Fleet-owned App Server turns can be steered immediately. An attached
+        # terminal accepts typing while busy but holds it for later, so it must
+        # use the durable availability queue instead of pretending it was sent.
+        return (session.get("provider") == "codex" and
+                session.get("control_state") == "connected_active")
+
+    def _queue_when_available(self, action, provider, reason=None):
+        image_paths = list(action.get("image_paths") or [])
+        message = str(action.get("text") or "").strip()
+        if not message and image_paths:
+            message = ("Please inspect the attached image." if len(image_paths) == 1 else
+                       "Please inspect the attached images.")
+        try:
+            item = self.outbox.create_delivery(
+                message=message, target_provider=provider,
+                target_session_id=str(action.get("session_id") or ""),
+                idempotency_key=action.get("client_request_id"),
+                image_paths=image_paths, kind="when_available",
+                origin="automatic_fallback")
+            wait_reason = reason or "Waiting for the session to become available"
+            return {"ok": True, "queued": True, "outbox_id": item["id"],
+                    "queue_state": item["state"],
+                    "message": "Queued · waiting for session",
+                    "queue_reason": wait_reason}
+        except OutboxError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code}
+        except Exception as exc:
+            print(f"Automatic delivery queue failed: {exc}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "message could not be saved to the Outbox"}
+
+    def _send_now_or_queue(self, action):
+        """Choose immediate delivery or a durable exact-session queue server-side."""
+        sid = str(action.get("session_id") or "")
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        session = next((item for item in snapshot.get("sessions") or []
+                        if str(item.get("session_id") or "") == sid), None)
+        if not session:
+            return {"ok": False, "error": "session not live"}
+        provider = str(session.get("provider") or
+                       ("codex" if sid.startswith("codex:") else "claude"))
+        record = {"kind": "when_available", "target_provider": provider,
+                  "target_session_id": sid, "updated_at": time.time() - 300}
+        target, reason, _ = self.outbox._target_status(record, snapshot)
+        if target == "block":
+            return {"ok": False, "error": reason or "session cannot accept messages"}
+        if not self._message_can_send_now(session):
+            return self._queue_when_available(action, provider, reason)
+
+        direct = {"type": action.get("type"), "session_id": sid,
+                  "text": action.get("text"),
+                  "client_request_id": action.get("client_request_id")}
+        if action.get("type") == "image_text":
+            direct["upload_ids"] = list(action.get("upload_ids") or [])
+        result = self.act(direct)
+        if result.get("ok"):
+            if result.get("queued"):
+                return result
+            return {**result, "queued": False, "delivery": "sent_now",
+                    "message": "Sent now"}
+        if result.get("queueable") or result.get("code") == "provider_control_unavailable":
+            return self._queue_when_available(action, provider, result.get("error"))
+        return result
 
     def _queue_codex_recovery(self, action):
         image_paths = list(action.get("image_paths") or [])
@@ -5713,19 +5827,25 @@ Treat this as an independent session. Verify the repository state before changin
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
         {type:'text', session_id, text:'...'} |
-        {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']}"""
+        {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']} |
+        {type:'send_message', session_id, text:'...', upload_ids:['opaque-id']}"""
         if not isinstance(action, dict):
             return {"ok": False, "error": "action must be an object"}
         # Double-underscore fields are server-internal. A client must never be
         # able to claim that an arbitrary directory is a prepared staging worktree.
         action = {key: value for key, value in action.items()
                   if not str(key).startswith("__")}
+        # Public callers identify server-owned uploads by opaque ID. Never let a
+        # JSON request smuggle a local path into either direct or queued sends.
+        action.pop("image_paths", None)
         staging_error = self._staging_action_error(action)
         if staging_error:
             return staging_error
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
-        if action.get("type") == "image_text":
+        requested_type = action.get("type")
+        if requested_type == "image_text" or (requested_type == "send_message" and
+                                               action.get("upload_ids")):
             paths, error = self._resolve_image_uploads(
                 str(action.get("session_id") or ""), action.get("upload_ids"))
             if error:
@@ -5733,6 +5853,10 @@ Treat this as an independent session. Verify the repository state before changin
             # Client-supplied paths are never accepted. Only this server-side
             # resolution can add image_paths to a provider action.
             action = {**action, "image_paths": paths}
+        if requested_type == "send_message":
+            action = {**action,
+                      "type": "image_text" if action.get("image_paths") else "text"}
+            return self._send_now_or_queue(action)
         if action.get("type") == "briefing_review":
             return self.briefing_action(action)
         if str(action.get("type") or "").startswith("outbox_"):
@@ -5760,7 +5884,12 @@ Treat this as an independent session. Verify the repository state before changin
                not self._cleanup_ticket_matches(action.get("cleanup_ticket"), sid):
                 return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
             if action.get("type") in ("text", "image_text"):
-                route = self._codex_terminal_route(self.codex.native(sid), force=True)
+                # Prefer exact App Server turn authority. A live terminal is a
+                # fallback for a TUI-owned turn, not a reason to bypass the
+                # post-compaction turn id delivered by the provider.
+                route = (None if session and
+                         session.get("control_state") == "connected_active" else
+                         self._codex_terminal_route(self.codex.native(sid), force=True))
                 if route:
                     return self._write_codex_terminal(action, route)
             if action.get("type") in ("text", "image_text") and session and \

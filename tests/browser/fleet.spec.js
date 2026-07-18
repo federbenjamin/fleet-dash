@@ -461,7 +461,7 @@ test('cross-provider search filters, exact context, live handoff, and rebuild', 
   await page.locator('#search-rebuild').click();
   await expect(page.locator('#confirm')).toBeVisible();
   await page.locator('#confirm').getByRole('button', { name: 'rebuild index' }).click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type)
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type)
     .toBe('search_rebuild');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
@@ -1385,7 +1385,7 @@ test('message composers use Return for newlines and an explicit modified Return 
   await composer.fill('First line\nSecond line');
   await sendModifiedReturn(page, composer);
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1)).toMatchObject({
-    type: 'text', text: 'First line\nSecond line' });
+    type: 'send_message', text: 'First line\nSecond line' });
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
   await page.reload();
@@ -1458,16 +1458,21 @@ test('Markdown uses the canonical composer and a direct Chat jump without embedd
   await expect(chatComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
 });
 
-test('phone images persist across reload and send through the owning provider', async ({ page }) => {
+test('phone image menu keeps the trusted tap, persists, and sends through the owning provider', async ({ page }, testInfo) => {
   await reset(page);
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sact').getByRole('menu')).toBeHidden();
   await page.locator('#sact').getByRole('button',{name:'message options'}).click();
-  await expect(page.locator('#sact').getByRole('menuitem',{name:'Send picture'})).toBeVisible();
+  const pictureAction=page.locator('#sact').getByRole('menuitem',{name:'Send picture'});
+  await expect(pictureAction).toBeVisible();
   await expect(page.locator('#sact').getByRole('menuitem',{name:'Schedule message'})).toBeVisible();
   const image={name:'phone-photo.png',mimeType:'image/png',
     buffer:Buffer.from([137,80,78,71,13,10,26,10,0,0,0,0])};
-  await page.locator('#sact input[type="file"]').setInputFiles(image);
+  const chooserPromise=page.waitForEvent('filechooser');
+  if(testInfo.project.name.startsWith('mobile'))await pictureAction.tap();
+  else await pictureAction.click();
+  const chooser=await chooserPromise;await chooser.setFiles(image);
+  await expect(page.locator('#sact').getByRole('menu')).toBeHidden();
   await expect(page.locator('#sact .image-draft')).toContainText('phone-photo.png');
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('fleet.imageDrafts.v1')||'{}')
     ['codex:thread-one']?.length)).toBe(1);
@@ -1480,12 +1485,36 @@ test('phone images persist across reload and send through the owning provider', 
   await expect(page.locator('#sbody .image-receipt')).toContainText('1 image');
   await expect.poll(async () => (await fixtureState(page)).uploads.length).toBe(1);
   await expect.poll(async () => (await fixtureState(page)).actions.find(action=>
-    action.type==='image_text')).toMatchObject({session_id:'codex:thread-one',
+    action.type==='send_message'&&action.upload_ids?.length)).toMatchObject({session_id:'codex:thread-one',
       text:'Inspect the mobile screenshot'});
-  expect((await fixtureState(page)).actions.find(action=>action.type==='image_text').upload_ids)
+  expect((await fixtureState(page)).actions.find(action=>
+    action.type==='send_message'&&action.upload_ids?.length).upload_ids)
     .toHaveLength(1);
   await expect.poll(() => page.evaluate(() => localStorage.getItem('fleet.imageDrafts.v1')))
     .toBeNull();
+});
+
+test('default send visibly queues a busy session and never becomes a false failure', async ({ page }) => {
+  await reset(page,'send-while-busy');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  const input=page.locator('#sft-claude-one');
+  await input.fill('Send after the current turn');
+  await page.locator('#sact').getByRole('button',{name:'send'}).click();
+  const receipt=page.locator('#sbody .optimistic').filter({hasText:'Send after the current turn'});
+  await expect(receipt).toContainText('Queued · waiting for session');
+  await expect(receipt.locator('[aria-label="message queued"]')).toBeVisible();
+  await expect.poll(async () => (await fixtureState(page)).outbox).toHaveLength(1);
+  expect((await fixtureState(page)).outbox[0]).toMatchObject({
+    kind:'when_available',state:'waiting_availability',target_session_id:'claude-one',
+    origin:'automatic_fallback',message:'Send after the current turn'});
+  await page.waitForTimeout(15_500);
+  await expect(receipt).toContainText('Queued · waiting for session');
+  await expect(receipt.getByRole('button',{name:'send failed; restore message'})).toHaveCount(0);
+  await page.locator('#sclose').click();
+  await expect(page.locator('[data-sid="claude-one"] .quickfeedback'))
+    .toContainText('Queued · waiting for session');
+  await page.reload();
+  await expect(page.locator('#outboxsummary')).toContainText('1 waiting to send');
 });
 
 test('images selected offline survive reload and flush exactly once after reconnection', async ({ page,context }) => {
@@ -1510,11 +1539,13 @@ test('images selected offline survive reload and flush exactly once after reconn
     await context.setOffline(false);
     await expect.poll(async () => (await fixtureState(page)).uploads.length).toBe(1);
     await expect.poll(async () => (await fixtureState(page)).actions.filter(action=>
-      action.type==='image_text'&&action.session_id==='claude-one').length).toBe(1);
+      action.type==='send_message'&&action.upload_ids?.length&&
+      action.session_id==='claude-one').length).toBe(1);
     await page.waitForTimeout(2200);
     expect((await fixtureState(page)).uploads).toHaveLength(1);
     expect((await fixtureState(page)).actions.filter(action=>
-      action.type==='image_text'&&action.session_id==='claude-one')).toHaveLength(1);
+      action.type==='send_message'&&action.upload_ids?.length&&
+      action.session_id==='claude-one')).toHaveLength(1);
     page.__failures=page.__failures.filter(message=>
       !/ERR_INTERNET_DISCONNECTED|net::ERR_FAILED|Failed to fetch/i.test(message));
   }finally{await context.setOffline(false);}
@@ -2368,12 +2399,12 @@ test('connection loss reloads the cached dashboard, keeps drafts, and flushes qu
 
     await context.setOffline(false);
     await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
-      action.type === 'text' && action.session_id === 'codex:thread-one' &&
+      action.type === 'send_message' && action.session_id === 'codex:thread-one' &&
       action.text === 'Send this when Fleet reconnects').length).toBe(1);
     await page.evaluate(() => tick());
     await page.waitForTimeout(2200);
     expect((await fixtureState(page)).actions.filter(action =>
-      action.type === 'text' && action.session_id === 'codex:thread-one' &&
+      action.type === 'send_message' && action.session_id === 'codex:thread-one' &&
       action.text === 'Send this when Fleet reconnects')).toHaveLength(1);
     expect(await page.evaluate(() => localStorage.getItem('fleet.offlineMessages.v1'))).toBeNull();
     page.__failures = page.__failures.filter(message =>

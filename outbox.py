@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 PENDING_STATES = {"scheduled", "waiting_availability", "waiting_usage_reset",
                   "waiting_provider"}
 TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancelled"}
+TARGET_RECONNECT_GRACE_SECONDS = 120
 ALL_STATES = PENDING_STATES | TERMINAL_STATES | {"spawning", "sending"}
 KINDS = {"at_time", "when_available", "usage_reset", "new_session",
          "provider_reconnect"}
@@ -126,6 +127,10 @@ class OutboxManager:
             os.path.dirname(os.path.abspath(db_path)), "outbox-images"))
         self.db_connect_ms = deque(maxlen=240)
         self.db_begin_ms = deque(maxlen=240)
+        # Provider discovery is asynchronous at daemon start. One empty fleet
+        # snapshot must never convert a durable exact-session delivery into a
+        # permanent failure.
+        self._missing_targets = {}
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_db()
 
@@ -347,15 +352,23 @@ class OutboxManager:
                 f"VALUES({','.join('?' for _ in columns)})", params)
         return self.get(outbox_id)
 
-    def create_recovery(self, *, message, target_provider, target_session_id,
-                        idempotency_key, image_paths=None):
-        """Persist one direct send while provider control is unavailable.
+    def create_delivery(self, *, message, target_provider, target_session_id,
+                        idempotency_key, image_paths=None, kind="when_available",
+                        origin="automatic_fallback"):
+        """Persist one idempotent send with queue-owned image copies.
 
-        Image files are copied into queue-owned private storage before the row
-        becomes visible, so upload expiry cannot silently break later delivery.
+        Browser uploads are short lived. Copy them before publishing the row so
+        an automatic send fallback survives browser exit, daemon restart, and
+        upload cleanup. The unique request ID makes a retried HTTP request safe.
         """
-        if target_provider != "codex":
+        if target_provider not in ("claude", "codex"):
+            raise OutboxError("unknown delivery provider")
+        if kind not in ("when_available", "provider_reconnect"):
+            raise OutboxError("unsupported delivery queue")
+        if kind == "provider_reconnect" and target_provider != "codex":
             raise OutboxError("provider recovery queue is unavailable for this provider")
+        if origin not in ("automatic_fallback", "direct_send_recovery"):
+            raise OutboxError("invalid delivery origin")
         key = str(idempotency_key or "")
         if not (8 <= len(key) <= 160) or any(ord(char) < 33 or ord(char) > 126
                                              for char in key):
@@ -367,7 +380,7 @@ class OutboxManager:
             return self._public(existing)
         now = self.clock()
         values = self._normalize_create({
-            "kind": "provider_reconnect", "message": message,
+            "kind": kind, "message": message,
             "target_provider": target_provider, "target_session_id": target_session_id,
             "created_zone": "UTC"}, now=now)
         outbox_id = self.id_factory()
@@ -394,7 +407,7 @@ class OutboxManager:
                         shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
                     os.chmod(destination, 0o600, follow_symlinks=False)
                     owned_paths.append(destination)
-            values.update(origin="direct_send_recovery", idempotency_key=key,
+            values.update(origin=origin, idempotency_key=key,
                           image_paths_json=json.dumps(owned_paths, separators=(",", ":")))
             columns = ["id", "created_at", "updated_at", *values.keys()]
             params = [outbox_id, now, now, *values.values()]
@@ -426,6 +439,15 @@ class OutboxManager:
             except OSError:
                 pass
             raise
+
+    def create_recovery(self, *, message, target_provider, target_session_id,
+                        idempotency_key, image_paths=None):
+        """Compatibility wrapper for Codex provider-control recovery."""
+        return self.create_delivery(
+            message=message, target_provider=target_provider,
+            target_session_id=target_session_id, idempotency_key=idempotency_key,
+            image_paths=image_paths, kind="provider_reconnect",
+            origin="direct_send_recovery")
 
     def _remove_asset_paths(self, paths):
         """Delete only queue-owned image paths and their now-empty directory."""
@@ -548,6 +570,7 @@ class OutboxManager:
                 raise OutboxError("only an unclaimed pending message can be cancelled",
                                   code="immutable")
         self._clear_assets_for(outbox_id)
+        self._missing_targets.pop(str(outbox_id), None)
         return self.get(outbox_id)
 
     def retry(self, outbox_id, patch=None):
@@ -606,10 +629,14 @@ class OutboxManager:
         sessions = self._sessions(snapshot)
         sid = record.get("destination_session_id") or record.get("target_session_id")
         session = sessions.get(str(sid or ""))
+        missing_key = str(record.get("id") or sid or "")
         if not session:
-            if record.get("destination_session_id") and self.clock() - record["updated_at"] < 120:
-                return "wait", "Waiting for the new session to register", None
+            first_missing = self._missing_targets.setdefault(missing_key, self.clock())
+            if self.clock() - first_missing < TARGET_RECONNECT_GRACE_SECONDS:
+                return "wait", "Waiting for the exact target to reconnect", None
+            self._missing_targets.pop(missing_key, None)
             return "block", "The exact target session is no longer live", None
+        self._missing_targets.pop(missing_key, None)
         if session.get("provider_stale") or session.get("stale"):
             return "retry", "Provider state is stale", session
         terminal_attached = bool(session.get("terminal_attached"))
@@ -638,11 +665,18 @@ class OutboxManager:
                 return "block", "This provider cannot relay to that subagent", session
         elif not capabilities.get("submit"):
             return "block", "The target does not accept messages from Fleet", session
-        if session.get("pending") or session.get("ui_group") in ("working", "needs_you") \
-                or session.get("state") in ("running", "stalled", "needs_you"):
+        # Placement is presentation, not provider availability. In particular,
+        # an idle session whose assistant requested a reply lives in Needs you;
+        # waiting for that card to move to Available would deadlock the reply.
+        # Gate only on native work/prompt signals.
+        if session.get("pending"):
             return "wait", "Waiting for the target to become available", session
-        if session.get("ui_group") != "available":
-            return "block", "The target is inactive rather than available", session
+        active = (session.get("compacting") is not None or
+                  session.get("state") in
+                  ("running", "stalled", "needs_you", "stalled_or_prompt"))
+        if active and not (session.get("provider") == "codex" and
+                           session.get("control_state") == "connected_active"):
+            return "wait", "Waiting for the target to become available", session
         return "ready", None, session
 
     @staticmethod
@@ -697,6 +731,7 @@ class OutboxManager:
                        (state, now, str(error or "")[:1000] or None,
                         str(reason or "")[:1000] or None, bounded_receipt, destination,
                         now if state == "sent" else None, outbox_id))
+        self._missing_targets.pop(str(outbox_id), None)
 
     def recover_expired(self, snapshot):
         now = self.clock()

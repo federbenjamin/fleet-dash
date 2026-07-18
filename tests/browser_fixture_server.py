@@ -697,7 +697,7 @@ def set_scenario(name):
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
         name.startswith("mobile-needs-you") or name.startswith("close-worktree") or
-        name == "notification-request") else codex_session()
+        name in ("notification-request", "send-while-busy")) else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -816,6 +816,11 @@ def set_scenario(name):
                                "text": preview[:499] + "…"}
     elif name == "send-failure":
         STATE["fail_text"] = True
+    elif name == "send-while-busy":
+        session.update(state="running", normalized_state="running",
+                       reg_status="running", ui_group="working",
+                       reason_label="Working")
+        session["capabilities"]["interrupt"] = True
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
     elif name.startswith("close-worktree"):
@@ -1700,6 +1705,44 @@ class Handler(BaseHTTPRequestHandler):
                 if not session:
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")
+                if typ == "send_message":
+                    if STATE.get("fail_text"):
+                        return self.json_reply({"ok": False,
+                                                "error": "terminal rejected input"})
+                    immediately_steerable = (session.get("provider") == "codex" and
+                        session.get("control_state") == "connected_active")
+                    if session.get("state") in ("running", "stalled", "needs_you") \
+                            and not immediately_steerable:
+                        request_id = payload.get("client_request_id")
+                        item = next((row for row in STATE["outbox"]
+                                     if row.get("idempotency_key") == request_id), None)
+                        if not item:
+                            now = time.time()
+                            item = {"id": f"fixture-out-{len(STATE['outbox']) + 1}",
+                                "created_at": now, "updated_at": now,
+                                "created_zone": "UTC", "local_time": None,
+                                "trigger_fold": None, "kind": "when_available",
+                                "state": "waiting_availability",
+                                "state_label": "Waiting for availability",
+                                "message": payload.get("text"),
+                                "target_provider": session.get("provider"),
+                                "target_session_id": session.get("session_id"),
+                                "target_agent_id": None, "trigger_at": None,
+                                "usage_account_id": None, "usage_window_id": None,
+                                "observed_reset_at": None, "spawn_spec": None,
+                                "destination_session_id": None, "provider_receipt": None,
+                                "sent_at": None, "error": None,
+                                "blocked_reason": "Waiting for the target to become available",
+                                "retry_of": None, "origin": "automatic_fallback",
+                                "idempotency_key": request_id,
+                                "image_count": len(payload.get("upload_ids") or []),
+                                "version": 1, "editable": True,
+                                "cancellable": True, "retryable": False}
+                            STATE["outbox"].append(item)
+                        return self.json_reply({"ok": True, "queued": True,
+                            "outbox_id": item["id"], "queue_state": item["state"],
+                            "message": "Queued · waiting for session",
+                            "queue_reason": item["blocked_reason"]})
                 if typ == "close_preview":
                     secondary = "fleet-dash-worktrees" in session.get("cwd", "")
                     if not secondary:
@@ -1730,7 +1773,7 @@ class Handler(BaseHTTPRequestHandler):
                         "reason": ("Another live Fleet session is using this worktree."
                                    if shared else "The worktree contains files that removal would erase."
                                    if dirty else None)})
-                if typ == "text":
+                if typ in ("text", "send_message"):
                     if STATE.get("fail_text"):
                         return self.json_reply({"ok": False, "error": "terminal rejected input"})
                     session.update(state="running", reg_status="running")

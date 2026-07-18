@@ -122,6 +122,56 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(self.manager.get(item["id"])["state"], "sent")
 
+    def test_idle_reply_requested_placement_does_not_deadlock_delivery(self):
+        item = self.create()
+        sent = []
+        reply_requested = session(group="needs_you", state="idle")
+        reply_requested["reply_requested"] = True
+        self.manager.tick(snapshot(reply_requested), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["target_session_id"], "codex:one")
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
+    def test_missing_target_waits_through_provider_discovery_then_recovers(self):
+        item = self.create()
+        sent = []
+        self.manager.tick(snapshot(), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        waiting = self.manager.get(item["id"])
+        self.assertEqual(waiting["state"], "waiting_availability")
+        self.assertEqual(waiting["blocked_reason"],
+                         "Waiting for the exact target to reconnect")
+        self.assertFalse(sent)
+
+        self.clock.advance(1)
+        self.manager.tick(snapshot(session()), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
+    def test_continuously_missing_target_blocks_after_reconnect_grace(self):
+        item = self.create()
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.clock.advance(119)
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(item["id"])["state"], "waiting_availability")
+        self.clock.advance(2)
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        blocked = self.manager.get(item["id"])
+        self.assertEqual(blocked["state"], "blocked")
+        self.assertEqual(blocked["blocked_reason"], "The exact target session is no longer live")
+
+    def test_reconnected_active_codex_turn_flushes_waiting_delivery(self):
+        item = self.create()
+        sent = []
+        active = session(group="working", state="running",
+                         control_state="connected_active")
+        self.manager.tick(snapshot(active), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
     def test_closed_read_only_and_completed_agent_block_visibly(self):
         missing = self.create(message="missing")
         readonly = self.create(message="readonly", target_session_id="codex:read")
@@ -132,9 +182,12 @@ class OutboxTests(unittest.TestCase):
         parent = session("claude-one", provider="claude", agents=[
             {"agent_id": "agent-1", "state": "done"}])
         self.manager.tick(snapshot(read, parent), {}, lambda _: {"ok": True}, lambda _: {})
-        self.assertEqual(self.manager.get(missing["id"])["state"], "blocked")
+        self.assertEqual(self.manager.get(missing["id"])["state"], "waiting_availability")
         self.assertIn("view only", self.manager.get(readonly["id"])["blocked_reason"])
         self.assertIn("finished", self.manager.get(agent["id"])["blocked_reason"])
+        self.clock.advance(121)
+        self.manager.tick(snapshot(read, parent), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(missing["id"])["state"], "blocked")
 
     def test_usage_reset_requires_fresh_post_reset_evidence(self):
         reset = self.clock() + 20
@@ -252,6 +305,9 @@ class OutboxTests(unittest.TestCase):
     def test_retry_is_a_new_linked_attempt_and_terminals_stay_immutable(self):
         original = self.create()
         self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(original["id"])["state"], "waiting_availability")
+        self.clock.advance(121)
+        self.manager.tick(snapshot(), {}, lambda _: {"ok": True}, lambda _: {})
         self.assertEqual(self.manager.get(original["id"])["state"], "blocked")
         retry = self.manager.retry(original["id"], {"target_session_id": "codex:one"})
         self.assertEqual(retry["retry_of"], original["id"])
@@ -313,6 +369,39 @@ class OutboxTests(unittest.TestCase):
             self.assertEqual(image.read(), b"jpeg payload")
         with self.manager._connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox_messages").fetchone()[0], 1)
+
+    def test_automatic_claude_delivery_is_idempotent_waits_and_keeps_images(self):
+        source = os.path.join(self.upload_root, "claude-upload.jpg")
+        with open(source, "wb") as image:
+            image.write(b"claude jpeg payload")
+        first = self.manager.create_delivery(message="inspect this", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="send-request-claude-0001",
+            image_paths=[source])
+        second = self.manager.create_delivery(message="inspect this", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="send-request-claude-0001",
+            image_paths=[source])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["state"], "waiting_availability")
+        self.assertEqual(first["origin"], "automatic_fallback")
+        self.assertEqual(first["image_count"], 1)
+
+        sent = []
+        busy = session("claude-one", provider="claude", group="working", state="running")
+        self.manager.tick(snapshot(busy), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertFalse(sent)
+        self.clock.advance(1)
+        available = session("claude-one", provider="claude")
+        self.manager.tick(snapshot(available), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["_image_paths"],
+                         self.manager.get_internal(first["id"])["_image_paths"])
+        self.assertEqual(self.manager.get(first["id"])["state"], "sent")
+        self.manager.tick(snapshot(available), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(first["id"])["image_count"], 0)
 
     def test_recovery_waits_for_authority_then_dispatches_once_and_cleans_assets(self):
         source = os.path.join(self.upload_root, "upload.jpg")

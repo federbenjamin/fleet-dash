@@ -620,6 +620,28 @@ class CodexAppServer:
                 item = params.get("item") or {}
                 if item.get("id"):
                     state.setdefault("items", {})[item["id"]] = item
+                # Item notifications carry the canonical turn id even when a
+                # client misses ``turn/started`` during reconnect or compaction.
+                # Recover authority only from this live transport event; a
+                # later thread/read can describe another App Server's turn and
+                # is deliberately not sufficient.
+                turn_id = params.get("turnId")
+                # A reconnect may first observe the completed compaction item,
+                # so that completion is also sufficient live authority. Other
+                # completed items do not resurrect a turn on their own.
+                recovers_turn = (method == "item/started" or
+                                 item.get("type") == "contextCompaction")
+                if recovers_turn and turn_id:
+                    state.update(status="running", turn_id=turn_id,
+                                 turn_generation=self.generation,
+                                 control_lost_at=None, no_active_turn_at=None,
+                                 error=None)
+                if item.get("type") == "contextCompaction":
+                    if method == "item/started":
+                        state["compacting"] = 0
+                    else:
+                        state["compacted_at"] = now
+                        state["compacting"] = None
             elif method == "item/agentMessage/delta":
                 iid = params.get("itemId")
                 if iid:
@@ -632,8 +654,17 @@ class CodexAppServer:
                     {"type": method, "text": params.get("delta") or "", "ts": now})
                 del state["stream_events"][:-100]
             elif method in ("thread/compacted",):
-                state["compacted_at"] = now
-                state["compacting"] = None
+                # Current schemas include the active turn id on this legacy
+                # notification. Compaction can replace the turn identity, so
+                # retaining the pre-compact id strands steering until the turn
+                # ends. Keep the turn running; only turn/completed ends it.
+                turn_id = params.get("turnId")
+                state.update(compacted_at=now, compacting=None)
+                if turn_id:
+                    state.update(status="running", turn_id=turn_id,
+                                 turn_generation=self.generation,
+                                 control_lost_at=None, no_active_turn_at=None,
+                                 error=None)
             elif method in ("error", "warning", "guardianWarning", "configWarning"):
                 state["last_notice"] = {"method": method, "params": params, "ts": now}
                 if method == "error":
@@ -1126,8 +1157,24 @@ class CodexAdapter:
             cwd = thread.get("cwd") or ""
             usage = live.get("token_usage") or {}
             mode = live.get("collaboration_mode") or modes.get(tid) or "default"
-            model = thread.get("model") or live.get("model") or ""
-            effort = thread.get("effort") or live.get("effort")
+            persisted_meta = thread_meta.get(tid) or {}
+            # thread/start and thread/resume report the selected model/effort,
+            # but thread/list and thread/read do not. Keep Fleet's saved values
+            # as the durable restart/compaction fallback for owned threads.
+            model = (thread.get("model") or live.get("model") or
+                     persisted_meta.get("model") or "")
+            effort = (thread.get("effort") or live.get("effort") or
+                      persisted_meta.get("effort"))
+            if is_managed:
+                discovered_meta = {}
+                discovered_model = thread.get("model") or live.get("model")
+                discovered_effort = thread.get("effort") or live.get("effort")
+                if discovered_model and discovered_model != persisted_meta.get("model"):
+                    discovered_meta["model"] = discovered_model
+                if discovered_effort and discovered_effort != persisted_meta.get("effort"):
+                    discovered_meta["effort"] = discovered_effort
+                if discovered_meta:
+                    self._remember(tid, mode, discovered_meta)
             ctx_tokens = _usage_total(usage)
             ctx_window = _usage_window(usage)
             files = _files(thread, cwd)
@@ -1840,7 +1887,7 @@ class CodexAdapter:
                           ("medium" if mode == "plan" else None))
                 self._ensure_loaded(tid)
                 self.client.set_mode(tid, mode, model, effort)
-                self._remember(tid, mode)
+                self._remember(tid, mode, {"model": model, "effort": effort})
                 with self._lock:
                     for current in self._sessions:
                         if current.get("native_session_id") == tid:
