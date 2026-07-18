@@ -250,8 +250,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
     selected account and its active marker. The Now-header button summarizes the active Claude
     profile's 5-hour/weekly percentages plus the highest active non-Spark Codex bucket as
-    `Usage · Claude X/Y · Codex Z`. Any visible selected account/window drives amber at 70% and red
-    at 90%; the popover/sheet contains the full gauges. If the app is absent/unreadable, fall back to the Claude
+    `Usage · Claude X/Y · Codex Z`. Only the active Claude profile (falling back to the first selected
+    profile when the active marker is missing) and active Codex windows drive amber at 70% and red at
+    90%. Inactive Claude profiles retain their own gauge colors in the full popover/sheet but never
+    color the summary button. If the app is absent/unreadable, fall back to the Claude
     Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
     `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`

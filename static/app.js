@@ -526,14 +526,14 @@ function usageBar(legacy,providers){
   const codexBuckets=(codex?.buckets||[]).filter(b=>
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
   const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
+  const activeClaude=claudeProfiles.find(profile=>profile?.active) || claudeProfiles.find(Boolean);
   const visiblePercentages=[
-    ...claudeProfiles.filter(Boolean).flatMap(profile=>[
-      profile.five_hour_pct,claude?.show_week===false?null:profile.weekly_pct,
-      claude?.show_week===false?null:profile.fable_weekly_pct]),
+    ...(activeClaude?[activeClaude.five_hour_pct,
+      claude?.show_week===false?null:activeClaude.weekly_pct,
+      claude?.show_week===false?null:activeClaude.fable_weekly_pct]:[]),
     ...codexBuckets.map(bucket=>bucket.used_pct),
   ].filter(value=>Number.isFinite(Number(value))).map(Number);
   const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
-  const activeClaude=claudeProfiles.find(profile=>profile?.active) || claudeProfiles.find(Boolean);
   const claudeWindows=activeClaude?[activeClaude.five_hour_pct,
     claude?.show_week===false?null:activeClaude.weekly_pct]
     .filter(value=>Number.isFinite(Number(value))).map(value=>Math.round(Number(value))):[];

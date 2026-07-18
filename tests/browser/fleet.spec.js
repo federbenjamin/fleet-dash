@@ -337,6 +337,18 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
     await expect(claude.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
   }
 
+  await reset(page, 'inactive-usage-warning');
+  await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
+  await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
+  await page.locator('#usagechip').click();
+  await expect(page.locator('#usagepanel')).toBeVisible();
+  await expect(page.locator('#usagebody')).toContainText('94%');
+  await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
+
+  await reset(page, 'usage-amber');
+  await expect(page.locator('#usagechip')).toHaveClass(/usagewarn/);
+  await expect(page.locator('#usagechip')).not.toHaveClass(/usagedanger/);
+
   await reset(page, 'usage-warning');
   await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
   await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
@@ -347,6 +359,9 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await expect(page.locator('#usagebody')).toContainText('second@example.com');
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(page.locator('#usagepanel')).toBeHidden();
+
+  await reset(page, 'missing-active-warning');
+  await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
 
   await reset(page, 'subagent');
   await expect(page.locator('[data-sid="codex:thread-one"]')).not.toHaveClass(/fixedpeek/);

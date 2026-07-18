@@ -183,7 +183,8 @@ the provider without affecting Claude sessions.
   of turning every session into a duplicate error card.
 - **Usage button** (under the Now title): it shows the active Claude account's 5-hour/weekly values
   and the highest active non-Spark Codex window, for example **Usage · Claude 23/8 · Codex 14**.
-  At 70% any visible selected account/window turns it amber; at 90% it turns red. Tapping opens every
+  At 70% an active account/window turns it amber; at 90% it turns red. Inactive Claude profiles do
+  not color the button, but retain their own gauge colors inside the panel. Tapping opens every
   provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
   middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
   active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads

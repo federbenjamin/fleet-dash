@@ -644,13 +644,17 @@ def fleet():
                     "lifetime_scope": "local_transcripts", "source": "claude_usage",
                     "show_week": True, "show_active": True, "refresh_seconds": 30,
                     "profiles": [{"id": "one", "email": "claude@example.com",
-                        "active": True, "five_hour_pct": 20, "weekly_pct": 30,
-                        "fable_weekly_pct": 96 if STATE.get("scenario") == "usage-warning" else 41,
+                        "active": STATE.get("scenario") != "missing-active-warning",
+                        "five_hour_pct": 20, "weekly_pct": 30,
+                        "fable_weekly_pct": (96 if STATE.get("scenario") in
+                        {"usage-warning", "missing-active-warning"} else
+                        75 if STATE.get("scenario") == "usage-amber" else 41),
                         "five_hour_reset": "2099-01-01T00:00:00Z",
                         "weekly_reset": "2099-01-07T00:00:00Z",
                         "fable_weekly_reset": "2099-01-08T00:00:00Z"},
                         {"id": "two", "email": "second@example.com", "active": False,
-                         "five_hour_pct": 94 if STATE.get("scenario") == "usage-warning" else 4,
+                         "five_hour_pct": 94 if STATE.get("scenario") in
+                         {"usage-warning", "inactive-usage-warning"} else 4,
                          "weekly_pct": 8, "fable_weekly_pct": 12,
                          "five_hour_reset": "2099-01-01T02:00:00Z",
                          "weekly_reset": "2099-01-07T02:00:00Z",
