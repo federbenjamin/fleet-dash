@@ -122,6 +122,27 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(self.manager.get(item["id"])["state"], "sent")
 
+    def test_idle_reply_requested_placement_does_not_deadlock_delivery(self):
+        item = self.create()
+        sent = []
+        reply_requested = session(group="needs_you", state="idle")
+        reply_requested["reply_requested"] = True
+        self.manager.tick(snapshot(reply_requested), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["target_session_id"], "codex:one")
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
+    def test_reconnected_active_codex_turn_flushes_waiting_delivery(self):
+        item = self.create()
+        sent = []
+        active = session(group="working", state="running",
+                         control_state="connected_active")
+        self.manager.tick(snapshot(active), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+
     def test_closed_read_only_and_completed_agent_block_visibly(self):
         missing = self.create(message="missing")
         readonly = self.create(message="readonly", target_session_id="codex:read")

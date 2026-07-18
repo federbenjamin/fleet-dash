@@ -655,11 +655,18 @@ class OutboxManager:
                 return "block", "This provider cannot relay to that subagent", session
         elif not capabilities.get("submit"):
             return "block", "The target does not accept messages from Fleet", session
-        if session.get("pending") or session.get("ui_group") in ("working", "needs_you") \
-                or session.get("state") in ("running", "stalled", "needs_you"):
+        # Placement is presentation, not provider availability. In particular,
+        # an idle session whose assistant requested a reply lives in Needs you;
+        # waiting for that card to move to Available would deadlock the reply.
+        # Gate only on native work/prompt signals.
+        if session.get("pending"):
             return "wait", "Waiting for the target to become available", session
-        if session.get("ui_group") != "available":
-            return "block", "The target is inactive rather than available", session
+        active = (session.get("compacting") is not None or
+                  session.get("state") in
+                  ("running", "stalled", "needs_you", "stalled_or_prompt"))
+        if active and not (session.get("provider") == "codex" and
+                           session.get("control_state") == "connected_active"):
+            return "wait", "Waiting for the target to become available", session
         return "ready", None, session
 
     @staticmethod

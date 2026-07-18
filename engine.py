@@ -5667,7 +5667,13 @@ Treat this as an independent session. Verify the repository state before changin
         capabilities = session.get("capabilities") or {}
         if not capabilities.get("submit"):
             return False
-        if session.get("ui_group") == "available":
+        active = (session.get("compacting") is not None or
+                  session.get("state") in
+                  ("running", "stalled", "needs_you", "stalled_or_prompt"))
+        # Now placement is an action queue, not provider availability. An idle
+        # session can be in Needs you solely because its last prose asks for a
+        # reply; that reply must start immediately instead of waiting on itself.
+        if not active:
             return True
         # Fleet-owned App Server turns can be steered immediately. An attached
         # terminal accepts typing while busy but holds it for later, so it must

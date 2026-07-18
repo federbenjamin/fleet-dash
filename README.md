@@ -59,8 +59,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
   queue, appear immediately as **Queued offline**, and send in order after a live fleet poll confirms
   reconnection. While online, the same Send button sends immediately only when the exact session can
   accept the message now; otherwise Fleet saves it durably in the server Outbox and shows
-  **Queued · waiting for session** until that session becomes available. Commands and skills remain
-  immediate-only and stay as drafts while offline. The full-chat composer also accepts up to four
+  **Queued · waiting for session** until that session becomes available. A **Needs you** card caused
+  only by the assistant asking for a reply remains immediately writable; that placement does not
+  mean the provider is busy. Commands and skills remain immediate-only and stay as drafts while
+  offline. The full-chat composer also accepts up to four
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
   device storage, can queue offline with their message, and are removed locally after delivery or
   after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.

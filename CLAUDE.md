@@ -646,7 +646,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     browser exit, and daemon restart must not lose or duplicate it. When availability is proven,
     dispatch exactly once; keep the optimistic row until canonical transcript confirmation. A
     connection drop after an immediate HTTP dispatch stays **Delivery unconfirmed** and is never
-    auto-retried because the server may already have accepted it.
+    auto-retried because the server may already have accepted it. **Never use `ui_group` as an
+    availability signal.** An idle provider whose assistant asks a direct question belongs in
+    **Needs you**, but it is immediately writable; making Outbox wait for that card to become
+    Available deadlocks the very reply that would clear it. Gate sends on native state, pending
+    requests, compaction, and exact control authority only.
 
 ## Dev workflow
 

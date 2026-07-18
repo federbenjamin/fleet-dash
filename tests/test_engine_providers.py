@@ -256,6 +256,26 @@ class EngineProviderTest(unittest.TestCase):
             "session_id": "codex:same", "text": "Steer active work",
             "client_request_id": "send-codex-steer-0001"})
 
+    def test_send_message_replies_immediately_to_idle_needs_you_session(self):
+        self.codex.session.update(
+            state="idle", reg_status="idle", control_state="connected_idle",
+            _latest_prose={"role": "assistant", "text": "What are you working on?"},
+            last_msg={"role": "assistant", "text": "What are you working on?"})
+        snapshot = self.engine.scan()
+        current = next(item for item in snapshot["sessions"]
+                       if item["session_id"] == "codex:same")
+        self.assertEqual(current["state"], "idle")
+        self.assertEqual(current["ui_group"], "needs_you")
+        self.assertTrue(current["reply_requested"])
+
+        result = self.engine.act({"type": "send_message", "session_id": "codex:same",
+            "text": "Here is my reply", "client_request_id": "send-reply-codex-0001"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["queued"])
+        self.assertEqual(result["delivery"], "sent_now")
+        self.assertEqual(self.codex.actions[-1]["text"], "Here is my reply")
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
+
     def test_busy_claude_photo_is_copied_into_durable_outbox_storage(self):
         registry = os.path.join(self.sessions, "same.json")
         with open(registry, "w") as handle:
