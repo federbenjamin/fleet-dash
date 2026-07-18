@@ -1157,8 +1157,24 @@ class CodexAdapter:
             cwd = thread.get("cwd") or ""
             usage = live.get("token_usage") or {}
             mode = live.get("collaboration_mode") or modes.get(tid) or "default"
-            model = thread.get("model") or live.get("model") or ""
-            effort = thread.get("effort") or live.get("effort")
+            persisted_meta = thread_meta.get(tid) or {}
+            # thread/start and thread/resume report the selected model/effort,
+            # but thread/list and thread/read do not. Keep Fleet's saved values
+            # as the durable restart/compaction fallback for owned threads.
+            model = (thread.get("model") or live.get("model") or
+                     persisted_meta.get("model") or "")
+            effort = (thread.get("effort") or live.get("effort") or
+                      persisted_meta.get("effort"))
+            if is_managed:
+                discovered_meta = {}
+                discovered_model = thread.get("model") or live.get("model")
+                discovered_effort = thread.get("effort") or live.get("effort")
+                if discovered_model and discovered_model != persisted_meta.get("model"):
+                    discovered_meta["model"] = discovered_model
+                if discovered_effort and discovered_effort != persisted_meta.get("effort"):
+                    discovered_meta["effort"] = discovered_effort
+                if discovered_meta:
+                    self._remember(tid, mode, discovered_meta)
             ctx_tokens = _usage_total(usage)
             ctx_window = _usage_window(usage)
             files = _files(thread, cwd)
@@ -1871,7 +1887,7 @@ class CodexAdapter:
                           ("medium" if mode == "plan" else None))
                 self._ensure_loaded(tid)
                 self.client.set_mode(tid, mode, model, effort)
-                self._remember(tid, mode)
+                self._remember(tid, mode, {"model": model, "effort": effort})
                 with self._lock:
                     for current in self._sessions:
                         if current.get("native_session_id") == tid:

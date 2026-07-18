@@ -24,6 +24,7 @@ class FixtureClient:
         self.started_turns = []
         self.steered_turns = []
         self.steer_error = None
+        self.mode_changed = None
 
     def list_threads(self):
         if self.fail_list:
@@ -66,6 +67,9 @@ class FixtureClient:
         self.steered_turns.append((thread_id, text, kwargs))
         if self.steer_error:
             raise self.steer_error
+
+    def set_mode(self, thread_id, mode, model, effort):
+        self.mode_changed = (thread_id, mode, model, effort)
 
     def account_limits(self):
         if self.fail_account:
@@ -538,6 +542,46 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                                      self.tmp.name, "models-cache.json"))
         restarted._refresh()
         self.assertEqual(restarted.sessions()[0]["native_session_id"], "empty")
+
+    def test_restart_uses_persisted_model_and_effort_when_thread_omits_them(self):
+        thread = self.thread("managed")
+        thread.pop("model")
+        thread.pop("effort")
+        adapter, client = self.adapter([thread])
+        adapter._remember("managed", "plan", {
+            "cwd": "/work/project", "model": "gpt-5.6-sol", "effort": "xhigh",
+            "unmaterialized": False})
+
+        restarted = CodexAdapter(
+            client=client, state_path=self.state_path, clock=lambda: 1000,
+            stall_seconds=30,
+            models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        restarted._refresh()
+
+        session = restarted.sessions()[0]
+        self.assertEqual(session["collaboration_mode"], "plan")
+        self.assertEqual(session["model"], "gpt-5.6-sol")
+        self.assertEqual(session["effort"], "xhigh")
+        result = restarted.act({
+            "type": "text", "session_id": "codex:managed", "text": "after compact"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(client.started_turns, [("managed", "after compact", {
+            "mode": "plan", "model": "gpt-5.6-sol", "effort": "xhigh"})])
+
+    def test_mode_change_keeps_model_and_effort_in_persisted_metadata(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+
+        result = adapter.act({
+            "type": "mode", "session_id": "codex:managed", "mode": "plan"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(client.mode_changed, ("managed", "plan", "gpt-5.4", "high"))
+        meta = adapter._state()["thread_meta"]["managed"]
+        self.assertEqual(meta["model"], "gpt-5.4")
+        self.assertEqual(meta["effort"], "high")
 
     def test_unmaterialized_thread_missing_from_runtime_is_discarded(self):
         adapter, _ = self.adapter([])

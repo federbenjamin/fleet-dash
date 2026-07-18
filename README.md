@@ -121,7 +121,10 @@ visible-message events in its local `~/.codex/sessions` rollout so the view-only
 that the separate Desktop/VS Code App Server reports only as `notLoaded`.
 
 - Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
-  ownership, mode, and last normalized conversation, and resume after daemon restarts. Every new
+  ownership, mode, model, effort, and last normalized conversation, and resume after daemon
+  restarts. Codex's `thread/list` and `thread/read` responses omit model and effort, so Fleet uses
+  those saved selections after a daemon restart or compaction instead of losing the ability to send
+  the next Plan-mode turn. Every new
   Fleet Codex session immediately sends a visible, normal `hi` turn. That creates the rollout the
   TUI needs instead of leaving an empty, unresumable thread shell. **Attach** stays disabled as
   **turn active** until that bootstrap turn finishes because resuming an active thread aborts its turn.

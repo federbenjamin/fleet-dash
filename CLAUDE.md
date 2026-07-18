@@ -316,7 +316,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     choices from Codex's bounded, credential-free `~/.codex/models_cache.json`; never put automatic
     `model/list` calls on Fleet's shared control WebSocket. A `thread/read` failure is a per-session
     refresh warning: retain the prior preview, back off detail reads for 30s, and keep an owned
-    session interactive. A lifecycle timeout closes only Fleet's client transport so the next call
+    session interactive. `thread/start` and `thread/resume` report model and effort, but the canonical
+    `Thread` returned by `thread/list` / `thread/read` does not. Persist the selections in owned
+    `thread_meta` at creation and on later settings changes, and use them as the refresh fallback;
+    otherwise a daemon restart after compaction leaves a Plan-mode session unable to start its next
+    turn. A lifecycle timeout closes only Fleet's client transport so the next call
     reconnects to the detached runtime. A provider-wide list outage marks cached state stale but
     preserves its existing owned capabilities and interactive access. Reconnection is not evidence
     that a thread is unloaded: check `thread/loaded/list` before an exact on-demand resume and never
