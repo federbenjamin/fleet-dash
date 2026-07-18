@@ -785,6 +785,43 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(relayed["ok"])
         self.assertIn("agent-child", writes[-1][1][0][0])
 
+    def test_background_claude_session_uses_validated_open_tty_fallback(self):
+        pid = 424245
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude", "kind": "bg"}
+        self.engine.live_sessions = lambda: [reg]
+        tail = SimpleNamespace(pending={}, poll=lambda: None,
+                               turn_state=lambda: "awaiting_input")
+        self.engine.tail_for = lambda path: tail
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        ps_result = SimpleNamespace(stdout="??\n", returncode=0)
+        lsof_result = SimpleNamespace(
+            stdout=f"p{pid}\nf0\nn/dev/ttys009\nf1\nn/dev/ttys009\n",
+            returncode=0)
+
+        with mock.patch.object(engine_module.subprocess, "run",
+                               side_effect=[ps_result, lsof_result]) as run:
+            result = self.engine.act({"type": "text", "session_id": "same",
+                                      "text": "hello"})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(writes, [("/dev/ttys009", [("hello", True)], 0.05)])
+        self.assertEqual(self.engine._tty_cache[pid], "ttys009")
+        self.assertEqual(run.call_args_list[1].args[0],
+            ["lsof", "-a", "-p", str(pid), "-d", "0,1,2", "-Fn"])
+
+    def test_background_claude_tty_fallback_rejects_non_terminal_paths(self):
+        pid = 424246
+        ps_result = SimpleNamespace(stdout="??\n", returncode=0)
+        lsof_result = SimpleNamespace(stdout=f"p{pid}\nf0\nn/private/tmp/input\n",
+                                      returncode=0)
+        with mock.patch.object(engine_module.subprocess, "run",
+                               side_effect=[ps_result, lsof_result]):
+            self.assertEqual(self.engine._tty_for_pid(pid), "")
+        self.assertNotIn(pid, self.engine._tty_cache)
+
     def test_claude_permission_mode_uses_only_verified_native_cycle(self):
         pid = os.getpid()
         reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,

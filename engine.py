@@ -4889,6 +4889,47 @@ Treat this as an independent session. Verify the repository state before changin
             modes.append("auto")
         return modes
 
+    def _tty_for_pid(self, pid):
+        """Resolve the iTerm tty even when a background Claude fork has no ctty.
+
+        Claude's ``kind:bg`` sessions keep their original iTerm tty open on the
+        standard file descriptors, but macOS ``ps -o tty`` reports ``??`` because
+        the fork no longer has a controlling terminal.  Inspect only fd 0/1/2 and
+        accept only an exact macOS pseudo-terminal path; never trust arbitrary
+        lsof output as an injector destination.
+        """
+        try:
+            pid = int(pid or 0)
+        except (TypeError, ValueError):
+            return ""
+        if pid <= 1:
+            return ""
+        cached = self._tty_cache.get(pid)
+        if cached:
+            return cached
+        try:
+            tty = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "tty="], capture_output=True,
+                text=True, timeout=5).stdout.strip()
+        except Exception:
+            tty = ""
+        if tty and tty != "??" and re.fullmatch(r"ttys[0-9A-Za-z]+", tty):
+            self._tty_cache[pid] = tty
+            return tty
+        try:
+            opened = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "0,1,2", "-Fn"],
+                capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            opened = ""
+        for line in opened.splitlines():
+            path = line[1:] if line.startswith("n") else ""
+            if re.fullmatch(r"/dev/ttys[0-9A-Za-z]+", path):
+                tty = os.path.basename(path)
+                self._tty_cache[pid] = tty
+                return tty
+        return ""
+
     def _close_claude_session(self, reg):
         """Terminate only the registered Claude process; never close its terminal tab."""
         try:
@@ -4915,17 +4956,8 @@ Treat this as an independent session. Verify the repository state before changin
         interrupted = False
         interrupt_error = None
         if reg.get("status") in ("busy", "shell", "waiting"):
-            tty = self._tty_cache.get(pid)
-            if not tty:
-                try:
-                    tty = subprocess.run(
-                        ["ps", "-p", str(pid), "-o", "tty="], capture_output=True,
-                        text=True, timeout=5).stdout.strip()
-                except Exception as exc:
-                    interrupt_error = f"tty lookup failed: {exc}"
-                if tty and tty != "??":
-                    self._tty_cache[pid] = tty
-            if tty and tty != "??":
+            tty = self._tty_for_pid(pid)
+            if tty:
                 result = self._iterm_write(f"/dev/{tty}", [("\x1b", False)],
                                            step_delay=0.05)
                 interrupted = bool(result.get("ok"))
@@ -5692,16 +5724,8 @@ Treat this as an independent session. Verify the repository state before changin
                 steps = [(txt, True)]
             else:
                 return {"ok": False, "error": "unknown action type"}
-        tty = self._tty_cache.get(reg["pid"])     # a pid's tty never changes
+        tty = self._tty_for_pid(reg["pid"])     # a pid's tty never changes
         if not tty:
-            try:
-                tty = subprocess.run(["ps", "-p", str(reg["pid"]), "-o", "tty="],
-                                     capture_output=True, text=True, timeout=5).stdout.strip()
-            except Exception as e:
-                return {"ok": False, "error": f"tty lookup failed: {e}"}
-            if tty and tty != "??":
-                self._tty_cache[reg["pid"]] = tty
-        if not tty or tty == "??":
             return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
         # The 0.4s inter-key delay is load-bearing ONLY for the ask-TUI key sequences
         # (digits/arrows/CR need a render between them, or keys get dropped — invariant
