@@ -31,6 +31,11 @@ async function goTo(page, route) {
   else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
+async function openSettingsSection(page, section) {
+  await page.evaluate(value => selectSettingsSection(value), section);
+  await expect(page).toHaveURL(new RegExp(`#settings/${section}$`));
+}
+
 async function openAction(page, sid) {
   const row = page.locator(`[data-action-sid="${sid}"]`);
   await expect(row).toBeVisible();
@@ -360,6 +365,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
 test('desktop navigation side and nested Settings preserve the full chat state', async ({ page }, testInfo) => {
   await reset(page);
   await goTo(page, 'settings');
+  await openSettingsSection(page, 'appearance');
   await page.getByRole('button', { name: 'Right side' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-nav-side', 'right');
   await page.reload();
@@ -726,6 +732,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
 
   await goTo(page, 'settings');
+  await openSettingsSection(page, 'appearance');
   const widthGroup = page.getByRole('group', { name: 'Full-screen reading width' });
   await expect(widthGroup.getByRole('button', { name: 'Fit the screen' }))
     .toHaveAttribute('aria-pressed', 'true');
@@ -733,6 +740,9 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
+  await expect(page.locator('#settingsview')).toBeVisible();
+  await page.locator('#setclose').click();
+  await expect(page.locator('#settingsview')).toBeHidden();
 
   card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
@@ -764,6 +774,19 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   expect(centeredAgent.width).toBeLessThanOrEqual(760);
   expect(Math.abs(centeredAgent.left - centeredAgent.right)).toBeLessThan(2);
   await page.screenshot({ path: testInfo.outputPath('centered-reading-width.png'), fullPage: true });
+});
+
+test('saving a numeric setting does not swallow the next control click', async ({ page }) => {
+  await reset(page, 'base');
+  await goTo(page, 'settings');
+  await openSettingsSection(page, 'appearance');
+  const previewHeight = page.locator('.settingsfield').filter({hasText:'Session peek height'})
+    .locator('input[type="number"]');
+  await previewHeight.fill('5');
+  await page.getByRole('button', {name:'Centered'}).click();
+  await expect.poll(async () => (await fixtureState(page)).settings.preview_session_lines).toBe(5);
+  await expect.poll(async () => (await fixtureState(page)).settings.reader_width).toBe('centered');
+  await expect(page.getByRole('button', {name:'Centered'})).toHaveAttribute('aria-pressed','true');
 });
 
 test('large conversations load newest-first in bounded pages without losing older turns', async ({ page }) => {
@@ -1306,6 +1329,14 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   await expect(page.locator('#sact .session-context')).toBeHidden();
   const bounds=await page.locator('#sview').boundingBox();
   expect(Math.round(bounds.y+bounds.height)).toBeLessThanOrEqual(844);
+  const headerBounds=await page.locator('#shead2').evaluate(header=>{const close=header.querySelector('#sclose').getBoundingClientRect(),controls=header.querySelector('#sctrl').getBoundingClientRect();return{
+    scrollWidth:header.scrollWidth,clientWidth:header.clientWidth,closeLeft:close.left,
+    closeTop:close.top,controlsRight:controls.right,viewport:innerWidth};});
+  expect(headerBounds.scrollWidth).toBeLessThanOrEqual(headerBounds.clientWidth);
+  expect(headerBounds.closeLeft).toBeGreaterThanOrEqual(0);
+  expect(headerBounds.closeTop).toBeGreaterThanOrEqual(0);
+  expect(headerBounds.controlsRight).toBeLessThanOrEqual(headerBounds.viewport);
+  await page.screenshot({path:testInfo.outputPath('mobile-composer-focused.png'),fullPage:true});
   await page.locator('#sbody').evaluate(body=>{
     const touch=(type,x,y)=>{
       const event=new Event(type,{bubbles:true,cancelable:true});
@@ -1316,6 +1347,33 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   });
   await expect(composer).not.toBeFocused();
   await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
+});
+
+test('Markdown uses the canonical composer and a direct Chat jump without embedding chat history', async ({ page }, testInfo) => {
+  await reset(page);
+  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
+    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
+  await expect(page.locator('#viewer')).toBeVisible();
+  await expect(page.locator('#vbody')).toContainText('Safe preview');
+  await expect(page.locator('#vbody .aconvo')).toHaveCount(0);
+  const viewerComposer = page.locator('#vact .freetext.composer');
+  await expect(viewerComposer.getByPlaceholder('send message')).toBeVisible();
+  await expect(viewerComposer.getByRole('button', {name:'message options'})).toBeVisible();
+  await expect(viewerComposer.getByRole('button', {name:'chat', exact:true})).toBeVisible();
+  await expect(viewerComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
+  expect(await viewerComposer.locator('.composer-submit-stack').evaluate(element =>
+    [...element.querySelectorAll('button')].map(button => button.textContent.trim())))
+    .toEqual(['chat','send']);
+  await page.screenshot({path:testInfo.outputPath('markdown-canonical-composer.png'),fullPage:true});
+  await viewerComposer.getByPlaceholder('send message').fill('Draft shared across reading surfaces');
+  await viewerComposer.getByRole('button', {name:'chat', exact:true}).click();
+  await expect(page.locator('#viewer')).toBeHidden();
+  await expect(page.locator('#sview')).toBeVisible();
+  const chatComposer = page.locator('#sact .freetext.composer');
+  await expect(chatComposer.getByPlaceholder('send message'))
+    .toHaveValue('Draft shared across reading surfaces');
+  await expect(chatComposer.getByRole('button', {name:'message options'})).toBeVisible();
+  await expect(chatComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
 });
 
 test('phone images persist across reload and send through the owning provider', async ({ page }) => {
@@ -2018,6 +2076,53 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
     action.type === 'option' && action.session_id === 'claude-one' && action.nonce === 'rev-6')).toBe(true);
 });
 
+test('notification policy controls every kind, warns on aggressive cadence, and nests cleanly in Settings', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await goTo(page, 'settings');
+  await expect(page.locator('.policyanswer')).toContainText('Push on');
+  await expect(page.locator('.policyanswer')).toContainText('Last delivery: sent · Quick build finished');
+  await expect(page.locator('.policyrule')).toHaveCount(12);
+  const question = page.locator('.policyrule').filter({hasText:'Question'});
+  await question.locator('summary').click();
+  await expect(question).toContainText('Once + reminder');
+  await question.getByLabel('Apply this change to 1 active event').check();
+  await question.getByLabel('Cadence').selectOption('repeat');
+  await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.mode).toBe('repeat');
+  const beforeInvalidDuration = (await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question').length;
+  await page.locator('#policy-question-repeat_interval_seconds-amount').evaluate(input => { input.value = '1'; });
+  await page.locator('#policy-question-repeat_interval_seconds-unit').selectOption('1');
+  await expect(question.locator('summary em')).toContainText('enter 1 minute to 7 days');
+  expect((await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question')).toHaveLength(beforeInvalidDuration);
+  const maximum = question.getByLabel('Maximum deliveries');
+  await maximum.fill('20');
+  await maximum.press('Tab');
+  await expect(page.locator('#confirm')).toContainText('High notification cadence');
+  await expect(page.locator('#confirm')).toContainText('20 pushes per day');
+  await page.locator('#confirm').getByRole('button', {name:'use high cadence'}).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.max_deliveries).toBe(20);
+  expect((await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question').at(-1).apply_current).toBe(true);
+
+  await page.getByRole('checkbox', {name:/^Quiet hours/}).check();
+  await expect(page.getByRole('textbox', {name:'Starts', exact:true})).toBeVisible();
+  await expect(page.getByRole('textbox', {name:'Ends', exact:true})).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('notification-policy-settings.png'),fullPage:true});
+  await openSettingsSection(page, 'devices');
+  await expect(page.locator('.pushsetup')).toContainText('Fleet app & Web Push');
+  await page.goBack();
+  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page).toHaveURL(/#settings\/notifications$/);
+  await expect(page.locator('.policyanswer')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#settingsview')).toBeHidden();
+  if (testInfo.project.name.startsWith('mobile'))
+    await expect(page.locator('#bottomnav')).toBeVisible();
+});
+
 test('push fallback opens exact current state and direct close stays inside Notifications', async ({ page }) => {
   await reset(page, 'base');
   await page.goto('/?push_action=snooze#notifications/evt-6-question');
@@ -2055,6 +2160,7 @@ test('PWA caches the local shell and fleet snapshot without credentials', async 
   expect(cached.some(url => url.endsWith('/static/offline.html'))).toBe(true);
 
   await goTo(page, 'settings');
+  await openSettingsSection(page, 'devices');
   const setup = page.locator('.pushsetup');
   await expect(setup).toContainText('Fleet app & Web Push');
   await expect(setup).toContainText(/Not requested|Blocked/);
@@ -2079,6 +2185,36 @@ test('PWA caches the local shell and fleet snapshot without credentials', async 
   await setup.locator('.pushswitch input').uncheck();
   await expect.poll(async () => (await fixtureState(page)).push_devices[deviceId].enabled)
     .toBe(false);
+  await page.request.post('/api/push/subscription', {data: {device_id: 'remote-phone',
+    display_name: 'Travel phone', platform: 'iOS', permission_state: 'granted',
+    subscription: {endpoint: 'https://fcm.googleapis.com/fcm/send/another-private',
+      keys: {p256dh: 'another-p256dh', auth: 'another-auth'}}}});
+  await page.evaluate(() => window.__fleetPush.loadPushState(true));
+  let remote = page.locator('[data-push-device="remote-phone"]');
+  await expect(remote).toBeVisible();
+  const remoteName = remote.getByLabel('Rename Travel phone');
+  await remoteName.fill('Pocket phone');
+  await remoteName.press('Tab');
+  await expect.poll(async () => (await fixtureState(page)).push_devices['remote-phone'].display_name)
+    .toBe('Pocket phone');
+  remote = page.locator('[data-push-device="remote-phone"]');
+  await remote.getByRole('button', {name:'Test', exact:true}).click();
+  await expect.poll(async () => (await fixtureState(page)).actions.some(action =>
+    action.type==='push_test'&&action.device_id==='remote-phone')).toBe(true);
+  remote = page.locator('[data-push-device="remote-phone"]');
+  await remote.getByRole('button', {name:'Pause', exact:true}).click();
+  await expect.poll(async () => (await fixtureState(page)).push_devices['remote-phone'].enabled)
+    .toBe(false);
+  remote = page.locator('[data-push-device="remote-phone"]');
+  await remote.getByRole('button', {name:'Resume', exact:true}).click();
+  await expect.poll(async () => (await fixtureState(page)).push_devices['remote-phone'].enabled)
+    .toBe(true);
+  remote = page.locator('[data-push-device="remote-phone"]');
+  await remote.getByRole('button', {name:'Remove', exact:true}).click();
+  await expect(page.locator('#confirm')).toContainText('Pocket phone');
+  await page.locator('#confirm').getByRole('button', {name:'remove device'}).click();
+  await expect.poll(async () => (await fixtureState(page)).push_devices['remote-phone']).toBeUndefined();
+  await expect(page.locator('[data-push-device="remote-phone"]')).toHaveCount(0);
   const state = await fixtureState(page);
   expect(JSON.stringify(state.push_devices)).not.toContain('private-p256dh');
   expect(JSON.stringify(state.push_devices)).not.toContain('private-auth');
@@ -2100,7 +2236,8 @@ test('PWA caches the local shell and fleet snapshot without credentials', async 
   });
   const retained = JSON.stringify(privacy);
   for (const secret of ['abcdef123456', 'private-p256dh', 'private-auth',
-    'fcm.googleapis.com/fcm/send/private']) expect(retained).not.toContain(secret);
+    'fcm.googleapis.com/fcm/send/private', 'another-p256dh', 'another-auth',
+    'fcm.googleapis.com/fcm/send/another-private']) expect(retained).not.toContain(secret);
   expect(privacy.session).toEqual({});
   expect(privacy.indexedDb).toEqual([]);
 });
@@ -2153,7 +2290,7 @@ test('connection loss reloads the cached dashboard, keeps drafts, and flushes qu
 test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {
   await reset(page, 'base');
   await goTo(page, 'settings');
-  await page.locator('.budgetsettingsfold summary').click();
+  await openSettingsSection(page, 'budgets');
   await page.getByRole('button', { name: '＋ Add budget' }).click();
   const budget = page.locator('.budgetedit').first();
   await budget.locator('select').nth(0).selectOption('fleet');
@@ -2168,13 +2305,15 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
   await providerBudget.locator('input[type="number"]').fill('50000');
   await expect(page.locator('#settings')).not.toContainText('waiting on you');
   await expect(page.locator('#settings')).not.toContainText('daily briefing push');
+  await page.getByRole('button', { name: 'Save budgets' }).click();
+  await expect(page.locator('#setmsg')).toContainText('saved ✓');
+  await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
+  await openSettingsSection(page, 'advanced');
   await page.getByLabel('Enable manual legacy tests').check();
   await expect.poll(async () => (await fixtureState(page)).settings.legacy_ntfy_enabled)
     .toBe(true);
   await page.getByRole('button', { name: 'Send legacy test' }).click();
   await expect(page.locator('#settings')).toContainText('Legacy test queued');
-  await page.getByRole('button', { name: 'Save budgets' }).click();
-  await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
   const state = await fixtureState(page);
   expect(state.budgets[0]).toMatchObject({scope_type: 'fleet', metric: 'tokens',
     limit_value: 10000, block_spawns: true});

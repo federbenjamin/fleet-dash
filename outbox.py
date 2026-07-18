@@ -10,6 +10,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -17,14 +18,18 @@ from collections import deque
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-PENDING_STATES = {"scheduled", "waiting_availability", "waiting_usage_reset"}
+PENDING_STATES = {"scheduled", "waiting_availability", "waiting_usage_reset",
+                  "waiting_provider"}
 TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancelled"}
 ALL_STATES = PENDING_STATES | TERMINAL_STATES | {"spawning", "sending"}
-KINDS = {"at_time", "when_available", "usage_reset", "new_session"}
+KINDS = {"at_time", "when_available", "usage_reset", "new_session",
+         "provider_reconnect"}
+RECOVERY_ASSET_RETENTION_SECONDS = 24 * 60 * 60
 STATE_LABELS = {
     "scheduled": "Scheduled",
     "waiting_availability": "Waiting for availability",
     "waiting_usage_reset": "Waiting for usage reset",
+    "waiting_provider": "Waiting for provider connection",
     "spawning": "Spawning",
     "sending": "Sending",
     "sent": "Sent",
@@ -108,12 +113,17 @@ class OutboxManager:
     """Persistence, validation, claims, and delivery orchestration."""
 
     def __init__(self, db_path, *, clock=time.time, id_factory=None,
-                 lease_seconds=45, max_batch=20):
+                 lease_seconds=45, max_batch=20, recovery_source_root=None,
+                 asset_root=None):
         self.db_path = db_path
         self.clock = clock
         self.id_factory = id_factory or (lambda: "out-" + uuid.uuid4().hex)
         self.lease_seconds = max(5, int(lease_seconds))
         self.max_batch = max(1, int(max_batch))
+        self.recovery_source_root = (os.path.realpath(recovery_source_root)
+                                     if recovery_source_root else None)
+        self.asset_root = os.path.realpath(asset_root or os.path.join(
+            os.path.dirname(os.path.abspath(db_path)), "outbox-images"))
         self.db_connect_ms = deque(maxlen=240)
         self.db_begin_ms = deque(maxlen=240)
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
@@ -168,11 +178,22 @@ class OutboxManager:
                 attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL,
                 expires_at REAL, destination_session_id TEXT,
                 provider_receipt TEXT, sent_at REAL, error TEXT, blocked_reason TEXT,
-                retry_of TEXT, version INTEGER NOT NULL DEFAULT 1)""")
+                retry_of TEXT, origin TEXT NOT NULL DEFAULT 'scheduled',
+                idempotency_key TEXT, image_paths_json TEXT,
+                version INTEGER NOT NULL DEFAULT 1)""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(outbox_messages)")}
+            for name, definition in (
+                    ("origin", "TEXT NOT NULL DEFAULT 'scheduled'"),
+                    ("idempotency_key", "TEXT"),
+                    ("image_paths_json", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE outbox_messages ADD COLUMN {name} {definition}")
             db.execute("""CREATE INDEX IF NOT EXISTS outbox_pending
                 ON outbox_messages(state, next_attempt_at, trigger_at, created_at)""")
             db.execute("""CREATE INDEX IF NOT EXISTS outbox_target
                 ON outbox_messages(target_session_id, state, created_at)""")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS outbox_idempotency
+                ON outbox_messages(idempotency_key) WHERE idempotency_key IS NOT NULL""")
 
     @staticmethod
     def _public(row):
@@ -187,11 +208,29 @@ class OutboxManager:
             item["provider_receipt"] = json.loads(item.get("provider_receipt") or "null")
         except (TypeError, ValueError):
             item["provider_receipt"] = None
+        try:
+            image_paths = json.loads(item.pop("image_paths_json") or "[]")
+        except (TypeError, ValueError):
+            image_paths = []
+        item["image_count"] = len(image_paths) if isinstance(image_paths, list) else 0
         item["state_label"] = STATE_LABELS.get(item.get("state"), "Unknown")
         item["editable"] = item.get("state") in PENDING_STATES and not item.get("claimed_at")
         item["cancellable"] = item["editable"]
-        item["retryable"] = item.get("state") in {
-            "blocked", "failed", "confirmation_unknown"}
+        item["retryable"] = (item.get("origin") != "direct_send_recovery" and
+                             item.get("state") in {
+                                 "blocked", "failed", "confirmation_unknown"})
+        return item
+
+    @classmethod
+    def _internal(cls, row):
+        item = cls._public(row)
+        if item is None:
+            return None
+        try:
+            paths = json.loads(row["image_paths_json"] or "[]")
+        except (TypeError, ValueError, IndexError):
+            paths = []
+        item["_image_paths"] = paths if isinstance(paths, list) else []
         return item
 
     @staticmethod
@@ -280,7 +319,8 @@ class OutboxManager:
         if kind == "usage_reset" and (not usage_account or not usage_window or reset_at is None):
             raise OutboxError("choose a usage account and reset window")
         state = {"when_available": "waiting_availability",
-                 "usage_reset": "waiting_usage_reset"}.get(kind, "scheduled")
+                 "usage_reset": "waiting_usage_reset",
+                 "provider_reconnect": "waiting_provider"}.get(kind, "scheduled")
         base_trigger = (trigger_at if trigger_at is not None else
                         reset_at if kind == "usage_reset" and reset_at is not None else now)
         return {
@@ -306,6 +346,134 @@ class OutboxManager:
                 f"INSERT INTO outbox_messages({','.join(columns)}) "
                 f"VALUES({','.join('?' for _ in columns)})", params)
         return self.get(outbox_id)
+
+    def create_recovery(self, *, message, target_provider, target_session_id,
+                        idempotency_key, image_paths=None):
+        """Persist one direct send while provider control is unavailable.
+
+        Image files are copied into queue-owned private storage before the row
+        becomes visible, so upload expiry cannot silently break later delivery.
+        """
+        if target_provider != "codex":
+            raise OutboxError("provider recovery queue is unavailable for this provider")
+        key = str(idempotency_key or "")
+        if not (8 <= len(key) <= 160) or any(ord(char) < 33 or ord(char) > 126
+                                             for char in key):
+            raise OutboxError("invalid message request ID")
+        with self._connect() as db:
+            existing = db.execute(
+                "SELECT * FROM outbox_messages WHERE idempotency_key=?", (key,)).fetchone()
+        if existing:
+            return self._public(existing)
+        now = self.clock()
+        values = self._normalize_create({
+            "kind": "provider_reconnect", "message": message,
+            "target_provider": target_provider, "target_session_id": target_session_id,
+            "created_zone": "UTC"}, now=now)
+        outbox_id = self.id_factory()
+        sources = list(image_paths or [])
+        if len(sources) > 4:
+            raise OutboxError("attach between 1 and 4 images")
+        owned_paths = []
+        asset_dir = os.path.join(self.asset_root, outbox_id)
+        try:
+            if sources:
+                if not self.recovery_source_root:
+                    raise OutboxError("image recovery storage is unavailable")
+                os.makedirs(asset_dir, mode=0o700, exist_ok=False)
+                os.chmod(asset_dir, 0o700, follow_symlinks=False)
+                for index, source in enumerate(sources):
+                    source = os.path.realpath(str(source or ""))
+                    if not source.startswith(self.recovery_source_root + os.sep):
+                        raise OutboxError("image recovery source is invalid")
+                    info = os.lstat(source)
+                    if not os.path.isfile(source) or not 1 <= info.st_size <= 10_000_000:
+                        raise OutboxError("queued image is invalid")
+                    destination = os.path.join(asset_dir, f"image-{index + 1}.jpg")
+                    with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
+                        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+                    os.chmod(destination, 0o600, follow_symlinks=False)
+                    owned_paths.append(destination)
+            values.update(origin="direct_send_recovery", idempotency_key=key,
+                          image_paths_json=json.dumps(owned_paths, separators=(",", ":")))
+            columns = ["id", "created_at", "updated_at", *values.keys()]
+            params = [outbox_id, now, now, *values.values()]
+            duplicate = None
+            with self._transaction(immediate=True) as db:
+                try:
+                    db.execute(
+                        f"INSERT INTO outbox_messages({','.join(columns)}) "
+                        f"VALUES({','.join('?' for _ in columns)})", params)
+                except sqlite3.IntegrityError:
+                    existing = db.execute(
+                        "SELECT * FROM outbox_messages WHERE idempotency_key=?", (key,)).fetchone()
+                    if existing:
+                        duplicate = self._public(existing)
+                    else:
+                        raise
+            if duplicate:
+                self._remove_asset_paths(owned_paths)
+                return duplicate
+            return self.get(outbox_id)
+        except Exception:
+            for path in owned_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(asset_dir)
+            except OSError:
+                pass
+            raise
+
+    def _remove_asset_paths(self, paths):
+        """Delete only queue-owned image paths and their now-empty directory."""
+        directories = set()
+        root = self.asset_root + os.sep
+        for raw_path in paths or []:
+            path = os.path.realpath(str(raw_path or ""))
+            if not path.startswith(root):
+                continue
+            directories.add(os.path.dirname(path))
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+        for directory in sorted(directories, key=len, reverse=True):
+            try:
+                os.rmdir(directory)
+            except OSError:
+                pass
+
+    def _clear_assets_for(self, outbox_id):
+        record = self.get_internal(outbox_id)
+        if not record or not record.get("_image_paths"):
+            return
+        self._remove_asset_paths(record["_image_paths"])
+        with self._transaction(immediate=True) as db:
+            db.execute("UPDATE outbox_messages SET image_paths_json='[]' WHERE id=?",
+                       (outbox_id,))
+
+    def cleanup_terminal_assets(self):
+        """Bound private recovery storage without weakening failure visibility."""
+        cutoff = self.clock() - RECOVERY_ASSET_RETENTION_SECONDS
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id FROM outbox_messages WHERE image_paths_json IS NOT NULL "
+                "AND image_paths_json!='[]' AND (state IN ('sent','cancelled') OR "
+                "(state IN ('blocked','failed','confirmation_unknown') AND updated_at<=?))",
+                (cutoff,)).fetchall()
+        for row in rows:
+            self._clear_assets_for(row["id"])
+
+    def get_internal(self, outbox_id):
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM outbox_messages WHERE id=?",
+                             (str(outbox_id or ""),)).fetchone()
+        return self._internal(row)
 
     def get(self, outbox_id):
         with self._connect() as db:
@@ -362,7 +530,7 @@ class OutboxManager:
             result = db.execute(
                 "UPDATE outbox_messages SET " + ",".join(f"{key}=?" for key in values) +
                 ",updated_at=?,version=version+1 WHERE id=? AND state IN "
-                "('scheduled','waiting_availability','waiting_usage_reset') "
+                "('scheduled','waiting_availability','waiting_usage_reset','waiting_provider') "
                 "AND claimed_at IS NULL",
                 (*values.values(), now, outbox_id))
             if result.rowcount != 1:
@@ -375,10 +543,11 @@ class OutboxManager:
             result = db.execute(
                 "UPDATE outbox_messages SET state='cancelled',updated_at=?,version=version+1 "
                 "WHERE id=? AND state IN ('scheduled','waiting_availability',"
-                "'waiting_usage_reset') AND claimed_at IS NULL", (now, outbox_id))
+                "'waiting_usage_reset','waiting_provider') AND claimed_at IS NULL", (now, outbox_id))
             if result.rowcount != 1:
                 raise OutboxError("only an unclaimed pending message can be cancelled",
                                   code="immutable")
+        self._clear_assets_for(outbox_id)
         return self.get(outbox_id)
 
     def retry(self, outbox_id, patch=None):
@@ -446,6 +615,15 @@ class OutboxManager:
         if session.get("read_only") or session.get("external") or session.get("access") == "view_only":
             return "block", session.get("read_only_reason") or "The target is view only", session
         capabilities = session.get("capabilities") or {}
+        if record.get("kind") == "provider_reconnect":
+            if session.get("control_state") == "reconnecting" or capabilities.get(
+                    "queue_submit"):
+                return "wait", "Waiting for provider control to reconnect", session
+            if not capabilities.get("submit"):
+                return "block", "The target no longer accepts messages from Fleet", session
+            # A live authoritative turn can be steered; an idle session starts a
+            # new turn. Both are safe dispatch points for this recovery kind.
+            return "ready", None, session
         agent_id = record.get("target_agent_id")
         if agent_id:
             agent = next((item for item in session.get("agents") or []
@@ -524,7 +702,7 @@ class OutboxManager:
             rows = db.execute("SELECT * FROM outbox_messages WHERE state IN "
                               "('sending','spawning') AND lease_until<?", (now,)).fetchall()
         for raw in rows:
-            record = self._public(raw)
+            record = self._internal(raw)
             if record["state"] == "spawning" and record.get("destination_session_id") \
                     and record["destination_session_id"] in self._sessions(snapshot):
                 self._set_waiting(record["id"], "waiting_availability",
@@ -557,17 +735,18 @@ class OutboxManager:
 
     def tick(self, snapshot, usage, dispatch, spawn):
         """Evaluate and deliver a bounded batch. Call from one daemon scheduler."""
+        self.cleanup_terminal_assets()
         self.recover_expired(snapshot)
         now = self.clock()
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM outbox_messages WHERE state IN "
-                "('scheduled','waiting_availability','waiting_usage_reset') "
+                "('scheduled','waiting_availability','waiting_usage_reset','waiting_provider') "
                 "AND claimed_at IS NULL AND COALESCE(next_attempt_at,0)<=? "
                 "ORDER BY COALESCE(trigger_at,created_at),created_at,id LIMIT ?",
                 (now, self.max_batch)).fetchall()
         for raw in rows:
-            record = self._public(raw)
+            record = self._internal(raw)
             if record["state"] == "scheduled" and record.get("trigger_at") is not None \
                     and now < record["trigger_at"]:
                 continue
@@ -592,7 +771,7 @@ class OutboxManager:
                 self._set_waiting(record["id"], "waiting_availability",
                                   "Fresh post-reset usage evidence received",
                                   observed_reset=reset_at)
-                record = self.get(record["id"])
+                record = self.get_internal(record["id"])
             if record["kind"] == "new_session" and not record.get("destination_session_id"):
                 if record.get("target_provider") == "claude":
                     destination = str(uuid.uuid4())
@@ -600,10 +779,10 @@ class OutboxManager:
                         db.execute("UPDATE outbox_messages SET destination_session_id=?,"
                                    "updated_at=?,version=version+1 WHERE id=? AND version=?",
                                    (destination, now, record["id"], record["version"]))
-                    record = self.get(record["id"])
+                    record = self.get_internal(record["id"])
                 if not self._claim(record, "spawning"):
                     continue
-                claimed = self.get(record["id"])
+                claimed = self.get_internal(record["id"])
                 try:
                     result = spawn(claimed)
                 except Exception as exc:
@@ -629,7 +808,9 @@ class OutboxManager:
                 self._transient(record, reason)
                 continue
             if target == "wait":
-                self._set_waiting(record["id"], "waiting_availability", reason,
+                waiting_state = ("waiting_provider" if record.get("kind") ==
+                                 "provider_reconnect" else "waiting_availability")
+                self._set_waiting(record["id"], waiting_state, reason,
                                   next_attempt=now + 1)
                 continue
             if target == "block":
@@ -637,7 +818,7 @@ class OutboxManager:
                 continue
             if not self._claim(record, "sending"):
                 continue
-            claimed = self.get(record["id"])
+            claimed = self.get_internal(record["id"])
             try:
                 result = dispatch(claimed)
             except Exception as exc:
@@ -646,6 +827,11 @@ class OutboxManager:
             if result.get("ok"):
                 self._terminal(record["id"], "sent", receipt=result,
                                destination=record.get("destination_session_id"))
+            elif result.get("queueable") or result.get("code") == \
+                    "provider_control_unavailable":
+                self._set_waiting(record["id"], "waiting_provider",
+                                  "Provider control disconnected during delivery",
+                                  next_attempt=self.clock() + 1)
             else:
                 self._terminal(record["id"], "failed",
                                error=result.get("error") or "provider rejected the message")

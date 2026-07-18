@@ -137,23 +137,25 @@ let pushActionFallback=(()=>{const value=new URLSearchParams(location.search).ge
 const open=new Set();
 const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
-const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights'};
+const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights',settings:'Settings'};
 const validRoutes=new Set(Object.keys(routeNames));
 function hashDestination(){
   const parts=location.hash.replace(/^#/,'').split('/'),route=parts[0];
   let detail=null;
-  if(route==='notifications'&&parts[1]){
+  if((route==='notifications'||route==='settings')&&parts[1]){
     try{detail=decodeURIComponent(parts.slice(1).join('/'));}catch(_){detail=null;}
   }
   return{route:validRoutes.has(route)?route:'now',detail};
 }
 const initialDestination=hashDestination();
-if(initialDestination.detail&&!(history.state&&history.state.eventId)){
+if(initialDestination.route==='notifications'&&initialDestination.detail&&
+    !(history.state&&history.state.eventId)){
   const detailHash=`#notifications/${encodeURIComponent(initialDestination.detail)}`;
   history.replaceState({fdRoute:'notifications'},'','#notifications');
   history.pushState({fdRoute:'notifications',eventId:initialDestination.detail},'',detailHash);
 }
-let currentRoute=initialDestination.route,notificationDetailId=initialDestination.detail;
+let currentRoute=initialDestination.route,
+  notificationDetailId=initialDestination.route==='notifications'?initialDestination.detail:null;
 let nowFilter=draftValue('filter:now'),nowState='all',workFilter=draftValue('filter:workstreams'),workState='all';
 const NAV_SIDE_KEY='fleet.navSide.v1';
 let navSide=localStorage.getItem(NAV_SIDE_KEY)==='right'?'right':'left';
@@ -241,7 +243,7 @@ async function loadWorkstreams(force=false){
     if(!r.ok||!data.ok)throw new Error(data.error||'Workstreams unavailable');
     workstreamData=data;workstreamsLoadedAt=Date.now();
   }catch(error){workstreamData={ok:false,error:String(error),workstreams:workstreamData.workstreams||[]};}
-  finally{workstreamsLoading=false;renderWorkstreams(workstreamData);if(settingsOpen&&budgetSettingsOpen)renderSettings();}
+  finally{workstreamsLoading=false;renderWorkstreams(workstreamData);if(settingsOpen&&settingsSection==='budgets')renderSettings();}
 }
 function setWorkFilter(value){workFilter=value;setDraft('filter:workstreams',value);renderWorkstreams(workstreamData);}
 function setWorkState(value){
@@ -630,7 +632,7 @@ function md(src){
 let outboxData={ok:true,items:[],summary:{pending:0,attention:0},usage_options:[]};
 let outboxLoading=false,outboxLoadPromise=null,outboxLoadedAt=0,outboxAccess='unknown',outboxFilter='current',scheduleView=null;
 const outboxActions=new Map();
-const outboxPending=new Set(['scheduled','waiting_availability','waiting_usage_reset','spawning','sending']);
+const outboxPending=new Set(['scheduled','waiting_availability','waiting_usage_reset','waiting_provider','spawning','sending']);
 const outboxAttention=new Set(['blocked','failed','confirmation_unknown']);
 function outboxWhen(item){
   const value=item.sent_at||item.trigger_at||item.created_at;if(!value)return'';
@@ -650,10 +652,27 @@ async function loadOutbox(force=false){
   outboxLoadPromise=(async()=>{try{
       const r=await fetch('/api/outbox?limit=200',{cache:'no-store'}),data=await r.json();
       if(!r.ok||!data.ok){if(r.status===403)outboxAccess='denied';throw new Error(r.status===403?'Outbox needs this device’s action token':(data.error||'Outbox unavailable'));}
-      outboxAccess='allowed';outboxData=data;outboxLoadedAt=Date.now();
+      outboxAccess='allowed';outboxData=data;outboxLoadedAt=Date.now();reconcileOutboxOptimistic();
     }catch(error){outboxData={...outboxData,ok:false,error:String(error)};}
     finally{outboxLoading=false;outboxLoadPromise=null;renderOutboxCompact();renderOutboxFull();}})();
   await outboxLoadPromise;return outboxData;
+}
+function reconcileOutboxOptimistic(){
+  const rows=new Map((outboxData.items||[]).map(item=>[item.id,item]));
+  for(const list of optimisticMessages.values())for(const item of list){
+    if(!item.outboxId)continue;
+    const row=rows.get(item.outboxId);if(!row)continue;
+    if(outboxPending.has(row.state)){
+      clearTimeout(item.confirmTimer);item.status='queued';
+      item.queueReason=row.blocked_reason||row.state_label||'Queued until provider control reconnects';
+    }else if(row.state==='sent'){
+      clearTimeout(item.confirmTimer);item.status='confirmed';delete item.error;
+      if(item.imageIds?.length){void deleteImages(item.imageIds);item.imageIds=[];}
+    }else if(['blocked','failed','confirmation_unknown','cancelled'].includes(row.state)){
+      clearTimeout(item.confirmTimer);item.status='failed';
+      item.error=row.error||row.blocked_reason||(row.state==='cancelled'?'Queued send was cancelled.':'Queued send failed.');
+    }
+  }
 }
 function renderOutboxCompact(){
   const el=$('#outboxsummary');if(!el)return;
@@ -746,7 +765,7 @@ function closeComposerMenus(except=null){
     if(menu===except)return;
     menu.classList.remove('open');
     menu.previousElementSibling?.setAttribute('aria-expanded','false');
-    menu.closest('#sact')?.classList.remove('tools-open');
+    menu.closest('.session-composer')?.classList.remove('tools-open');
   });
 }
 function toggleComposerMenu(button,event){
@@ -755,7 +774,7 @@ function toggleComposerMenu(button,event){
   const opening=!menu.classList.contains('open');
   closeComposerMenus(opening?menu:null);
   menu.classList.toggle('open',opening);button.setAttribute('aria-expanded',String(opening));
-  menu.closest('#sact')?.classList.toggle('tools-open',opening);
+  menu.closest('.session-composer')?.classList.toggle('tools-open',opening);
 }
 function openComposerSchedule(sid,inputId,agentId=''){
   closeComposerMenus();
@@ -764,9 +783,39 @@ function openComposerSchedule(sid,inputId,agentId=''){
 function composerTools(sid,inputId){
   return`<span class="composertools"><button type="button" class="pbtn composerplusbtn" aria-label="message options" aria-haspopup="menu" aria-expanded="false" onclick="toggleComposerMenu(this,event)">＋</button>
     <span class="composerplus" role="menu">
-      <label class="composerplusitem" role="menuitem" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.querySelector('input').click()}">▧ <span>Send picture</span><input type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="closeComposerMenus();chooseImages('${sid}',this)"></label>
+      <button type="button" class="composerplusitem" role="menuitem"
+        onpointerdown="prepareImagePicker('${inputId}',event)" onclick="openImagePicker('${inputId}',event)">▧ <span>Send picture</span></button>
       <button type="button" class="composerplusitem" role="menuitem" onclick="openComposerSchedule('${sid}','${inputId}')">◷ <span>Schedule message</span></button>
-    </span></span>`;
+    </span><input id="picker-${inputId}" class="composer-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="chooseImages('${sid}',this)"></span>`;
+}
+function prepareImagePicker(inputId,event){
+  if(event?.pointerType==='mouse')return;
+  document.getElementById(inputId)?.blur();
+  document.getElementById(inputId)?.closest('.session-composer')?.classList.remove('composer-active');
+  closeComposerMenus();syncVisualViewport();
+}
+function openImagePicker(inputId,event){
+  event?.preventDefault();event?.stopPropagation();
+  const input=document.getElementById(inputId),picker=document.getElementById('picker-'+inputId);
+  input?.blur();input?.closest('.session-composer')?.classList.remove('composer-active');
+  closeComposerMenus();syncVisualViewport();
+  // Keep the native picker call in the trusted click. iOS may revoke user
+  // activation before a deferred click, even though viewport settling is nicer.
+  picker?.click();requestAnimationFrame(syncVisualViewport);
+}
+function canCompose(s){const caps=s?.capabilities||{};return Boolean(caps.submit||caps.queue_submit);}
+function renderComposer(s,surface='session'){
+  if(!canCompose(s))return'';
+  const viewer=surface==='viewer',pre=viewer?'vft':'sft',msg=viewer?'vmsg':'smsg';
+  const inputId=pre+'-'+s.session_id;
+  return`<div class="composer-dock" data-composer-surface="${surface}">
+    <div class="freetext composer"><textarea id="${inputId}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" placeholder="send message" autocomplete="off"
+      oninput="composerInput(this,'${s.session_id}','${pre}')" onfocus="composerFocus(this,'${s.session_id}','${pre}')"
+      onkeydown="composerKey(event,()=>sendText('${s.session_id}','${pre}','${msg}'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(s.session_id)))}</textarea>
+      <span class="sendpair">${composerTools(s.session_id,inputId)}<span class="composer-submit-stack">${viewer?`<button class="pbtn chatjump" onclick="openSession('${s.session_id}')">chat</button>`:''}<button class="pbtn send" onclick="sendText('${s.session_id}','${pre}','${msg}')">send</button></span></span></div>
+    <div class="image-drafts" id="imgdraft-${s.session_id}"></div>
+    <div class="slashwrap" id="slash-${inputId}"></div>
+    <div class="actmsg" id="${msg}-${s.session_id}"></div></div>`;
 }
 async function openSchedule(sid,inputId,agentId='',existing=null,spawnSpec=null,message=''){
   const feedbackStarted=performance.now();
@@ -900,7 +949,7 @@ async function loadPushState(force=false){
       'Open Fleet once with its action-token URL on this device':(data.error||'Push status unavailable'));
     pushData=data;pushLocal.error='';pushLoadedAt=Date.now();
   }catch(error){pushLocal.error=String(error.message||error);}
-  if(settingsOpen)renderSettings();return pushData;
+  if(settingsOpen&&['notifications','devices'].includes(settingsSection))renderSettings();return pushData;
 }
 async function currentPushSubscription(){
   const registration=await navigator.serviceWorker.ready;
@@ -978,6 +1027,55 @@ async function testFleetPush(){
   }catch(error){pushLocal.error=String(error.message||error);}
   finally{pushBusy=false;renderSettings();}
 }
+const listedPushBusy=new Set();
+function replaceListedPushDevice(device){
+  if(!device?.id)return;
+  const devices=[...(pushData.devices||[])],index=devices.findIndex(item=>item.id===device.id);
+  if(index>=0)devices[index]=device;else devices.push(device);
+  pushData.devices=devices;
+  if(pushData.current_device?.id===device.id)pushData.current_device=device;
+  pushData.enabled_devices=devices.filter(item=>item.enabled===true).length;
+}
+function listedPushWorking(deviceId,message){
+  const card=document.querySelector(`[data-push-device="${CSS.escape(deviceId)}"]`);
+  if(!card)return;
+  card.querySelectorAll('button,input').forEach(control=>{control.disabled=true;});
+  const status=card.querySelector('.devicefeedback');if(status)status.textContent=message;
+}
+async function updateListedPushDevice(deviceId,patch){
+  if(listedPushBusy.has(deviceId))return;
+  listedPushBusy.add(deviceId);listedPushWorking(deviceId,'saving…');
+  try{const data=await pushApi('/api/push/device-settings',{device_id:deviceId,...patch});
+    replaceListedPushDevice(data.device);renderSettings();
+    const status=document.querySelector(`[data-push-device="${CSS.escape(deviceId)}"] .devicefeedback`);
+    if(status)status.textContent='saved ✓';
+  }catch(error){pushLocal.error=String(error.message||error);renderSettings();}
+  finally{listedPushBusy.delete(deviceId);}
+}
+async function testListedPushDevice(deviceId){
+  if(listedPushBusy.has(deviceId))return;
+  listedPushBusy.add(deviceId);listedPushWorking(deviceId,'queuing test…');
+  try{await pushApi('/api/push/test',{device_id:deviceId});await loadPushState(true);
+    const status=document.querySelector(`[data-push-device="${CSS.escape(deviceId)}"] .devicefeedback`);
+    if(status)status.textContent='test queued ✓';
+  }catch(error){pushLocal.error=String(error.message||error);renderSettings();}
+  finally{listedPushBusy.delete(deviceId);}
+}
+function confirmForgetPushDevice(deviceId,name){
+  askConfirm('Remove notification device',
+    `Fleet will revoke <b>${esc(name||'this device')}</b> and suppress its queued deliveries. The browser must reconnect before it can receive another push.`,
+    'remove device',()=>forgetPushDevice(deviceId),true);
+}
+async function forgetPushDevice(deviceId){
+  if(listedPushBusy.has(deviceId))return;
+  listedPushBusy.add(deviceId);listedPushWorking(deviceId,'removing…');
+  try{await pushApi('/api/push/subscription',{device_id:deviceId,forget:true});
+    pushData.devices=(pushData.devices||[]).filter(item=>item.id!==deviceId);
+    pushData.enabled_devices=pushData.devices.filter(item=>item.enabled===true).length;
+    renderSettings();
+  }catch(error){pushLocal.error=String(error.message||error);renderSettings();}
+  finally{listedPushBusy.delete(deviceId);}
+}
 function pushSettingsHtml(){
   const device=pushData.current_device,standalone=pushStandalone(),supported=pushSupported();
   const installState=standalone?'Installed':pushInstallPrompt?'Ready to install':'Browser tab';
@@ -1017,10 +1115,10 @@ async function initFleetPwa(){
   if(pushSupported()&&Notification.permission==='granted'&&pushData.current_device){
     try{await repairPushSubscription();await loadPushState(true);}catch(error){pushLocal.error=String(error.message||error);}
   }
-  if(settingsOpen)renderSettings();
+  if(settingsOpen&&settingsSection==='devices')renderSettings();
 }
-window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();pushInstallPrompt=event;if(settingsOpen)renderSettings();});
-window.addEventListener('appinstalled',()=>{pushInstallPrompt=null;if(settingsOpen)renderSettings();});
+window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();pushInstallPrompt=event;if(settingsOpen&&settingsSection==='devices')renderSettings();});
+window.addEventListener('appinstalled',()=>{pushInstallPrompt=null;if(settingsOpen&&settingsSection==='devices')renderSettings();});
 navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type==='push-subscription-change')repairPushSubscription().catch(()=>{});});
 window.__fleetPush={loadPushState,enableFleetPush,repairPushSubscription};
 let briefingData={ok:true,sections:{attention:[],completed:[],slow:[],outcomes:[],budgets:[],measurements:[],reviewed:[]},unread:0};
@@ -1265,8 +1363,9 @@ async function markNotificationsRead(cursor=notificationData.event_cursor,render
   }catch(error){notificationData.read_cursor=previous;notificationError=String(error.message||error);await loadNotifications(true,true);}
   renderNotifications();
 }
-function notificationTime(item){const value=Number(item.changed_at||item.opened_at||item.updated_at)||0;
-  return value?fmtAge(Math.max(0,Date.now()/1000-value))+' ago':'';}
+function notificationTime(item){const value=Number(typeof item==='number'?item:
+  item?.changed_at||item?.opened_at||item?.updated_at)||0;if(!value)return'';
+  const delta=Date.now()/1000-value;return delta<0?'in '+fmtAge(-delta):fmtAge(delta)+' ago';}
 function notificationRow(item){
   const bucket=notificationBucket(item),id=enc(item.id),meta=[notificationKinds[item.kind]||item.kind,item.provider,
     notificationTime(item)].filter(Boolean).join(' · ');
@@ -1547,7 +1646,7 @@ function composerInput(input,sid,pre){
   slashInput(sid,pre);
 }
 function composerFocus(input,sid,pre){
-  input?.closest('#sact')?.classList.add('composer-active');
+  input?.closest('.session-composer')?.classList.add('composer-active');
   resizeComposer(input);
   slashInput(sid,pre);
   requestAnimationFrame(syncVisualViewport);
@@ -1583,7 +1682,7 @@ function restoreOptimistic(sid,id){
 }
 function optimisticItemHtml(item){
   return`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
-    <span class="crole">you</span>${item.status==='queued'?`<span class="delivery queued" aria-label="queued offline" title="queued until Fleet reconnects">↥</span>`:
+    <span class="crole">you</span>${item.status==='queued'?`<span class="delivery queued" aria-label="${item.queueId?'queued offline':'message queued'}" title="${esc(item.queueReason||'queued until Fleet reconnects')}">↥</span>`:
       item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
       item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">!</button>`:''}
     <div class="cbody">${item.imageCount?`<div class="image-receipt">🖼 ${item.imageCount} image${item.imageCount===1?'':'s'}</div>`:''}<p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
@@ -1924,7 +2023,7 @@ function terminalButton(s,card=false){
   }
   return'';
 }
-let viewerChatOpen=false,viewerQOpen=true,viewerPath=null;
+let viewerQOpen=true,viewerPath=null;
 // one question's full interaction block (options + descriptions + Other + ✕ dismiss);
 // shared by the card's amber box (pre='msg') and the viewer's docked bar (pre='vmsg')
 function singleQBlock(s,p,pre){
@@ -1973,18 +2072,9 @@ function renderViewerBar(force){
   const ae=document.activeElement;
   if(ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&bar.contains(ae))return; // don't clobber typing
   if(!force&&touching())return;                           // or a swipe/tap in flight
-  const old=bar.querySelector&&bar.querySelector('.vconvo');
-  const oldScroll=old?{top:old.scrollTop,atBottom:old.scrollTop+old.clientHeight>=old.scrollHeight-12}:null;
   if(s)ensureCtx(viewerSid,ctxVersion(s));
   const c=ctxCache[viewerSid];
-  let h=`<div class="togbox">
-      <div class="togrow">
-        <button class="vchat-toggle" onclick="viewerChatOpen=!viewerChatOpen;renderViewerBar(true)">${viewerChatOpen?'▾ hide conversation':'▸ show conversation'}</button>
-        <button class="expandbtn" title="open the full conversation (closes this file)"
-          onclick="openSession('${viewerSid}')">⤢ full view</button>
-      </div>
-      ${viewerChatOpen?`<div class="togbody">${c&&!c.fetching?`<div class="convo vconvo">${convoMsgs(c,viewerSid)||'<div class="ctxload">no conversation yet</div>'}</div>`:'<div class="ctxload">loading conversation…</div>'}</div>`:''}
-    </div>`;
+  let h='<div class="session-context">';
   const p=s&&s.pending;
   if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
     h+=`<div class="togbox waiting">
@@ -1996,16 +2086,12 @@ function renderViewerBar(force){
   }
   h+=`${fileStrip(viewerSid,(c&&c.files)||[])}
     ${handoffLinksHtml(s)}
-    ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s&&s.capabilities?.submit?`<div class="freetext composer"><textarea id="vft-${viewerSid}" data-draft-key="${esc(composerDraftKey(viewerSid))}" rows="2" placeholder="send message" autocomplete="off"
-      oninput="composerInput(this,'${viewerSid}','vft')" onfocus="resizeComposer(this);slashInput('${viewerSid}','vft')"
-      onkeydown="composerKey(event,()=>sendText('${viewerSid}','vft','vmsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(viewerSid)))}</textarea>
-      <span class="sendpair"><button class="pbtn send" onclick="sendText('${viewerSid}','vft','vmsg')">send</button>${scheduleButton(viewerSid,'vft-'+viewerSid)}</span></div>`:''}
-    <div class="slashwrap" id="slash-vft-${viewerSid}"></div>
-    <div class="actmsg" id="vmsg-${viewerSid}"></div>`;
+    ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}</div>
+    ${s?renderComposer(s,'viewer'):''}`;
+  bar.classList.toggle('session-composer',canCompose(s));
+  if(!canCompose(s))bar.classList.remove('composer-active','tools-open');
   keepStripScroll(bar,()=>{bar.innerHTML=h;});
-  const nw=bar.querySelector&&bar.querySelector('.vconvo');
-  if(nw)nw.scrollTop=(oldScroll&&!oldScroll.atBottom)?oldScroll.top:nw.scrollHeight;
+  if(canCompose(s)){resizeComposer(document.getElementById('vft-'+viewerSid));void renderImageDrafts(viewerSid);}
 }
 // Full chat headers identify the conversation. Operational metadata lives in
 // the status strip above the composer, where it can update independently.
@@ -2034,7 +2120,7 @@ function viewFile(sid,ep,en,kind,ecap){
   }).catch(e=>{vb.textContent='✗ '+e;});
 }
 function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
-  $('#vctrl').innerHTML='';
+  $('#vact').classList.remove('session-composer','composer-active','tools-open');$('#vctrl').innerHTML='';
   viewerSid=null;viewerPath=null;}
 // ---- back-gesture / Esc closes the open full-screen overlay ----------------
 // The fullscreen surfaces are mutually exclusive, so we model
@@ -2042,12 +2128,17 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
-let histPushed=false,schedulePushed=false,settingsPushed=false;
+let histPushed=false,schedulePushed=false,settingsPushed=false,settingsSectionDepth=0;
 const anyOverlay=()=>['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#outboxview','#scheduleview'].some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
 }
 window.addEventListener('popstate',()=>{
+  const destination=hashDestination();
+  if(settingsOpen&&settingsSectionDepth>0&&destination.route==='settings'){
+    settingsSection=SETTINGS_SECTIONS.includes(destination.detail)?destination.detail:'notifications';
+    settingsSectionDepth=Math.max(0,settingsSectionDepth-1);renderSettings(true);return;
+  }
   if(settingsPushed){settingsPushed=false;closeSettings();return;}
   if(schedulePushed){schedulePushed=false;closeSchedule();return;}
   if(handoffPushed){
@@ -2062,7 +2153,7 @@ window.addEventListener('popstate',()=>{
     closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
     return;
   }
-  const destination=hashDestination();notificationDetailId=destination.detail;
+  notificationDetailId=destination.route==='notifications'?destination.detail:'';
   if(!notificationDetailId){notificationDetail=null;notificationDetailError='';}
   navigateTo(destination.route,false,Boolean(notificationDetailId));
 });
@@ -2071,6 +2162,7 @@ function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if(document.querySelector('.composerplus.open'))return closeComposerMenus();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
+  if(settingsOpen&&settingsSectionDepth)return history.go(-(settingsSectionDepth+1));
   if(settingsPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
@@ -2109,16 +2201,18 @@ window.visualViewport?.addEventListener('resize',syncVisualViewport);
 window.visualViewport?.addEventListener('scroll',syncVisualViewport);
 window.addEventListener('orientationchange',()=>requestAnimationFrame(syncVisualViewport));
 document.addEventListener('focusout',event=>{
-  if(!event.target.closest?.('#sact .composer'))return;
+  if(!event.target.closest?.('.session-composer .composer'))return;
   setTimeout(()=>{
-    if(!document.activeElement?.closest?.('#sact .composer'))$('#sact').classList.remove('composer-active');
+    if(!document.activeElement?.closest?.('.session-composer .composer'))
+      event.target.closest?.('.session-composer')?.classList.remove('composer-active');
     syncVisualViewport();
   },0);
 },true);
 let chatTouch=null;
 document.addEventListener('touchstart',event=>{
   const input=document.activeElement;
-  if(!event.target.closest?.('#sbody')||!input?.matches?.('#sact .composer textarea'))return chatTouch=null;
+  if(!event.target.closest?.('#sbody,#vbody')||
+      !input?.matches?.('.session-composer .composer textarea'))return chatTouch=null;
   const touch=event.touches?.[0];
   chatTouch=touch?{x:touch.clientX,y:touch.clientY,input}:null;
 },{passive:true,capture:true});
@@ -2504,21 +2598,16 @@ function renderSession(force){
     :pendingBox(s,'smsg');   // permission prompts render whole
   const act=$('#sact');
   act.classList.remove('tools-open');
-  act.classList.toggle('session-composer',Boolean(s.capabilities?.submit));
-  if(!s.capabilities?.submit)act.classList.remove('composer-active');
+  act.classList.toggle('session-composer',canCompose(s));
+  if(!canCompose(s))act.classList.remove('composer-active');
   keepStripScroll(act,()=>{act.innerHTML=`
     <div class="session-context">${qHtml}
       ${fileStrip(s.session_id,(c&&c.files)||[])}
       ${handoffLinksHtml(s)}
       ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
       ${statusLineHtml(s.status_line,'session:'+s.session_id)}</div>
-    <div class="composer-dock">${s.capabilities?.submit?`<div class="freetext composer"><textarea id="sft-${s.session_id}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" placeholder="send message" autocomplete="off"
-      oninput="composerInput(this,'${s.session_id}','sft')" onfocus="composerFocus(this,'${s.session_id}','sft')"
-      onkeydown="composerKey(event,()=>sendText('${s.session_id}','sft','smsg'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(s.session_id)))}</textarea>
-      <span class="sendpair">${composerTools(s.session_id,'sft-'+s.session_id)}<button class="pbtn send" onclick="sendText('${s.session_id}','sft','smsg')">send</button></span></div><div class="image-drafts" id="imgdraft-${s.session_id}"></div>`:''}
-      <div class="slashwrap" id="slash-sft-${s.session_id}"></div>
-      <div class="actmsg" id="smsg-${s.session_id}"></div></div>`;});
-  if(s.capabilities?.submit){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
+    ${renderComposer(s,'session')}`;});
+  if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
   if(wantBottom)requestAnimationFrame(()=>{const b=$('#sbody');b.scrollTop=b.scrollHeight;});
 }
@@ -2742,9 +2831,9 @@ function pinFeedbackHtml(sid){
   return`<div class="quickfeedback failed" role="alert"><span class="qfstate">Pin failed</span><span class="qftext">${esc(item.error||'Could not save pin')}</span><button onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${enc(sid)}'))">retry</button></div>`;
 }
 // mobile: long-press a session header to pin; a short tap still opens its chat
-let sessionPressTimer=null,sessionPressTarget=null,sessionLongFired=false;
+let sessionPressTimer=null,sessionPressTarget=null,sessionPressSid=null,sessionLongFired=false;
 function sessionPressStart(sid,target){
-  sessionPressEnd();sessionPressTarget=target||null;
+  sessionPressEnd();sessionPressSid=sid;sessionPressTarget=target||null;
   if(sessionPressTarget)sessionPressTarget.classList.add('pinpress');
   sessionLongFired=false;
   sessionPressTimer=setTimeout(()=>{sessionLongFired=true;toggleSessionPin(sid);
@@ -2753,6 +2842,7 @@ function sessionPressStart(sid,target){
 function sessionPressEnd(){
   if(sessionPressTimer){clearTimeout(sessionPressTimer);sessionPressTimer=null;}
   if(sessionPressTarget){sessionPressTarget.classList.remove('pinpress');sessionPressTarget=null;}
+  sessionPressSid=null;
 }
 function sessionTap(e,sid){
   if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
@@ -2829,7 +2919,7 @@ function cardTop(s){
   // conversation itself now lives only in the full view
   if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
-  return`<div class="shead" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
+  return`<div class="shead${sessionPressSid===s.session_id?' pinpress':''}" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
       ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
@@ -2981,31 +3071,66 @@ const mqSel={};      // sessionId -> {nonce, qi, a:{qIdx:Set(digits)}, other:{qI
 const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-renders)
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
+const SETTINGS_SECTIONS=['notifications','devices','sessions','appearance','budgets','advanced'];
+const SETTINGS_LABELS={notifications:'Notifications',devices:'Devices & delivery',sessions:'Sessions',
+  appearance:'Appearance',budgets:'Budgets & spawning',advanced:'Advanced'};
 let settingsOpen=false,budgetSettingsOpen=false,settingsReturnState=null,settingsRenderFrame=0;
+let settingsRendering=false,settingsRerenderPending=false,settingsFocusPending=false;
+let settingsMessage='';
+let settingsSection=(initialDestination.route==='settings'&&SETTINGS_SECTIONS.includes(initialDestination.detail))?
+  initialDestination.detail:'notifications';
+let notificationPolicy={ok:true,global:null,kinds:[],muted_sessions:[],next_deliveries:[],recent_deliveries:[]};
+let notificationPolicyLoading=false,notificationPolicyError='';
+let notificationPolicySaveError='';
+let globalPolicySaving=false,globalPolicyStatus='';
+const policyRuleOpen=new Set(),policyApplyCurrent=new Set(),policySaving=new Map();
 function uiRefresh(){render(last,true);if(settingsOpen)renderSettings();}
-function openSettings(){
+async function loadNotificationPolicy(force=false){
+  if(notificationPolicyLoading)return;
+  if(!force&&notificationPolicy.global)return;
+  notificationPolicyLoading=true;notificationPolicyError='';if(settingsOpen&&['notifications','sessions'].includes(settingsSection))renderSettings();
+  try{const response=await fetch('/api/notification-policy',{cache:'no-store'}),data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Notification policy unavailable');
+    notificationPolicy=data;
+  }catch(error){notificationPolicyError=String(error.message||error);}
+  finally{notificationPolicyLoading=false;if(settingsOpen&&['notifications','sessions'].includes(settingsSection))renderSettings();}
+}
+function selectSettingsSection(section){
+  if(!SETTINGS_SECTIONS.includes(section))return;
+  settingsMessage='';
+  if(section!==settingsSection){settingsSection=section;settingsSectionDepth++;
+    history.pushState({fdSettingsSection:section},'',`#settings/${section}`);}
+  $('#settings').scrollTop=0;renderSettings(true);
+  if(section==='notifications')loadNotificationPolicy();
+  if(section==='devices')loadPushState(true);
+  if(section==='budgets')loadBudgets();
+}
+function openSettings(section=settingsSection){
   if(settingsOpen)return;
+  if(SETTINGS_SECTIONS.includes(section))settingsSection=section;settingsSectionDepth=0;
   const stacked=anyOverlay();
   settingsReturnState=sessionView?{sid:sessionView.sid,closed:sessionView.closed,
     scrollTop:$('#sbody')?.scrollTop||0,evidenceOpen:sessionEvidenceOpen}:null;
-  settingsOpen=true;
+  settingsOpen=true;settingsMessage='';
   $('#settingsview').style.display='flex';
   $('#settings').scrollTop=0;
   $('#settings').innerHTML='<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> loading settings…</div>';
   cancelAnimationFrame(settingsRenderFrame);
   settingsRenderFrame=requestAnimationFrame(()=>{
-    settingsRenderFrame=0;if(settingsOpen)renderSettings();
+    settingsRenderFrame=0;if(settingsOpen)renderSettings(true);
   });
   loadPushState(true);
+  loadNotificationPolicy(true);
   loadBudgets();
   loadWorkstreams();
   if(stacked){settingsPushed=true;history.pushState({fdSettings:1},'');}
   else syncOverlayHistory();
+  history.replaceState(history.state,'',`#settings/${settingsSection}`);
 }
 function closeSettings(){
   const restore=settingsReturnState;settingsReturnState=null;
   cancelAnimationFrame(settingsRenderFrame);settingsRenderFrame=0;
-  settingsOpen=false;
+  settingsOpen=false;settingsSectionDepth=0;
   $('#settingsview').style.display='none';
   $('#settings').innerHTML='';
   applyRouteNav(currentRoute);
@@ -3017,49 +3142,135 @@ function closeSettings(){
     }});
   }
 }
-function renderSettings(){
-  const el=$('#settings');
-  if(!settingsOpen){el.innerHTML='';return;}
-  const st=(last&&last.settings)||{};
-  const num=(k,step)=>`<input type="number" value="${st[k]??''}" min="0" step="${step}"
-    onchange="setNum('${k}',this.value)">`;
-  el.innerHTML=`<div class="setpanel">${pushSettingsHtml()}<div class="dhead">Legacy ntfy</div>
-    <label class="setrow"><input type="checkbox" ${st.legacy_ntfy_enabled===true?'checked':''}
-      onchange="setBool('legacy_ntfy_enabled',this.checked)">Enable manual legacy tests</label>
-    <div class="sethint">Manual test delivery only. Fleet never sends automatic, fallback, or duplicate ntfy alerts.${st.legacy_ntfy_configured?'':' Add ntfy_server and ntfy_topic to config.json first.'}</div>
-    <div class="pushactions" style="margin-top:8px"><button onclick="testLegacyNtfy()"
-      ${legacyNtfyBusy||st.legacy_ntfy_enabled!==true||!st.legacy_ntfy_configured?'disabled':''}>${legacyNtfyBusy?'<span class="delivery sending">◌</span> Queuing…':'Send legacy test'}</button></div>
-    ${legacyNtfyMessage?`<div class="${legacyNtfyError?'pusherror':'pushnotice'}" role="status">${esc(legacyNtfyMessage)}</div>`:''}
-    <div class="dhead" style="margin-top:12px">session state</div>
-    <label class="setrow">Mark a running session stalled after <span class="setnum">${num('stall_seconds',30)} seconds without progress</span></label>
-    <div class="setnum" style="padding:6px 0 2px">per-session mute: tap the 🔔 on a card</div>
-    <div class="dhead" style="margin-top:12px">desktop navigation</div>
-    <div class="setchoice" role="group" aria-label="Desktop navigation side">
-      <button aria-pressed="${navSide==='left'}" onclick="setNavSide('left')">Left side</button>
-      <button aria-pressed="${navSide==='right'}" onclick="setNavSide('right')">Right side</button>
-    </div>
-    <div class="sethint">Saved on this browser. Mobile keeps the bottom navigation.</div>
-    <div class="dhead" style="margin-top:12px">full-screen reading width</div>
-    <div class="setchoice" role="group" aria-label="Full-screen reading width">
-      <button aria-pressed="${(st.reader_width||'fit')==='fit'}"
-        onclick="setStr('reader_width','fit')">Fit the screen</button>
-      <button aria-pressed="${st.reader_width==='centered'}"
-        onclick="setStr('reader_width','centered')">Centered · fixed width</button>
-    </div>
-    <div class="sethint">Applies to session chat, Markdown, and subagent conversations.</div>
-    <div class="dhead" style="margin-top:12px">conversation peek</div>
-    <label class="setrow"><input type="checkbox" ${st.preview_sessions!==false?'checked':''}
-      onchange="setBool('preview_sessions',this.checked)">on session cards<span class="setnum">
-      — ${num('preview_session_lines',1)} line(s)</span></label>
-    <label class="setrow"><input type="checkbox" ${st.preview_agents?'checked':''}
-      onchange="setBool('preview_agents',this.checked)">on subagent rows<span class="setnum">
-      — ${num('preview_agent_lines',1)} line(s)</span></label>
-    <details class="budgetsettingsfold" ${budgetSettingsOpen?'open':''} ontoggle="budgetSettingsOpen=this.open"><summary>Budgets and spawn limits</summary>${budgetSettingsHtml()}</details>
-    <div class="actmsg" id="setmsg"></div></div>`;
+function settingsHasEditableFocus(){const active=document.activeElement;
+  if(!active||!$('#settings')?.contains(active))return false;
+  if(active.matches('textarea,select,[contenteditable="true"]'))return true;
+  return active.matches('input')&&!['checkbox','radio','button','submit','reset','range','color','file'].includes(active.type);}
+function flushFocusedSettingsRender(){
+  if(!settingsFocusPending||settingsHasEditableFocus())return;
+  settingsFocusPending=false;renderSettings();
 }
+function renderSettings(force=false){
+  if(settingsRendering){settingsRerenderPending=true;return;}
+  if(!force&&settingsOpen&&settingsHasEditableFocus()){settingsFocusPending=true;return;}
+  settingsRendering=true;
+  const el=$('#settings');
+  try{
+    if(!settingsOpen){el.innerHTML='';return;}
+    const sectionHtml={notifications:notificationPolicySettingsHtml,devices:deviceSettingsHtml,
+      sessions:sessionSettingsHtml,appearance:appearanceSettingsHtml,budgets:budgetSectionHtml,
+      advanced:advancedSettingsHtml}[settingsSection]();
+    el.innerHTML=`<div class="settingsapp"><nav class="settingsrail" aria-label="Settings sections">
+        ${SETTINGS_SECTIONS.map(section=>`<button class="${section===settingsSection?'active':''}" aria-current="${section===settingsSection?'page':'false'}" onclick="selectSettingsSection('${section}')"><span>${esc(SETTINGS_LABELS[section])}</span></button>`).join('')}</nav>
+      <div class="settingsmobile"><label>Section<select onchange="selectSettingsSection(this.value)">${SETTINGS_SECTIONS.map(section=>`<option value="${section}" ${section===settingsSection?'selected':''}>${esc(SETTINGS_LABELS[section])}</option>`).join('')}</select></label></div>
+      <section class="settingscontent"><header><h2>${esc(SETTINGS_LABELS[settingsSection])}</h2><p>${esc(settingsSectionDescription(settingsSection))}</p></header>${sectionHtml}<div class="actmsg" id="setmsg">${esc(settingsMessage)}</div></section></div>`;
+  }finally{
+    settingsRendering=false;
+    if(settingsRerenderPending){settingsRerenderPending=false;requestAnimationFrame(()=>renderSettings());}
+  }
+}
+$('#settings').addEventListener('focusout',()=>setTimeout(flushFocusedSettingsRender,100));
+function settingsSectionDescription(section){return{
+  notifications:'Choose exactly which events can push, when they fire, and when they repeat.',
+  devices:'Install Fleet, connect browsers, and verify delivery health.',
+  sessions:'Control stalled-session timing and every persistent session mute.',
+  appearance:'Tune navigation, reading width, and conversation previews.',
+  budgets:'Set visibility and spawn guardrails from measured local usage.',
+  advanced:'Diagnostics and manual-only legacy delivery controls.'}[section]||'';}
+function settingNumber(st,key,step=1,min=0){return`<input type="number" value="${st[key]??''}" min="${min}" step="${step}" oninput="setNum('${key}',this.value)">`;}
+function timeValue(minutes){const value=Math.max(0,Math.min(1439,Number(minutes)||0));return`${String(Math.floor(value/60)).padStart(2,'0')}:${String(value%60).padStart(2,'0')}`;}
+function timeMinutes(value){const [hours,minutes]=String(value).split(':').map(Number);return hours*60+minutes;}
+function cadenceSummary(rule){if(rule.mode==='off')return'No external pushes';
+  const delay=rule.initial_delay_seconds?`after ${durationShort(rule.initial_delay_seconds)}`:'now';
+  if(rule.mode==='once')return`Once · ${delay}`;
+  if(rule.mode==='remind_once')return`${delay} · one reminder after ${durationShort(rule.repeat_interval_seconds)}`;
+  return`${delay} · every ${durationShort(rule.repeat_interval_seconds)} · max ${rule.max_deliveries}`;}
+function durationShort(seconds){seconds=Number(seconds)||0;return seconds%86400===0?`${seconds/86400}d`:seconds%3600===0?`${seconds/3600}h`:seconds%60===0?`${seconds/60}m`:`${seconds}s`;}
+function durationParts(seconds){seconds=Math.max(0,Number(seconds)||0);
+  if(seconds&&seconds%86400===0)return[seconds/86400,86400];
+  if(seconds&&seconds%3600===0)return[seconds/3600,3600];
+  if(seconds%60===0)return[seconds/60,60];return[seconds,1];}
+function policyDurationField(rule,field,label,locked=false){const [amount,unit]=durationParts(rule[field]),id=`policy-${rule.kind}-${field}`,disabled=locked?'disabled':'';
+  return`<label>${label}<span class="durationinput"><input id="${id}-amount" type="number" min="${field==='initial_delay_seconds'?0:1}" max="604800" value="${amount}" ${disabled} onchange="savePolicyDuration('${rule.kind}','${field}')"><select id="${id}-unit" aria-label="${esc(label)} unit" ${disabled} onchange="savePolicyDuration('${rule.kind}','${field}')">${[[1,'seconds'],[60,'minutes'],[3600,'hours'],[86400,'days']].map(([value,name])=>`<option value="${value}" ${unit===value?'selected':''}>${name}</option>`).join('')}</select></span></label>`;}
+function savePolicyDuration(kind,field){const id=`policy-${kind}-${field}`,amount=Number(document.getElementById(id+'-amount')?.value),unit=Number(document.getElementById(id+'-unit')?.value),seconds=Math.round(amount*unit),minimum=field==='initial_delay_seconds'?0:60;
+  if(!Number.isFinite(amount)||!Number.isFinite(unit)||amount<0||seconds<minimum||seconds>604800){policySaving.set(kind,field==='initial_delay_seconds'?'error · enter 0 seconds to 7 days':'error · enter 1 minute to 7 days');renderSettings();return;}
+  saveKindPolicy(kind,{[field]:seconds});}
+function cadenceStrip(rule){if(rule.mode==='off')return'<span class="cadenceoff">Off</span>';
+  const count=rule.mode==='once'?1:rule.mode==='remind_once'?2:Math.min(5,rule.max_deliveries);
+  return`<span class="cadencestrip">${Array.from({length:count},(_,index)=>`<i class="${index?'repeat':''}"></i>${index<count-1?'<b></b>':''}`).join('')}</span>`;}
+function notificationPolicySettingsHtml(){
+  if(notificationPolicyLoading&&!notificationPolicy.global)return'<div class="ctxload"><span class="delivery sending">◌</span> Loading notification policy…</div>';
+  if(notificationPolicyError)return`<div class="pusherror">${esc(notificationPolicyError)} <button onclick="loadNotificationPolicy(true)">retry</button></div>`;
+  const global=notificationPolicy.global;if(!global)return'<div class="ctxload">Notification policy unavailable</div>';
+  const onRules=(notificationPolicy.kinds||[]).filter(rule=>rule.mode!=='off').length;
+  const next=(notificationPolicy.next_deliveries||[])[0];
+  const recent=(notificationPolicy.recent_deliveries||[])[0];
+  const recentState=recent?String(recent.status||'unknown').replaceAll('_',' '):'';
+  const globalDisabled=globalPolicySaving?'disabled':'';
+  return`${notificationPolicySaveError?`<div class="pusherror" role="alert">${esc(notificationPolicySaveError)}</div>`:''}<div class="policyanswer"><span class="pushsignal ${global.enabled?'healthy':'off'}"></span><span><b>Push ${global.enabled?'on':'off'} · ${pushData.enabled_devices||0} device${(pushData.enabled_devices||0)===1?'':'s'} · ${onRules}/${notificationPolicy.kinds.length} rules enabled</b><small><span>${next?`Next: ${esc(next.title)} · ${notificationTime(next.next_attempt_at)}`:global.quiet_now?`Quiet hours until ${notificationTime(global.quiet_ends_at)}`:'No delivery currently scheduled'}</span><span>${recent?`Last delivery: ${esc(recentState)} · ${esc(recent.title)} · ${notificationTime(recent.updated_at)}`:'No delivery attempt recorded yet'}</span></small></span></div>
+    <div class="settingscard"><label class="settingsswitch"><span><b>External push notifications</b><small>In-app events remain visible when this is off.</small></span><input type="checkbox" ${global.enabled?'checked':''} ${globalDisabled} onchange="saveGlobalPolicy({enabled:this.checked})"></label>
+      <label class="settingsswitch"><span><b>Quiet hours</b><small>Hold and coalesce pushes until the window ends.</small></span><input type="checkbox" ${global.quiet_hours_enabled?'checked':''} ${globalDisabled} onchange="saveGlobalPolicy({quiet_hours_enabled:this.checked})"></label>
+      ${global.quiet_hours_enabled?`<div class="quietgrid"><label>Starts<input type="time" value="${timeValue(global.quiet_start_minute)}" ${globalDisabled} onchange="saveGlobalPolicy({quiet_start_minute:timeMinutes(this.value)})"></label><label>Ends<input type="time" value="${timeValue(global.quiet_end_minute)}" ${globalDisabled} onchange="saveGlobalPolicy({quiet_end_minute:timeMinutes(this.value)})"></label><label>Timezone<input value="${esc(global.timezone)}" list="fleet-timezones" ${globalDisabled} onchange="saveGlobalPolicy({timezone:this.value})"><datalist id="fleet-timezones"><option value="${esc(Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC')}"><option value="UTC"></datalist></label></div>`:''}${globalPolicyStatus?`<div class="setsavestate" role="status">${esc(globalPolicyStatus)}</div>`:''}</div>
+    <div class="settingssubhead"><span><b>Event rules</b><small>One global policy applies to every enabled device.</small></span><button onclick="dismissOverlay();setTimeout(()=>navigateTo('notifications'),0)">View delivery history</button></div>
+    <div class="policyrules">${notificationPolicy.kinds.map(policyRuleHtml).join('')}</div>`;
+}
+function policyRuleHtml(rule){const open=policyRuleOpen.has(rule.kind),saving=policySaving.get(rule.kind)||'',locked=saving==='saving…',disabled=locked?'disabled':'';
+  const max=rule.mode==='once'?1:rule.mode==='remind_once'?2:rule.max_deliveries;
+  return`<details class="policyrule" ${open?'open':''} ontoggle="this.open?policyRuleOpen.add('${rule.kind}'):policyRuleOpen.delete('${rule.kind}')"><summary><span><b>${esc(notificationKinds[rule.kind]||rule.kind)}</b><small>${esc(cadenceSummary(rule))}${rule.active_matches?` · ${rule.active_matches} active`:''}</small></span>${cadenceStrip({...rule,max_deliveries:max})}<em class="${saving.startsWith('error')?'error':''}">${esc(saving||'')}</em></summary><div class="policycontrols">
+    <label>Cadence<select ${disabled} onchange="saveKindPolicy('${rule.kind}',{mode:this.value})">${[['off','Off'],['once','Once'],['remind_once','Once + reminder'],['repeat','Repeat until resolved']].map(([value,label])=>`<option value="${value}" ${rule.mode===value?'selected':''}>${label}</option>`).join('')}</select></label>
+    <label>Minimum severity<select ${disabled} onchange="saveKindPolicy('${rule.kind}',{minimum_severity:this.value})">${['info','warning','critical'].map(value=>`<option value="${value}" ${rule.minimum_severity===value?'selected':''}>${value}</option>`).join('')}</select></label>
+    ${rule.mode!=='off'?policyDurationField(rule,'initial_delay_seconds','Initial delay',locked):''}
+    ${['remind_once','repeat'].includes(rule.mode)?policyDurationField(rule,'repeat_interval_seconds','Reminder interval',locked):''}
+    ${rule.mode==='repeat'?`<label>Maximum deliveries<input type="number" min="1" max="100" value="${rule.max_deliveries}" ${disabled} onchange="saveKindPolicy('${rule.kind}',{max_deliveries:Number(this.value)})"></label>`:''}
+    ${rule.mode!=='off'?`<label class="policycheck"><input type="checkbox" ${rule.allow_during_quiet_hours?'checked':''} ${disabled} onchange="saveKindPolicy('${rule.kind}',{allow_during_quiet_hours:this.checked})"> Allow during quiet hours</label>`:''}
+    ${rule.active_matches?`<label class="policycheck"><input type="checkbox" ${policyApplyCurrent.has(rule.kind)?'checked':''} onchange="this.checked?policyApplyCurrent.add('${rule.kind}'):policyApplyCurrent.delete('${rule.kind}')"> Apply this change to ${rule.active_matches} active event${rule.active_matches===1?'':'s'}</label>`:''}</div></details>`;}
+async function saveGlobalPolicy(patch){const global=notificationPolicy.global;if(!global||globalPolicySaving)return;
+  const previous={...global};notificationPolicySaveError='';globalPolicySaving=true;globalPolicyStatus='saving…';Object.assign(global,patch);renderSettings();
+  try{const data=await pushApi('/api/notification-policy',{scope:'global',expected_revision:previous.revision,patch});notificationPolicy=data;}
+  catch(error){notificationPolicy.global=previous;notificationPolicySaveError=String(error.message||error);}
+  finally{globalPolicySaving=false;globalPolicyStatus=notificationPolicySaveError?'':'saved ✓';renderSettings();if(globalPolicyStatus)setTimeout(()=>{globalPolicyStatus='';if(settingsOpen&&settingsSection==='notifications')renderSettings();},1200);}}
+async function saveKindPolicy(kind,patch,confirmAggressive=false){const rule=notificationPolicy.kinds.find(item=>item.kind===kind);if(!rule)return;
+  if(policySaving.get(kind)==='saving…')return;
+  const candidate={...rule,...patch},possible=candidate.mode==='repeat'?Math.min(candidate.max_deliveries,1+Math.floor(86400/candidate.repeat_interval_seconds)):candidate.mode==='remind_once'?2:1;
+  if(possible>12&&!confirmAggressive){askConfirm('High notification cadence',`This rule can send up to ${possible} pushes per day until the event resolves.`,
+      'use high cadence',()=>saveKindPolicy(kind,patch,true),true);return;}
+  const previous={...rule};notificationPolicySaveError='';Object.assign(rule,patch);policySaving.set(kind,'saving…');renderSettings();
+  try{const data=await pushApi('/api/notification-policy',{scope:'kind',kind,expected_revision:previous.revision,
+      patch,apply_current:policyApplyCurrent.has(kind),confirm_aggressive:confirmAggressive});notificationPolicy=data;policySaving.set(kind,'saved ✓');setTimeout(()=>{if(policySaving.get(kind)==='saved ✓'){policySaving.delete(kind);renderSettings();}},1200);}
+  catch(error){Object.assign(rule,previous);policySaving.set(kind,`error · ${String(error.message||error)}`);}renderSettings();}
+function deviceSettingsHtml(){const devices=pushData.devices||[];return`${pushSettingsHtml()}
+  <div class="settingssubhead"><span><b>Connected devices</b><small>Pause applies only to the selected device. Event rules are global.</small></span></div>
+  <div class="devicelist">${devices.length?devices.map(device=>{const current=device.id===briefingDevice,id=enc(device.id),name=device.display_name||'Fleet device';return`<article class="devicecard ${current?'current':''}" data-push-device="${esc(device.id)}"><span class="pushsignal ${esc(device.health||'off')}"></span><span class="deviceidentity"><b>${esc(name)}</b><small>${esc([device.platform,String(device.health||'unknown').replaceAll('_',' ')].filter(Boolean).join(' · '))}</small></span>${current?'<em>this device · controls above</em>':`<div class="devicecontrols"><input aria-label="Rename ${esc(name)}" value="${esc(name)}" maxlength="80" onchange="updateListedPushDevice(decodeURIComponent('${id}'),{display_name:this.value.trim()})"><button onclick="testListedPushDevice(decodeURIComponent('${id}'))" ${device.enabled?'':'disabled'}>Test</button><button onclick="updateListedPushDevice(decodeURIComponent('${id}'),{enabled:${device.enabled?'false':'true'}})">${device.enabled?'Pause':'Resume'}</button><button class="danger" onclick="confirmForgetPushDevice(decodeURIComponent('${id}'),decodeURIComponent('${enc(name)}'))">Remove</button><small class="devicefeedback" role="status"></small></div>`}</article>`;}).join(''):'<div class="settingsempty">No device is connected yet.</div>'}</div>`;}
+let sessionMuteQuery=localStorage.getItem('settings_mute_query')||'';
+function setSessionMuteQuery(value){sessionMuteQuery=String(value||'');localStorage.setItem('settings_mute_query',sessionMuteQuery);
+  const query=sessionMuteQuery.trim().toLowerCase(),rows=[...document.querySelectorAll('.mutelist article[data-search]')];let shown=0;
+  rows.forEach(row=>{const visible=!query||String(row.dataset.search||'').includes(query);row.hidden=!visible;if(visible)shown++;});
+  const empty=document.querySelector('.mutelist .mute-search-empty');if(empty){empty.hidden=shown>0;empty.textContent=rows.length?'No muted sessions match.':'No sessions are muted.';}}
+function sessionSettingsHtml(){const st=(last&&last.settings)||{},muted=notificationPolicy.muted_sessions||[],query=sessionMuteQuery.trim().toLowerCase();
+  return`<div class="settingscard"><label class="settingsfield"><span><b>Stalled-session threshold</b><small>How long a working session can show no progress before Fleet marks it stalled.</small></span><span>${settingNumber(st,'stall_seconds',30,30)} seconds</span></label></div>
+    <div class="settingssubhead"><span><b>Muted sessions</b><small>Muted until you manually unmute them.</small></span><em>${muted.length}</em></div>
+    ${muted.length?`<label class="settingssearch"><span>Search muted sessions</span><input type="search" value="${esc(sessionMuteQuery)}" placeholder="session, project, or provider" oninput="setSessionMuteQuery(this.value)"></label>`:''}
+    <div class="mutelist">${muted.map(item=>{const session=((last||{}).sessions||[]).find(s=>s.session_id===item.session_id),search=[item.session_id,item.provider,session?.title,session?.project].filter(Boolean).join(' ').toLowerCase(),visible=!query||search.includes(query);return`<article data-search="${esc(search)}" ${visible?'':'hidden'}><span><b>${esc(session?.title||session?.project||item.session_id)}</b><small>${esc(item.provider||session?.provider||'session')}</small></span><button onclick="unmuteSettingsSession(decodeURIComponent('${enc(item.session_id)}'))">Unmute</button></article>`;}).join('')}<div class="settingsempty mute-search-empty" ${muted.length&&muted.some(item=>{const session=((last||{}).sessions||[]).find(s=>s.session_id===item.session_id);return !query||[item.session_id,item.provider,session?.title,session?.project].filter(Boolean).join(' ').toLowerCase().includes(query);})?'hidden':''}>${muted.length?'No muted sessions match.':'No sessions are muted.'}</div></div>`;}
+async function unmuteSettingsSession(sid){const previous=[...(notificationPolicy.muted_sessions||[])];notificationPolicy.muted_sessions=previous.filter(item=>item.session_id!==sid);renderSettings();
+  const result=await queueSetting('mute:'+sid,{mute_session:sid,muted:false},()=>{},()=>{notificationPolicy.muted_sessions=previous;});
+  if(result.ok)loadNotificationPolicy(true);}
+function appearanceSettingsHtml(){const st=(last&&last.settings)||{};return`
+  <div class="settingscard"><div class="settingsfield"><span><b>Desktop navigation</b><small>Mobile always uses the bottom navigation.</small></span><div class="setchoice" role="group" aria-label="Desktop navigation side"><button aria-pressed="${navSide==='left'}" onclick="setNavSide('left')">Left side</button><button aria-pressed="${navSide==='right'}" onclick="setNavSide('right')">Right side</button></div></div>
+    <div class="settingsfield"><span><b>Full-screen reading width</b><small>Session chat, Markdown, and subagent conversations.</small></span><div class="setchoice" role="group" aria-label="Full-screen reading width"><button aria-pressed="${(st.reader_width||'fit')==='fit'}" onclick="setStr('reader_width','fit')">Fit the screen</button><button aria-pressed="${st.reader_width==='centered'}" onclick="setStr('reader_width','centered')">Centered</button></div></div>
+    <label class="settingsswitch"><span><b>Session conversation peek</b><small>Fixed card height follows this line count.</small></span><input type="checkbox" ${st.preview_sessions!==false?'checked':''} onchange="setBool('preview_sessions',this.checked)"></label>
+    <label class="settingsfield"><span><b>Session peek height</b><small>Collapsed conversation rows.</small></span><span>${settingNumber(st,'preview_session_lines',1,1)} lines</span></label>
+    <label class="settingsswitch"><span><b>Subagent conversation peek</b><small>Show a short latest-message preview on subagent rows.</small></span><input type="checkbox" ${st.preview_agents?'checked':''} onchange="setBool('preview_agents',this.checked)"></label>
+    <label class="settingsfield"><span><b>Subagent peek height</b></span><span>${settingNumber(st,'preview_agent_lines',1,1)} lines</span></label></div>`;}
+function budgetSectionHtml(){return`<div class="settingscard budgetsection">${budgetSettingsHtml()}</div>`;}
+function advancedSettingsHtml(){const st=(last&&last.settings)||{};return`
+  <div class="settingscard"><div class="settingssubhead"><span><b>Legacy ntfy</b><small>Manual test delivery only. Never an automatic fallback.</small></span></div>
+    <label class="settingsswitch"><span><b>Enable manual legacy tests</b><small>${st.legacy_ntfy_configured?'Configured':'Add ntfy_server and ntfy_topic to config.json first.'}</small></span><input type="checkbox" ${st.legacy_ntfy_enabled===true?'checked':''} onchange="setBool('legacy_ntfy_enabled',this.checked)"></label>
+    <div class="pushactions"><button onclick="testLegacyNtfy()" ${legacyNtfyBusy||st.legacy_ntfy_enabled!==true||!st.legacy_ntfy_configured?'disabled':''}>${legacyNtfyBusy?'<span class="delivery sending">◌</span> Queuing…':'Send legacy test'}</button></div>
+    ${legacyNtfyMessage?`<div class="${legacyNtfyError?'pusherror':'pushnotice'}" role="status">${esc(legacyNtfyMessage)}</div>`:''}</div>
+  <div class="settingscard"><div class="settingssubhead"><span><b>Diagnostics</b><small>Operational evidence contains no subscription keys or transcript content.</small></span><button onclick="window.open('/api/diagnostics','_blank','noopener')">Open diagnostics</button></div></div>`;}
 const settingQueues=new Map(),settingIntents=new Map();
-function settingMessage(id,text){const element=document.getElementById(id);if(element)element.textContent=text;}
-function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg'){
+function settingMessage(id,text){if(id==='setmsg')settingsMessage=String(text||'');const element=document.getElementById(id);if(element)element.textContent=text;}
+function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg',refreshSection=true){
   const intent=(settingIntents.get(key)||0)+1;settingIntents.set(key,intent);
   settingMessage(messageId,'saving…');
   const prior=settingQueues.get(key)||Promise.resolve();
@@ -3073,18 +3284,21 @@ function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg'){
   settingQueues.set(key,request);
   return request.then(data=>{
     if(settingIntents.get(key)!==intent)return data;
-    onSuccess(data);uiRefresh();settingMessage(messageId,'saved ✓');return data;
+    onSuccess(data);refreshSection?uiRefresh():render(last,true);settingMessage(messageId,'saved ✓');return data;
   }).catch(error=>{
-    if(settingIntents.get(key)===intent){onFailure();uiRefresh();settingMessage(messageId,'✗ '+String(error.message||error));}
+    if(settingIntents.get(key)===intent){onFailure();refreshSection?uiRefresh():render(last,true);settingMessage(messageId,'✗ '+String(error.message||error));}
     return{ok:false,error:String(error.message||error)};
   }).finally(()=>{if(settingQueues.get(key)===request)settingQueues.delete(key);});
 }
 async function setNum(k,v){
   const value=parseFloat(v),previous=last?.settings?.[k];
-  if(last?.settings)last.settings[k]=value;uiRefresh();
+  if(!Number.isFinite(value))return{ok:false,error:'enter a number'};
+  if(last?.settings)last.settings[k]=value;render(last,true);
   return queueSetting(k,{[k]:value},d=>{if(last?.settings)last.settings[k]=d[k];},()=>{
     if(last?.settings)last.settings[k]=previous;
-  });
+    const field=document.querySelector(`input[oninput="setNum('${CSS.escape(k)}',this.value)"]`);
+    if(field)field.value=previous??'';
+  },'setmsg',false);
 }
 async function setBool(k,v){
   const previous=last?.settings?.[k];
@@ -3365,6 +3579,9 @@ async function act(sid,payload,pre='msg',optimisticId=null){
       performance.now()-requestStarted);
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
       d.ok&&['option','multiq'].includes(payload.type));
+    if(optimisticId!=null&&d.queued){const item=optimisticList(sid).find(entry=>entry.id===optimisticId);
+      if(item){clearTimeout(item.confirmTimer);item.status='queued';item.outboxId=d.outbox_id;
+        item.queueReason=d.message||'Queued until provider control reconnects';uiRefresh();}}
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
     const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
     if(!d.ok&&!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert(d.error||'failed');
@@ -3604,7 +3821,8 @@ function imageType(file){
   return ext==='heic'?'image/heic':ext==='heif'?'image/heif':'';
 }
 async function chooseImages(sid,input){
-  const message=document.getElementById('smsg-'+sid),current=imageDraftIds(sid);
+  const message=document.getElementById('smsg-'+sid)||document.getElementById('vmsg-'+sid),
+    current=imageDraftIds(sid);
   const files=[...(input?.files||[])];if(input)input.value='';
   if(current.length>=IMAGE_MAX_COUNT){if(message)message.textContent='Remove an image before adding another.';return;}
   let added=0;
@@ -3674,7 +3892,8 @@ async function sendText(sid,ftPre='ft',msgPre='msg'){
   if(cmd&&cmd.execution==='action')return act(sid,{type:cmd.action},msgPre);
   if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
   const optimisticId=addOptimistic(sid,text,'text','sending',null,null,imageIds);
-  if(!imageIds.length)return act(sid,{type:'text',text},msgPre,optimisticId);
+  const clientRequestId='send-'+offlineMessageId();
+  if(!imageIds.length)return act(sid,{type:'text',text,client_request_id:clientRequestId},msgPre,optimisticId);
   if(el)el.textContent='uploading images…';
   const uploaded=await uploadImages(sid,imageIds);
   if(!uploaded.ok){
@@ -3683,8 +3902,9 @@ async function sendText(sid,ftPre='ft',msgPre='msg'){
     }
     updateOptimistic(sid,optimisticId,false,uploaded.error);if(el)el.textContent='✗ '+uploaded.error;return;
   }
-  const result=await act(sid,{type:'image_text',text,upload_ids:uploaded.uploadIds},msgPre,optimisticId);
-  if(result.ok)void deleteImages(imageIds);
+  const result=await act(sid,{type:'image_text',text,upload_ids:uploaded.uploadIds,
+    client_request_id:clientRequestId},msgPre,optimisticId);
+  if(result.ok&&!result.queued)void deleteImages(imageIds);
 }
 
 let offlineFlushBusy=false;
@@ -3726,12 +3946,13 @@ async function flushOfflineMessages(){
       if(!item){removeOfflineMessage(queued.id);continue;}
       item.baseCount=canonicalCount((ctxCache[queued.sid]?.messages)||[],item);
       item.status='sending';delete item.error;armOptimisticTimeout(item);uiRefresh();
-      let payload={type:'text',text:queued.text};
+      let payload={type:'text',text:queued.text,client_request_id:'offline-'+queued.id};
       if(queued.imageIds?.length){
         const uploaded=await uploadImages(queued.sid,queued.imageIds);
         if(uploaded.network_error){clearTimeout(item.confirmTimer);item.status='queued';delete item.error;uiRefresh();break;}
         if(!uploaded.ok){removeOfflineMessage(queued.id);clearTimeout(item.confirmTimer);item.status='failed';item.error=uploaded.error;uiRefresh();continue;}
-        payload={type:'image_text',text:queued.text,upload_ids:uploaded.uploadIds};
+        payload={type:'image_text',text:queued.text,upload_ids:uploaded.uploadIds,
+          client_request_id:'offline-'+queued.id};
       }
       const result=await act(queued.sid,payload,false,item.id);
       if(result.offline){
@@ -3746,7 +3967,7 @@ async function flushOfflineMessages(){
       if(!result.ok){
         clearTimeout(item.confirmTimer);item.status='failed';item.error=result.error||'Send rejected';uiRefresh();
       }
-      if(result.ok&&queued.imageIds?.length)void deleteImages(queued.imageIds);
+      if(result.ok&&!result.queued&&queued.imageIds?.length)void deleteImages(queued.imageIds);
     }
   }finally{offlineFlushBusy=false;}
 }
@@ -4401,7 +4622,7 @@ async function loadBudgets(force=false,spawn=null){
     if(spawn){spawnForecast=data.spawn_forecast;spawnBudgetHeadroom=data.spawn_budgets||[];}
     else{budgetData=data;budgetLoadedAt=Date.now();if(budgetDraft===null)budgetDraft=(data.budgets||[]).map(budgetEditable);}
   }catch(error){if(spawn)spawnForecast={status:'error',error:String(error)};else budgetData={...budgetData,ok:false,error:String(error)};}
-  finally{if(!spawn)budgetLoading=false;renderBudgetPanel();if(settingsOpen)renderSettings();if(newOpen)render(last,true);}
+  finally{if(!spawn)budgetLoading=false;renderBudgetPanel();if(settingsOpen&&settingsSection==='budgets')renderSettings();if(newOpen)render(last,true);}
 }
 function budgetEditable(item){return{id:item.id,scope_type:item.scope_type,scope_id:item.scope_id||'',metric:item.metric,
   limit_value:item.limit_value,block_spawns:!!item.block_spawns,enabled:item.enabled!==false,label:item.label||''};}
@@ -4447,13 +4668,14 @@ function budgetSettingsHtml(){
     <div class="budgeteditactions"><button onclick="addBudget()">＋ Add budget</button><button class="primary" onclick="saveBudgets()">Save budgets</button></div></div>`;
 }
 function editBudget(index,key,value){if(!budgetDraft?.[index])return;budgetDraft[index][key]=value;
-  if(key==='scope_type'){budgetDraft[index].scope_id=value==='fleet'?'':value==='provider'?'claude':'';}renderSettings();}
+  if(key==='scope_type')budgetDraft[index].scope_id=value==='fleet'?'':value==='provider'?'claude':'';
+  if(key==='scope_type'||key==='metric')renderSettings();}
 function addBudget(){if(budgetDraft===null)budgetDraft=[];budgetDraft.push({scope_type:'fleet',scope_id:'',metric:'tokens',limit_value:1000000,block_spawns:false,enabled:true});renderSettings();}
 function removeBudget(index){budgetDraft.splice(index,1);renderSettings();}
-async function saveBudgets(){const msg=$('#setmsg');if(msg)msg.textContent='saving budgets…';
+async function saveBudgets(){settingMessage('setmsg','saving budgets…');
   const data=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({budgets:budgetDraft})}).then(r=>r.json()).catch(error=>({ok:false,error:String(error)}));
-  if(!data.ok){if(msg)msg.textContent='✗ '+(data.error||'failed');return;}
-  budgetDraft=(data.budgets||[]).map(budgetEditable);if(msg)msg.textContent='saved ✓';await loadBudgets(true);}
+  if(!data.ok){settingMessage('setmsg','✗ '+(data.error||'failed'));return;}
+  budgetDraft=(data.budgets||[]).map(budgetEditable);settingMessage('setmsg','saved ✓');await loadBudgets(true);}
 function updateSpawnForecastDisplay(){
   const current=document.querySelector('#newsess .spawnforecast');
   if(current)current.outerHTML=spawnForecastHtml();

@@ -185,7 +185,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(context["read_only"])
         self.assertEqual(context["messages"][-1]["text"], "Working now")
 
-    def test_cli_connected_to_shared_socket_is_adopted_without_resuming_a_copy(self):
+    def test_cli_connected_to_shared_socket_is_adopted_without_claiming_turn_control(self):
         thread = {**self.thread("attached", {"type": "active"}), "source": "cli"}
         thread["turns"] = [{"id": "same-turn", "status": "inProgress",
                             "startedAt": 999, "completedAt": None, "items": []}]
@@ -196,9 +196,11 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         session = adapter.sessions()[0]
         self.assertFalse(session["headless"])
         self.assertFalse(session["read_only"])
-        self.assertTrue(session["capabilities"]["submit"])
-        self.assertTrue(session["capabilities"]["interrupt"])
-        self.assertEqual(client.thread_state["attached"]["turn_id"], "same-turn")
+        self.assertFalse(session["capabilities"]["submit"])
+        self.assertTrue(session["capabilities"]["queue_submit"])
+        self.assertFalse(session["capabilities"]["interrupt"])
+        self.assertNotIn("turn_id", client.thread_state["attached"])
+        self.assertEqual(session["control_state"], "reconnecting")
         self.assertEqual(adapter._managed(), ["attached"])
 
     def test_cross_app_server_turn_without_completion_is_running(self):

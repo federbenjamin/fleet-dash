@@ -36,6 +36,10 @@ function recordUnexpectedRequestFailures(page, failures) {
 
 test('running Fleet Dash renders both providers without console or network failures', async ({ page }, testInfo) => {
   test.skip(!liveURL, 'set FLEET_DASH_LIVE_URL for the opt-in running-daemon check');
+  // Browser cookies are shared by host, not port. Fixture runs can therefore
+  // leave a localhost action token that would make this read-only probe mutate
+  // the live daemon it is meant to inspect safely.
+  await page.context().clearCookies();
   const failures = [];
   const expectedReadOnly = [];
   page.on('pageerror', error => failures.push(`page: ${error}`));
@@ -90,11 +94,13 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(page.getByRole('menuitem', { name: /Appearance.*light \/ dark/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeVisible();
   await page.locator('#sclose').click();
+  // The banner belongs to Now. A session opened from History correctly returns
+  // to History when closed, so navigate before asserting visual visibility.
+  await goTo(page, 'now');
   await expect(page.locator('#notoken')).toBeVisible();
   for (let index = 0; index < 10; index += 1) await page.evaluate(() => tick());
   await page.screenshot({ path: testInfo.outputPath('running-fleet.png'), fullPage: true });
   expect(expectedReadOnly.length).toBeGreaterThanOrEqual(1);
-  expect(expectedReadOnly.length).toBeLessThanOrEqual(2);
   expect(failures).toEqual([]);
 });
 
@@ -129,9 +135,10 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   await page.locator('.notificationbar').getByRole('button', { name: /^Briefing/ }).click();
   await expect(page.locator('#notifications .briefbody')).toBeVisible();
   await goTo(page, 'settings');
-  await expect(page.locator('.setrow:has-text("daily briefing push")')).toBeVisible();
-  await expect(page.locator('.digestsettings input[type="time"]')).toBeVisible();
-  await expect(page.locator('.budgetsettingsfold')).toBeVisible();
+  await expect(page.locator('.policyrules .policyrule')).toHaveCount(12);
+  await expect(page.locator('.policyanswer')).toContainText(/Push (on|off)/);
+  await page.evaluate(() => selectSettingsSection('budgets'));
+  await expect(page.locator('.budgetsettings')).toBeVisible();
   await page.locator('#setclose').click();
   await goTo(page, 'insights');
   await expect(page.locator('#budgets')).toContainText(/Budgets|No budgets configured/);

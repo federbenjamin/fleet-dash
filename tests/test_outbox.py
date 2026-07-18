@@ -18,10 +18,13 @@ class Clock:
 
 
 def session(sid="codex:one", *, group="available", state="idle", provider="codex",
-            submit=True, pending=None, agents=None, relay=True):
+            submit=True, pending=None, agents=None, relay=True,
+            queue_submit=False, control_state=None):
     return {"session_id": sid, "provider": provider, "ui_group": group,
             "state": state, "pending": pending, "access": "interactive",
-            "capabilities": {"submit": submit, "relay_agent": relay},
+            "control_state": control_state,
+            "capabilities": {"submit": submit, "relay_agent": relay,
+                             "queue_submit": queue_submit},
             "agents": agents or []}
 
 
@@ -35,9 +38,13 @@ class OutboxTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.clock = Clock()
         counter = iter(range(1000))
+        self.upload_root = os.path.join(self.tmp.name, "uploads")
+        self.asset_root = os.path.join(self.tmp.name, "outbox-images")
+        os.makedirs(self.upload_root)
         self.manager = OutboxManager(os.path.join(self.tmp.name, "ledger.db"),
             clock=self.clock, id_factory=lambda: f"out-{next(counter):04d}",
-            lease_seconds=10)
+            lease_seconds=10, recovery_source_root=self.upload_root,
+            asset_root=self.asset_root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -284,6 +291,71 @@ class OutboxTests(unittest.TestCase):
                           lambda record: sent.append(record) or {"ok": True}, lambda _: {})
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["destination_session_id"], destinations[0])
+
+    def test_recovery_queue_is_idempotent_private_and_copies_images(self):
+        source = os.path.join(self.upload_root, "upload.jpg")
+        with open(source, "wb") as image:
+            image.write(b"jpeg payload")
+        first = self.manager.create_recovery(message="inspect this", target_provider="codex",
+            target_session_id="codex:one", idempotency_key="send-request-0001",
+            image_paths=[source])
+        second = self.manager.create_recovery(message="inspect this", target_provider="codex",
+            target_session_id="codex:one", idempotency_key="send-request-0001",
+            image_paths=[source])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["state"], "waiting_provider")
+        self.assertEqual(first["image_count"], 1)
+        self.assertNotIn("image_paths_json", first)
+        owned = self.manager.get_internal(first["id"])["_image_paths"]
+        self.assertEqual(len(owned), 1)
+        self.assertTrue(owned[0].startswith(os.path.realpath(self.asset_root) + os.sep))
+        with open(owned[0], "rb") as image:
+            self.assertEqual(image.read(), b"jpeg payload")
+        with self.manager._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox_messages").fetchone()[0], 1)
+
+    def test_recovery_waits_for_authority_then_dispatches_once_and_cleans_assets(self):
+        source = os.path.join(self.upload_root, "upload.jpg")
+        with open(source, "wb") as image:
+            image.write(b"jpeg payload")
+        item = self.manager.create_recovery(message="inspect this", target_provider="codex",
+            target_session_id="codex:one", idempotency_key="send-request-0002",
+            image_paths=[source])
+        sent = []
+        reconnecting = session(submit=False, queue_submit=True, control_state="reconnecting")
+        self.manager.tick(snapshot(reconnecting), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertFalse(sent)
+        waiting = self.manager.get(item["id"])
+        self.assertEqual(waiting["state"], "waiting_provider")
+        self.assertIn("reconnect", waiting["blocked_reason"].lower())
+
+        self.clock.advance(1)
+        connected = session(submit=True, queue_submit=False, control_state="connected")
+        self.manager.tick(snapshot(connected), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["_image_paths"],
+                         self.manager.get_internal(item["id"])["_image_paths"])
+        self.assertEqual(self.manager.get(item["id"])["state"], "sent")
+        self.manager.tick(snapshot(connected), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(item["id"])["image_count"], 0)
+
+    def test_cancelling_recovery_removes_private_images_and_disables_retry(self):
+        source = os.path.join(self.upload_root, "upload.jpg")
+        with open(source, "wb") as image:
+            image.write(b"jpeg payload")
+        item = self.manager.create_recovery(message="inspect this", target_provider="codex",
+            target_session_id="codex:one", idempotency_key="send-request-0003",
+            image_paths=[source])
+        owned = self.manager.get_internal(item["id"])["_image_paths"][0]
+        cancelled = self.manager.cancel(item["id"])
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["image_count"], 0)
+        self.assertFalse(os.path.exists(owned))
+        self.assertFalse(cancelled["retryable"])
 
 
 if __name__ == "__main__":

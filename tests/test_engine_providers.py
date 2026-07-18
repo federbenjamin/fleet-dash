@@ -785,34 +785,36 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(relayed["ok"])
         self.assertIn("agent-child", writes[-1][1][0][0])
 
-    def test_background_claude_session_uses_validated_open_tty_fallback(self):
+    def test_background_claude_session_uses_supported_attach_transport(self):
         pid = 424245
         reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
-               "status": "idle", "name": "Claude", "kind": "bg"}
+               "status": "idle", "name": "Claude", "kind": "bg",
+               "jobId": "1a2b3c4d"}
         self.engine.live_sessions = lambda: [reg]
         tail = SimpleNamespace(pending={}, poll=lambda: None,
                                turn_state=lambda: "awaiting_input")
         self.engine.tail_for = lambda path: tail
-        writes = []
-        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
-            writes.append((tty, steps, step_delay)) or {"ok": True})
-        ps_result = SimpleNamespace(stdout="??\n", returncode=0)
-        lsof_result = SimpleNamespace(
-            stdout=f"p{pid}\nf0\nn/dev/ttys009\nf1\nn/dev/ttys009\n",
-            returncode=0)
+        attached = []
+        transport = SimpleNamespace(
+            write=lambda job, steps, step_delay=None:
+                attached.append((job, steps, step_delay)) or
+                {"ok": True, "transport": "claude_attach"},
+            attach_command=lambda job, cwd:
+                ("/usr/local/bin/claude", job, os.path.realpath(cwd)),
+            stop=lambda job: {"ok": True, "transport": "claude_stop"})
+        self.engine._claude_background = transport
+        self.engine._iterm_write = mock.Mock(side_effect=AssertionError(
+            "background sends must not use iTerm"))
 
-        with mock.patch.object(engine_module.subprocess, "run",
-                               side_effect=[ps_result, lsof_result]) as run:
-            result = self.engine.act({"type": "text", "session_id": "same",
-                                      "text": "hello"})
+        result = self.engine.act({"type": "text", "session_id": "same",
+                                  "text": "hello"})
 
         self.assertTrue(result["ok"])
-        self.assertEqual(writes, [("/dev/ttys009", [("hello", True)], 0.05)])
-        self.assertEqual(self.engine._tty_cache[pid], "ttys009")
-        self.assertEqual(run.call_args_list[1].args[0],
-            ["lsof", "-a", "-p", str(pid), "-d", "0,1,2", "-Fn"])
+        self.assertEqual(result["transport"], "claude_attach")
+        self.assertEqual(attached, [("1a2b3c4d", [("hello", True)], 0.05)])
+        self.assertNotIn(pid, self.engine._tty_cache)
 
-    def test_background_claude_tty_fallback_rejects_non_terminal_paths(self):
+    def test_foreground_claude_tty_fallback_rejects_non_terminal_paths(self):
         pid = 424246
         ps_result = SimpleNamespace(stdout="??\n", returncode=0)
         lsof_result = SimpleNamespace(stdout=f"p{pid}\nf0\nn/private/tmp/input\n",
@@ -821,6 +823,36 @@ class EngineProviderTest(unittest.TestCase):
                                side_effect=[ps_result, lsof_result]):
             self.assertEqual(self.engine._tty_for_pid(pid), "")
         self.assertNotIn(pid, self.engine._tty_cache)
+
+    def test_background_claude_focus_opens_official_attach_and_close_uses_stop(self):
+        pid = 424247
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude", "kind": "bg",
+               "jobId": "1a2b3c4d"}
+        self.engine.live_sessions = lambda: [reg]
+        transport = SimpleNamespace(
+            write=mock.Mock(return_value={"ok": True}),
+            attach_command=lambda job, cwd:
+                ("/usr/local/bin/claude", job, os.path.realpath(cwd)),
+            stop=mock.Mock(return_value={"ok": True, "transport": "claude_stop"}))
+        self.engine._claude_background = transport
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        focused = self.engine.act({"type": "focus", "session_id": "same"})
+        self.assertTrue(focused["ok"])
+        self.assertEqual(writes[0][0], "SPAWN")
+        self.assertEqual(writes[0][1], [(f"cd {os.path.realpath(self.cwd)} && "
+            "/usr/local/bin/claude attach 1a2b3c4d", False)])
+
+        process = SimpleNamespace(stdout="/usr/local/bin/claude --bg-pty-host")
+        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
+             mock.patch.object(engine_module.os, "kill") as kill:
+            closed = self.engine.act({"type": "close", "session_id": "same"})
+        self.assertTrue(closed["ok"])
+        transport.stop.assert_called_once_with("1a2b3c4d")
+        kill.assert_not_called()
 
     def test_claude_permission_mode_uses_only_verified_native_cycle(self):
         pid = os.getpid()
