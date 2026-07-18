@@ -305,9 +305,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     socket, and one canonical thread UUID on a real TTY. Parent/child processes on the same TTY are
     one route; two distinct TTYs are ambiguous and enable nothing. That route may enable only text,
     image-path text, and focus. It must never enable close, interrupt, approval, archive, compact,
-    review, takeover, or ownership, and its process/TTY details never enter the API. Prefer that
-    terminal route over App Server submission when present, including during an active-turn owner
-    mismatch, and let recovery-outbox messages flush when the exact route appears.
+    review, takeover, or ownership, and its process/TTY details never enter the API. Exact App Server
+    turn authority always wins over the terminal fallback. Both legacy `thread/compacted` and current
+    `contextCompaction` item notifications carry the post-compact `turnId`; bind that id to the current
+    transport generation and keep the turn running until `turn/completed`. This prevents compaction
+    from leaving a stale pre-compact steer id or demoting a controllable turn to terminal typing.
+    When App Server authority is genuinely absent, the exact terminal route may still flush recovery-
+    outbox messages.
     Optional metadata must never poison or block the critical `thread/list` refresh. Read model
     choices from Codex's bounded, credential-free `~/.codex/models_cache.json`; never put automatic
     `model/list` calls on Fleet's shared control WebSocket. A `thread/read` failure is a per-session
@@ -563,8 +567,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     validates magic bytes, ignores the client filename for path construction, normalizes through fixed-
     argv `sips`, and removes every JPEG APP/COM metadata segment (including EXIF GPS/XMP). Files and
     0600 metadata live under the 0700 `fleet-dash/uploads` directory, are bound to one live interactive
-    session, and expire after 24 hours. `image_text` resolves ids server-side: Codex receives native
-    `localImage` inputs; Claude receives only Fleet-managed absolute paths in injected text. Image
+    session, and expire after 24 hours. `image_text` and the default `send_message` path resolve ids
+    server-side: Codex receives native `localImage` inputs; Claude receives only Fleet-managed
+    absolute paths in injected text. Image
     uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
     service worker never caches image bytes.
 55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
@@ -603,9 +608,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Markdown: it owns the textarea, draft/image state, ＋ menu, send path, and feedback. Markdown
     embeds no conversation disclosure; its right-hand stack is **Chat** above **Send**, and Chat
     preserves the draft while opening full chat. The upward **＋** menu is the only entry point for
-    **Send picture** and **Schedule message**; selecting either closes it. Photo selection blurs the
-    textarea and settles viewport geometry before activating the hidden picker, then stays drafted
-    without refocusing. Safari's native keyboard
+    **Send picture** and **Schedule message**; selecting either closes it. The picture button must
+    call the hidden picker as the FIRST state-changing operation in its trusted `click`; only after
+    `picker.click()` may it close the menu, blur the textarea, or settle viewport geometry. A touch
+    `pointerdown` must never tear down the menu before iOS delivers `click`. The attachment then stays
+    drafted without refocusing. Safari's native keyboard
     accessory bar is not controllable from a web app, so layout must remain correct with it present.
 59. **Settings is section-routed and mutation-safe.** The overlay owns Notifications, Devices &
     delivery, Sessions, Appearance, Budgets & spawning, and Advanced at exact
@@ -627,6 +634,19 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Up/Down resizes, Home collapses, and End expands. Persist height/collapsed state per nonce in
     bounded localStorage and clamp it after viewport/orientation changes. Changing question pages
     gets a distinct scroll key; unrelated refreshes must never return the current page to its top.
+61. **Ordinary Send is one server-owned send-now-or-queue decision.** The browser sends normal text/photos
+    as `send_message` with an idempotent `client_request_id`; slash commands and skills keep their
+    immediate-only actions. `Engine._send_now_or_queue` may deliver immediately only when the exact
+    target is Available, or when a Fleet-owned Codex App Server turn has
+    `control_state=connected_active` and can be steered now. Typing into a busy Claude or attached
+    Codex terminal is NOT immediate delivery: persist an `origin=automatic_fallback`,
+    `kind=when_available` Outbox row and render **Queued · waiting for session** without arming the
+    15-second transcript timer. `OutboxManager.create_delivery` owns idempotency and copies temporary
+    image uploads into private queue storage before publishing the row. Provider-state refresh,
+    browser exit, and daemon restart must not lose or duplicate it. When availability is proven,
+    dispatch exactly once; keep the optimistic row until canonical transcript confirmation. A
+    connection drop after an immediate HTTP dispatch stays **Delivery unconfirmed** and is never
+    auto-retried because the server may already have accepted it.
 
 ## Dev workflow
 
@@ -677,8 +697,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   PTY readiness, allowlisted Engine key operations, per-job serialization, and secret-free errors.
 - `briefing.py` — canonical notification/briefing store, global kind policy, quiet-hours and cadence
   scheduler, policy-revision suppression, delivery leases, device health, and budget records.
-- `outbox.py` — scheduled/waiting messages plus idempotent direct-send recovery during temporary
-  Codex control loss; private queue-owned images are never projected as paths.
+- `outbox.py` — scheduled/waiting messages plus provider-neutral automatic send fallback and Codex
+  control-recovery queues; private queue-owned images are never projected as paths.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`

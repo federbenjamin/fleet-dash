@@ -666,6 +666,8 @@ function reconcileOutboxOptimistic(){
     if(outboxPending.has(row.state)){
       clearTimeout(item.confirmTimer);item.status='queued';
       item.queueReason=row.blocked_reason||row.state_label||'Queued until provider control reconnects';
+      item.queueLabel=row.state==='waiting_provider'?'Queued · waiting for connection':
+        'Queued · waiting for session';
     }else if(row.state==='sent'){
       clearTimeout(item.confirmTimer);item.status='confirmed';delete item.error;
       if(item.imageIds?.length){void deleteImages(item.imageIds);item.imageIds=[];}
@@ -777,32 +779,29 @@ function toggleComposerMenu(button,event){
   menu.classList.toggle('open',opening);button.setAttribute('aria-expanded',String(opening));
   menu.closest('.session-composer')?.classList.toggle('tools-open',opening);
 }
-function openComposerSchedule(sid,inputId,agentId=''){
-  closeComposerMenus();
+function openComposerSchedule(sid,inputId,agentId='',event=null){
+  event?.preventDefault();event?.stopPropagation();
   openSchedule(sid,inputId,agentId);
+  closeComposerMenus();
 }
 function composerTools(sid,inputId){
   return`<span class="composertools"><button type="button" class="pbtn composerplusbtn" aria-label="message options" aria-haspopup="menu" aria-expanded="false" onclick="toggleComposerMenu(this,event)">＋</button>
     <span class="composerplus" role="menu">
       <button type="button" class="composerplusitem" role="menuitem"
-        onpointerdown="prepareImagePicker('${inputId}',event)" onclick="openImagePicker('${inputId}',event)">▧ <span>Send picture</span></button>
-      <button type="button" class="composerplusitem" role="menuitem" onclick="openComposerSchedule('${sid}','${inputId}')">◷ <span>Schedule message</span></button>
+        onclick="openImagePicker('${inputId}',event)">▧ <span>Send picture</span></button>
+      <button type="button" class="composerplusitem" role="menuitem" onclick="openComposerSchedule('${sid}','${inputId}','',event)">◷ <span>Schedule message</span></button>
     </span><input id="picker-${inputId}" class="composer-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif" multiple onchange="chooseImages('${sid}',this)"></span>`;
-}
-function prepareImagePicker(inputId,event){
-  if(event?.pointerType==='mouse')return;
-  document.getElementById(inputId)?.blur();
-  document.getElementById(inputId)?.closest('.session-composer')?.classList.remove('composer-active');
-  closeComposerMenus();syncVisualViewport();
 }
 function openImagePicker(inputId,event){
   event?.preventDefault();event?.stopPropagation();
   const input=document.getElementById(inputId),picker=document.getElementById('picker-'+inputId);
-  input?.blur();input?.closest('.session-composer')?.classList.remove('composer-active');
-  closeComposerMenus();syncVisualViewport();
-  // Keep the native picker call in the trusted click. iOS may revoke user
-  // activation before a deferred click, even though viewport settling is nicer.
-  picker?.click();requestAnimationFrame(syncVisualViewport);
+  if(!picker)return;
+  // The picker MUST be the first state-changing operation in this trusted tap.
+  // Closing/blurring on pointerdown made iOS discard the following click.
+  picker.click();
+  closeComposerMenus();input?.blur();
+  input?.closest('.session-composer')?.classList.remove('composer-active');
+  requestAnimationFrame(syncVisualViewport);
 }
 function canCompose(s){const caps=s?.capabilities||{};return Boolean(caps.submit||caps.queue_submit);}
 function renderComposer(s,surface='session'){
@@ -1343,13 +1342,18 @@ function closeNotificationDetail(){
 async function notificationPost(path,payload,success){
   const started=performance.now();notificationActionState={busy:true,message:'Working…',error:false};
   renderNotifications();recordInputFeedback(started,'notification_action');
+  let completionRecorded=false;
   try{
     const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'Notification action failed');
-    notificationActionState={busy:false,message:success,error:false};await loadNotifications(true,true);
-    if(notificationDetailId)await loadNotificationDetail(notificationDetailId,false);
+    notificationActionState={busy:false,message:success,error:false};renderNotifications();
+    perfRecord('notification_action_completion_ms',performance.now()-started);completionRecorded=true;
+    // Provider acceptance is the local completion point. Refresh canonical
+    // history in the background so a slow list read cannot hold the control.
+    void (async()=>{await loadNotifications(true,true);
+      if(notificationDetailId)await loadNotificationDetail(notificationDetailId,false);})();
   }catch(error){notificationActionState={busy:false,message:String(error.message||error),error:true};renderNotifications();}
-  finally{perfRecord('notification_action_completion_ms',performance.now()-started);}
+  finally{if(!completionRecorded)perfRecord('notification_action_completion_ms',performance.now()-started);}
 }
 function snoozeNotification(id,revision,choice){
   const now=new Date(),until=new Date(now);
@@ -1605,7 +1609,8 @@ function optimisticList(sid){
     if(queued.sid!==sid||list.some(item=>item.queueId===queued.id))continue;
     list.push({id:++optimisticSequence,queueId:queued.id,sid,text:queued.text,kind:'text',
       imageIds:[...(queued.imageIds||[])],imageCount:(queued.imageIds||[]).length,
-      status:'queued',baseCount:queued.baseCount,created:queued.created});
+      status:'queued',queueLabel:'Queued offline',queueReason:'Sends automatically after reconnection',
+      baseCount:queued.baseCount,created:queued.created});
   }
   return list;
 }
@@ -1699,10 +1704,13 @@ function restoreOptimistic(sid,id){
   });
 }
 function optimisticItemHtml(item){
+  const queueLabel=item.queueLabel||'Queued · waiting for session';
+  const delivery=item.status==='queued'?`<span class="delivery queued" aria-label="${item.queueId?'queued offline':'message queued'}">↥</span><span class="deliverylabel" role="status" title="${esc(item.queueReason||queueLabel)}">${esc(queueLabel)}</span>`:
+    item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
+    item.status==='confirmed'&&item.kind==='text'&&item.outboxId?`<span class="delivery sent" aria-hidden="true">✓</span><span class="deliverylabel" role="status">Sent</span>`:
+    item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">!</button>`:'';
   return`<div class="cmsg user optimistic" data-optimistic-id="${item.id}">
-    <span class="crole">you</span>${item.status==='queued'?`<span class="delivery queued" aria-label="${item.queueId?'queued offline':'message queued'}" title="${esc(item.queueReason||'queued until Fleet reconnects')}">↥</span>`:
-      item.status==='sending'?`<span class="delivery sending" aria-label="sending">◌</span>`:
-      item.status==='failed'?`<button class="delivery failed" title="${esc(item.error||'Send failed')} — restore" aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">!</button>`:''}
+    <span class="crole">you</span>${delivery}
     <div class="cbody">${item.imageCount?`<div class="image-receipt">🖼 ${item.imageCount} image${item.imageCount===1?'':'s'}</div>`:''}<p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
 }
 function optimisticHtml(sid,messages){
@@ -1745,15 +1753,15 @@ function cardResponseFeedback(s){
   const messages=((ctxCache[s.session_id]||{}).messages)||[];
   const answers=visibleOptimistic(s.session_id,messages).filter(item=>item.kind==='answer');
   const answer=answers.length?answers[answers.length-1]:null;
-  const queuedMessages=visibleOptimistic(s.session_id,messages).filter(item=>item.queueId);
+  const queuedMessages=visibleOptimistic(s.session_id,messages).filter(item=>item.status==='queued');
   const queued=queuedMessages.length?queuedMessages[queuedMessages.length-1]:null;
   const action=quickResponses.get(s.session_id)||null;
   const item=[answer,queued,action].filter(Boolean).sort((a,b)=>a.created-b.created).at(-1);
   if(!item)return'';
   const status=item.status==='confirmed'||item.status==='sent'?'sent':item.status;
-  const verb=status==='queued'?'Queued offline':status==='sending'?(item.kind==='text'?'Sending':'Submitting'):
+  const verb=status==='queued'?(item.queueLabel||'Queued'):status==='sending'?(item.kind==='text'?'Sending':'Submitting'):
     status==='failed'?'Failed':'Submitted';
-  const icon=status==='queued'?`<span class="delivery queued" aria-label="queued offline">↥</span>`:
+  const icon=status==='queued'?`<span class="delivery queued" aria-label="message queued">↥</span>`:
     status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
     status==='failed'?(item.kind==='answer'||item.kind==='text'
       ?`<button class="delivery failed" title="${esc(item.error||'Submission failed')} — restore" aria-label="submission failed; restore response" onclick="event.stopPropagation();restoreOptimistic('${s.session_id}',${item.id})">!</button>`
@@ -2449,6 +2457,7 @@ function questionDrawerHtml(s,p,pre){
   </section>`;
 }
 const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
+const reopenedSessions=new Set();// successful reopen feedback survives poll rerenders
 let sessionEvidenceOpen=false;
 const evidenceCache={};          // sid -> {events,next_cursor,loaded,loading,error}
 function confidenceText(value){return({confirmed:'confirmed',inferred:'inferred',stale:'stale',unknown:'unknown'})[value]||'unknown';}
@@ -2640,8 +2649,8 @@ async function renderClosed(){
       so there is nothing to send to. The conversation is read-only.</div>
       ${statusLineHtml(status,'closed:'+sid)}
       ${handoffLinksHtml(meta)}
-      ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
-        onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
+      ${meta.can_reopen?`<div class="freetext"><button class="pbtn send" ${reopenedSessions.has(sid)?'disabled':''}
+        onclick="reopenClosed('${sid}',this)">${reopenedSessions.has(sid)?'opened ✓':'reopen in terminal'}</button></div>
         <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
   $('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sact').innerHTML=closedActions(meta.status_line);
@@ -2682,7 +2691,7 @@ async function reopenClosed(sid,button){
     button.textContent=result.ok?'opened ✓':original;
     if(!result.ok)button.disabled=false;
   }
-  if(result.ok)setTimeout(()=>tick(),500);
+  if(result.ok){reopenedSessions.add(sid);renderHistoryDestination();setTimeout(()=>tick(),500);}
   return result;
 }
 function renderSession(force){
@@ -3035,7 +3044,7 @@ function cardUsesFixedPeekHeight(s){
   if(s.provisional||open.has(s.session_id)||expandedPeeks.has(s.session_id))return false;
   const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
   const running=s.ui_group==='working'&&(s.agents||[]).some(a=>!['done','ended'].includes(a.state));
-  const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.queueId);
+  const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.status==='queued');
   return!pending&&!s.error&&!s.reply_requested&&!running&&!pinActions.has(s.session_id)&&
     !quickResponses.has(s.session_id)&&!answerFeedback;
 }
@@ -3725,10 +3734,11 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     if(optimisticId!=null)updateOptimistic(sid,optimisticId,d.ok,d.error,
       d.ok&&['option','multiq'].includes(payload.type));
     if(optimisticId!=null&&d.queued){const item=optimisticList(sid).find(entry=>entry.id===optimisticId);
-      if(item){clearTimeout(item.confirmTimer);item.status='queued';item.outboxId=d.outbox_id;
-        item.queueReason=d.message||'Queued until provider control reconnects';uiRefresh();}}
+      if(item){clearTimeout(item.confirmTimer);item.status='queued';delete item.queueId;item.outboxId=d.outbox_id;
+        item.queueLabel=d.message||'Queued · waiting for session';
+        item.queueReason=d.queue_reason||d.message||'Waiting for the session to become available';uiRefresh();}}
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
-    const el=setMessage(d.ok?'sent ✓':'✗ '+(d.error||'failed'));
+    const el=setMessage(d.ok?(d.queued?(d.message||'queued'):'sent ✓'):'✗ '+(d.error||'failed'));
     if(!d.ok&&!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','elicitation'].includes(payload.type)){
       answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
@@ -3740,12 +3750,14 @@ async function act(sid,payload,pre='msg',optimisticId=null){
   }catch(e){
     if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
       performance.now()-requestStarted);
-    if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,String(e));
+    const error=payload.type==='send_message'?
+      'Delivery unconfirmed — the connection dropped before Fleet received a result. Restore to send again only if it did not arrive.':String(e);
+    if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,error);
     if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
-    const el=setMessage('✗ '+e);
+    const el=setMessage('✗ '+error);
     if(!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert('request failed: '+e);
     setFleetOffline(true);
-    return {ok:false,error:String(e),network_error:true};
+    return {ok:false,error,network_error:true};
   }
 }
 function pendingQuestion(sid){
@@ -4038,7 +4050,9 @@ async function sendText(sid,ftPre='ft',msgPre='msg'){
   if(cmd&&cmd.execution==='skill')return act(sid,{type:'skill',name:cmd.name,args:v.slice(cmd.name.length).trim()},msgPre);
   const optimisticId=addOptimistic(sid,text,'text','sending',null,null,imageIds);
   const clientRequestId='send-'+offlineMessageId();
-  if(!imageIds.length)return act(sid,{type:'text',text,client_request_id:clientRequestId},msgPre,optimisticId);
+  const directOnly=/^[\/$]/.test(v);
+  if(!imageIds.length)return act(sid,{type:directOnly?'text':'send_message',text,
+    client_request_id:clientRequestId},msgPre,optimisticId);
   if(el)el.textContent='uploading images…';
   const uploaded=await uploadImages(sid,imageIds);
   if(!uploaded.ok){
@@ -4047,7 +4061,7 @@ async function sendText(sid,ftPre='ft',msgPre='msg'){
     }
     updateOptimistic(sid,optimisticId,false,uploaded.error);if(el)el.textContent='✗ '+uploaded.error;return;
   }
-  const result=await act(sid,{type:'image_text',text,upload_ids:uploaded.uploadIds,
+  const result=await act(sid,{type:'send_message',text,upload_ids:uploaded.uploadIds,
     client_request_id:clientRequestId},msgPre,optimisticId);
   if(result.ok&&!result.queued)void deleteImages(imageIds);
 }
@@ -4063,7 +4077,8 @@ function queueOfflineText(sid,text,imageIds=[],existingOptimisticId=null){
   // Do not call optimisticList before linking an existing row: that function
   // materializes every unlinked queue record and would create a duplicate.
   let item=existingOptimisticId==null?null:optimisticBucket(sid).find(candidate=>candidate.id===existingOptimisticId);
-  if(item){clearTimeout(item.confirmTimer);item.queueId=entry.id;item.status='queued';delete item.error;}
+  if(item){clearTimeout(item.confirmTimer);item.queueId=entry.id;item.status='queued';
+    item.queueLabel='Queued offline';item.queueReason='Sends automatically after reconnection';delete item.error;}
   else{optimisticList(sid);item=optimisticList(sid).find(candidate=>candidate.queueId===entry.id);}
   if(item){
     const openConvo=sessionView?.sid===sid&&!sessionView.closed&&$('#sbody .aconvo');
@@ -4091,12 +4106,12 @@ async function flushOfflineMessages(){
       if(!item){removeOfflineMessage(queued.id);continue;}
       item.baseCount=canonicalCount((ctxCache[queued.sid]?.messages)||[],item);
       item.status='sending';delete item.error;armOptimisticTimeout(item);uiRefresh();
-      let payload={type:'text',text:queued.text,client_request_id:'offline-'+queued.id};
+      let payload={type:'send_message',text:queued.text,client_request_id:'offline-'+queued.id};
       if(queued.imageIds?.length){
         const uploaded=await uploadImages(queued.sid,queued.imageIds);
         if(uploaded.network_error){clearTimeout(item.confirmTimer);item.status='queued';delete item.error;uiRefresh();break;}
         if(!uploaded.ok){removeOfflineMessage(queued.id);clearTimeout(item.confirmTimer);item.status='failed';item.error=uploaded.error;uiRefresh();continue;}
-        payload={type:'image_text',text:queued.text,upload_ids:uploaded.uploadIds,
+        payload={type:'send_message',text:queued.text,upload_ids:uploaded.uploadIds,
           client_request_id:'offline-'+queued.id};
       }
       const result=await act(queued.sid,payload,false,item.id);
@@ -4708,7 +4723,7 @@ function historyRow(item,pinnedView=false){
       <span class="historyname"><b>${esc(title)}</b><small>${esc(item.project||'')}${item.branch&&item.branch!=='HEAD'?` · ${esc(item.branch)}`:''} · ${esc(provider)}</small></span>
       <span class="historyage">${fmtAge(Math.max(0,Math.round(((last&&last.t)||Date.now()/1000)-activity)))} ago</span>
       ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
-        ${canReopen?`<button class="historyaction" onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">Reopen</button>`:''}`
+        ${canReopen?`<button class="historyaction" ${reopenedSessions.has(sid)?'disabled':''} onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">${reopenedSessions.has(sid)?'opened ✓':'Reopen'}</button>`:''}`
         :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(action)}</button>`}
       <button class="spin${pinnedSessions.has(sid)?' on':''}" ${pinActions.get(sid)?.busy?'disabled':''} aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
         title="${pinnedSessions.has(sid)?'unpin session':'pin session'}"

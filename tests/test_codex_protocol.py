@@ -158,6 +158,53 @@ class CodexProtocolTest(unittest.TestCase):
         self.assertEqual(client.thread_state["healthy"],
                          {"status": "idle", "error": None})
 
+    def test_compaction_events_recover_exact_turn_authority(self):
+        client, _ = self.client()
+        client.start()
+        generation = client.generation
+        client.thread_state["legacy"] = {
+            "status": "running", "turn_id": "turn-before",
+            "turn_generation": generation}
+
+        client._notification("thread/compacted", {
+            "threadId": "legacy", "turnId": "turn-after"})
+
+        legacy = client.thread_state["legacy"]
+        self.assertEqual(legacy["status"], "running")
+        self.assertEqual(legacy["turn_id"], "turn-after")
+        self.assertEqual(legacy["turn_generation"], generation)
+        self.assertTrue(client.owns_active_turn("legacy"))
+        self.assertIsNone(legacy["compacting"])
+
+        client._notification("item/started", {
+            "threadId": "modern", "turnId": "turn-modern",
+            "startedAtMs": 1, "item": {
+                "id": "compact-1", "type": "contextCompaction"}})
+        modern = client.thread_state["modern"]
+        self.assertEqual(modern["turn_id"], "turn-modern")
+        self.assertEqual(modern["turn_generation"], generation)
+        self.assertEqual(modern["compacting"], 0)
+        self.assertTrue(client.owns_active_turn("modern"))
+
+        client._notification("item/completed", {
+            "threadId": "modern", "turnId": "turn-modern",
+            "completedAtMs": 2, "item": {
+                "id": "compact-1", "type": "contextCompaction"}})
+        self.assertIsNone(modern["compacting"])
+        self.assertEqual(modern["status"], "running")
+        self.assertEqual(modern["turn_id"], "turn-modern")
+
+        client._notification("item/completed", {
+            "threadId": "completed-only", "turnId": "turn-completed-only",
+            "completedAtMs": 3, "item": {
+                "id": "compact-2", "type": "contextCompaction"}})
+        completed_only = client.thread_state["completed-only"]
+        self.assertEqual(completed_only["status"], "running")
+        self.assertEqual(completed_only["turn_id"], "turn-completed-only")
+        self.assertEqual(completed_only["turn_generation"], generation)
+        self.assertTrue(client.owns_active_turn("completed-only"))
+        client.close()
+
     def test_npm_shared_runtime_detaches_one_unix_listener_and_reuses_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             socket_path = os.path.join(tmp, "control.sock")

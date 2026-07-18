@@ -347,15 +347,23 @@ class OutboxManager:
                 f"VALUES({','.join('?' for _ in columns)})", params)
         return self.get(outbox_id)
 
-    def create_recovery(self, *, message, target_provider, target_session_id,
-                        idempotency_key, image_paths=None):
-        """Persist one direct send while provider control is unavailable.
+    def create_delivery(self, *, message, target_provider, target_session_id,
+                        idempotency_key, image_paths=None, kind="when_available",
+                        origin="automatic_fallback"):
+        """Persist one idempotent send with queue-owned image copies.
 
-        Image files are copied into queue-owned private storage before the row
-        becomes visible, so upload expiry cannot silently break later delivery.
+        Browser uploads are short lived. Copy them before publishing the row so
+        an automatic send fallback survives browser exit, daemon restart, and
+        upload cleanup. The unique request ID makes a retried HTTP request safe.
         """
-        if target_provider != "codex":
+        if target_provider not in ("claude", "codex"):
+            raise OutboxError("unknown delivery provider")
+        if kind not in ("when_available", "provider_reconnect"):
+            raise OutboxError("unsupported delivery queue")
+        if kind == "provider_reconnect" and target_provider != "codex":
             raise OutboxError("provider recovery queue is unavailable for this provider")
+        if origin not in ("automatic_fallback", "direct_send_recovery"):
+            raise OutboxError("invalid delivery origin")
         key = str(idempotency_key or "")
         if not (8 <= len(key) <= 160) or any(ord(char) < 33 or ord(char) > 126
                                              for char in key):
@@ -367,7 +375,7 @@ class OutboxManager:
             return self._public(existing)
         now = self.clock()
         values = self._normalize_create({
-            "kind": "provider_reconnect", "message": message,
+            "kind": kind, "message": message,
             "target_provider": target_provider, "target_session_id": target_session_id,
             "created_zone": "UTC"}, now=now)
         outbox_id = self.id_factory()
@@ -394,7 +402,7 @@ class OutboxManager:
                         shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
                     os.chmod(destination, 0o600, follow_symlinks=False)
                     owned_paths.append(destination)
-            values.update(origin="direct_send_recovery", idempotency_key=key,
+            values.update(origin=origin, idempotency_key=key,
                           image_paths_json=json.dumps(owned_paths, separators=(",", ":")))
             columns = ["id", "created_at", "updated_at", *values.keys()]
             params = [outbox_id, now, now, *values.values()]
@@ -426,6 +434,15 @@ class OutboxManager:
             except OSError:
                 pass
             raise
+
+    def create_recovery(self, *, message, target_provider, target_session_id,
+                        idempotency_key, image_paths=None):
+        """Compatibility wrapper for Codex provider-control recovery."""
+        return self.create_delivery(
+            message=message, target_provider=target_provider,
+            target_session_id=target_session_id, idempotency_key=idempotency_key,
+            image_paths=image_paths, kind="provider_reconnect",
+            origin="direct_send_recovery")
 
     def _remove_asset_paths(self, paths):
         """Delete only queue-owned image paths and their now-empty directory."""

@@ -314,6 +314,39 @@ class OutboxTests(unittest.TestCase):
         with self.manager._connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox_messages").fetchone()[0], 1)
 
+    def test_automatic_claude_delivery_is_idempotent_waits_and_keeps_images(self):
+        source = os.path.join(self.upload_root, "claude-upload.jpg")
+        with open(source, "wb") as image:
+            image.write(b"claude jpeg payload")
+        first = self.manager.create_delivery(message="inspect this", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="send-request-claude-0001",
+            image_paths=[source])
+        second = self.manager.create_delivery(message="inspect this", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="send-request-claude-0001",
+            image_paths=[source])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["state"], "waiting_availability")
+        self.assertEqual(first["origin"], "automatic_fallback")
+        self.assertEqual(first["image_count"], 1)
+
+        sent = []
+        busy = session("claude-one", provider="claude", group="working", state="running")
+        self.manager.tick(snapshot(busy), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertFalse(sent)
+        self.clock.advance(1)
+        available = session("claude-one", provider="claude")
+        self.manager.tick(snapshot(available), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["_image_paths"],
+                         self.manager.get_internal(first["id"])["_image_paths"])
+        self.assertEqual(self.manager.get(first["id"])["state"], "sent")
+        self.manager.tick(snapshot(available), {},
+                          lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.manager.get(first["id"])["image_count"], 0)
+
     def test_recovery_waits_for_authority_then_dispatches_once_and_cleans_assets(self):
         source = os.path.join(self.upload_root, "upload.jpg")
         with open(source, "wb") as image:

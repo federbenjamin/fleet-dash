@@ -191,6 +191,110 @@ class EngineProviderTest(unittest.TestCase):
                                    "text": "staging test"})
         self.assertTrue(allowed["ok"])
 
+    def test_send_message_delivers_immediately_only_when_claude_is_available(self):
+        self.engine.scan()
+        writes = []
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write",
+                side_effect=lambda tty, steps, step_delay=None:
+                    writes.append((tty, steps, step_delay)) or {"ok": True}):
+            result = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "Deliver immediately", "client_request_id": "send-now-claude-0001"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["queued"])
+        self.assertEqual(result["delivery"], "sent_now")
+        self.assertEqual(writes, [
+            ("/dev/ttys001", [("Deliver immediately", True)], 0.05)])
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
+
+    def test_send_message_queues_busy_claude_and_dispatches_once_when_idle(self):
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "busy", "name": "Claude", "startedAt": 1}, handle)
+        snapshot = self.engine.scan()
+        claude = next(item for item in snapshot["sessions"]
+                      if item["session_id"] == "same")
+        self.assertEqual(claude["ui_group"], "working")
+        writes = []
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write",
+                side_effect=lambda tty, steps, step_delay=None:
+                    writes.append((tty, steps, step_delay)) or {"ok": True}):
+            queued = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "Wait for this turn", "client_request_id": "send-busy-claude-0001"})
+            self.assertTrue(queued["ok"], queued)
+            self.assertTrue(queued["queued"])
+            self.assertEqual(queued["message"], "Queued · waiting for session")
+            self.assertFalse(writes)
+            row = self.engine.outbox.get(queued["outbox_id"])
+            self.assertEqual(row["kind"], "when_available")
+            self.assertEqual(row["target_session_id"], "same")
+
+            with open(registry, "w") as handle:
+                json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                           "status": "idle", "name": "Claude", "startedAt": 1}, handle)
+            self.engine.scan()
+            self.engine.run_outbox()
+            self.engine.run_outbox()
+        self.assertEqual(self.engine.outbox.get(queued["outbox_id"])["state"], "sent")
+        self.assertEqual(writes, [
+            ("/dev/ttys001", [("Wait for this turn", True)], 0.05)])
+
+    def test_send_message_steers_fleet_owned_active_codex_turn_immediately(self):
+        self.codex.session.update(state="running", reg_status="running",
+                                  control_state="connected_active")
+        self.codex.session["capabilities"].update(submit=True, queue_submit=False)
+        self.engine.scan()
+        self.engine._codex_terminal_route = lambda _sid, force=False: None
+        result = self.engine.act({"type": "send_message", "session_id": "codex:same",
+            "text": "Steer active work", "client_request_id": "send-codex-steer-0001"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["queued"])
+        self.assertEqual(result["delivery"], "sent_now")
+        self.assertEqual(self.codex.actions[-1], {"type": "text",
+            "session_id": "codex:same", "text": "Steer active work",
+            "client_request_id": "send-codex-steer-0001"})
+
+    def test_busy_claude_photo_is_copied_into_durable_outbox_storage(self):
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "busy", "name": "Claude", "startedAt": 1}, handle)
+        self.engine.scan()
+        upload_id = "phone-image-001"
+        upload_root, image_path, meta_path = self.engine._image_upload_paths(upload_id)
+        os.makedirs(upload_root, exist_ok=True)
+        payload = b"normalized jpeg"
+        with open(image_path, "wb") as image:
+            image.write(payload)
+        with open(meta_path, "w") as meta:
+            json.dump({"session_id": "same", "size": len(payload),
+                       "expires_at": time.time() + 300}, meta)
+        queued = self.engine.act({"type": "send_message", "session_id": "same",
+            "text": "Inspect the photo", "upload_ids": [upload_id],
+            "client_request_id": "send-photo-claude-0001"})
+        self.assertTrue(queued["queued"], queued)
+        row = self.engine.outbox.get_internal(queued["outbox_id"])
+        self.assertEqual(row["image_count"], 1)
+        self.assertNotEqual(row["_image_paths"], [image_path])
+        with open(row["_image_paths"][0], "rb") as image:
+            self.assertEqual(image.read(), payload)
+
+    def test_client_cannot_smuggle_image_paths_through_send_message(self):
+        self.engine.scan()
+        writes = []
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write",
+                side_effect=lambda tty, steps, step_delay=None:
+                    writes.append((tty, steps)) or {"ok": True}):
+            result = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "No attachment", "image_paths": [self.transcript],
+                "client_request_id": "send-path-smuggle-0001"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(writes, [("/dev/ttys001", [("No attachment", True)])])
+        self.assertNotIn(self.transcript, str(writes))
+
     def test_staging_spawn_forces_dedicated_worktree_and_records_exact_session(self):
         workspace = os.path.join(self.tmp.name, "staging-workspace")
         os.makedirs(workspace)
@@ -702,6 +806,32 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes, [
             ("/dev/ttys001", [("Queued exact work", True)], 0.05)])
         self.assertEqual(self.codex.actions, [])
+
+    def test_connected_app_server_turn_stays_canonical_when_terminal_is_attached(self):
+        thread_id = "019f6bb5-1a72-7041-a7f2-afab571271d9"
+        sid = "codex:" + thread_id
+        session = codex_session()
+        session.update(session_id=sid, native_session_id=thread_id, state="running",
+                       control_state="connected_active", queue_accepting=False)
+        session["capabilities"].update(submit=True, queue_submit=False)
+        self.codex.session = session
+        self.engine._codex_terminal_routes = lambda force=False: {
+            thread_id: {"tty": "/dev/ttys001", "pid": 101}}
+
+        snapshot = self.engine.scan()
+        active = next(item for item in snapshot["sessions"]
+                      if item["session_id"] == sid)
+        self.assertTrue(active["terminal_attached"])
+        self.assertEqual(active["control_state"], "connected_active")
+
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        result = self.engine.act({"type": "text", "session_id": sid,
+                                  "text": "After compact"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.codex.actions[-1]["text"], "After compact")
+        self.assertEqual(writes, [])
 
     def test_codex_focus_uses_existing_exact_terminal_route(self):
         thread_id = "019f6bb5-1a72-7041-a7f2-afab571271d9"

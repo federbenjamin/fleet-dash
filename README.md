@@ -57,7 +57,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
   its action is accepted for sending or the user deletes the text. Password/secret answers are never
   persisted. If Fleet is known to be offline, ordinary messages pressed Send enter a bounded local
   queue, appear immediately as **Queued offline**, and send in order after a live fleet poll confirms
-  reconnection. Commands stay as drafts until online. The full-chat composer also accepts up to four
+  reconnection. While online, the same Send button sends immediately only when the exact session can
+  accept the message now; otherwise Fleet saves it durably in the server Outbox and shows
+  **Queued · waiting for session** until that session becomes available. Commands and skills remain
+  immediate-only and stay as drafts while offline. The full-chat composer also accepts up to four
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
   device storage, can queue offline with their message, and are removed locally after delivery or
   after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.
@@ -125,9 +128,12 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
   is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
   active turn without resuming a second agent. If that exact command is running on one real TTY,
-  Fleet can send through and focus the existing terminal even while App Server reports a transient
-  turn-owner mismatch. The card's **attach** button opens this TUI form only when no exact attached
-  terminal already exists.
+  Fleet can send through and focus the existing terminal when App Server turn authority is absent.
+  Exact App Server authority wins when both routes exist. During compaction, Fleet follows the
+  provider's replacement turn ID from either the current `contextCompaction` item or the legacy
+  compacted notification, so messages continue steering the same active turn after compaction instead
+  of landing in a stale terminal input. The card's **attach** button opens this TUI form only when no
+  exact attached terminal already exists.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
   transcripts through paginated `thread/list`, puts active work under **Working** and inactive work
   in **Session history**, and exposes them as view-only. Pinned external threads also observe local
@@ -336,14 +342,18 @@ the provider without affecting Claude sessions.
 - **Conversation context**: the session's recent turns (your prompts + Claude's replies,
   markdown-rendered, including messages you send mid-turn from the app) in a scrollable box — shown automatically above the amber box when a
   session needs you; for every other state it's in the tap-detail panel ("recent conversation").
-  A sent message appears there immediately with a small sending spinner. The placeholder is
-  replaced only when the provider transcript confirms it. A failed request, or one still
-  unconfirmed after 15 seconds, gets a red `!`; tapping it restores the text to the composer and
-  never retries automatically. Message and subagent-relay composers are multiline: **Return adds a
+  A message appears there immediately with a small sending spinner. If its exact session is busy,
+  that spinner becomes the visible **Queued · waiting for session** state and the durable Outbox
+  keeps the message editable/cancellable across browser exit or a daemon restart. After Outbox
+  delivery it shows **Sent** until the provider transcript replaces the placeholder. An immediate
+  request that fails, or remains unconfirmed after 15 seconds, gets a red `!`; tapping it restores
+  the text to the composer and never retries an ambiguous delivery automatically. Message and
+  subagent-relay composers are multiline: **Return adds a
   newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
   Send/Relay button remains available. The full-chat **＋** menu offers **Send picture** and
   **Schedule message**. The picture action opens the phone camera/photo picker (or desktop file
-  picker); selected images are shown beside the composer and delivered to
+  picker); the menu preserves the original trusted tap on iOS before closing, so choosing either
+  action cannot dismiss without opening it. Selected images are shown beside the composer and delivered to
   either Claude or Codex with the message. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for

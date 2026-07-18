@@ -620,6 +620,28 @@ class CodexAppServer:
                 item = params.get("item") or {}
                 if item.get("id"):
                     state.setdefault("items", {})[item["id"]] = item
+                # Item notifications carry the canonical turn id even when a
+                # client misses ``turn/started`` during reconnect or compaction.
+                # Recover authority only from this live transport event; a
+                # later thread/read can describe another App Server's turn and
+                # is deliberately not sufficient.
+                turn_id = params.get("turnId")
+                # A reconnect may first observe the completed compaction item,
+                # so that completion is also sufficient live authority. Other
+                # completed items do not resurrect a turn on their own.
+                recovers_turn = (method == "item/started" or
+                                 item.get("type") == "contextCompaction")
+                if recovers_turn and turn_id:
+                    state.update(status="running", turn_id=turn_id,
+                                 turn_generation=self.generation,
+                                 control_lost_at=None, no_active_turn_at=None,
+                                 error=None)
+                if item.get("type") == "contextCompaction":
+                    if method == "item/started":
+                        state["compacting"] = 0
+                    else:
+                        state["compacted_at"] = now
+                        state["compacting"] = None
             elif method == "item/agentMessage/delta":
                 iid = params.get("itemId")
                 if iid:
@@ -632,8 +654,17 @@ class CodexAppServer:
                     {"type": method, "text": params.get("delta") or "", "ts": now})
                 del state["stream_events"][:-100]
             elif method in ("thread/compacted",):
-                state["compacted_at"] = now
-                state["compacting"] = None
+                # Current schemas include the active turn id on this legacy
+                # notification. Compaction can replace the turn identity, so
+                # retaining the pre-compact id strands steering until the turn
+                # ends. Keep the turn running; only turn/completed ends it.
+                turn_id = params.get("turnId")
+                state.update(compacted_at=now, compacting=None)
+                if turn_id:
+                    state.update(status="running", turn_id=turn_id,
+                                 turn_generation=self.generation,
+                                 control_lost_at=None, no_active_turn_at=None,
+                                 error=None)
             elif method in ("error", "warning", "guardianWarning", "configWarning"):
                 state["last_notice"] = {"method": method, "params": params, "ts": now}
                 if method == "error":
