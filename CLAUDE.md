@@ -232,11 +232,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the Claude card's desktop-only **Terminal** button (`.deskonly`, hidden
-    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless). A Claude `kind:bg`
-    fork may retain `/dev/ttys…` on fd 0/1/2 while `ps -o tty` reports `??`; `_tty_for_pid`
-    therefore falls back to fixed-argv `lsof -d 0,1,2` and accepts only an exact
-    `/dev/ttys[0-9A-Za-z]+` path. Keep that fallback shared by act and close—otherwise valid
-    background sessions advertise Send but every injection fails as falsely headless.
+    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless). This path is only for a
+    foreground Claude process whose exact PID/tty maps to an iTerm session. A `kind:bg` registry row
+    has no iTerm route: `ClaudeBackgroundTransport` validates its eight-hex job id, starts the
+    official fixed-argv `claude attach <job>` client in a private PTY, writes only Engine-composed
+    text/keys, then sends Claude's documented Ctrl-Z detach. Close uses fixed-argv
+    `claude stop <job>`. Never read the private daemon roster, accept a client socket/tty/job id, or
+    speak Claude's private rendezvous protocol. PTY bytes are readiness evidence only and must never
+    be returned through an error, API, snapshot, cache, or log. Attachment failures are scoped
+    `background_connection_lost`; they must not crash, reload, or hide the session.
 26. **Claude plan usage mirrors Claude Usage's selected profiles, without exposing credentials.**
     `Engine.claude_usage_profiles` watches
     `~/Library/Preferences/HamedElfayome.Claude-Usage.plist` by mtime/size and projects ONLY profile
@@ -309,6 +313,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     incremental, path-confined, row-bounded, and tolerant of malformed/unknown additions. Its result
     may update state, preview, and context, but must never update ownership or enable submit,
     interrupt, archive, close, attach, compact, review, or relay capabilities.
+    Control authority is connection-generation scoped: only lifecycle notifications received on
+    the current App Server connection may provide the active turn id for steer/interrupt. Rollout or
+    `thread/read` evidence may show observed work but can never repopulate that authority. On loss,
+    an owned active thread projects `control_state=reconnecting` and `queue_submit`, not submit.
+    Direct text/images use the server Outbox with `origin=direct_send_recovery`,
+    `kind=provider_reconnect`, and a client-stable idempotency key. Queue-owned images are private
+    copies. Reconnect to the same authoritative active turn steers once; authoritative completion
+    starts one next turn; ambiguous state stays `waiting_provider`. Terminal failures are visible
+    and restorable but never auto-retried.
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
@@ -467,24 +480,32 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     failures, and the in-process Briefing generation. An unchanged signature performs no projection
     I/O; a provider failure bypasses the cache until corroborated, and daemon restart always runs one
     full reconciliation.
-48. **Production Web Push is purpose-bounded and capability-authenticated.** The policy sweep runs in
-    the same short transaction as canonical event reconciliation and may enqueue only `question`,
-    `approval`, `form`, `reply`, confirmed `failure`, or threshold-crossed `stall` events. A target
-    device must be enabled, permission-granted, subscription-present, explicitly test-qualified,
-    healthy, preference-eligible, and behind the event's sequence; informational/completion/spend/
-    budget/fleet-quiet events never push. Delivery rows persist an explicit `initial`, `reminder`,
-    `snooze_wake`, `manual_retry`, or `test` purpose plus source revision. An event gets one initial
-    per eligible device and one global reminder wave 15 minutes after the first successful initial;
-    stalls never remind. Snooze suppresses queued initial/reminder work, consumes the reminder, and
-    permits one wake wave. Mute is session-wide and must update both `muted_sessions` config and the
-    notification DB before future claims. Every schedule, claim, retry, and mutation revalidates
-    current event/device/mute state. The encrypted payload is generic, uses a hashed tag and exact
+48. **Production Web Push is globally policy-bounded and capability-authenticated.** One durable
+    global policy applies to every enabled device. `notification_global_policy` owns master state,
+    quiet hours, timezone, and revision; `notification_kind_policy` has one row for every canonical
+    kind with Off/Once/Once+reminder/Repeat, severity floor, initial delay, repeat interval, maximum
+    successful wave count, and quiet-hours bypass. Defaults preserve the former interruption
+    behavior: question/approval/form/reply/failure use one reminder, stall sends once, and
+    informational kinds are Off. Device rows own connection, enable/pause, permission,
+    qualification, and health only—never cadence overrides. Session mute and event snooze outrank
+    quiet hours and kind rules. Quiet hours hold/coalesce rather than replay missed intervals. A rule
+    newly enabled for existing active events schedules nothing unless `apply_current` is explicit;
+    a worst case above 12 pushes/day requires high-cadence confirmation. Policy writes use expected
+    revisions, and every schedule/claim/retry/wake revalidates its policy revision so obsolete jobs
+    become suppressed. Transport retries do not consume another user cadence count. A target device
+    must still be enabled, permission-granted, subscription-present, explicitly test-qualified, and
+    healthy. Delivery rows persist an explicit purpose plus source and policy revisions. Mute is
+    session-wide and must update both `muted_sessions` config and the notification DB before future
+    claims. The encrypted payload is generic, uses a hashed tag and exact
     `#notifications/<event>` link, and carries only Open plus optional Snooze/Mute capabilities.
     Capabilities are HMAC-signed for one event/device/action, expire after ten minutes, persist only a
     consumed JTI hash, and are accepted solely by credential-omitting
     `/api/push/capability-action`; that route ignores `act_token` and returns one generic rejection
     for malformed, expired, replayed, or stale tokens. A failed shortcut keeps the system
     notification visible and opens current Fleet detail without putting the capability in a URL.
+    Removing a device deletes its redacted registration/read cursor and suppresses its queued jobs;
+    historical delivery rows retain only the opaque device id. Disconnecting the current device may
+    instead preserve its redacted row so it can reconnect with its read position intact.
     The separate legacy flag enables only one manually invoked generic ntfy test route; provider
     scans never dispatch it and it is never a Web Push fallback or duplicate path.
 49. **One provider limit blocks one session, never the dashboard.** App Server error payloads are
@@ -558,9 +579,26 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Focusing the main composer hides that context strip so chat history gets the remaining height;
     a vertical drag starting in `#sbody` blurs the composer, while a tap does not. Textareas use 16px
     type on coarse pointers to prevent iOS focus zoom, auto-grow only to a bounded height, and keep
-    Return as newline-only. The upward **＋** menu is the only full-chat entry point for **Send
-    picture** and **Schedule message**; selecting either closes it. Safari's native keyboard
+    Return as newline-only. `renderComposer` is the sole main-session composer for both full chat and
+    Markdown: it owns the textarea, draft/image state, ＋ menu, send path, and feedback. Markdown
+    embeds no conversation disclosure; its right-hand stack is **Chat** above **Send**, and Chat
+    preserves the draft while opening full chat. The upward **＋** menu is the only entry point for
+    **Send picture** and **Schedule message**; selecting either closes it. Photo selection blurs the
+    textarea and settles viewport geometry before activating the hidden picker, then stays drafted
+    without refocusing. Safari's native keyboard
     accessory bar is not controllable from a web app, so layout must remain correct with it present.
+59. **Settings is section-routed and mutation-safe.** The overlay owns Notifications, Devices &
+    delivery, Sessions, Appearance, Budgets & spawning, and Advanced at exact
+    `#settings/<section>` routes. Desktop uses a rail; mobile renders one section under a sticky
+    selector. Browser/native Back unwinds section history before closing Settings and restores any
+    underlying full-chat state. Async loaders may rerender only the section whose data they own—an
+    unrelated push/workstream/budget response must never detach an active control. Inputs that save
+    on blur must not synchronously replace the button the user is clicking. Settings serializes
+    reentrant renders and defers data-driven replacement while a text, number, or select field owns
+    focus; checkbox state never blocks a legitimate refresh. Policy edits lock their
+    own row while saving, use expected revisions, paint Saved/Error in place, and roll back on
+    failure. Muted-session search filters existing rows in place so typing focus survives.
+
 ## Dev workflow
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,
@@ -581,7 +619,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   unanswered AskUserQuestion tool_use, poll /api/fleet, clean up. Pattern in the session
   scratchpad (`probe_pending.py`) — recreate as needed.
 - **Harmless injection probe:** `POST /api/act {"type":"noop", "session_id":…}` — full
-  daemon→applet→iTerm chain, delivers zero keystrokes.
+  daemon→selected Claude transport chain, delivers zero keystrokes. Foreground sessions use the
+  applet/iTerm path; background jobs use the official attach/detach path.
 - **Live interactive test protocol:** the building session asks a real AskUserQuestion; the
   user answers it FROM the dashboard. The recorded answer proves (or pinpoints) the loop.
 - **Screen ground truth:** to see what a TUI actually displays (keybinding hints, prompt
@@ -605,13 +644,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `web_push.py` + `web_push_worker.js` — private key store, asynchronous durable-lease supervisor,
   bounded helper protocol, Web Push encryption/request construction, endpoint/DNS confinement, and
   retry/result mapping. No provider scan or HTTP handler performs remote delivery.
+- `claude_background.py` — fixed-argv official Claude background attach/stop client, bounded private
+  PTY readiness, allowlisted Engine key operations, per-job serialization, and secret-free errors.
+- `briefing.py` — canonical notification/briefing store, global kind policy, quiet-hours and cadence
+  scheduler, policy-revision suppression, delivery leases, device health, and budget records.
+- `outbox.py` — scheduled/waiting messages plus idempotent direct-send recovery during temporary
+  Codex control loss; private queue-owned images are never projected as paths.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
-  `/api/push/config`, and `/api/push/devices`; POST `/api/act` + `/api/upload-image` + `/api/settings` +
+  `/api/notification-policy`, `/api/push/config`, and `/api/push/devices`; POST `/api/act` +
+  `/api/upload-image` + `/api/settings` + `/api/notification-policy` +
   `/api/search/rebuild` + notification read/snooze/wake/mute/retry and
   device/subscription/test routes are token-gated.
   Settings persists the manual `legacy_ntfy_enabled` switch, range-validated UI/session thresholds

@@ -143,6 +143,7 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
+                         "/api/notification-policy",
                          "/api/push/test", "/api/push/device-settings",
                          "/api/push/capability-action", "/api/legacy-ntfy/test"):
             return self.reply(404, "text/plain", b"not found")
@@ -224,12 +225,17 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/notifications/retry":
             result = self.eng.notifications_retry(action)
             return self.reply(200, "application/json", json.dumps(result).encode())
+        if route == "/api/notification-policy":
+            result = self.eng.notification_policy_update(action)
+            return self.reply(200 if result.get("ok") else 409, "application/json",
+                              json.dumps(result).encode())
         if route == "/api/push/subscription":
             result = self.eng.push_subscription(action)
             device_ref = hashlib.sha256(
                 str(action.get("device_id") or "").encode()).hexdigest()[:12]
             audit = {"ok": bool(result.get("ok")), "device_ref": device_ref,
-                     "operation": "remove" if action.get("remove") else "register"}
+                     "operation": ("forget" if action.get("forget") else
+                                   "remove" if action.get("remove") else "register")}
             print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
             return self.reply(200, "application/json", json.dumps(result).encode())
         if route == "/api/push/device-settings":
@@ -299,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route in ("/api/search", "/api/search/status", "/api/search/context",
                      "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics",
-                     "/api/notifications", "/api/push/config", "/api/push/devices"):
+                     "/api/notifications", "/api/push/config", "/api/push/devices",
+                     "/api/notification-policy"):
             if not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
@@ -322,6 +329,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.query("device") or "default", self.query("cursor") or None,
                     self.query("limit") or 100, states, kinds, self.query("id") or None)
                 return self.reply(200, "application/json", json.dumps(out).encode())
+            if route == "/api/notification-policy":
+                out = self.eng.notification_policy_snapshot()
+                return self.reply(200 if out.get("ok") else 503, "application/json",
+                                  json.dumps(out).encode())
             if route == "/api/push/config":
                 device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
                 out = self.eng.push_config(device)

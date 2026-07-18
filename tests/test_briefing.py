@@ -4,7 +4,9 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from briefing import FleetOperations, OperationsError
 
@@ -555,6 +557,14 @@ class BriefingTests(unittest.TestCase):
                 FROM notification_devices WHERE id='desktop'""").fetchone()
         self.assertEqual(stored, ("{}", ""))
 
+        forgotten = self.ops.notification_forget_device("desktop")
+        self.assertEqual(forgotten, {"id": "desktop", "removed": True})
+        listing = self.ops.notification_devices_snapshot("desktop")
+        self.assertIsNone(listing["current_device"])
+        self.assertEqual(listing["devices"], [])
+        with self.assertRaises(OperationsError):
+            self.ops.notification_forget_device("desktop")
+
     def test_explicit_exact_push_origin_can_be_allowed_without_wildcards(self):
         device = self.ops.notification_register_device(
             "custom", "Custom", "test",
@@ -588,6 +598,19 @@ class BriefingTests(unittest.TestCase):
         self.assertNotIn("web.push.apple.com", repr(diagnostics))
         self.assertNotIn("subscription", repr(sent))
 
+    def test_forgetting_device_suppresses_queued_delivery_and_keeps_history(self):
+        self.ops.notification_register_device(
+            "old-phone", "Old phone", "iOS", push_subscription())
+        queued = self.ops.notification_create_test_delivery("old-phone")
+        self.ops.notification_forget_device("old-phone")
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute("SELECT * FROM notification_deliveries WHERE id=?",
+                             (queued["id"],)).fetchone()
+        self.assertEqual(row["status"], "suppressed")
+        self.assertEqual(row["error"], "device removed")
+        self.assertEqual(self.ops.notification_devices_snapshot()["devices"], [])
+
     def test_push_delivery_enqueue_coalesces_same_event_and_device(self):
         self.ops.notification_register_device(
             "phone", "Phone", "iOS", push_subscription())
@@ -619,9 +642,14 @@ class BriefingTests(unittest.TestCase):
                 WHERE d.purpose!='test'""").fetchall()
         self.assertEqual(purposes, [("question", "initial")])
 
-    def test_production_policy_applies_delay_and_one_global_reminder_wave(self):
+    def test_global_policy_applies_delay_and_one_reminder_wave_to_all_devices(self):
         self.qualify_push_device("phone", {"kinds": ["question"],
             "minimum_severity": "warning", "initial_delay_seconds": 30})
+        policy = self.ops.notification_policy_snapshot()
+        question = next(item for item in policy["kinds"] if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": question["revision"], "apply_current": True,
+            "patch": {"initial_delay_seconds": 30}})
         self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
         self.assertIsNone(self.ops.notification_claim_delivery())
         self.clock.advance(30)
@@ -645,6 +673,111 @@ class BriefingTests(unittest.TestCase):
             purposes = db.execute("""SELECT purpose,COUNT(*) FROM notification_deliveries
                 WHERE purpose!='test' GROUP BY purpose ORDER BY purpose""").fetchall()
         self.assertEqual(purposes, [("initial", 1), ("reminder", 1)])
+
+    def test_notification_policy_has_every_kind_and_never_exposes_delivery_secrets(self):
+        snapshot = self.ops.notification_policy_snapshot()
+        self.assertEqual({item["kind"] for item in snapshot["kinds"]}, {
+            "question", "approval", "form", "reply", "failure", "stall",
+            "completion", "artifact", "outcome", "budget", "measurement",
+            "notification"})
+        self.assertEqual(next(item for item in snapshot["kinds"]
+                              if item["kind"] == "question")["mode"], "remind_once")
+        self.assertEqual(next(item for item in snapshot["kinds"]
+                              if item["kind"] == "completion")["mode"], "off")
+        self.assertNotIn("subscription", repr(snapshot))
+        self.assertNotIn("endpoint", repr(snapshot))
+
+    def test_explicit_push_test_survives_global_and_kind_policy_edits(self):
+        self.ops.notification_register_device(
+            "phone", "Phone", "iOS", push_subscription())
+        delivery = self.ops.notification_create_test_delivery("phone")
+        policy = self.ops.notification_policy_snapshot()
+        self.ops.notification_policy_update({"scope": "global",
+            "expected_revision": policy["global"]["revision"],
+            "patch": {"quiet_hours_enabled": True}})
+        policy = self.ops.notification_policy_snapshot()
+        notice = next(item for item in policy["kinds"]
+                      if item["kind"] == "notification")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "notification",
+            "expected_revision": notice["revision"], "patch": {"mode": "once"}})
+        claim = self.ops.notification_claim_delivery()
+        self.assertEqual(claim["id"], delivery["id"])
+        self.assertEqual(claim["purpose"], "test")
+
+    def test_policy_revision_conflict_and_aggressive_cadence_confirmation(self):
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        changed = self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "patch": {"mode": "repeat",
+                "repeat_interval_seconds": 3600, "max_deliveries": 8}})
+        current = next(item for item in changed["kinds"] if item["kind"] == "question")
+        with self.assertRaisesRegex(OperationsError, "changed"):
+            self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+                "expected_revision": rule["revision"], "patch": {"mode": "off"}})
+        with self.assertRaisesRegex(OperationsError, "more than 12"):
+            self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+                "expected_revision": current["revision"], "patch": {
+                    "repeat_interval_seconds": 60, "max_deliveries": 100}})
+        accepted = self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": current["revision"], "confirm_aggressive": True,
+            "patch": {"repeat_interval_seconds": 60, "max_deliveries": 100}})
+        self.assertEqual(next(item for item in accepted["kinds"]
+            if item["kind"] == "question")["repeat_interval_seconds"], 60)
+
+    def test_enabling_rule_does_not_backfill_active_event_without_explicit_choice(self):
+        self.qualify_push_device("phone")
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        disabled = self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "patch": {"mode": "off"}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        rule = next(item for item in disabled["kinds"] if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "patch": {"mode": "once"}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, actions=[action(nonce="ask-2")]), self.workstream)
+        self.assertEqual(self.ops.notification_claim_delivery()["event"]["source_revision"],
+                         "ask-2")
+
+    def test_repeat_policy_stops_at_exact_successful_delivery_maximum(self):
+        self.qualify_push_device("phone")
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "apply_current": True,
+            "patch": {"mode": "repeat", "repeat_interval_seconds": 60,
+                      "max_deliveries": 3}})
+        current = fleet(self.clock, actions=[action()])
+        for index in range(3):
+            self.ops.observe(current, self.workstream)
+            delivery = self.ops.notification_claim_delivery()
+            self.assertIsNotNone(delivery, index)
+            self.ops.notification_finish_delivery(delivery["id"], {"ok": True, "status": 201})
+            self.clock.advance(60)
+        self.ops.observe(current, self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+
+    def test_quiet_hours_hold_then_kind_override_delivers_without_replay(self):
+        self.qualify_push_device("phone")
+        policy = self.ops.notification_policy_snapshot()
+        global_policy = policy["global"]
+        self.ops.notification_policy_update({"scope": "global",
+            "expected_revision": global_policy["revision"], "patch": {
+                "quiet_hours_enabled": True, "quiet_start_minute": 0,
+                "quiet_end_minute": 0, "timezone": "UTC"}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "apply_current": True,
+            "patch": {"allow_during_quiet_hours": True}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        delivery = self.ops.notification_claim_delivery()
+        self.assertIsNotNone(delivery)
+        self.assertEqual(delivery["purpose"], "initial")
 
     def test_snooze_replaces_reminder_with_one_wake_and_mute_suppresses_all_devices(self):
         self.qualify_push_device("phone")
@@ -676,6 +809,92 @@ class BriefingTests(unittest.TestCase):
         self.ops.observe(next_current, self.workstream)
         self.assertIsNone(self.ops.notification_claim_delivery())
         self.assertTrue(self.ops.notification_session_muted("s1"))
+
+    def test_global_policy_ignores_obsolete_per_device_kind_preferences(self):
+        self.qualify_push_device("phone", {"kinds": ["completion"],
+            "minimum_severity": "critical", "initial_delay_seconds": 3600})
+        self.qualify_push_device("desktop", {"kinds": []})
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "apply_current": True,
+            "patch": {"mode": "once", "initial_delay_seconds": 0}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        deliveries = [self.ops.notification_claim_delivery(),
+                      self.ops.notification_claim_delivery()]
+        self.assertEqual({item["device_id"] for item in deliveries},
+                         {"phone", "desktop"})
+
+    def test_claim_suppresses_job_if_policy_revision_changed_after_scheduling(self):
+        self.qualify_push_device("phone")
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE notification_kind_policy SET revision=revision+1 "
+                       "WHERE kind='question'")
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        with sqlite3.connect(self.path) as db:
+            state, error = db.execute("""SELECT status,error FROM notification_deliveries
+                WHERE purpose='initial' ORDER BY created_at DESC LIMIT 1""").fetchone()
+        self.assertEqual(state, "suppressed")
+        self.assertEqual(error, "suppressed")
+
+    def test_global_disable_suppresses_already_queued_policy_jobs(self):
+        self.qualify_push_device("phone")
+        rule = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                    if item["kind"] == "question")
+        self.ops.notification_policy_update({"scope": "kind", "kind": "question",
+            "expected_revision": rule["revision"], "apply_current": True,
+            "patch": {"initial_delay_seconds": 60}})
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        policy = self.ops.notification_policy_snapshot()["global"]
+        self.ops.notification_policy_update({"scope": "global",
+            "expected_revision": policy["revision"], "patch": {"enabled": False}})
+        self.assertIsNone(self.ops.notification_claim_delivery())
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute("""SELECT status FROM notification_deliveries
+                WHERE purpose='initial' ORDER BY created_at DESC LIMIT 1""").fetchone()[0],
+                "suppressed")
+
+    def test_quiet_boundaries_are_deterministic_across_spring_and_fall_dst(self):
+        zone = ZoneInfo("America/New_York")
+        spring_now = datetime(2026, 3, 8, 1, 45, tzinfo=zone).timestamp()
+        active, spring_end = self.ops._quiet_state({"quiet_hours_enabled": True,
+            "quiet_start_minute": 60, "quiet_end_minute": 150,
+            "timezone": "America/New_York"}, spring_now)
+        self.assertTrue(active)
+        self.assertEqual(datetime.fromtimestamp(spring_end, zone).strftime("%H:%M"), "03:00")
+
+        fall_now = datetime(2026, 11, 1, 1, 15, tzinfo=zone, fold=0).timestamp()
+        active, fall_end = self.ops._quiet_state({"quiet_hours_enabled": True,
+            "quiet_start_minute": 0, "quiet_end_minute": 90,
+            "timezone": "America/New_York"}, fall_now)
+        self.assertTrue(active)
+        resolved = datetime.fromtimestamp(fall_end, zone)
+        self.assertEqual(resolved.strftime("%H:%M"), "01:30")
+        self.assertEqual(resolved.fold, 1)
+
+    def test_existing_delivery_schema_is_upgraded_without_losing_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "ledger.db")
+            with sqlite3.connect(path) as db:
+                db.execute("""CREATE TABLE notification_deliveries(
+                    id TEXT PRIMARY KEY,event_id TEXT NOT NULL,device_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL,
+                    claimed_at REAL,lease_until REAL,next_attempt_at REAL,remote_status INTEGER,
+                    remote_id TEXT,error TEXT,created_at REAL NOT NULL,updated_at REAL NOT NULL,
+                    UNIQUE(event_id,device_id,generation))""")
+                db.execute("""INSERT INTO notification_deliveries(
+                    id,event_id,device_id,generation,status,attempt,created_at,updated_at)
+                    VALUES('old','event','phone',1,'sent',1,1,1)""")
+            FleetOperations(path, clock=lambda: 10)
+            with sqlite3.connect(path) as db:
+                columns = {row[1] for row in db.execute(
+                    "PRAGMA table_info(notification_deliveries)")}
+                self.assertTrue({"purpose", "source_revision", "cadence_index",
+                    "global_policy_revision", "kind_policy_revision"}.issubset(columns))
+                self.assertEqual(db.execute(
+                    "SELECT id,status FROM notification_deliveries").fetchone(),
+                    ("old", "sent"))
 
     def test_provider_failure_requires_two_matching_scans(self):
         failed = {"claude": {"ok": False, "error": "adapter unavailable"}}

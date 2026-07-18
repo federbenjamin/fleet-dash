@@ -326,6 +326,25 @@ class CodexProtocolTest(unittest.TestCase):
         self.assertIn("stale_pending_request",
                       [item["kind"] for item in client.diagnostics])
 
+    def test_process_exit_revokes_only_that_connections_turn_authority(self):
+        client, factory = self.client()
+        client.start()
+        process = factory.processes[0]
+        generation = client.generation
+        client.thread_state["owned"] = {
+            "status": "running", "turn_id": "turn-owned",
+            "turn_generation": generation}
+        client.thread_state["newer"] = {
+            "status": "running", "turn_id": "turn-newer",
+            "turn_generation": generation + 1}
+
+        process.crash()
+        time.sleep(0.02)
+
+        self.assertIsNone(client.thread_state["owned"]["turn_id"])
+        self.assertIsNone(client.thread_state["owned"]["turn_generation"])
+        self.assertEqual(client.thread_state["newer"]["turn_id"], "turn-newer")
+
     def test_server_requests_queue_and_resolve_independently(self):
         client, _ = self.client()
         client.respond = lambda rid, result: None
@@ -400,8 +419,10 @@ class CodexProtocolTest(unittest.TestCase):
         calls = []
         client.request = lambda method, params=None, timeout=None: calls.append(
             (method, params)) or {"turnId": "turn-active"}
+        client.proc = SimpleNamespace(poll=lambda: None)
         client.thread_state["thread-one"] = {
-            "status": "running", "turn_id": "turn-active"}
+            "status": "running", "turn_id": "turn-active",
+            "turn_generation": client.generation}
 
         client.steer_turn("thread-one", "Focus on the failing test")
 
@@ -418,8 +439,10 @@ class CodexProtocolTest(unittest.TestCase):
         inputs = [{"type": "text", "text": "Inspect it"},
                   {"type": "localImage", "path": "/private/fleet/photo.jpg"}]
         client.start_turn("thread-one", "Inspect it", inputs=inputs)
+        client.proc = SimpleNamespace(poll=lambda: None)
         client.thread_state["thread-one"] = {
-            "status": "running", "turn_id": "turn-active"}
+            "status": "running", "turn_id": "turn-active",
+            "turn_generation": client.generation}
         client.steer_turn("thread-one", "Inspect it", inputs=inputs)
 
         self.assertEqual(calls[0], ("turn/start", {

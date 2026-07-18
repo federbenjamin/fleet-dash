@@ -14,6 +14,7 @@ import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subproces
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
+from claude_background import ClaudeBackgroundTransport, ClaudeBackgroundError
 from repo_center import RepositoryOutcomeCenter, observed_test_outcome
 from outbox import OutboxError, OutboxManager
 from briefing import FleetOperations, OperationsError
@@ -1135,6 +1136,8 @@ class Engine:
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
+        self._claude_background = None  # lazy official `claude attach` bridge
+        self._claude_background_error = None
         self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
         self._cleanup_lock = threading.Lock()
         self._image_upload_lock = threading.RLock()
@@ -1172,7 +1175,10 @@ class Engine:
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
         ledger_path = os.path.join(BASE, "ledger.db")
         self.ledger_status = self._prepare_ledger(ledger_path)
-        self.outbox = OutboxManager(ledger_path)
+        self.outbox = OutboxManager(
+            ledger_path,
+            recovery_source_root=os.path.join(BASE, "uploads"),
+            asset_root=os.path.join(BASE, "outbox-images"))
         self.operations = FleetOperations(ledger_path)
         self.web_push = None
         self.web_push_lock = threading.RLock()
@@ -1501,7 +1507,9 @@ class Engine:
         with self.lock:
             session = next((copy.deepcopy(item) for item in
                 self.snapshot_cache.get("sessions") or [] if item.get("session_id") == sid), None)
-        if not session or not (session.get("capabilities") or {}).get("submit"):
+        capabilities = (session or {}).get("capabilities") or {}
+        if not session or not (capabilities.get("submit") or
+                               capabilities.get("queue_submit")):
             return {"ok": False, "error": "session is not available for image messages"}
         root, image_path, meta_path = self._image_upload_paths(upload_id)
         os.makedirs(root, mode=0o700, exist_ok=True)
@@ -4890,13 +4898,13 @@ Treat this as an independent session. Verify the repository state before changin
         return modes
 
     def _tty_for_pid(self, pid):
-        """Resolve the iTerm tty even when a background Claude fork has no ctty.
+        """Resolve a foreground Claude tty; background jobs use `claude attach`.
 
-        Claude's ``kind:bg`` sessions keep their original iTerm tty open on the
-        standard file descriptors, but macOS ``ps -o tty`` reports ``??`` because
-        the fork no longer has a controlling terminal.  Inspect only fd 0/1/2 and
-        accept only an exact macOS pseudo-terminal path; never trust arbitrary
-        lsof output as an injector destination.
+        Some foreground launchers lose their controlling-terminal marker while
+        retaining the terminal on fd 0/1/2. Inspect only those descriptors and
+        accept only an exact macOS pseudo-terminal path. The caller must already
+        have excluded registry ``kind:bg`` sessions: an open PTY descriptor is not
+        evidence that the background job belongs to an iTerm tab.
         """
         try:
             pid = int(pid or 0)
@@ -4930,6 +4938,57 @@ Treat this as an independent session. Verify the repository state before changin
                 return tty
         return ""
 
+    @staticmethod
+    def _is_background_claude(reg):
+        return str((reg or {}).get("kind") or "").lower() in ("bg", "background")
+
+    @staticmethod
+    def _background_job_id(reg):
+        return str((reg or {}).get("jobId") or (reg or {}).get("id") or "")
+
+    def _background_claude_transport(self):
+        if self._claude_background is not None:
+            return self._claude_background
+        try:
+            self._claude_background = ClaudeBackgroundTransport(
+                self.cfg.get("claude_command") or None, home=HOME)
+            self._claude_background_error = None
+            return self._claude_background
+        except ClaudeBackgroundError as exc:
+            self._claude_background_error = str(exc)[:300]
+            return None
+
+    def _write_background_claude(self, reg, steps, step_delay):
+        transport = self._background_claude_transport()
+        if transport is None:
+            return {"ok": False, "code": "background_connection_lost",
+                    "error": self._claude_background_error or
+                             "Claude background connection is unavailable"}
+        return transport.write(self._background_job_id(reg), steps,
+                               step_delay=step_delay)
+
+    def _focus_background_claude(self, reg):
+        transport = self._background_claude_transport()
+        if transport is None:
+            return {"ok": False, "code": "background_connection_lost",
+                    "error": self._claude_background_error or
+                             "Claude background connection is unavailable"}
+        try:
+            executable, job_id, cwd = transport.attach_command(
+                self._background_job_id(reg), reg.get("cwd") or HOME)
+        except ClaudeBackgroundError as exc:
+            return {"ok": False, "code": "background_connection_lost",
+                    "error": str(exc)[:300]}
+        if not os.path.isdir(cwd):
+            return {"ok": False, "error": "session working directory no longer exists"}
+        command = (f"cd {shlex.quote(cwd)} && {shlex.quote(executable)} attach "
+                   f"{shlex.quote(job_id)}")
+        result = self._iterm_write("SPAWN", [(command, False)])
+        if result.get("ok"):
+            result.update(command=command, transport="claude_attach",
+                          session_id=reg.get("sessionId"))
+        return result
+
     def _close_claude_session(self, reg):
         """Terminate only the registered Claude process; never close its terminal tab."""
         try:
@@ -4952,6 +5011,14 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "Claude process is no longer running"}
         if not re.search(r"(^|[/\s])claude(?:-code)?(?:[/\s]|$)", command, re.I):
             return {"ok": False, "error": "refusing to terminate a non-Claude process"}
+
+        if self._is_background_claude(reg):
+            transport = self._background_claude_transport()
+            if transport is None:
+                return {"ok": False, "code": "background_connection_lost",
+                        "error": self._claude_background_error or
+                                 "Claude background connection is unavailable"}
+            return transport.stop(self._background_job_id(reg))
 
         interrupted = False
         interrupt_error = None
@@ -5089,6 +5156,7 @@ Treat this as an independent session. Verify the repository state before changin
                     "delivery": runtime.get("delivery") or "unavailable",
                     "helper": runtime.get("helper"), "queue": runtime.get("queue"),
                     "current_device": devices.get("current_device"),
+                    "devices": devices.get("devices") or [],
                     "registered_devices": devices.get("registered", 0),
                     "enabled_devices": devices.get("enabled", 0)}
         except OperationsError as exc:
@@ -5121,7 +5189,10 @@ Treat this as an independent session. Verify the repository state before changin
 
     def push_subscription(self, payload):
         try:
-            if payload.get("remove"):
+            if payload.get("forget"):
+                device = self.operations.notification_forget_device(
+                    payload.get("device_id"))
+            elif payload.get("remove"):
                 device = self.operations.notification_remove_device(
                     payload.get("device_id"), payload.get("permission_state") or "expired")
             else:
@@ -5213,6 +5284,28 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": str(exc)}
         except Exception:
             return {"ok": False, "error": "notification delivery could not be retried"}
+
+    def notification_policy_snapshot(self):
+        try:
+            return self.operations.notification_policy_snapshot()
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            print(f"notification policy snapshot failed: {exc}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "notification policy is temporarily unavailable"}
+
+    def notification_policy_update(self, payload):
+        try:
+            result = self.operations.notification_policy_update(payload)
+            with self.web_push_lock:
+                if self.web_push:
+                    self.web_push.wake_event.set()
+            return result
+        except OperationsError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            print(f"notification policy update failed: {exc}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "notification policy could not be saved"}
 
     def start_web_push(self):
         """Start the isolated delivery runtime without delaying daemon availability."""
@@ -5398,14 +5491,45 @@ Treat this as an independent session. Verify the repository state before changin
 
     def _outbox_dispatch(self, record):
         sid = record.get("destination_session_id") or record.get("target_session_id")
+        image_paths = list(record.get("_image_paths") or [])
         action = {"type": "relay", "session_id": sid,
                   "agent_id": record.get("target_agent_id"),
                   "text": record.get("message")} if record.get("target_agent_id") else {
-                  "type": "text", "session_id": sid, "text": record.get("message")}
-        result = self.act(action)
+                  "type": "image_text" if image_paths else "text",
+                  "session_id": sid, "text": record.get("message")}
+        if image_paths:
+            action["image_paths"] = image_paths
+        # Queue-owned image paths are server-internal and already confined by
+        # OutboxManager. Do not send them through public act(), which accepts
+        # opaque upload IDs only.
+        result = (self.codex.act(action) if image_paths and
+                  record.get("target_provider") == "codex" else self.act(action))
         return {"ok": bool(result.get("ok")), "provider": record.get("target_provider"),
                 "session_id": sid, "accepted": bool(result.get("ok")),
-                "error": result.get("error")}
+                "error": result.get("error"), "code": result.get("code"),
+                "queueable": bool(result.get("queueable"))}
+
+    def _queue_codex_recovery(self, action):
+        image_paths = list(action.get("image_paths") or [])
+        message = str(action.get("text") or "").strip()
+        if not message and image_paths:
+            message = ("Please inspect the attached image." if len(image_paths) == 1 else
+                       "Please inspect the attached images.")
+        try:
+            item = self.outbox.create_recovery(
+                message=message,
+                target_provider="codex",
+                target_session_id=str(action.get("session_id") or ""),
+                idempotency_key=action.get("client_request_id"),
+                image_paths=image_paths)
+            return {"ok": True, "queued": True, "outbox_id": item["id"],
+                    "queue_state": item["state"],
+                    "message": "Queued until Codex control reconnects"}
+        except OutboxError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code}
+        except Exception as exc:
+            print(f"Codex recovery queue failed: {exc}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "message could not be saved to the recovery queue"}
 
     def _outbox_spawn(self, record):
         spec = dict(record.get("spawn_spec") or {})
@@ -5490,7 +5614,14 @@ Treat this as an independent session. Verify the repository state before changin
             if action.get("type") == "close" and action.get("cleanup_ticket") and \
                not self._cleanup_ticket_matches(action.get("cleanup_ticket"), sid):
                 return {"ok": False, "error": "cleanup preview expired — refresh before closing"}
+            if action.get("type") in ("text", "image_text") and session and \
+                    (session.get("capabilities") or {}).get("queue_submit"):
+                return self._queue_codex_recovery(action)
             result = self.codex.act(action)
+            if (action.get("type") in ("text", "image_text") and
+                    (result.get("queueable") or
+                     result.get("code") == "provider_control_unavailable")):
+                return self._queue_codex_recovery(action)
             if action.get("type") == "close" and result.get("ok"):
                 self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
             return result
@@ -5724,15 +5855,20 @@ Treat this as an independent session. Verify the repository state before changin
                 steps = [(txt, True)]
             else:
                 return {"ok": False, "error": "unknown action type"}
-        tty = self._tty_for_pid(reg["pid"])     # a pid's tty never changes
-        if not tty:
-            return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
         # The 0.4s inter-key delay is load-bearing ONLY for the ask-TUI key sequences
         # (digits/arrows/CR need a render between them, or keys get dropped — invariant
         # 4). Typing a message or focusing a tab is one or two keys with nothing to
         # re-render, so those wait 0.05s and the click stops feeling laggy.
         fast = typ in ("text", "image_text", "handoff_text", "relay", "focus", "interrupt", "noop")
-        result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05 if fast else 0.4)
+        step_delay = 0.05 if fast else 0.4
+        if self._is_background_claude(reg):
+            result = (self._focus_background_claude(reg) if typ == "focus" else
+                      self._write_background_claude(reg, steps, step_delay))
+        else:
+            tty = self._tty_for_pid(reg["pid"])     # a pid's tty never changes
+            if not tty:
+                return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
+            result = self._iterm_write(f"/dev/{tty}", steps, step_delay=step_delay)
         if typ == "permission_mode" and result.get("ok"):
             # Claude may defer its transcript marker until the next prompt. Keep
             # Fleet's state responsive; the next native row remains authoritative.

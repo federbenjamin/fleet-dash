@@ -99,6 +99,37 @@ def base_session(provider, sid, title):
     return session
 
 
+def fixture_notification_policy(now):
+    kinds = ("question", "approval", "form", "reply", "failure", "stall",
+             "completion", "artifact", "outcome", "budget", "measurement",
+             "notification")
+    active = {"question": 1, "failure": 1}
+    rules = []
+    for kind in kinds:
+        attention = kind in {"question", "approval", "form", "reply", "failure"}
+        rules.append({"kind": kind,
+            "mode": "remind_once" if attention else "once" if kind == "stall" else "off",
+            "minimum_severity": "info", "initial_delay_seconds": 0,
+            "repeat_interval_seconds": 900,
+            "max_deliveries": 2 if attention else 1,
+            "allow_during_quiet_hours": False, "effective_after": 0,
+            "revision": 1, "updated_at": now,
+            "active_matches": active.get(kind, 0)})
+    return {"ok": True, "global": {"singleton_id": 1, "enabled": True,
+        "quiet_hours_enabled": False, "quiet_start_minute": 1320,
+        "quiet_end_minute": 420, "timezone": "America/New_York",
+        "revision": 1, "updated_at": now, "quiet_now": False,
+        "quiet_ends_at": None}, "kinds": rules, "muted_sessions": [],
+        "next_deliveries": [{"id": "push-next", "event_id": "evt-1-question",
+            "device_id": "phone", "purpose": "reminder",
+            "next_attempt_at": now + 900, "status": "queued", "kind": "question",
+            "title": "Claude needs a decision"}],
+        "recent_deliveries": [{"id": "push-recent", "event_id": "evt-2-completion",
+            "device_id": "phone", "purpose": "initial", "status": "sent", "attempt": 1,
+            "remote_status": 201, "updated_at": now - 45, "kind": "completion",
+            "title": "Quick build finished"}]}
+
+
 def fixture_notification(sequence, kind, state, title, summary, provider="claude",
                          session_id=None, *, unread=False, snoozed_until=None,
                          link_kind=None, link_id=None):
@@ -225,6 +256,7 @@ def fresh_state():
             "briefing_reviewed": {}, "push_devices": {},
             "notification_events": notifications,
             "notification_read_cursors": {}, "muted_notification_sessions": [],
+            "notification_policy": fixture_notification_policy(now),
             "notification_delivery_problems": [{"id": "delivery-fixture-1",
                 "event_id": "evt-5-failure", "device_id": "expired-phone",
                 "generation": 1, "status": "subscription_expired", "attempt": 2,
@@ -883,7 +915,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # Superseded-request tests intentionally abort in-flight responses.
+            return
 
     def json_reply(self, data, code=200):
         self.reply(code, "application/json", json.dumps(data))
@@ -897,11 +933,18 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if route in ("/api/search", "/api/search/status", "/api/search/context",
                          "/api/handoff", "/api/repo", "/api/outbox",
-                         "/api/notifications", "/api/push/config", "/api/push/devices"):
+                         "/api/notifications", "/api/push/config", "/api/push/devices",
+                         "/api/notification-policy"):
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
                 if route == "/api/notifications":
                     return self.json_reply(fixture_notifications(query))
+                if route == "/api/notification-policy":
+                    policy = copy.deepcopy(STATE["notification_policy"])
+                    policy["muted_sessions"] = [{"session_id": sid, "provider": "claude",
+                        "muted_at": time.time() - 60}
+                        for sid in STATE["muted_notification_sessions"]]
+                    return self.json_reply(policy)
                 if route in ("/api/push/config", "/api/push/devices"):
                     device_id = (query.get("device") or
                         [self.headers.get("X-Fleet-Device-ID") or ""])[0]
@@ -917,6 +960,7 @@ class Handler(BaseHTTPRequestHandler):
                             "state": "ready"},
                         "queue": {"queued": 0, "failed": 0, "subscription_expired": 0},
                         "current_device": current,
+                        "devices": devices,
                         "registered_devices": len(devices),
                         "enabled_devices": sum(item.get("enabled") is True for item in devices)})
                 if route == "/api/repo":
@@ -1221,12 +1265,17 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/notifications/wake", "/api/notifications/mute",
                          "/api/notifications/retry", "/api/push/subscription",
                          "/api/push/test", "/api/push/device-settings",
-                         "/api/legacy-ntfy/test") \
+                         "/api/legacy-ntfy/test", "/api/notification-policy") \
                     and not authorized(self):
                 return self.json_reply({"ok": False, "error": "bad or missing act token"}, 403)
             if route == "/api/push/subscription":
                 device_id = str(payload.get("device_id") or "")
-                if payload.get("remove"):
+                if payload.get("forget"):
+                    device = STATE["push_devices"].pop(device_id, None)
+                    if not device:
+                        return self.json_reply({"ok": False, "error": "device not registered"})
+                    device = {"id": device_id, "removed": True}
+                elif payload.get("remove"):
                     device = STATE["push_devices"].get(device_id)
                     if not device:
                         return self.json_reply({"ok": False, "error": "device not registered"})
@@ -1244,6 +1293,36 @@ class Handler(BaseHTTPRequestHandler):
                         last_failure_at=None)
                     STATE["push_devices"][device_id] = device
                 return self.json_reply({"ok": True, "device": copy.deepcopy(device)})
+            if route == "/api/notification-policy":
+                policy = STATE["notification_policy"]
+                scope = payload.get("scope")
+                if scope == "global":
+                    target = policy["global"]
+                elif scope == "kind":
+                    target = next((item for item in policy["kinds"]
+                                   if item["kind"] == payload.get("kind")), None)
+                else:
+                    target = None
+                if not target:
+                    return self.json_reply({"ok": False, "error": "unknown policy target"}, 400)
+                if int(payload.get("expected_revision", -1)) != int(target["revision"]):
+                    return self.json_reply({"ok": False,
+                        "error": "notification policy changed; refresh and try again"}, 409)
+                patch = payload.get("patch") or {}
+                if scope == "kind" and patch.get("mode", target.get("mode")) == "repeat":
+                    interval = int(patch.get("repeat_interval_seconds",
+                                             target["repeat_interval_seconds"]))
+                    maximum = int(patch.get("max_deliveries", target["max_deliveries"]))
+                    if min(maximum, 1 + 86400 // max(1, interval)) > 12 and \
+                            payload.get("confirm_aggressive") is not True:
+                        return self.json_reply({"ok": False,
+                            "error": "this rule can send more than 12 pushes per day; confirm the high cadence"}, 409)
+                target.update(copy.deepcopy(patch), revision=int(target["revision"]) + 1,
+                              updated_at=time.time())
+                STATE["actions"].append({"type": "notification_policy", "scope": scope,
+                    "kind": payload.get("kind"), "patch": copy.deepcopy(patch),
+                    "apply_current": payload.get("apply_current") is True})
+                return self.json_reply(copy.deepcopy(policy))
             if route == "/api/push/device-settings":
                 device = STATE["push_devices"].get(str(payload.get("device_id") or ""))
                 if not device:

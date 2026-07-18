@@ -18,6 +18,8 @@ import time
 import uuid
 from collections import deque
 from urllib.parse import urlsplit
+from datetime import datetime, time as datetime_time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 EVENT_CATEGORIES = {
@@ -44,9 +46,25 @@ PUSH_DELIVERY_STATES = {
     "subscription_expired",
 }
 PUSH_RETRY_DELAYS = (2, 10, 30, 120, 600)
-PUSHABLE_KINDS = {"question", "approval", "form", "reply", "failure", "stall"}
+PUSHABLE_KINDS = set(NOTIFICATION_KINDS)
+INFORMATIONAL_NOTIFICATION_KINDS = {
+    "completion", "artifact", "outcome", "budget", "measurement", "notification"}
 PUSH_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 PUSH_DELIVERY_PURPOSES = {"initial", "reminder", "snooze_wake", "manual_retry", "test"}
+NOTIFICATION_POLICY_MODES = {"off", "once", "remind_once", "repeat"}
+DEFAULT_KIND_POLICY = {
+    kind: ({"mode": "once", "minimum_severity": "info",
+            "initial_delay_seconds": 0, "repeat_interval_seconds": 900,
+            "max_deliveries": 1, "allow_during_quiet_hours": False}
+           if kind == "stall" else
+           {"mode": "remind_once", "minimum_severity": "info",
+            "initial_delay_seconds": 0, "repeat_interval_seconds": 900,
+            "max_deliveries": 2, "allow_during_quiet_hours": False}
+           if kind in {"question", "approval", "form", "reply", "failure"} else
+           {"mode": "off", "minimum_severity": "info",
+            "initial_delay_seconds": 0, "repeat_interval_seconds": 900,
+            "max_deliveries": 1, "allow_during_quiet_hours": False})
+    for kind in NOTIFICATION_KINDS}
 
 
 class OperationsError(ValueError):
@@ -236,6 +254,31 @@ class FleetOperations:
                 action TEXT NOT NULL, expires_at REAL NOT NULL, consumed_at REAL NOT NULL)""")
             db.execute("""CREATE INDEX IF NOT EXISTS notification_capability_expiry
                 ON notification_capability_uses(expires_at)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_global_policy(
+                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+                enabled INTEGER NOT NULL, quiet_hours_enabled INTEGER NOT NULL,
+                quiet_start_minute INTEGER NOT NULL, quiet_end_minute INTEGER NOT NULL,
+                timezone TEXT NOT NULL, revision INTEGER NOT NULL, updated_at REAL NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS notification_kind_policy(
+                kind TEXT PRIMARY KEY, mode TEXT NOT NULL, minimum_severity TEXT NOT NULL,
+                initial_delay_seconds INTEGER NOT NULL, repeat_interval_seconds INTEGER NOT NULL,
+                max_deliveries INTEGER NOT NULL, allow_during_quiet_hours INTEGER NOT NULL,
+                effective_after REAL NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL, updated_at REAL NOT NULL)""")
+            now = self.clock()
+            db.execute("""INSERT OR IGNORE INTO notification_global_policy(
+                singleton_id,enabled,quiet_hours_enabled,quiet_start_minute,
+                quiet_end_minute,timezone,revision,updated_at)
+                VALUES(1,1,0,1320,420,'UTC',1,?)""", (now,))
+            for kind, policy in sorted(DEFAULT_KIND_POLICY.items()):
+                db.execute("""INSERT OR IGNORE INTO notification_kind_policy(
+                    kind,mode,minimum_severity,initial_delay_seconds,
+                    repeat_interval_seconds,max_deliveries,allow_during_quiet_hours,
+                    effective_after,revision,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?)""", (
+                    kind, policy["mode"], policy["minimum_severity"],
+                    policy["initial_delay_seconds"], policy["repeat_interval_seconds"],
+                    policy["max_deliveries"],
+                    1 if policy["allow_during_quiet_hours"] else 0, 0, now))
             device_columns = {row[1] for row in
                               db.execute("PRAGMA table_info(notification_devices)").fetchall()}
             if "test_success_at" not in device_columns:
@@ -247,6 +290,15 @@ class FleetOperations:
                     purpose TEXT NOT NULL DEFAULT 'initial'""")
             if "source_revision" not in delivery_columns:
                 db.execute("ALTER TABLE notification_deliveries ADD COLUMN source_revision TEXT")
+            if "cadence_index" not in delivery_columns:
+                db.execute("""ALTER TABLE notification_deliveries ADD COLUMN
+                    cadence_index INTEGER NOT NULL DEFAULT 0""")
+            if "global_policy_revision" not in delivery_columns:
+                db.execute("""ALTER TABLE notification_deliveries ADD COLUMN
+                    global_policy_revision INTEGER""")
+            if "kind_policy_revision" not in delivery_columns:
+                db.execute("""ALTER TABLE notification_deliveries ADD COLUMN
+                    kind_policy_revision INTEGER""")
             db.execute("""UPDATE notification_deliveries SET purpose='test'
                 WHERE event_id IN (SELECT id FROM notification_events
                     WHERE source_type='push_test')""")
@@ -414,6 +466,205 @@ class FleetOperations:
             health = "registered"
         item["health"] = health
         return item
+
+    @staticmethod
+    def _global_policy(row):
+        item = dict(row)
+        item["enabled"] = bool(item["enabled"])
+        item["quiet_hours_enabled"] = bool(item["quiet_hours_enabled"])
+        return item
+
+    @staticmethod
+    def _kind_policy(row):
+        item = dict(row)
+        item["allow_during_quiet_hours"] = bool(item["allow_during_quiet_hours"])
+        return item
+
+    @staticmethod
+    def _local_boundary_epoch(day, minute, zone):
+        """Resolve a wall-clock quiet boundary safely across DST transitions.
+
+        A repeated time uses the later occurrence so quiet hours do not end in
+        the middle of the repeated hour. A nonexistent spring-forward time
+        advances to the first real local minute.
+        """
+        naive = datetime.combine(
+            day, datetime_time(int(minute) // 60, int(minute) % 60))
+        for advance in range(181):
+            candidate = naive + timedelta(minutes=advance)
+            epochs = []
+            for fold in (0, 1):
+                aware = candidate.replace(tzinfo=zone, fold=fold)
+                epoch = aware.timestamp()
+                back = datetime.fromtimestamp(epoch, zone)
+                if back.replace(tzinfo=None) == candidate:
+                    epochs.append(epoch)
+            if epochs:
+                return max(set(epochs))
+        return naive.replace(tzinfo=zone).timestamp()
+
+    @staticmethod
+    def _quiet_state(policy, now):
+        if not policy.get("quiet_hours_enabled"):
+            return False, None
+        try:
+            zone = ZoneInfo(policy["timezone"])
+        except (KeyError, ZoneInfoNotFoundError):
+            zone = ZoneInfo("UTC")
+        current = datetime.fromtimestamp(float(now), zone)
+        start_minute = int(policy["quiet_start_minute"])
+        end_minute = int(policy["quiet_end_minute"])
+        if start_minute == end_minute:
+            return True, FleetOperations._local_boundary_epoch(
+                current.date() + timedelta(days=1), end_minute, zone)
+        minute = current.hour * 60 + current.minute
+        overnight = start_minute > end_minute
+        active = ((minute >= start_minute or minute < end_minute) if overnight else
+                  start_minute <= minute < end_minute)
+        if not active:
+            return False, None
+        end_day = current.date()
+        if overnight and minute >= start_minute:
+            end_day += timedelta(days=1)
+        return True, FleetOperations._local_boundary_epoch(end_day, end_minute, zone)
+
+    def notification_policy_snapshot(self):
+        with self.lock, self._connect() as db:
+            global_row = db.execute(
+                "SELECT * FROM notification_global_policy WHERE singleton_id=1").fetchone()
+            kind_rows = db.execute(
+                "SELECT * FROM notification_kind_policy ORDER BY kind").fetchall()
+            active_counts = {row[0]: int(row[1]) for row in db.execute("""
+                SELECT kind,COUNT(*) FROM notification_events
+                WHERE state='active' GROUP BY kind""").fetchall()}
+            next_rows = db.execute("""SELECT d.id,d.event_id,d.device_id,d.purpose,
+                    d.next_attempt_at,d.status,e.kind,e.title
+                FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id
+                WHERE d.status IN ('queued','retrying') ORDER BY d.next_attempt_at LIMIT 20""").fetchall()
+            recent_rows = db.execute("""SELECT d.id,d.event_id,d.device_id,d.purpose,
+                    d.status,d.attempt,d.remote_status,d.updated_at,e.kind,e.title
+                FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id
+                WHERE d.status IN ('sent','failed','suppressed','subscription_expired')
+                ORDER BY d.updated_at DESC LIMIT 30""").fetchall()
+            muted = [dict(row) for row in db.execute("""SELECT session_id,provider,muted_at
+                FROM notification_session_mutes ORDER BY muted_at DESC LIMIT 1000""").fetchall()]
+        kinds = []
+        for row in kind_rows:
+            item = self._kind_policy(row)
+            item["active_matches"] = active_counts.get(item["kind"], 0)
+            kinds.append(item)
+        quiet, quiet_end = self._quiet_state(self._global_policy(global_row), self.clock())
+        return {"ok": True, "global": {**self._global_policy(global_row),
+                    "quiet_now": quiet, "quiet_ends_at": quiet_end},
+                "kinds": kinds, "muted_sessions": muted,
+                "next_deliveries": [dict(row) for row in next_rows],
+                "recent_deliveries": [dict(row) for row in recent_rows]}
+
+    def notification_policy_update(self, payload):
+        if not isinstance(payload, dict):
+            raise OperationsError("invalid notification policy update")
+        scope = payload.get("scope")
+        patch = payload.get("patch")
+        if not isinstance(patch, dict) or not patch:
+            raise OperationsError("notification policy update is empty")
+        try:
+            expected = int(payload.get("expected_revision"))
+        except (TypeError, ValueError):
+            raise OperationsError("notification policy revision is required")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            if scope == "global":
+                allowed = {"enabled", "quiet_hours_enabled", "quiet_start_minute",
+                           "quiet_end_minute", "timezone"}
+                if set(patch) - allowed:
+                    raise OperationsError("unknown global notification setting")
+                row = db.execute(
+                    "SELECT * FROM notification_global_policy WHERE singleton_id=1").fetchone()
+                if int(row["revision"]) != expected:
+                    raise OperationsError("notification policy changed; refresh and try again")
+                values = dict(row)
+                values.update(patch)
+                for key in ("enabled", "quiet_hours_enabled"):
+                    if not isinstance(values[key], bool) and values[key] not in (0, 1):
+                        raise OperationsError(f"{key.replace('_', ' ')} must be on or off")
+                for key in ("quiet_start_minute", "quiet_end_minute"):
+                    if isinstance(values[key], bool) or not isinstance(values[key], (int, float)) \
+                       or int(values[key]) != values[key] or not 0 <= int(values[key]) < 1440:
+                        raise OperationsError("quiet-hour times are invalid")
+                try:
+                    ZoneInfo(str(values["timezone"]))
+                except (ZoneInfoNotFoundError, ValueError):
+                    raise OperationsError("quiet hours need a valid IANA timezone")
+                revision = expected + 1
+                changed = db.execute("""UPDATE notification_global_policy SET enabled=?,
+                    quiet_hours_enabled=?,quiet_start_minute=?,quiet_end_minute=?,timezone=?,
+                    revision=?,updated_at=? WHERE singleton_id=1 AND revision=?""", (
+                    1 if values["enabled"] else 0,
+                    1 if values["quiet_hours_enabled"] else 0,
+                    int(values["quiet_start_minute"]), int(values["quiet_end_minute"]),
+                    str(values["timezone"]), revision, now, expected)).rowcount
+                if not changed:
+                    raise OperationsError("notification policy changed; refresh and try again")
+                db.execute("""UPDATE notification_deliveries SET status='suppressed',
+                    error='global policy changed',updated_at=?
+                    WHERE status IN ('queued','retrying') AND purpose!='test'""", (now,))
+            elif scope == "kind":
+                kind = self._text(payload.get("kind"), 40)
+                if kind not in NOTIFICATION_KINDS:
+                    raise OperationsError("unknown notification kind")
+                allowed = {"mode", "minimum_severity", "initial_delay_seconds",
+                           "repeat_interval_seconds", "max_deliveries",
+                           "allow_during_quiet_hours"}
+                if set(patch) - allowed:
+                    raise OperationsError("unknown notification rule setting")
+                row = db.execute(
+                    "SELECT * FROM notification_kind_policy WHERE kind=?", (kind,)).fetchone()
+                if int(row["revision"]) != expected:
+                    raise OperationsError("notification rule changed; refresh and try again")
+                values = dict(row)
+                values.update(patch)
+                if values["mode"] not in NOTIFICATION_POLICY_MODES:
+                    raise OperationsError("unknown notification cadence")
+                if values["minimum_severity"] not in NOTIFICATION_SEVERITIES:
+                    raise OperationsError("unknown notification severity")
+                numeric = (("initial_delay_seconds", 0, 86400),
+                           ("repeat_interval_seconds", 60, 604800),
+                           ("max_deliveries", 1, 100))
+                for key, low, high in numeric:
+                    value = values[key]
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                       or int(value) != value or not low <= int(value) <= high:
+                        raise OperationsError(f"invalid {key.replace('_', ' ')}")
+                if not isinstance(values["allow_during_quiet_hours"], bool) and \
+                        values["allow_during_quiet_hours"] not in (0, 1):
+                    raise OperationsError("quiet-hours override must be on or off")
+                possible_daily = (1 if values["mode"] in ("off", "once") else
+                                  min(int(values["max_deliveries"]),
+                                      1 + 86400 // int(values["repeat_interval_seconds"])))
+                if possible_daily > 12 and payload.get("confirm_aggressive") is not True:
+                    raise OperationsError(
+                        "this rule can send more than 12 pushes per day; confirm the high cadence")
+                revision = expected + 1
+                effective_after = 0 if payload.get("apply_current") is True else now
+                changed = db.execute("""UPDATE notification_kind_policy SET mode=?,
+                    minimum_severity=?,initial_delay_seconds=?,repeat_interval_seconds=?,
+                    max_deliveries=?,allow_during_quiet_hours=?,effective_after=?,revision=?,
+                    updated_at=? WHERE kind=? AND revision=?""", (
+                    values["mode"], values["minimum_severity"],
+                    int(values["initial_delay_seconds"]),
+                    int(values["repeat_interval_seconds"]), int(values["max_deliveries"]),
+                    1 if values["allow_during_quiet_hours"] else 0,
+                    effective_after, revision, now, kind, expected)).rowcount
+                if not changed:
+                    raise OperationsError("notification rule changed; refresh and try again")
+                db.execute("""UPDATE notification_deliveries SET status='suppressed',
+                    error='event rule changed',updated_at=? WHERE status IN ('queued','retrying')
+                    AND purpose!='test'
+                    AND event_id IN (SELECT id FROM notification_events WHERE kind=?)""",
+                           (now, kind))
+            else:
+                raise OperationsError("unknown notification policy scope")
+        return self.notification_policy_snapshot()
 
     @staticmethod
     def _signature(value):
@@ -765,12 +1016,18 @@ class FleetOperations:
         return (PUSH_SEVERITY_RANK.get(event["severity"], -1) >=
                 PUSH_SEVERITY_RANK.get(minimum, 0))
 
-    def _policy_delivery_insert(self, db, event, device, purpose, due, now):
+    def _policy_delivery_insert(self, db, event, device, purpose, due, now, *,
+                                cadence_index=0, global_revision=None,
+                                kind_revision=None):
         if purpose not in PUSH_DELIVERY_PURPOSES:
             raise OperationsError("invalid notification delivery purpose")
         existing = db.execute("""SELECT * FROM notification_deliveries
-            WHERE event_id=? AND device_id=? AND purpose=? ORDER BY generation DESC LIMIT 1""",
-            (event["id"], device["id"], purpose)).fetchone()
+            WHERE event_id=? AND device_id=? AND purpose=? AND cadence_index=?
+            AND source_revision=? AND COALESCE(global_policy_revision,-1)=COALESCE(?,-1)
+            AND COALESCE(kind_policy_revision,-1)=COALESCE(?,-1)
+            ORDER BY generation DESC LIMIT 1""",
+            (event["id"], device["id"], purpose, cadence_index,
+             event["source_revision"], global_revision, kind_revision)).fetchone()
         if existing:
             return False
         queued = int(db.execute("""SELECT COUNT(*) FROM notification_deliveries
@@ -785,14 +1042,16 @@ class FleetOperations:
             (event["id"], device["id"])).fetchone()[0])
         db.execute("""INSERT INTO notification_deliveries(
             id,event_id,device_id,generation,purpose,source_revision,status,attempt,
-            next_attempt_at,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,'queued',0,?,?,?)""", (
+            next_attempt_at,created_at,updated_at,cadence_index,
+            global_policy_revision,kind_policy_revision)
+            VALUES(?,?,?,?,?,?,'queued',0,?,?,?,?,?,?)""", (
             delivery_id, event["id"], device["id"], generation, purpose,
-            event["source_revision"], max(now, float(due)), now, now))
+            event["source_revision"], max(now, float(due)), now, now,
+            int(cadence_index), global_revision, kind_revision))
         return True
 
     def _schedule_notification_deliveries(self, db, now):
-        """Apply the settled push policy in the same transaction as reconciliation."""
+        """Apply global, per-kind, quiet-hour, mute, and cadence policy."""
         expired = db.execute("""SELECT id FROM notification_events
             WHERE state='snoozed' AND snoozed_until IS NOT NULL AND snoozed_until<=?""",
             (now,)).fetchall()
@@ -806,8 +1065,20 @@ class FleetOperations:
             AND purpose IN ('initial','reminder') AND event_id IN
                 (SELECT id FROM notification_events WHERE state='snoozed')""", (now,))
 
+        global_row = db.execute(
+            "SELECT * FROM notification_global_policy WHERE singleton_id=1").fetchone()
+        global_policy = self._global_policy(global_row)
+        if not global_policy["enabled"]:
+            db.execute("""UPDATE notification_deliveries SET status='suppressed',
+                error='push policy disabled',updated_at=? WHERE status IN ('queued','retrying')
+                AND purpose!='test'""",
+                       (now,))
+            return 0
+        kind_policy = {row["kind"]: self._kind_policy(row) for row in db.execute(
+            "SELECT * FROM notification_kind_policy").fetchall()}
         events = db.execute("""SELECT * FROM notification_events
-            WHERE state='active' AND kind IN ('question','approval','form','reply','failure','stall')
+            WHERE state='active' OR (state='resolved' AND kind IN
+                ('completion','artifact','outcome','budget','measurement','notification'))
             ORDER BY sequence""").fetchall()
         devices = db.execute("""SELECT * FROM notification_devices
             WHERE enabled=1 AND permission_state='granted' AND subscription_json!='{}'
@@ -816,6 +1087,13 @@ class FleetOperations:
             ORDER BY id""").fetchall()
         inserted = 0
         for event in events:
+            rule = kind_policy.get(event["kind"])
+            if (not rule or rule["mode"] == "off" or
+                    PUSH_SEVERITY_RANK.get(event["severity"], -1) <
+                    PUSH_SEVERITY_RANK.get(rule["minimum_severity"], 0) or
+                    max(float(event["opened_at"]), float(event["changed_at"])) <=
+                    float(rule["effective_after"] or 0)):
+                continue
             if event["session_id"] and db.execute(
                     "SELECT 1 FROM notification_session_mutes WHERE session_id=?",
                     (event["session_id"],)).fetchone():
@@ -826,8 +1104,6 @@ class FleetOperations:
                     continue
                 if event["source_type"] == "delivery" and event["source_id"] == device["id"]:
                     continue
-                if not self._push_preferences_allow(event, device):
-                    continue
                 eligible.append(device)
 
             if event["id"] in expired_ids:
@@ -837,35 +1113,38 @@ class FleetOperations:
                 if not prior_wake:
                     for device in eligible:
                         inserted += self._policy_delivery_insert(
-                            db, event, device, "snooze_wake", now, now)
+                            db, event, device, "snooze_wake", now, now,
+                            cadence_index=0, global_revision=global_policy["revision"],
+                            kind_revision=rule["revision"])
                 continue
-
             for device in eligible:
-                try:
-                    preferences = json.loads(device["preferences_json"] or "{}")
-                except (TypeError, ValueError):
+                sent_rows = db.execute("""SELECT updated_at FROM notification_deliveries
+                    WHERE event_id=? AND device_id=? AND source_revision=? AND status='sent'
+                    AND purpose IN ('initial','reminder','snooze_wake')
+                    ORDER BY updated_at""", (
+                    event["id"], device["id"], event["source_revision"])).fetchall()
+                sent_count = len(sent_rows)
+                maximum = (1 if rule["mode"] == "once" else
+                           2 if rule["mode"] == "remind_once" else
+                           int(rule["max_deliveries"]))
+                if event["state"] == "resolved":
+                    maximum = 1
+                if sent_count >= maximum:
                     continue
-                delay = max(0, min(3600, int(preferences.get(
-                    "initial_delay_seconds") or 0)))
+                cadence_index = sent_count
+                purpose = "initial" if sent_count == 0 else "reminder"
+                due = (float(event["opened_at"]) + int(rule["initial_delay_seconds"])
+                       if sent_count == 0 else
+                       float(sent_rows[-1]["updated_at"]) +
+                       int(rule["repeat_interval_seconds"]))
+                quiet, quiet_end = self._quiet_state(global_policy, max(now, due))
+                if quiet and not rule["allow_during_quiet_hours"]:
+                    due = max(due, quiet_end or due)
                 inserted += self._policy_delivery_insert(
-                    db, event, device, "initial", float(event["opened_at"]) + delay, now)
-
-            if event["kind"] == "stall" or int(event["reminder_budget"] or 0) <= 0:
-                continue
-            first_sent = db.execute("""SELECT MIN(updated_at) FROM notification_deliveries
-                WHERE event_id=? AND purpose='initial' AND status='sent'""",
-                (event["id"],)).fetchone()[0]
-            if first_sent is None or now < float(first_sent) + 900:
-                continue
-            db.execute("UPDATE notification_events SET reminder_budget=0 WHERE id=?",
-                       (event["id"],))
-            for device in eligible:
-                initial_sent = db.execute("""SELECT 1 FROM notification_deliveries
-                    WHERE event_id=? AND device_id=? AND purpose='initial' AND status='sent'""",
-                    (event["id"], device["id"])).fetchone()
-                if initial_sent:
-                    inserted += self._policy_delivery_insert(
-                        db, event, device, "reminder", now, now)
+                    db, event, device, purpose, due, now,
+                    cadence_index=cadence_index,
+                    global_revision=global_policy["revision"],
+                    kind_revision=rule["revision"])
         return inserted
 
     @staticmethod
@@ -1676,6 +1955,27 @@ class FleetOperations:
                              (device_id,)).fetchone()
         return self._notification_device(row)
 
+    def notification_forget_device(self, device_id):
+        """Forget a disconnected device without erasing delivery history."""
+        device_id = str(device_id or "")
+        if not DEVICE_RE.fullmatch(device_id):
+            raise OperationsError("invalid notification device")
+        now = self.clock()
+        with self.lock, self._transaction(immediate=True) as db:
+            current = db.execute(
+                "SELECT id FROM notification_devices WHERE id=?", (device_id,)).fetchone()
+            if not current:
+                raise OperationsError("notification device is not registered")
+            # A claimed worker revalidates the device before delivery. Everything
+            # still queued can be made terminal immediately and remains useful as
+            # bounded delivery-history evidence.
+            db.execute("""UPDATE notification_deliveries
+                SET status='suppressed',error='device removed',lease_until=NULL,updated_at=?
+                WHERE device_id=? AND status IN ('queued','retrying')""", (now, device_id))
+            db.execute("DELETE FROM notification_read_cursors WHERE device_id=?", (device_id,))
+            db.execute("DELETE FROM notification_devices WHERE id=?", (device_id,))
+        return {"id": device_id, "removed": True}
+
     def notification_mark_read(self, device_id, cursor):
         device_id = str(device_id or "")
         if not DEVICE_RE.fullmatch(device_id):
@@ -1953,6 +2253,7 @@ class FleetOperations:
                 except (TypeError, ValueError):
                     event_payload = {}
                 terminal = None
+                hold_until = None
                 if row["event_state"] is None or row["enabled"] is None:
                     terminal = "failed"
                 elif row["purpose"] not in PUSH_DELIVERY_PURPOSES:
@@ -1963,14 +2264,14 @@ class FleetOperations:
                     terminal = "suppressed"
                 elif row["permission_state"] != "granted" or row["subscription_json"] == "{}":
                     terminal = "subscription_expired"
-                elif row["event_state"] != "active" and not event_payload.get("push_test"):
+                elif (row["event_state"] != "active" and
+                      not (row["event_state"] == "resolved" and
+                           row["kind"] in INFORMATIONAL_NOTIFICATION_KINDS) and
+                      not event_payload.get("push_test")):
                     terminal = "suppressed"
                 elif (not event_payload.get("push_test") and
                       (row["kind"] not in PUSHABLE_KINDS or not row["test_success_at"] or
                        int(row["sequence"] or 0) <= int(row["read_cursor"] or 0))):
-                    terminal = "suppressed"
-                elif (not event_payload.get("push_test") and
-                      not self._push_preferences_allow(row, row)):
                     terminal = "suppressed"
                 elif (row["source_type"] == "delivery" and
                       row["source_id"] == row["device_id"]):
@@ -1979,6 +2280,29 @@ class FleetOperations:
                         "SELECT 1 FROM notification_session_mutes WHERE session_id=?",
                         (row["session_id"],)).fetchone():
                     terminal = "suppressed"
+                elif (not event_payload.get("push_test") and
+                      row["global_policy_revision"] is not None):
+                    global_row = db.execute("""SELECT * FROM notification_global_policy
+                        WHERE singleton_id=1""").fetchone()
+                    rule_row = db.execute("""SELECT * FROM notification_kind_policy
+                        WHERE kind=?""", (row["kind"],)).fetchone()
+                    if (not global_row or not rule_row or not global_row["enabled"] or
+                            rule_row["mode"] == "off" or
+                            int(row["global_policy_revision"]) != int(global_row["revision"]) or
+                            int(row["kind_policy_revision"] or -1) != int(rule_row["revision"]) or
+                            PUSH_SEVERITY_RANK.get(row["severity"], -1) <
+                            PUSH_SEVERITY_RANK.get(rule_row["minimum_severity"], 0)):
+                        terminal = "suppressed"
+                    elif not rule_row["allow_during_quiet_hours"]:
+                        quiet, quiet_end = self._quiet_state(
+                            self._global_policy(global_row), now)
+                        if quiet:
+                            hold_until = quiet_end
+                if hold_until and not terminal:
+                    db.execute("""UPDATE notification_deliveries SET status='queued',
+                        next_attempt_at=?,error='held for quiet hours',updated_at=? WHERE id=?""",
+                               (hold_until, now, row["id"]))
+                    continue
                 if terminal:
                     db.execute("""UPDATE notification_deliveries SET status=?,error=?,
                         updated_at=? WHERE id=?""",

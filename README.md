@@ -292,11 +292,10 @@ the provider without affecting Claude sessions.
   The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
-  file chip in the chat view opens that file (chat closes), and the viewer's own **⤢ full view**
-  button (right of "show conversation") takes you straight back. The two are built to resemble
-  each other — same docked bar, same file strip (one shared builder), same send box — so swapping
-  feels like changing what's on screen, not changing screens. Session chat, Markdown, and subagent
-  chat also share the persisted reading-width setting.
+  file chip in chat opens that file, while the viewer's **Chat** button opens the canonical full
+  conversation and preserves the current draft. Both surfaces call the same composer renderer and
+  therefore have the same textarea, ＋ menu, image drafts, Send behavior, and delivery feedback.
+  Session chat, Markdown, and subagent chat also share the persisted reading-width setting.
 - **Tap a card** → detail panel, top to bottom: recent conversation (with its ⤢ full-view
   button), a one-line horizontal strip of delivered-file chips (quick open), then the "session
   info" (full session id, pid, cwd,
@@ -340,6 +339,10 @@ the provider without affecting Claude sessions.
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.
+  If Fleet itself is online but temporarily loses control of a Fleet-owned active Codex turn, the
+  exact text/images enter the server Outbox once and show **Waiting for Codex connection**. A safe
+  reconnect steers the active turn or starts the next turn after authoritative completion; ambiguous
+  state keeps waiting and never forces a resume or duplicate retry.
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.
@@ -355,10 +358,9 @@ the provider without affecting Claude sessions.
   is persisted per device and shared with the full chat and subagent views. A **📄 files strip**
   (header button) expands a one-line horizontally
   scrolling selector of everything the session delivered, for switching files without leaving
-  the viewer; and a **docked action bar** at the bottom carries, top to bottom: a
-  "▸ show conversation" toggle (expands the session's recent conversation, scrollable), the
-  pending question (collapsible via "▾ hide question"; full option descriptions, Other input,
-  ✕ dismiss), and the always-visible free-text send box.
+  the viewer. Its docked action bar has no embedded conversation disclosure: it uses the canonical
+  composer, with **Chat** directly above **Send** to the right of the textarea. The ＋ menu owns
+  **Send picture** and **Schedule message** on both reading surfaces.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
 - **History destination:** inactive sessions plus every surviving top-level Claude transcript
@@ -486,13 +488,25 @@ with staging.
 3. On the phone, open that URL once with `?token=<act_token>` appended (get it via:
    `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash/config.json'))['act_token'])"`).
 4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
-   **Fleet app & Web Push**. Notification permission is requested only from the explicit Enable
+   **Devices & delivery**. Notification permission is requested only from the explicit Enable
    button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
 5. Click **Send test**. Fleet queues the encrypted minimal test immediately; Settings then reports
    device delivery health and qualifies that exact subscription for production delivery. Replacing
    a browser subscription requires a fresh successful test. Web Push is the only automatic external
    path. The separate legacy ntfy switch permits only a generic manual test; it is never automatic,
    a fallback, or a duplicate destination.
+
+**Devices & delivery** lists every connected browser. The current browser keeps its setup controls;
+other devices can be renamed, tested, paused/resumed, or removed remotely. Removing a device revokes
+its subscription and suppresses queued delivery while retaining redacted delivery history.
+
+Settings → **Notifications** controls one global push policy shared by every enabled device. It has
+a master switch, quiet hours/timezone, and a rule for each event kind. A rule may be Off, Once,
+Once + reminder, or Repeat until resolved, with bounded delay, interval, maximum count, minimum
+severity, and optional quiet-hours bypass. Changing an Off rule does not backfill existing active
+events unless you explicitly select **Apply this change**. Session mute and event snooze always
+override the global rule; a muted session stays muted until manually unmuted in Settings → Sessions.
+The section also shows the exact next due push and the most recent delivery outcome.
 
 ## Config (`config.json`)
 
@@ -595,10 +609,11 @@ same request/result files. The staging applet receives its own one-time iTerm au
 
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
-- Claude background forks can report no controlling tty through `ps` while still keeping their
-  live iTerm pseudo-terminal open. Fleet validates fd 0/1/2 with `lsof` as a fallback and keeps
-  those sessions interactive. A true Claude VS Code extension session has no `/dev/ttys…` route
-  and remains view-only (injection reports "no terminal").
+- Claude background jobs do not have an iTerm route. Fleet controls a validated eight-character
+  background job through Claude Code's official `claude attach <job>` client in a private PTY,
+  detaches with Ctrl-Z after each action, and uses `claude stop <job>` for close. A true Claude VS
+  Code extension session has neither that background-job identity nor a terminal route and remains
+  view-only.
 - ChatGPT Desktop and Codex VS Code do not expose their private App Server endpoint to Fleet Dash, so
   those transcripts are view-only. Managed Codex threads can open an attached TUI on Fleet's shared
   socket, but Fleet cannot focus an already-open Codex terminal tab.

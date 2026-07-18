@@ -21,7 +21,10 @@ from repo_center import observed_test_outcome
 
 
 class CodexError(RuntimeError):
-    pass
+    def __init__(self, message, *, code="codex_error", queueable=False):
+        super().__init__(message)
+        self.code = code
+        self.queueable = bool(queueable)
 
 
 def codex_command(configured=None):
@@ -387,8 +390,10 @@ class CodexAppServer:
 
     def close(self):
         with self.lock:
+            closing_generation = self.generation
             proc, self.proc = self.proc, None
             self.generation += 1
+            self._invalidate_turn_control_locked(closing_generation)
             waiters = list(self.pending.values())
             self.pending.clear()
         if proc and proc.poll() is None:
@@ -396,6 +401,28 @@ class CodexAppServer:
         for waiter in waiters:
             waiter["error"] = {"message": "Codex app-server closed"}
             waiter["event"].set()
+
+    def _invalidate_turn_control_locked(self, generation):
+        """Drop turn authority issued by one dead client connection.
+
+        The transcript and a subsequent thread/read may still prove that work is
+        active.  They do not prove that this WebSocket still owns the live turn.
+        """
+        for state in self.thread_state.values():
+            if state.get("turn_generation") != generation:
+                continue
+            state["turn_id"] = None
+            state["turn_generation"] = None
+            state["control_lost_at"] = self.clock()
+            state["revision"] = state.get("revision", 0) + 1
+
+    def owns_active_turn(self, thread_id):
+        with self.lock:
+            state = self.thread_state.get(thread_id, {})
+            return bool(
+                state.get("turn_id") and
+                state.get("turn_generation") == self.generation and
+                self.proc is not None and self.proc.poll() is None)
 
     def _send(self, message):
         try:
@@ -490,6 +517,7 @@ class CodexAppServer:
                 except Exception:
                     pass
             with self.lock:
+                self._invalidate_turn_control_locked(reader_generation)
                 waiter_ids = [rid for rid, waiter in self.pending.items()
                               if waiter.get("generation") == reader_generation]
                 waiters = [self.pending.pop(rid) for rid in waiter_ids]
@@ -563,7 +591,9 @@ class CodexAppServer:
             state["revision"] = state.get("revision", 0) + 1
             if method == "turn/started":
                 turn = params.get("turn") or {}
-                state.update(status="running", turn_id=turn.get("id"), error=None)
+                state.update(status="running", turn_id=turn.get("id"),
+                             turn_generation=self.generation,
+                             control_lost_at=None, error=None)
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
                 status = turn.get("status") or "completed"
@@ -572,7 +602,7 @@ class CodexAppServer:
                 state.update(status=("blocked" if failed_status and
                                      _is_limit_error(turn_error) else
                                      "error" if failed_status else "idle"),
-                             turn_id=None, completed_at=now,
+                             turn_id=None, turn_generation=None, completed_at=now,
                              turn_status=status, error=turn_error or None)
             elif method == "thread/tokenUsage/updated":
                 state["token_usage"] = params.get("tokenUsage") or params.get("usage") or {}
@@ -700,20 +730,33 @@ class CodexAppServer:
             params["model"] = model
         if effort:
             params["effort"] = effort
-        return self.request("turn/start", params)
+        result = self.request("turn/start", params)
+        turn = result.get("turn") or result
+        turn_id = turn.get("id") or result.get("turnId")
+        if turn_id:
+            with self.lock:
+                self.thread_state.setdefault(thread_id, {}).update(
+                    status="running", turn_id=turn_id,
+                    turn_generation=self.generation, control_lost_at=None)
+        return result
 
     def steer_turn(self, thread_id, text, inputs=None):
-        turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
-        if not turn_id:
-            raise CodexError("Codex thread has no active turn to steer")
+        with self.lock:
+            turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
+        if not turn_id or not self.owns_active_turn(thread_id):
+            raise CodexError(
+                "Codex control connection was lost; the message can be queued safely",
+                code="provider_control_unavailable", queueable=True)
         return self.request("turn/steer", {"threadId": thread_id,
                                             "expectedTurnId": turn_id,
                                             "input": inputs or [{"type": "text", "text": text}]})
 
     def interrupt(self, thread_id):
-        turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
-        if not turn_id:
-            raise CodexError("Codex thread has no active turn")
+        with self.lock:
+            turn_id = self.thread_state.get(thread_id, {}).get("turn_id")
+        if not turn_id or not self.owns_active_turn(thread_id):
+            raise CodexError("Codex control connection was lost",
+                             code="provider_control_unavailable")
         return self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
     def archive(self, thread_id):
@@ -870,6 +913,14 @@ class CodexAdapter:
     @staticmethod
     def native(key):
         return key.split(":", 1)[1] if str(key).startswith("codex:") else key
+
+    def _owns_active_turn(self, thread_id):
+        checker = getattr(self.client, "owns_active_turn", None)
+        if checker:
+            return bool(checker(thread_id))
+        # Test/alternate clients predate connection generations. Production's
+        # CodexAppServer always uses the strict generation check above.
+        return bool(self.client.thread_state.get(thread_id, {}).get("turn_id"))
 
     def track_external(self, keys):
         """Choose external threads whose local lifecycle should be observed.
@@ -1083,17 +1134,14 @@ class CodexAdapter:
                 revision = observation["revision"]
             if is_managed and not detail_error:
                 self._cache_snapshot(tid, messages, files, revision, thread)
-            canonical_turn_id = live.get("turn_id")
-            if is_managed and not canonical_turn_id and observed_running:
-                canonical_turn_id = turn_lifecycle.get("turn_id")
-                if canonical_turn_id:
-                    live["turn_id"] = canonical_turn_id
-                    live["status"] = "running"
-            owned_turn = bool(canonical_turn_id)
+            owned_turn = is_managed and self._owns_active_turn(tid)
             can_interrupt = (is_managed and owned_turn and
                              state in ("running", "stalled", "needs_you"))
             uncontrolled_active = (state in ("running", "stalled", "needs_you") and
                                    not can_interrupt)
+            control_state = ("connected_active" if owned_turn else
+                             "reconnecting" if is_managed and uncontrolled_active else
+                             "connected_idle" if is_managed else "view_only")
             materialized = not bool((thread_meta.get(tid) or {}).get("unmaterialized"))
             can_attach = (is_managed and materialized and
                           state not in ("running", "stalled", "needs_you"))
@@ -1124,6 +1172,9 @@ class CodexAdapter:
                 "observation_confidence": (observation or {}).get("confidence"),
                 "observation_warning": ((observation or {}).get("warning") or
                                         (observation or {}).get("error")),
+                "control_state": control_state,
+                "queue_accepting": bool(is_managed and uncontrolled_active and
+                                        state not in ("blocked", "error", "stale")),
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx_tokens,
                 "ctx_window": ctx_window,
@@ -1138,6 +1189,8 @@ class CodexAdapter:
                 "error": provider_error or None, "refresh_warning": detail_error,
                 "capabilities": {"submit": is_managed and
                     state not in ("blocked", "error", "stale") and not uncontrolled_active,
+                    "queue_submit": bool(is_managed and uncontrolled_active and
+                                         state not in ("blocked", "error", "stale")),
                     "interrupt": can_interrupt,
                     "takeover": False, "archive": is_managed,
                     "close": is_managed and not uncontrolled_active,
@@ -1186,7 +1239,7 @@ class CodexAdapter:
                     tid, meta, modes.get(tid) or "default")
                 pending = self._pending(tid, live.get("pending"))
                 completed_at = _epoch(live.get("completed_at"))
-                owned_turn = bool(live.get("turn_id"))
+                owned_turn = self._owns_active_turn(tid)
                 active = live.get("status") == "running" or owned_turn
                 if pending:
                     state = "needs_you"
@@ -1206,6 +1259,7 @@ class CodexAdapter:
                 uncontrolled_active = state in ("running", "needs_you") and not owned_turn
                 capabilities.update(
                     submit=not uncontrolled_active,
+                    queue_submit=uncontrolled_active,
                     interrupt=owned_turn and state in ("running", "needs_you"),
                     close=not uncontrolled_active,
                     focus_terminal=False,
@@ -1216,6 +1270,10 @@ class CodexAdapter:
                         "Wait for the current Codex turn to finish before attaching"
                         if state in ("running", "needs_you") else
                         "Fleet is syncing this Codex session with the shared App Server"))
+                fallback["control_state"] = ("connected_active" if owned_turn else
+                                             "reconnecting" if uncontrolled_active else
+                                             "connected_idle")
+                fallback["queue_accepting"] = uncontrolled_active
                 out.append(fallback)
                 continue
             if meta.get("unmaterialized"):
@@ -1683,6 +1741,11 @@ class CodexAdapter:
                                    "relay": "relay_agent"}.get(typ)
             if known and required_capability and not known.get("capabilities", {}).get(
                     required_capability):
+                if (required_capability == "submit" and
+                        known.get("capabilities", {}).get("queue_submit")):
+                    return {"ok": False,
+                            "error": "Codex control is reconnecting; message can be queued",
+                            "code": "provider_control_unavailable", "queueable": True}
                 if known.get("state") in ("running", "stalled", "needs_you"):
                     return {"ok": False, "error":
                             "Codex is active in another client; control it there until the turn ends"}
@@ -1709,7 +1772,7 @@ class CodexAdapter:
                 effort = session.get("effort") or live.get("effort")
                 if mode == "plan" and not model:
                     return {"ok": False, "error": "Codex model is unavailable; refresh and try again"}
-                if live.get("status") == "running" and hasattr(self.client, "steer_turn"):
+                if self._owns_active_turn(tid) and hasattr(self.client, "steer_turn"):
                     if inputs:
                         self.client.steer_turn(tid, text, inputs=inputs)
                     else:
@@ -1811,7 +1874,7 @@ class CodexAdapter:
                     return {"ok": False, "error": "agent and message are required"}
                 relay = f"Relay this message to subagent {aid}: {text}"
                 live = self.client.thread_state.get(tid, {})
-                if live.get("status") == "running" and hasattr(self.client, "steer_turn"):
+                if self._owns_active_turn(tid) and hasattr(self.client, "steer_turn"):
                     self.client.steer_turn(tid, relay)
                 else:
                     with self._lock:
@@ -1826,7 +1889,10 @@ class CodexAdapter:
                 return {"ok": False, "error": f"Codex does not support {typ} here"}
             return {"ok": True}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            result = {"ok": False, "error": str(exc)}
+            if isinstance(exc, CodexError):
+                result.update(code=exc.code, queueable=exc.queueable)
+            return result
 
 
 def _epoch(value):
