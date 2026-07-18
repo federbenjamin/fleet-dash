@@ -1236,6 +1236,73 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('dismiss');
 });
 
+test('fullscreen question drawer preserves reading position and resizes from nearly full to collapsed', async ({ page }, testInfo) => {
+  await reset(page, 'long-multi-question');
+  await openAction(page, 'codex:thread-one');
+  const drawer=page.locator('#sact .question-drawer');
+  const scroll=page.locator('#sact .question-scroll');
+  const grip=page.locator('#sact .question-resizer');
+  await expect(drawer).toBeVisible();
+  await expect(scroll).toContainText('Target 18');
+  await expect(grip).toHaveCSS('touch-action','none');
+  const readingTop=await scroll.evaluate(element=>{
+    element.scrollTop=Math.max(1,element.scrollHeight-element.clientHeight-90);
+    return element.scrollTop;
+  });
+  expect(readingTop).toBeGreaterThan(0);
+  for(let index=0;index<3;index+=1)await refresh(page);
+  await expect.poll(()=>scroll.evaluate(element=>element.scrollTop)).toBeGreaterThan(readingTop-3);
+  await page.locator('#sact').getByRole('button',{name:/Target 18/}).click();
+  await expect.poll(()=>scroll.evaluate(element=>element.scrollTop)).toBeGreaterThan(readingTop-3);
+
+  const initial=await drawer.boundingBox();
+  const gripBox=await grip.boundingBox();
+  await page.mouse.move(gripBox.x+gripBox.width/2,gripBox.y+gripBox.height/2);
+  await page.mouse.down();
+  await page.mouse.move(gripBox.x+gripBox.width/2,1,{steps:8});
+  await page.mouse.up();
+  const expanded=await drawer.boundingBox();
+  expect(expanded.height).toBeGreaterThan(initial.height+20);
+  const geometry=await page.evaluate(()=>{
+    const view=document.querySelector('#sview').getBoundingClientRect();
+    const head=document.querySelector('#shead2').getBoundingClientRect();
+    const drawer=document.querySelector('#sact .question-drawer').getBoundingClientRect();
+    const composer=document.querySelector('#sact .composer-dock').getBoundingClientRect();
+    return {viewBottom:view.y+view.height,headBottom:head.y+head.height,drawerTop:drawer.y,
+      composerBottom:composer.y+composer.height};
+  });
+  expect(geometry.drawerTop).toBeLessThanOrEqual(geometry.headBottom+20);
+  expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
+
+  let expandedGrip=null;
+  await expect.poll(async()=>{
+    expandedGrip=await grip.boundingBox();
+    return Boolean(expandedGrip);
+  }).toBe(true);
+  await page.mouse.move(expandedGrip.x+expandedGrip.width/2,expandedGrip.y+expandedGrip.height/2);
+  await page.mouse.down();
+  await page.mouse.move(expandedGrip.x+expandedGrip.width/2,expandedGrip.y+1200,{steps:5});
+  await page.mouse.up();
+  await expect(drawer).toHaveClass(/collapsed/);
+  await expect(scroll).toHaveCount(0);
+  await expect(drawer.getByRole('button')).toContainText('expand');
+
+  await page.reload();
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(drawer).toHaveClass(/collapsed/);
+  await drawer.getByRole('button').click();
+  await expect(page.locator('#sact .question-scroll')).toBeVisible();
+  await drawer.locator('.question-drawer-toggle').click();
+  await expect(drawer).toHaveClass(/collapsed/);
+  await page.evaluate(()=>closeSession());
+  await page.evaluate(()=>openSessionQ('codex:thread-one'));
+  await expect(drawer).not.toHaveClass(/collapsed/);
+  const restored=await drawer.boundingBox();
+  expect(restored.height).toBeGreaterThanOrEqual(expanded.height-2);
+  await page.screenshot({path:testInfo.outputPath('resizable-question-drawer.png'),fullPage:true});
+});
+
 test('messages and question answers render optimistically and recover from failure', async ({ page }) => {
   await reset(page);
   await page.locator('[data-sid="codex:thread-one"] .shead').click();

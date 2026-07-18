@@ -323,7 +323,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `kind=provider_reconnect`, and a client-stable idempotency key. Queue-owned images are private
     copies. Reconnect to the same authoritative active turn steers once; authoritative completion
     starts one next turn; ambiguous state stays `waiting_provider`. Terminal failures are visible
-    and restorable but never auto-retried.
+    and restorable but never auto-retried. A synchronous `turn/steer` rejection saying there is no
+    active turn is the narrow definitive non-delivery exception: clear turn authority and stale
+    running evidence, then retry the exact text/image payload once through `turn/start`. An expected-
+    turn mismatch instead proves that another turn exists: clear local authority and queue the
+    payload. Timeouts and unknown errors remain ambiguous and must never trigger a direct retry.
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
@@ -600,6 +604,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     focus; checkbox state never blocks a legitimate refresh. Policy edits lock their
     own row while saving, use expected revisions, paint Saved/Error in place, and roll back on
     failure. Muted-session search filters existing rows in place so typing focus survives.
+60. **A fullscreen question is a persistent, independently scrollable drawer.** `#sact` renders a
+    `.question-drawer` keyed by session id + pending nonce. Preserve its nested scroll position when
+    the two-second poll replaces the action DOM; the conversation and question have separate scroll
+    state. Suppress replacement for the entire pointer-resize gesture. Its horizontal grip uses
+    Pointer Events with `touch-action:none`: dragging upward clamps below the title bar while leaving
+    the composer visible; dragging below the snap threshold collapses to a waiting bar. Keyboard
+    Up/Down resizes, Home collapses, and End expands. Persist height/collapsed state per nonce in
+    bounded localStorage and clamp it after viewport/orientation changes. Changing question pages
+    gets a distinct scroll key; unrelated refreshes must never return the current page to its top.
 
 ## Dev workflow
 

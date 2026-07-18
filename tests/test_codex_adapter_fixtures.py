@@ -3,7 +3,8 @@ import os
 import tempfile
 import unittest
 
-from codex_adapter import CodexAdapter, _elicitation_pending, _last_message, _revision
+from codex_adapter import (CodexAdapter, CodexError, _elicitation_pending,
+                           _last_message, _revision)
 
 
 class FixtureClient:
@@ -22,6 +23,7 @@ class FixtureClient:
         self.read_calls = []
         self.started_turns = []
         self.steered_turns = []
+        self.steer_error = None
 
     def list_threads(self):
         if self.fail_list:
@@ -62,6 +64,8 @@ class FixtureClient:
 
     def steer_turn(self, thread_id, text, **kwargs):
         self.steered_turns.append((thread_id, text, kwargs))
+        if self.steer_error:
+            raise self.steer_error
 
     def account_limits(self):
         if self.fail_account:
@@ -291,6 +295,47 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(session["capabilities"]["submit"])
         self.assertTrue(session["capabilities"]["interrupt"])
         self.assertTrue(session["capabilities"]["close"])
+
+    def test_rejected_stale_steer_restarts_exact_text_and_image_payload_once(self):
+        for action in (
+                {"type": "text", "session_id": "codex:managed", "text": "Do it"},
+                {"type": "image_text", "session_id": "codex:managed", "text": "Inspect",
+                 "image_paths": ["/private/fleet/photo.jpg"]}):
+            with self.subTest(action=action["type"]):
+                adapter, client = self.adapter([self.thread("managed")])
+                adapter._sessions = [{"native_session_id": "managed", "read_only": False,
+                    "capabilities": {"submit": True}, "collaboration_mode": "default",
+                    "model": "gpt-5.4", "effort": "high"}]
+                client.thread_state["managed"] = {"status": "running",
+                                                    "turn_id": "stale-turn"}
+                client.steer_error = CodexError(
+                    "Codex turn ended before the message was accepted", code="turn_ended")
+
+                result = adapter.act(action)
+
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(len(client.steered_turns), 1)
+                self.assertEqual(len(client.started_turns), 1)
+                self.assertEqual(client.started_turns[0][1], action["text"])
+                if action["type"] == "image_text":
+                    self.assertEqual(client.started_turns[0][2]["inputs"][-1],
+                                     {"type": "localImage",
+                                      "path": "/private/fleet/photo.jpg"})
+
+    def test_provider_proved_idle_overrides_stale_active_thread_metadata(self):
+        thread = self.thread("managed", {"type": "active"}, updated=998)
+        adapter, client = self.adapter([thread], now=1000)
+        adapter._remember("managed", "default")
+        client.thread_state["managed"] = {
+            "status": "idle", "turn_id": None, "completed_at": 999,
+            "no_active_turn_at": 999, "updated_at": 998}
+
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertEqual(session["state"], "turn_done")
+        self.assertEqual(session["control_state"], "connected_idle")
+        self.assertFalse(session["capabilities"]["interrupt"])
 
     def test_stalled_and_dormant_are_time_based(self):
         threads = [self.thread("stalled", {"type": "active"}, updated=99_900),

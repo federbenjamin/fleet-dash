@@ -2,6 +2,7 @@ const $=q=>document.querySelector(q);
 const DRAFT_STORE_KEY='fleet.drafts.v1';
 const OFFLINE_MESSAGE_STORE_KEY='fleet.offlineMessages.v1';
 const IMAGE_DRAFT_STORE_KEY='fleet.imageDrafts.v1';
+const QUESTION_PANEL_STORE_KEY='fleet.questionPanels.v1';
 const IMAGE_DB_NAME='fleet-images-v1',IMAGE_STORE='images';
 const IMAGE_MAX_BYTES=10*1024*1024,IMAGE_MAX_COUNT=4,IMAGE_TTL_MS=24*60*60*1000;
 let draftStore=(()=>{try{
@@ -2064,6 +2065,17 @@ function keepStripScroll(root,fn){
   const ns=root.querySelector('.fstrip');
   if(ns)ns.scrollLeft=fstripScroll;
 }
+function keepSessionActionScroll(root,fn){
+  const contextTop=root.querySelector('.session-context')?.scrollTop||0;
+  const question=root.querySelector('.question-scroll');
+  if(question?.dataset.scrollKey)setQuestionScrollPosition(
+    question.dataset.scrollKey,question.scrollTop);
+  keepStripScroll(root,fn);
+  const context=root.querySelector('.session-context');if(context)context.scrollTop=contextTop;
+  const nextQuestion=root.querySelector('.question-scroll');
+  if(nextQuestion?.dataset.scrollKey)nextQuestion.scrollTop=
+    questionScrollPositions.get(nextQuestion.dataset.scrollKey)||0;
+}
 function renderViewerBar(force){
   if(!viewerSid)return;
   const bar=$('#vact');
@@ -2308,8 +2320,117 @@ function refreshStatusStrip(hostSelector,status,key){
   if(current)current.outerHTML=statusLineHtml(status,key);
 }
 let sessionView=null;            // {sid, closed} of the open overlay
-let sessQOpen=true;              // the question block inside the chat view
 let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
+let questionResizeActive=null;
+const questionScrollPositions=new Map();
+let questionPanelStore=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(QUESTION_PANEL_STORE_KEY)||'{}');
+  if(!value||typeof value!=='object'||Array.isArray(value))return{};
+  return Object.fromEntries(Object.entries(value).slice(-100).map(([key,state])=>[String(key),{
+    height:Math.max(0,Math.min(2000,Number(state?.height)||0)),collapsed:Boolean(state?.collapsed)}]));
+}catch(_){return{};}})();
+const questionPanelKey=(sid,nonce)=>`${sid}:${nonce}`;
+function questionPanelState(sid,nonce){
+  const key=questionPanelKey(sid,nonce);
+  return questionPanelStore[key]||(questionPanelStore[key]={height:0,collapsed:false});
+}
+function persistQuestionPanels(){try{
+  const entries=Object.entries(questionPanelStore).slice(-100);questionPanelStore=Object.fromEntries(entries);
+  localStorage.setItem(QUESTION_PANEL_STORE_KEY,JSON.stringify(questionPanelStore));
+}catch(error){console.warn('Fleet could not persist question panel size',error);}}
+function questionScrollKey(sid,p){
+  const state=mqSel[sid],part=state&&state.nonce===p.nonce?state.qi:0;
+  return`${sid}:${p.nonce}:${part}`;
+}
+function setQuestionScrollPosition(key,top){
+  if(!key)return;
+  questionScrollPositions.delete(key);
+  questionScrollPositions.set(key,Math.max(0,Number(top)||0));
+  while(questionScrollPositions.size>200){
+    questionScrollPositions.delete(questionScrollPositions.keys().next().value);
+  }
+}
+function rememberQuestionScroll(encodedKey,top){
+  setQuestionScrollPosition(decodeURIComponent(encodedKey),top);
+}
+function questionPanelMaxHeight(){
+  const view=$('#sview')?.getBoundingClientRect(),head=$('#shead2')?.getBoundingClientRect();
+  const dock=$('#sact .composer-dock')?.getBoundingClientRect();
+  const extras=$('#sact .session-extras')?.getBoundingClientRect();
+  return Math.max(180,Math.floor((view?.height||innerHeight)-(head?.height||52)-
+    (dock?.height||76)-(extras?.height||0)-18));
+}
+function questionPanelHeight(sid,nonce){
+  const state=questionPanelState(sid,nonce),fallback=Math.min(420,Math.round(innerHeight*.44));
+  return Math.max(180,Math.min(questionPanelMaxHeight(),state.height||fallback));
+}
+function toggleQuestionPanel(encodedSid,encodedNonce){
+  const sid=decodeURIComponent(encodedSid),nonce=decodeURIComponent(encodedNonce);
+  const state=questionPanelState(sid,nonce);state.collapsed=!state.collapsed;
+  if(!state.collapsed&&!state.height)state.height=Math.min(420,Math.round(innerHeight*.44));
+  persistQuestionPanels();renderSession(true);
+}
+function setQuestionPanelHeight(sid,nonce,height){
+  const state=questionPanelState(sid,nonce),max=questionPanelMaxHeight();
+  state.height=Math.max(180,Math.min(max,Math.round(height)));state.collapsed=false;
+  persistQuestionPanels();renderSession(true);
+}
+function questionResizeKey(event,encodedSid,encodedNonce){
+  if(!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
+  event.preventDefault();const sid=decodeURIComponent(encodedSid),nonce=decodeURIComponent(encodedNonce);
+  const state=questionPanelState(sid,nonce);
+  if(event.key==='Home'){state.collapsed=true;persistQuestionPanels();renderSession(true);return;}
+  if(event.key==='End'){setQuestionPanelHeight(sid,nonce,questionPanelMaxHeight());return;}
+  const height=questionPanelHeight(sid,nonce)+(event.key==='ArrowUp'?40:-40);
+  if(height<=190&&event.key==='ArrowDown'){state.collapsed=true;persistQuestionPanels();renderSession(true);return;}
+  setQuestionPanelHeight(sid,nonce,height);
+}
+function startQuestionResize(event,encodedSid,encodedNonce){
+  if(event.pointerType==='mouse'&&event.button!==0)return;
+  const sid=decodeURIComponent(encodedSid),nonce=decodeURIComponent(encodedNonce);
+  const drawer=event.currentTarget.closest('.question-drawer'),state=questionPanelState(sid,nonce);
+  if(!drawer||state.collapsed)return;
+  event.preventDefault();const startY=event.clientY,startHeight=drawer.getBoundingClientRect().height;
+  const max=questionPanelMaxHeight(),pointerId=event.pointerId;
+  questionResizeActive={sid,nonce,pointerId};drawer.classList.add('resizing');
+  event.currentTarget.setPointerCapture?.(pointerId);
+  const move=moveEvent=>{
+    if(moveEvent.pointerId!==pointerId)return;moveEvent.preventDefault();
+    const height=Math.max(72,Math.min(max,startHeight+startY-moveEvent.clientY));
+    state.height=Math.round(height);drawer.style.height=`${height}px`;
+    drawer.classList.toggle('collapse-ready',height<=112);
+  };
+  const finish=endEvent=>{
+    if(endEvent.pointerId!==pointerId)return;
+    window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);
+    window.removeEventListener('pointercancel',finish);questionResizeActive=null;
+    state.collapsed=state.height<=112;
+    state.height=state.collapsed?Math.max(180,Math.min(max,Math.round(startHeight))):
+      Math.max(180,state.height);
+    persistQuestionPanels();renderSession(true);
+  };
+  window.addEventListener('pointermove',move,{passive:false});window.addEventListener('pointerup',finish);
+  window.addEventListener('pointercancel',finish);
+}
+function questionDrawerHtml(s,p,pre){
+  const sid=s.session_id,state=questionPanelState(sid,p.nonce),collapsed=state.collapsed;
+  const height=questionPanelHeight(sid,p.nonce),scrollKey=questionScrollKey(sid,p);
+  const label=p.questions.length>1?`Multi-part question · ${(mqSel[sid]?.qi||0)+1} of ${p.questions.length}`:
+    `${p.questions[0].header||'Question'} · waiting on you`;
+  return`<section class="question-drawer${collapsed?' collapsed':''}" data-question-key="${esc(questionPanelKey(sid,p.nonce))}"
+      ${collapsed?'':`style="height:${height}px"`}>
+    <div class="question-resizer" role="separator" tabindex="0" aria-label="Resize question panel"
+      title="Drag to resize · Home collapses · End expands" aria-orientation="horizontal" aria-valuemin="0"
+      aria-valuemax="${questionPanelMaxHeight()}" aria-valuenow="${collapsed?0:height}"
+      aria-valuetext="${collapsed?'collapsed':`${height} pixels`}"
+      onpointerdown="startQuestionResize(event,'${enc(sid)}','${enc(p.nonce)}')"
+      onkeydown="questionResizeKey(event,'${enc(sid)}','${enc(p.nonce)}')"><i></i></div>
+    <button class="question-drawer-toggle" aria-expanded="${!collapsed}"
+      onclick="toggleQuestionPanel('${enc(sid)}','${enc(p.nonce)}')"><span>${esc(label)}</span><small>${collapsed?'expand':'collapse'}</small></button>
+    ${collapsed?'':`<div class="question-scroll" data-scroll-key="${esc(scrollKey)}"
+      onscroll="rememberQuestionScroll('${enc(scrollKey)}',this.scrollTop)">${pendingBox(s,pre)}</div>`}
+  </section>`;
+}
 const closedCtx={};              // sid -> {messages, info} for CLOSED sessions
 let sessionEvidenceOpen=false;
 const evidenceCache={};          // sid -> {events,next_cursor,loaded,loading,error}
@@ -2468,7 +2589,7 @@ function closeSession(){
   closeComposerMenus();
   $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
-  $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open');
+  $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
 }
 function sessionActivityHtml(s){
@@ -2505,7 +2626,7 @@ async function renderClosed(){
       ${meta.can_reopen?`<div class="freetext"><button class="pbtn send"
         onclick="reopenClosed('${sid}',this)">reopen in terminal</button></div>
         <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
-  $('#sact').classList.remove('session-composer','composer-active','tools-open');
+  $('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sact').innerHTML=closedActions(meta.status_line);
   if(!closedCtx[sid]){
     closedCtx[sid]={fetching:true,messages:[],info:{}};
@@ -2566,7 +2687,7 @@ function renderSession(force){
   // A focused composer must not freeze transcript confirmation. The composer
   // itself is preserved below; only defer the body repaint during an active
   // touch gesture so mobile scrolling is not interrupted.
-  if(!force&&touching())return;
+  if(questionResizeActive||(!force&&touching()))return;
   const body=$('#sbody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   // on open, always land at the bottom (newest); otherwise stick to bottom only if already there
@@ -2591,21 +2712,19 @@ function renderSession(force){
   }
   const p=s.pending;
   const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
-  const qHtml=hasQ?`<div class="togbox waiting">
-      <button class="vchat-toggle" onclick="sessQOpen=!sessQOpen;renderSession(true)">${sessQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
-      ${sessQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'smsg'):singleQBlock(s,p,'smsg')}</div>`:''}
-    </div>`
+  const qHtml=hasQ?questionDrawerHtml(s,p,'smsg')
     :pendingBox(s,'smsg');   // permission prompts render whole
   const act=$('#sact');
   act.classList.remove('tools-open');
   act.classList.toggle('session-composer',canCompose(s));
+  act.classList.toggle('question-present',Boolean(hasQ));
   if(!canCompose(s))act.classList.remove('composer-active');
-  keepStripScroll(act,()=>{act.innerHTML=`
+  keepSessionActionScroll(act,()=>{act.innerHTML=`
     <div class="session-context">${qHtml}
-      ${fileStrip(s.session_id,(c&&c.files)||[])}
-      ${handoffLinksHtml(s)}
-      ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-      ${statusLineHtml(s.status_line,'session:'+s.session_id)}</div>
+      <div class="session-extras">${fileStrip(s.session_id,(c&&c.files)||[])}
+        ${handoffLinksHtml(s)}
+        ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+        ${statusLineHtml(s.status_line,'session:'+s.session_id)}</div></div>
     ${renderComposer(s,'session')}`;});
   if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
@@ -3473,7 +3592,13 @@ function cardPending(s){
     <button class="pbtn qanswer" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">answer ⤢</button>
   </div>`;
 }
-function openSessionQ(sid){sessQOpen=true;openSession(sid);}
+function openSessionQ(sid){
+  const session=((last||{}).sessions||[]).find(item=>item.session_id===sid),pending=session?.pending;
+  if(pending?.kind==='question'){
+    questionPanelState(sid,pending.nonce).collapsed=false;persistQuestionPanels();
+  }
+  openSession(sid);
+}
 function stagingPendingBox(s,p){
   if(p.kind==='question')return`<div class="pend stagingreadonly">
     <div class="ptool"><span class="ptlabel">production question · view only in staging</span></div>
@@ -4342,7 +4467,7 @@ function renderProvisionalSession(s){
     ${failed?'!':`<span class="delivery sending" aria-hidden="true">◌</span>`}
     <div><b>${failed?'Session did not start':p.status==='discovering'?'Finding the new session…':'Starting session…'}</b>
     <span>${failed?esc(p.error||'Startup failed'):'Your message is saved here while Fleet waits for the exact native session.'}</span></div></div></div>`;
-  $('#sact').classList.remove('session-composer','composer-active','tools-open');
+  $('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sact').innerHTML=failed?`<div class="spawnrecovery">
     ${p.canRetry?`<button class="pbtn send" onclick="retrySpawn()">retry same session setup</button><button class="pbtn" onclick="restoreSpawnForm()">restore setup</button>`:
       p.serverSessionId?`<button class="pbtn send" onclick="keepWaitingForSpawn()">keep waiting</button>`:

@@ -749,6 +749,17 @@ def set_scenario(name):
                  "allowOther": True, "options": [{"label": "Desktop"}, {"label": "Mobile"}]},
                 {"header": "Depth", "question": "Choose depth", "multiSelect": False,
                  "allowOther": False, "options": [{"label": "Full"}, {"label": "Small"}]}]})
+    elif name == "long-multi-question":
+        long_options = [{"label": f"Target {index}",
+            "description": (f"Detailed explanation for target {index}. " * 4).strip()}
+            for index in range(1, 19)]
+        session.update(state="needs_you", pending={"kind": "question", "nonce": "q-long",
+            "dismiss_action": "cancel_turn", "questions": [
+                {"header": "Targets", "question": "Read every target before choosing.",
+                 "multiSelect": True, "allowOther": True, "options": long_options},
+                {"header": "Depth", "question": "Choose the verification depth.",
+                 "multiSelect": False, "allowOther": False,
+                 "options": [{"label": "Full"}, {"label": "Focused"}]}]})
     elif name in ("approval", "approval-slow"):
         session.update(state="needs_you", pending={"kind": "permission", "nonce": "p1",
             "tool": "command", "approval_kind": "command", "input_summary": "npm test",

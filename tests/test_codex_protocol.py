@@ -431,6 +431,46 @@ class CodexProtocolTest(unittest.TestCase):
             "input": [{"type": "text", "text": "Focus on the failing test"}],
         })])
 
+    def test_no_active_turn_rejection_revokes_stale_authority_for_safe_restart(self):
+        client, _ = self.client()
+        client.proc = SimpleNamespace(poll=lambda: None)
+        client.thread_state["thread-one"] = {
+            "status": "running", "turn_id": "turn-stale",
+            "turn_generation": client.generation}
+        client.request = lambda method, params=None, timeout=None: (_ for _ in ()).throw(
+            CodexError("no active turn to steer"))
+
+        with self.assertRaises(CodexError) as caught:
+            client.steer_turn("thread-one", "Start after the stale turn")
+
+        self.assertEqual(caught.exception.code, "turn_ended")
+        self.assertFalse(caught.exception.queueable)
+        state = client.thread_state["thread-one"]
+        self.assertEqual(state["status"], "idle")
+        self.assertIsNone(state["turn_id"])
+        self.assertIsNone(state["turn_generation"])
+        self.assertIsNotNone(state["no_active_turn_at"])
+
+    def test_changed_active_turn_rejection_is_queueable_not_restartable(self):
+        client, _ = self.client()
+        client.proc = SimpleNamespace(poll=lambda: None)
+        client.thread_state["thread-one"] = {
+            "status": "running", "turn_id": "turn-stale",
+            "turn_generation": client.generation}
+        client.request = lambda method, params=None, timeout=None: (_ for _ in ()).throw(
+            CodexError("expected active turn id `turn-stale` but found `turn-new`"))
+
+        with self.assertRaises(CodexError) as caught:
+            client.steer_turn("thread-one", "Queue behind the new turn")
+
+        self.assertEqual(caught.exception.code, "provider_control_unavailable")
+        self.assertTrue(caught.exception.queueable)
+        state = client.thread_state["thread-one"]
+        self.assertEqual(state["status"], "running")
+        self.assertIsNone(state["turn_id"])
+        self.assertIsNone(state["turn_generation"])
+        self.assertIsNotNone(state["control_lost_at"])
+
     def test_image_inputs_use_local_image_for_new_and_active_turns(self):
         client, _ = self.client()
         calls = []
