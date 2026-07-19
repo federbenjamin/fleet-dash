@@ -1,8 +1,9 @@
 # Provider control, mobile composer, and notification settings roadmap
 
-Status: Implementation complete on `fix/provider-control-recovery`; isolated staging API/read-only
-browser smoke passes. Draft PR [#9](https://github.com/federbenjamin/fleet-dash/pull/9) is clean and
-mergeable. Staging provider probes, installed-device checks, and production promotion remain.
+Status: Historical R1-R3 implementation record, amended on `fix/send-now-or-queue` by the adversarial
+hardening roadmap. The current draft is PR #12; automated gates pass, while staging phone approval
+and production promotion remain blocked by the final gates in
+[`adversarial-bug-scan-roadmap.md`](adversarial-bug-scan-roadmap.md).
 
 Date: 2026-07-17
 
@@ -26,8 +27,9 @@ separate branches. Production still promotes only the exact user-merged `origin/
    Fleet system notice.
 3. Each kind supports a full cadence: Off, once, once plus one reminder, or repeat until resolved,
    with an initial delay, repeat interval, and maximum delivery count.
-4. These rules control external Web Push interruptions. Canonical in-app notifications, history,
-   Needs-you placement, snooze state, and session state remain intact when a push rule is Off.
+4. External Web Push cadence and in-app Notification Center visibility are independent per kind.
+   Turning push Off does not hide the in-app event; turning in-app visibility Off does not alter
+   provider state, Needs-you placement, snooze/mute state, or an explicitly enabled push rule.
 5. Global quiet hours, session mute-until-manually-unmuted, delivery history, and a preview of the
    next scheduled notification are included.
 6. Claude background sessions use their real Claude Code background transport. A pseudo-terminal
@@ -105,7 +107,7 @@ test, staging, and—where named—live-device evidence.
 | SET-001 | Settings has distinct Notifications, Devices & delivery, Sessions, Appearance, Budgets & spawning, and Advanced sections instead of one long form. | R3 |
 | SET-002 | Desktop uses a compact section rail and content pane. Mobile shows one section at a time behind a sticky section selector. Deep links and Back preserve the active section. | R3 |
 | SET-003 | Every mutation paints feedback within 100ms, serializes rapid edits, ignores stale responses, rolls back on failure, and shows Saved/Error beside the changed control. | R3 |
-| NTF-001 | Notifications exposes one global master switch and one rule for every canonical kind. No device-level cadence override remains active. | R3 |
+| NTF-001 | Notifications exposes one global master switch and one row for every canonical kind. Each row has an independent in-app visibility switch plus its Web Push rule; no device-level cadence override remains active. | R3 |
 | NTF-002 | Each kind supports Off, once, once plus one reminder, and bounded repeat-until-resolved with editable initial delay, interval, maximum count, minimum severity, and quiet-hours behavior. | R3 |
 | NTF-003 | Scheduler decisions are durable and restart-safe. Policy changes suppress obsolete queued jobs and cannot replay already-delivered events. | R3 |
 | NTF-004 | Session mute and event snooze outrank global rules. Quiet hours hold rather than discard delivery unless that kind explicitly bypasses quiet hours. | R3 |
@@ -127,7 +129,7 @@ test, staging, and—where named—live-device evidence.
 | Interaction latency inventory | Pass | Complete named desktop and mobile inventories, including first-feedback and local-completion budgets. |
 | Screenshot inspection | Pass with fix | Desktop/mobile composer and policy screenshots inspected; the pass found and fixed a cadence-strip selector collision, then reran the affected checks. |
 | In-app Browser visual control | Unavailable | The native Browser runtime reported no available backend. No alternate browser-control surface was substituted. |
-| Isolated staging smoke | Pass | Staging restarted from this checkout; `/api/fleet` reported `mode=staging`, the expected source root, and zero owned sessions. A read-only live browser pass rendered both providers with no unexpected console/network failure. |
+| Isolated staging smoke | Pass | Staging restarted from this checkout; `/api/fleet` reported `mode=staging`, the expected source root, both providers healthy, one idle controllable staging-owned Codex session, and 27 observed production sessions read-only. Authenticated Outbox and notification-policy reads passed. The current desktop task exposed no in-app browser backend, so the real-phone interaction gate remains explicit. |
 | Staging provider control | Pending release gate | Run exact staging-owned Claude foreground/background noop/message and Codex disconnect/reconnect recovery probes. |
 | Installed iPhone/macOS | Pending release gate | Verify real iOS keyboard/photo-picker geometry and one global policy across installed mobile/desktop apps, including quiet hours/repeat/mute. |
 | Production | Blocked by normal release flow | Draft PR → base merged into branch conflict-free → user marks ready/merges → deploy exact `origin/main` only. |
@@ -401,6 +403,7 @@ notification_global_policy
 
 notification_kind_policy
   kind PRIMARY KEY
+  in_app_enabled               independent Notification Center visibility
   mode                         off | once | remind_once | repeat
   minimum_severity             info | warning | critical
   initial_delay_seconds
@@ -427,7 +430,8 @@ qualification, health, and read-cursor state.
 
 ### 4. Scheduling semantics
 
-- **Off:** no external delivery. The in-app event remains.
+- **Off:** no external delivery. The event appears in Notification Center only when that kind's
+  independent in-app switch is enabled.
 - **Once:** one successful user-visible delivery after the initial delay.
 - **Once + reminder:** initial delivery plus one reminder after the configured interval if still
   active.

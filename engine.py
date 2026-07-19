@@ -10,7 +10,7 @@ Data sources (all local, read-only):
 CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
-import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, mmap, stat
+import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, mmap, stat, math
 from collections import deque
 from codex_adapter import CodexAdapter
 from codex_observer import CodexRolloutObserver
@@ -62,6 +62,11 @@ DEFAULT_CONFIG = {
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
     "dismissed_actions": {},             # action_id -> dismissal ts (inbox only)
+    # Private recovery state. Values contain only provider ids/nonces and
+    # allowlisted control selections; never prompts, answers, or credentials.
+    "claude_delivery_uncertain": {},      # session_id -> pending prompt nonce
+    "claude_control_overrides": {},       # accepted native controls awaiting evidence
+    "claude_control_uncertain": {},       # native control writes with a lost result
     "velocity_window_points": 30,
     "port": 8377,
     "bind": "127.0.0.1",
@@ -94,6 +99,91 @@ DEFAULT_CONFIG = {
     "_context_note": "context window per model family; user runs 1M-context models",
     "context_windows": {"default": 1000000, "haiku": 200000, "sonnet": 1000000},
 }
+
+
+def _validated_claude_delivery_uncertain(raw):
+    """Restore only bounded, non-secret prompt identity state."""
+    if not isinstance(raw, dict):
+        return {}
+    restored = {}
+    for sid, nonce in list(raw.items())[-200:]:
+        if (isinstance(sid, str) and isinstance(nonce, str) and sid and nonce and
+                len(sid) <= 300 and len(nonce) <= 500 and
+                not any(ord(char) < 32 for char in sid + nonce)):
+            restored[sid] = nonce
+    return restored
+
+
+def _validated_claude_control_overrides(raw):
+    """Restore bounded allowlisted controls without trusting config shapes."""
+    if not isinstance(raw, dict):
+        return {}
+    restored = {}
+    allowed = {
+        "model": set(Engine.MODELS) if "Engine" in globals() else
+                 {"opus", "sonnet", "haiku", "fable"},
+        "effort": set(Engine.EFFORTS) if "Engine" in globals() else
+                  {"low", "medium", "high", "xhigh", "max"},
+        "permission_mode": {"default", "acceptEdits", "plan", "auto",
+                            "bypassPermissions"},
+    }
+    candidates = []
+    for sid, controls in raw.items():
+        if (not isinstance(sid, str) or not sid or len(sid) > 300 or
+                any(ord(char) < 32 for char in sid) or not isinstance(controls, dict)):
+            continue
+        clean = {}
+        newest = 0.0
+        for field, values in allowed.items():
+            item = controls.get(field)
+            if not isinstance(item, dict) or item.get("value") not in values:
+                continue
+            try:
+                accepted_at = float(item.get("accepted_at"))
+                baseline = int(item.get("baseline", 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (not math.isfinite(accepted_at) or accepted_at <= 0 or
+                    baseline < 0 or baseline > 10 ** 15):
+                continue
+            clean[field] = {"value": item["value"], "accepted_at": accepted_at,
+                            "baseline": baseline}
+            newest = max(newest, accepted_at)
+        if clean:
+            candidates.append((newest, sid, clean))
+    for _, sid, clean in sorted(candidates)[-200:]:
+        restored[sid] = clean
+    return restored
+
+
+def _validated_claude_control_uncertain(raw):
+    if not isinstance(raw, dict):
+        return {}
+    candidates = []
+    for sid, record in raw.items():
+        if (not isinstance(sid, str) or not sid or len(sid) > 300 or
+                any(ord(char) < 32 for char in sid) or not isinstance(record, dict)):
+            continue
+        try:
+            attempted_at = float(record.get("attempted_at"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(attempted_at) or attempted_at <= 0:
+            continue
+        fields = {}
+        for field in ("model", "effort", "permission_mode"):
+            if field not in (record.get("fields") or {}):
+                continue
+            try:
+                baseline = int(record["fields"][field].get("baseline", 0))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if 0 <= baseline <= 10 ** 15:
+                fields[field] = {"baseline": baseline}
+        if fields:
+            candidates.append((attempted_at, sid, {
+                "attempted_at": attempted_at, "fields": fields}))
+    return {sid: record for _, sid, record in sorted(candidates)[-200:]}
 
 
 def _write_private_json(path, payload):
@@ -254,6 +344,10 @@ IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 WAITING_CONFIRM_SECONDS = 3.0
 IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 IMAGE_UPLOAD_TTL_SECONDS = 24 * 60 * 60
+IMAGE_UPLOAD_SESSION_COUNT = 32
+IMAGE_UPLOAD_SESSION_BYTES = 80 * 1024 * 1024
+IMAGE_UPLOAD_GLOBAL_COUNT = 200
+IMAGE_UPLOAD_GLOBAL_BYTES = 512 * 1024 * 1024
 IMAGE_UPLOAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 IMAGE_UPLOAD_MIMES = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
@@ -558,10 +652,14 @@ class Tail:
         self.offset = 0
         self.ti = self.tw = self.tr = self.to = 0
         self.model = ""
+        # Byte offsets, rather than row timestamps, establish provider evidence
+        # order. Compaction can append older-timestamped rows after a command.
+        self.model_evidence_offset = 0
         # Claude writes mode changes as top-level `permission-mode` records and
         # also stamps the effective mode onto human prompt rows. Keep the newest
         # observed value; the live registry does not expose it.
         self.permission_mode = None
+        self.permission_mode_evidence_offset = 0
         self.last_usage = None          # usage dict of last assistant row
         self.last_shape = None          # ('assistant', stop_reason, [content types]) or ('user', kind)
         self.first_ts = None
@@ -622,15 +720,18 @@ class Tail:
         if nl < 0:
             return False
         self.offset += nl + 1
-        for line in chunk[:nl + 1].splitlines():
+        consumed = chunk[:nl + 1]
+        row_end = self.offset - len(consumed)
+        for line in consumed.splitlines(keepends=True):
+            row_end += len(line)
             try:
                 o = json.loads(line)
             except Exception:
                 continue
-            self._fold(o)
+            self._fold(o, evidence_offset=row_end)
         return True
 
-    def _fold(self, o):
+    def _fold(self, o, evidence_offset=None):
         ts = o.get("timestamp")
         if ts:
             self.first_ts = self.first_ts or ts
@@ -643,6 +744,9 @@ class Tail:
         if permission_mode in ("default", "acceptEdits", "plan", "auto",
                                "dontAsk", "bypassPermissions"):
             self.permission_mode = permission_mode
+            if evidence_offset is not None:
+                self.permission_mode_evidence_offset = max(
+                    self.permission_mode_evidence_offset, int(evidence_offset))
         if o.get("type") == "permission-mode":
             return
         if o.get("type") == "system":
@@ -695,6 +799,9 @@ class Tail:
                 self.to += u.get("output_tokens", 0)
                 self.last_usage = u
                 self.model = m.get("model") or self.model
+                if m.get("model") and evidence_offset is not None:
+                    self.model_evidence_offset = max(
+                        self.model_evidence_offset, int(evidence_offset))
                 self.turn_usage[0] += u.get("input_tokens", 0)
                 self.turn_usage[1] += u.get("cache_creation_input_tokens", 0)
                 self.turn_usage[2] += u.get("cache_read_input_tokens", 0)
@@ -1068,12 +1175,15 @@ class Tail:
         return len(str(c or ""))
 
     def _file_add(self, path, caption, ts):
-        for f in self.files:
+        previous = None
+        for f in list(self.files):
             if f["path"] == path:       # re-delivery: refresh, don't duplicate
-                f["ts"] = ts
-                f["caption"] = caption or f["caption"]
-                return
-        self.files.append({"path": path, "caption": caption or "", "ts": ts})
+                previous = f
+                self.files.remove(f)
+                break
+        self.files.append({"path": path,
+                           "caption": caption or (previous or {}).get("caption", ""),
+                           "ts": ts})
 
     def last_message(self, limit=160):
         """Newest prose for the card peek, preserving Markdown block structure."""
@@ -1123,6 +1233,7 @@ class Tail:
 class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.config_lock = threading.RLock()
         _scrub_private_log(os.path.join(BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
         for runtime_name in ("config.json", "fleet-dash.log"):
             runtime_path = os.path.join(BASE, runtime_name)
@@ -1137,17 +1248,44 @@ class Engine:
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
         self._codex_terminal_routes_cache = (0.0, {})
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
+        # A successful native /effort command is authoritative immediately, but
+        # Claude reports effort only through the next statusline side-write.
+        # Keep the accepted value until that newer provider report arrives.
+        self._claude_control_overrides = _validated_claude_control_overrides(
+            cfg.get("claude_control_overrides"))
+        self._claude_effort_overrides = {
+            sid: (entry["effort"]["value"], entry["effort"]["accepted_at"])
+            for sid, entry in self._claude_control_overrides.items()
+            if "effort" in entry}
+        self._claude_control_uncertain = _validated_claude_control_uncertain(
+            cfg.get("claude_control_uncertain"))
         self._claude_background = None  # lazy official `claude attach` bridge
         self._claude_background_error = None
         self._cleanup_tickets = {}      # opaque close-preview tickets, never client paths
         self._cleanup_lock = threading.Lock()
+        # The stay-open injector applet consumes one fixed request/result mailbox.
+        # Serialize the complete exchange or concurrent HTTP/Outbox actions can
+        # overwrite each other and type into the wrong terminal.
+        self._inject_lock = threading.Lock()
+        # The global injector mailbox protects only the final AppleScript
+        # exchange. A per-session lock must also cover the preceding registry /
+        # tail validation and the accepted in-memory projection, otherwise two
+        # requests can both pass the same idle/CAS snapshot before taking turns
+        # at the mailbox.
+        self._claude_mutation_locks_guard = threading.Lock()
+        self._claude_mutation_locks = {}
+        self._claude_turn_fences_guard = threading.Lock()
+        self._claude_turn_fences = {}
+        self._claude_delivery_uncertain_guard = threading.Lock()
+        self._claude_delivery_uncertain = _validated_claude_delivery_uncertain(
+            cfg.get("claude_delivery_uncertain"))
         self._image_upload_lock = threading.RLock()
         self._image_cleanup_due = 0.0
         self._image_cleanup_running = False
+        self._image_cleanup_skip = 0
         self.db = None
         self.pending_seen = {}          # pending nonce -> first-observed timestamp
         self.lock = threading.Lock()
-        self.config_lock = threading.RLock()
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
         self.snapshot_cache = {}
@@ -1301,7 +1439,8 @@ class Engine:
         for key in ("submit", "interrupt", "takeover", "archive", "close", "compact",
                     "review", "focus_terminal", "answer_structured", "decide_approval",
                     "spawn_agent", "relay_agent", "relay_agent_direct", "reopen",
-                    "change_permission_mode"):
+                    "change_permission_mode", "model_effort_settings",
+                    "change_model_effort"):
             capabilities[key] = False
         session.update(capabilities=capabilities, read_only=True, access="view_only",
                        access_label="View only", primary_action="view",
@@ -1447,34 +1586,51 @@ class Engine:
             now = float(now or time.time())
             root = os.path.join(BASE, "uploads")
             try:
-                names = os.listdir(root)[:2000]
+                entries = os.scandir(root)
             except FileNotFoundError:
                 return
-            for name in names:
-                if not name.endswith(".json") or not IMAGE_UPLOAD_ID_RE.fullmatch(name[:-5]):
-                    continue
-                upload_id = name[:-5]
-                _, image_path, meta_path = self._image_upload_paths(upload_id)
-                expired = False
-                try:
-                    info = os.lstat(meta_path)
-                    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            visited = processed = 0
+            exhausted = True
+            try:
+                for entry in entries:
+                    visited += 1
+                    if visited <= self._image_cleanup_skip:
+                        continue
+                    if processed >= 2000:
+                        exhausted = False
+                        break
+                    processed += 1
+                    name = entry.name
+                    if not name.endswith(".json") or not IMAGE_UPLOAD_ID_RE.fullmatch(name[:-5]):
+                        continue
+                    upload_id = name[:-5]
+                    _, image_path, meta_path = self._image_upload_paths(upload_id)
+                    expired = False
+                    try:
+                        info = os.lstat(meta_path)
+                        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                            expired = True
+                        else:
+                            with open(meta_path) as handle:
+                                meta = json.load(handle)
+                            expired = float(meta.get("expires_at") or 0) <= now
+                    except Exception:
                         expired = True
-                    else:
-                        with open(meta_path) as handle:
-                            meta = json.load(handle)
-                        expired = float(meta.get("expires_at") or 0) <= now
-                except Exception:
-                    expired = True
-                if expired:
-                    for path in (image_path, meta_path):
-                        try:
-                            if stat.S_ISREG(os.lstat(path).st_mode):
-                                os.unlink(path)
-                        except FileNotFoundError:
-                            pass
-                        except OSError:
-                            pass
+                    if expired:
+                        for path in (image_path, meta_path):
+                            try:
+                                if stat.S_ISREG(os.lstat(path).st_mode):
+                                    os.unlink(path)
+                            except FileNotFoundError:
+                                pass
+                            except OSError:
+                                pass
+            finally:
+                entries.close()
+            # Rotate through a polluted/legacy directory instead of inspecting
+            # the same first 2,000 names forever. Deletions may shift order, but
+            # reaching the end resets the cursor and catches anything skipped.
+            self._image_cleanup_skip = 0 if exhausted else self._image_cleanup_skip + processed
 
     def _schedule_image_cleanup(self):
         now = time.time()
@@ -1492,6 +1648,70 @@ class Engine:
                     self._image_cleanup_running = False
         threading.Thread(target=clean, name="fleet-image-cleanup", daemon=True).start()
 
+    def _image_upload_usage(self, root, sid):
+        """Return bounded live-upload usage without trusting client filenames or sizes."""
+        session_count = session_bytes = global_count = global_bytes = 0
+        try:
+            entries = os.scandir(root)
+        except FileNotFoundError:
+            return session_count, session_bytes, global_count, global_bytes
+        visited = 0
+        try:
+            for entry in entries:
+                visited += 1
+                # Fail closed on a directory polluted outside Fleet. API-created
+                # storage cannot legitimately exceed this after the hard quota.
+                if visited > 4000:
+                    global_count = IMAGE_UPLOAD_GLOBAL_COUNT
+                    break
+                name = entry.name
+                if not name.endswith(".json") or not IMAGE_UPLOAD_ID_RE.fullmatch(name[:-5]):
+                    continue
+                upload_id = name[:-5]
+                _, image_path, meta_path = self._image_upload_paths(upload_id)
+                try:
+                    image_info, meta_info = os.lstat(image_path), os.lstat(meta_path)
+                    if not stat.S_ISREG(image_info.st_mode) or not stat.S_ISREG(meta_info.st_mode):
+                        continue
+                    with open(meta_path) as handle:
+                        meta = json.load(handle)
+                    size = image_info.st_size
+                    if size < 1 or size > IMAGE_UPLOAD_BYTES or size != int(meta.get("size") or -1):
+                        continue
+                except Exception:
+                    continue
+                global_count += 1
+                global_bytes += size
+                if meta.get("session_id") == sid:
+                    session_count += 1
+                    session_bytes += size
+                if (global_count >= IMAGE_UPLOAD_GLOBAL_COUNT or
+                        session_count >= IMAGE_UPLOAD_SESSION_COUNT or
+                        global_bytes >= IMAGE_UPLOAD_GLOBAL_BYTES or
+                        session_bytes >= IMAGE_UPLOAD_SESSION_BYTES):
+                    break
+        finally:
+            entries.close()
+        return session_count, session_bytes, global_count, global_bytes
+
+    def _known_message_provider(self, sid, session=None):
+        """Resolve only a server-observed live or ledger-backed message target."""
+        provider = str((session or {}).get("provider") or "")
+        if provider in ("claude", "codex"):
+            return provider
+        db = None
+        try:
+            db = self.ledger_reader()
+            row = db.execute(
+                "SELECT provider FROM session_runs WHERE session_id=? LIMIT 1", (sid,)).fetchone()
+            provider = str((row or [""])[0] or "")
+            return provider if provider in ("claude", "codex") else None
+        except Exception:
+            return None
+        finally:
+            if db is not None:
+                db.close()
+
     def store_image_upload(self, sid, upload_id, display_name, content_type, data):
         """Validate and normalize one private image for an interactive live session."""
         sid = str(sid or "")
@@ -1508,9 +1728,7 @@ class Engine:
         with self.lock:
             session = next((copy.deepcopy(item) for item in
                 self.snapshot_cache.get("sessions") or [] if item.get("session_id") == sid), None)
-        capabilities = (session or {}).get("capabilities") or {}
-        if not session or not (capabilities.get("submit") or
-                               capabilities.get("queue_submit")):
+        if not self._known_message_provider(sid, session):
             return {"ok": False, "error": "session is not available for image messages"}
         root, image_path, meta_path = self._image_upload_paths(upload_id)
         os.makedirs(root, mode=0o700, exist_ok=True)
@@ -1520,6 +1738,19 @@ class Engine:
         safe_name = os.path.basename(str(display_name or "image"))[:120]
         with self._image_upload_lock:
             self._cleanup_image_uploads()
+            # IDs are immutable ownership handles. Reusing one must never replace
+            # another session's image or mutate a draft that already references it.
+            if os.path.lexists(image_path) or os.path.lexists(meta_path):
+                return {"ok": False, "error": "image ID already exists; choose a new ID"}
+            session_count, session_bytes, global_count, global_bytes = \
+                self._image_upload_usage(root, sid)
+            if (session_count >= IMAGE_UPLOAD_SESSION_COUNT or
+                    session_bytes + len(data) > IMAGE_UPLOAD_SESSION_BYTES):
+                return {"ok": False, "error": "this session's pending image limit is full"}
+            if (global_count >= IMAGE_UPLOAD_GLOBAL_COUNT or
+                    global_bytes + len(data) > IMAGE_UPLOAD_GLOBAL_BYTES):
+                return {"ok": False, "error": "Fleet's pending image storage is full"}
+            published_image = False
             try:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                 fd = os.open(source_path, flags, 0o600)
@@ -1545,8 +1776,18 @@ class Engine:
                 info = os.lstat(output_path)
                 if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= IMAGE_UPLOAD_BYTES:
                     return {"ok": False, "error": "normalized image exceeds 10 MB"}
+                # Conversion can make a compact HEIC/PNG larger. Quotas apply to
+                # the bytes Fleet actually retains, so repeat the serialized
+                # check with the normalized size before publishing either file.
+                if (session_count >= IMAGE_UPLOAD_SESSION_COUNT or
+                        session_bytes + info.st_size > IMAGE_UPLOAD_SESSION_BYTES):
+                    return {"ok": False, "error": "this session's pending image limit is full"}
+                if (global_count >= IMAGE_UPLOAD_GLOBAL_COUNT or
+                        global_bytes + info.st_size > IMAGE_UPLOAD_GLOBAL_BYTES):
+                    return {"ok": False, "error": "Fleet's pending image storage is full"}
                 os.chmod(output_path, 0o600, follow_symlinks=False)
                 os.replace(output_path, image_path)
+                published_image = True
                 created = time.time()
                 _write_private_json(meta_path, {"version": 1, "upload_id": upload_id,
                     "session_id": sid, "display_name": safe_name, "content_type": "image/jpeg",
@@ -1556,6 +1797,11 @@ class Engine:
                         "content_type": "image/jpeg", "size": info.st_size,
                         "expires_at": created + IMAGE_UPLOAD_TTL_SECONDS}
             except (OSError, subprocess.SubprocessError):
+                if published_image:
+                    try:
+                        os.unlink(image_path)
+                    except OSError:
+                        pass
                 return {"ok": False, "error": "image upload failed"}
             finally:
                 for path in (source_path, output_path):
@@ -1596,6 +1842,47 @@ class Engine:
         if t is None:
             t = self.tails[path] = Tail(path)
         return t
+
+    def _claude_mutation_lock(self, sid):
+        with self._claude_mutation_locks_guard:
+            return self._claude_mutation_locks.setdefault(str(sid), threading.RLock())
+
+    def _record_claude_turn_fence(self, sid, baseline):
+        with self._claude_turn_fences_guard:
+            self._claude_turn_fences[str(sid)] = {
+                "transcript_size": baseline.get("transcript_size"),
+                "convo_rev": baseline.get("convo_rev"),
+                "accepted_at": time.time(), "seen_active": False}
+
+    def _claude_turn_fenced(self, sid, reg_status, path=None, mt=None):
+        """Keep rapid follow-up writes out of Claude's registry-lag window.
+
+        The fence clears only after the provider reports an active state followed
+        by idle, or after the transcript changes beyond the exact pre-write file
+        size and folds to an awaiting-input state (the fast-turn / failed-turn
+        equivalent). Wall-clock expiry would reintroduce the same race.
+        """
+        sid = str(sid)
+        with self._claude_turn_fences_guard:
+            fence = self._claude_turn_fences.get(sid)
+            if not fence:
+                return False
+            if reg_status in ("busy", "shell", "waiting"):
+                fence["seen_active"] = True
+                return True
+            if reg_status == "idle" and fence.get("seen_active"):
+                self._claude_turn_fences.pop(sid, None)
+                return False
+            transcript_changed = False
+            if path and mt is not None:
+                try:
+                    transcript_changed = os.path.getsize(path) != fence.get("transcript_size")
+                except OSError:
+                    transcript_changed = False
+                if (transcript_changed and mt.turn_state() == "awaiting_input"):
+                    self._claude_turn_fences.pop(sid, None)
+                    return False
+            return True
 
     def waiting_confirmed(self, sid, status, now, pending=None):
         """Return whether Claude's registry `waiting` means real user input.
@@ -2248,13 +2535,18 @@ class Engine:
                     "capabilities": {"submit": True, "interrupt": state == "running",
                         "close": True, "focus_terminal": True,
                         "change_permission_mode": False,
-                        "answer_structured": True, "decide_approval": True,
+                        "model_effort_settings": False,
+                        "change_model_effort": False,
+                        "change_model_effort_reason": "Waiting for Claude to initialize",
+                        "answer_structured": False, "decide_approval": False,
+                        "answer_reason": "Waiting for Claude's native prompt state",
                         "spawn_agent": True, "relay_agent": True,
                         "account_usage": True, "exact_cost": True},
                 })
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
+            control_uncertain = self._reconcile_claude_control_state(sid, mt)
             claude_tails[sid] = mt
             self._claude_context_snapshots[sid] = {
                 "revision": mt.convo_rev,
@@ -2272,6 +2564,7 @@ class Engine:
             pending = self.hook_pending(sid, reg_status)
             confirmed_waiting = self.waiting_confirmed(
                 sid, reg_status, now, pending=pending)
+            turn_starting = self._claude_turn_fenced(sid, reg_status, main_path, mt)
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
             agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now,
@@ -2316,7 +2609,7 @@ class Engine:
                         qs = (p.get("input") or {}).get("questions", [])
                         pending = {"kind": "question", "nonce": tid, "questions": qs}
                         break
-            if pending is None and confirmed_waiting and mt.pending:
+            if pending is None and mt.pending and (confirmed_waiting or reg_status == "idle"):
                 tid, p = list(mt.pending.items())[-1]
                 pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
                            "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
@@ -2333,10 +2626,40 @@ class Engine:
                 print(f"pending first seen: {sid[:8]} {pending['kind']} nonce={pending['nonce'][:24]}",
                       file=sys.stderr, flush=True)
 
+            delivery_uncertain = None
+            with self._claude_delivery_uncertain_guard:
+                uncertain_nonce = self._claude_delivery_uncertain.get(sid)
+            pending_nonce = pending.get("nonce") if pending is not None else None
+            if uncertain_nonce and ((pending_nonce and
+                                     pending_nonce != uncertain_nonce) or
+                                    (pending is None and reg_status != "waiting")):
+                self._clear_claude_delivery_uncertain(sid)
+                uncertain_nonce = None
+            if uncertain_nonce:
+                delivery_uncertain = {"nonce": uncertain_nonce,
+                    "message": "Delivery uncertain — check the Claude terminal, then refresh"}
+
             ctx = mt.context_tokens()
             fam = model_family(mt.model)
             cw = cfg["context_windows"].get(fam, cfg["context_windows"]["default"])
             permission_modes = self._claude_permission_modes(reg, mt)
+            compacting = self.compacting_secs(sid, cwd, mt)
+            can_change_permission_mode = bool(
+                reg_status == "idle" and pending is None and compacting is None and
+                not turn_starting and not control_uncertain and
+                mt.permission_mode in permission_modes)
+            can_change_model_effort = bool(reg_status == "idle" and pending is None and
+                                           compacting is None and not turn_starting and
+                                           not control_uncertain)
+            can_answer_native = bool(reg_status == "waiting" and pending is not None and
+                                     delivery_uncertain is None)
+            settings_reason = (
+                "Check Claude's terminal; the last control change is unconfirmed" if
+                    control_uncertain else
+                "Answer Claude's request before changing settings" if pending is not None else
+                "Available after compaction finishes" if compacting is not None else
+                "Waiting for Claude to acknowledge the last message" if turn_starting else
+                "Available when Claude is idle" if reg_status != "idle" else "")
             sessions.append({
                 "session_id": sid,
                 "native_session_id": sid,
@@ -2374,7 +2697,9 @@ class Engine:
                                if reg.get("bridgeSessionId") else None),
                 "started_ms": reg.get("startedAt"),
                 "pending": pending,
-                "compacting": self.compacting_secs(sid, cwd, mt),
+                "delivery_uncertain": delivery_uncertain,
+                "control_delivery_uncertain": bool(control_uncertain),
+                "compacting": compacting,
                 "muted": sid in (cfg.get("muted_sessions") or {}),
                 # cache keys: the page refetches /api/context only when these move
                 # (a rev counter, not last-ts: tool results mutate entries in place)
@@ -2385,12 +2710,20 @@ class Engine:
                 "agents_total": len(agents),
                 "agent_cost": round(sum(a["cost"] for a in agents), 4),
                 "cost_source": "calculated",
-                "capabilities": {"submit": True, "interrupt": state == "running",
+                "capabilities": {"submit": not turn_starting,
+                    "queue_submit": turn_starting, "interrupt": state == "running",
                     "close": True,
-                    "change_permission_mode": (reg_status == "idle" and
-                        mt.permission_mode in permission_modes),
-                    "focus_terminal": True, "answer_structured": True,
-                    "decide_approval": True, "spawn_agent": True,
+                    "change_permission_mode": can_change_permission_mode,
+                    "change_permission_mode_reason": settings_reason,
+                    "model_effort_settings": True,
+                    "change_model_effort": can_change_model_effort,
+                    "change_model_effort_reason": settings_reason,
+                    "focus_terminal": True,
+                    "answer_structured": can_answer_native,
+                    "decide_approval": can_answer_native,
+                    "answer_reason": ("" if can_answer_native else
+                        "Waiting for Claude's native prompt state"),
+                    "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
         phase("claude")
@@ -2398,6 +2731,40 @@ class Engine:
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
         }
+        with self.config_lock:
+            control_overrides = {
+                sid: value for sid, value in self._claude_control_overrides.items()
+                if sid in live_claude_ids}
+            if control_overrides != self._claude_control_overrides:
+                self._claude_control_overrides = control_overrides
+                self._claude_effort_overrides = {
+                    sid: (entry["effort"]["value"], entry["effort"]["accepted_at"])
+                    for sid, entry in control_overrides.items() if "effort" in entry}
+                self._persist_private_runtime_map(
+                    "claude_control_overrides", control_overrides)
+            control_uncertain = {
+                sid: value for sid, value in self._claude_control_uncertain.items()
+                if sid in live_claude_ids}
+            if control_uncertain != self._claude_control_uncertain:
+                self._claude_control_uncertain = control_uncertain
+                self._persist_private_runtime_map(
+                    "claude_control_uncertain", control_uncertain)
+        with self._claude_turn_fences_guard:
+            self._claude_turn_fences = {
+                sid: value for sid, value in self._claude_turn_fences.items()
+                if sid in live_claude_ids
+            }
+        with self.config_lock:
+            with self._claude_delivery_uncertain_guard:
+                delivery_uncertain = {
+                sid: value for sid, value in self._claude_delivery_uncertain.items()
+                if sid in live_claude_ids
+                }
+                delivery_changed = delivery_uncertain != self._claude_delivery_uncertain
+                self._claude_delivery_uncertain = delivery_uncertain
+            if delivery_changed:
+                self._persist_private_runtime_map(
+                    "claude_delivery_uncertain", delivery_uncertain)
         self._claude_context_snapshots = {
             sid: value for sid, value in self._claude_context_snapshots.items()
             if sid in live_claude_ids
@@ -2813,6 +3180,171 @@ class Engine:
                 raw = {}
             raw.update(changed)
             _write_private_json(path, raw)
+
+    def _persist_private_runtime_map(self, key, value):
+        """Persist one internal recovery map and mirror the exact durable value."""
+        payload = copy.deepcopy(value)
+        with self.config_lock:
+            try:
+                self._persist_config_fields({key: payload})
+            except Exception as exc:
+                return f"recovery state could not be saved: {exc}"
+            self.cfg[key] = payload
+        return None
+
+    def _set_claude_delivery_uncertain(self, sid, nonce):
+        sid, nonce = str(sid or ""), str(nonce or "")
+        if not sid or not nonce:
+            return "prompt identity is unavailable"
+        with self.config_lock:
+            with self._claude_delivery_uncertain_guard:
+                updated = dict(self._claude_delivery_uncertain)
+                updated.pop(sid, None)
+                updated[sid] = nonce
+                updated = dict(list(updated.items())[-200:])
+                self._claude_delivery_uncertain = updated
+            return self._persist_private_runtime_map(
+                "claude_delivery_uncertain", updated)
+
+    def _clear_claude_delivery_uncertain(self, sid):
+        with self.config_lock:
+            with self._claude_delivery_uncertain_guard:
+                if sid not in self._claude_delivery_uncertain:
+                    return None
+                updated = dict(self._claude_delivery_uncertain)
+                updated.pop(sid, None)
+                self._claude_delivery_uncertain = updated
+            return self._persist_private_runtime_map(
+                "claude_delivery_uncertain", updated)
+
+    @staticmethod
+    def _claude_control_baseline(tail, field):
+        if field == "model":
+            return int(getattr(tail, "model_evidence_offset", 0) or 0)
+        if field == "permission_mode":
+            return int(getattr(tail, "permission_mode_evidence_offset", 0) or 0)
+        return 0
+
+    def _record_claude_control_overrides(self, sid, tail, accepted):
+        """Durably project provider-accepted controls until newer native evidence."""
+        if not accepted:
+            return None
+        now = time.time()
+        with self.config_lock:
+            updated = copy.deepcopy(self._claude_control_overrides)
+            entry = dict(updated.get(sid) or {})
+            for field, value in accepted.items():
+                entry[field] = {"value": value, "accepted_at": now,
+                                "baseline": self._claude_control_baseline(tail, field)}
+            updated.pop(sid, None)
+            updated[sid] = entry
+            updated = dict(list(updated.items())[-200:])
+            self._claude_control_overrides = updated
+            if "effort" in accepted:
+                self._claude_effort_overrides[sid] = (accepted["effort"], now)
+            return self._persist_private_runtime_map(
+                "claude_control_overrides", updated)
+
+    def _mark_claude_control_uncertain(self, sid, tail, fields):
+        now = time.time()
+        record = {"attempted_at": now, "fields": {
+            field: {"baseline": self._claude_control_baseline(tail, field)}
+            for field in fields}}
+        with self.config_lock:
+            updated = dict(self._claude_control_uncertain)
+            updated.pop(sid, None)
+            updated[sid] = record
+            updated = dict(list(updated.items())[-200:])
+            self._claude_control_uncertain = updated
+            return self._persist_private_runtime_map(
+                "claude_control_uncertain", updated)
+
+    def _retire_claude_control_override(self, sid, field):
+        with self.config_lock:
+            updated = copy.deepcopy(self._claude_control_overrides)
+            entry = dict(updated.get(sid) or {})
+            if field not in entry:
+                return None
+            entry.pop(field, None)
+            if entry:
+                updated[sid] = entry
+            else:
+                updated.pop(sid, None)
+            self._claude_control_overrides = updated
+            if field == "effort":
+                self._claude_effort_overrides.pop(sid, None)
+            return self._persist_private_runtime_map(
+                "claude_control_overrides", updated)
+
+    def _native_effort_evidence(self, sid):
+        path = os.path.join(capture_base(), "effort", sid)
+        try:
+            stat_result = os.stat(path)
+            with open(path) as handle:
+                value = handle.read().strip()
+        except OSError:
+            return None, 0.0
+        return (value if value in self.EFFORTS else None, stat_result.st_mtime)
+
+    def _reconcile_claude_control_state(self, sid, tail):
+        """Apply accepted controls and retire them only after newer native evidence."""
+        changed_overrides = changed_uncertain = False
+        with self.config_lock:
+            overrides = copy.deepcopy(self._claude_control_overrides)
+            entry = dict(overrides.get(sid) or {})
+            native_effort, effort_mtime = self._native_effort_evidence(sid)
+            for field in list(entry):
+                item = entry[field]
+                newer = False
+                if field == "model":
+                    newer = (int(getattr(tail, "model_evidence_offset", 0) or 0) >
+                             int(item.get("baseline", 0)))
+                    if not newer:
+                        tail.model = item["value"]
+                elif field == "permission_mode":
+                    newer = (int(getattr(tail, "permission_mode_evidence_offset", 0) or 0) >
+                             int(item.get("baseline", 0)))
+                    if not newer:
+                        tail.permission_mode = item["value"]
+                else:
+                    newer = bool(native_effort and
+                                 effort_mtime > float(item.get("accepted_at", 0)))
+                if newer:
+                    entry.pop(field, None)
+                    changed_overrides = True
+                    if field == "effort":
+                        self._claude_effort_overrides.pop(sid, None)
+            if entry:
+                overrides[sid] = entry
+            elif sid in overrides:
+                overrides.pop(sid, None)
+            if changed_overrides:
+                self._claude_control_overrides = overrides
+
+            uncertain = dict(self._claude_control_uncertain)
+            record = uncertain.get(sid)
+            if record:
+                resolved = True
+                for field, item in record["fields"].items():
+                    if field == "model":
+                        newer = (int(getattr(tail, "model_evidence_offset", 0) or 0) >
+                                 int(item.get("baseline", 0)))
+                    elif field == "permission_mode":
+                        newer = (int(getattr(tail, "permission_mode_evidence_offset", 0) or 0) >
+                                 int(item.get("baseline", 0)))
+                    else:
+                        newer = bool(native_effort and effort_mtime >
+                                     float(record.get("attempted_at", 0)))
+                    resolved = resolved and newer
+                if resolved:
+                    uncertain.pop(sid, None)
+                    self._claude_control_uncertain = uncertain
+                    changed_uncertain = True
+            if changed_overrides:
+                self._persist_private_runtime_map("claude_control_overrides", overrides)
+            if changed_uncertain:
+                self._persist_private_runtime_map("claude_control_uncertain", uncertain)
+        return self._claude_control_uncertain.get(sid)
 
     def stable_working_order(self, sessions):
         """Append new Working entries; never reorder incumbents by activity."""
@@ -3892,14 +4424,12 @@ Treat this as an independent session. Verify the repository state before changin
                 "SELECT cwd, model, cost, title, project, branch, transcript_path, "
                 "status_line_json "
                 "FROM session_runs "
-                "WHERE session_id = ?", (sid,)).fetchone()
+                "WHERE session_id = ? AND closed_at IS NOT NULL", (sid,)).fetchone()
         except Exception:
             pass
         finally:
             if db is not None:
                 db.close()
-        if not row and str(sid).startswith("codex:"):
-            return self.codex.context(sid)
         if not row:
             return {"ok": False, "error": "unknown session"}
         try:
@@ -4115,7 +4645,8 @@ Treat this as an independent session. Verify the repository state before changin
         """Pending prompt captured by the PreToolUse/Notification hooks."""
         path = os.path.join(capture_base(), "pending", f"{sid}.json")
         try:
-            d = json.load(open(path))
+            with open(path) as handle:
+                d = json.load(handle)
         except Exception:
             return None
         # a question stays valid while the session waits; permission notifications
@@ -4188,19 +4719,29 @@ Treat this as an independent session. Verify the repository state before changin
             return eff or parent_effort
         return parent_effort
 
-    @staticmethod
-    def effort_for(sid):
+    def effort_for(self, sid):
         """Effort level ('high', 'max', …) for a session.
 
         It exists ONLY in the statusline payload Claude Code pipes to the statusline
         command (`"effort":{"level":…}`) — not in the transcript, not in the session
         registry. So the statusline script side-writes it here (see its
         `fleet-dash effort side-write` block); no statusline, no effort."""
+        path = os.path.join(capture_base(), "effort", sid)
         try:
-            with open(os.path.join(capture_base(), "effort", sid)) as f:
+            stat = os.stat(path)
+            with open(path) as f:
                 v = f.read().strip()
         except OSError:
-            return None
+            override = self._claude_effort_overrides.get(sid)
+            return override[0] if override else None
+        override = self._claude_effort_overrides.get(sid)
+        if override:
+            # A newer statusline render is the native source of truth and also
+            # catches model/effort changes made directly in Claude's terminal.
+            if stat.st_mtime > override[1] and v in self.EFFORTS:
+                self._retire_claude_control_override(sid, "effort")
+            else:
+                return override[0]
         return v if v in Engine.EFFORTS else None
 
     def compacting_secs(self, sid, cwd, mt):
@@ -4290,6 +4831,12 @@ Treat this as an independent session. Verify the repository state before changin
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
         if str(sid).startswith("codex:"):
+            with self.lock:
+                known = any(item.get("session_id") == sid and
+                            item.get("provider") == "codex"
+                            for item in self.snapshot_cache.get("sessions") or [])
+            if not known:
+                return {"ok": False, "error": "unknown session"}
             return self.codex.context(sid)
         reg, path = self._reg_main_path(sid)
         if not reg:
@@ -4340,11 +4887,13 @@ Treat this as an independent session. Verify the repository state before changin
             parent = next((dict(item) for item in
                            self.snapshot_cache.get("sessions") or []
                            if item.get("session_id") == sid), None)
+        agent = next((dict(item) for item in (parent or {}).get("agents") or []
+                      if item.get("agent_id") == aid), None)
+        if not parent or not agent:
+            return {"ok": False, "error": "no such subagent"}
         if str(sid).startswith("codex:"):
             result = self.codex.agent_context(sid, aid)
-            if result.get("ok") and parent:
-                agent = next((dict(item) for item in parent.get("agents") or []
-                              if item.get("agent_id") == aid), {})
+            if result.get("ok"):
                 info = result.setdefault("info", {})
                 for key in ("agent_type", "description", "model", "family", "effort",
                             "state", "cost", "cost_source"):
@@ -4361,8 +4910,6 @@ Treat this as an independent session. Verify the repository state before changin
                 meta = json.load(handle)
         except Exception:
             meta = {}
-        agent = next((dict(item) for item in (parent or {}).get("agents") or []
-                      if item.get("agent_id") == aid), {})
         snapshot = self._claude_agent_context_snapshots.get((sid, aid))
         if snapshot is not None:
             info = {**agent,
@@ -4404,6 +4951,24 @@ Treat this as an independent session. Verify the repository state before changin
         """Serve a delivered file. WHITELIST: only paths recorded from this session's
         own SendUserFile tool_use rows — never a free-form client path."""
         if str(sid).startswith("codex:"):
+            with self.lock:
+                known = any(item.get("session_id") == sid and
+                            item.get("provider") == "codex"
+                            for item in self.snapshot_cache.get("sessions") or [])
+            if not known:
+                db = None
+                try:
+                    db = self.ledger_reader()
+                    known = db.execute("""SELECT 1 FROM session_runs
+                        WHERE session_id=? AND provider='codex'
+                        AND closed_at IS NOT NULL""", (sid,)).fetchone() is not None
+                except Exception:
+                    known = False
+                finally:
+                    if db is not None:
+                        db.close()
+            if not known:
+                return None, None, "unknown session"
             return self.codex.file_content(sid, fpath)
         reg, path = self._reg_main_path(sid)
         if not reg:
@@ -4788,8 +5353,10 @@ Treat this as an independent session. Verify the repository state before changin
     def cleanup_closed_worktree(self, action):
         token = str(action.get("cleanup_ticket") or "")
         with self._cleanup_lock:
-            ticket = self._cleanup_tickets.pop(token, None)
+            ticket = self._cleanup_tickets.get(token)
         if not ticket or ticket.get("expires", 0) <= time.time():
+            with self._cleanup_lock:
+                self._cleanup_tickets.pop(token, None)
             return {"ok": False, "error": "cleanup preview expired — the worktree was preserved"}
         if not ticket.get("closed_at"):
             return {"ok": False, "error": "the session did not close — the worktree was preserved"}
@@ -4817,13 +5384,19 @@ Treat this as an independent session. Verify the repository state before changin
                    "cwd": ticket["worktree"], "pid": ticket.get("pid")}
         preview = self.close_worktree_preview(session, issue_ticket=False)
         if not preview.get("inspect_ok") or preview.get("revision") != ticket["revision"]:
+            with self._cleanup_lock:
+                self._cleanup_tickets.pop(token, None)
             return {"ok": False, "error": "the worktree changed after preview — it was preserved",
                     "worktree": ticket["worktree"], "preserved": True}
         if preview.get("root") != ticket["root"] or preview.get("worktree") != ticket["worktree"]:
+            with self._cleanup_lock:
+                self._cleanup_tickets.pop(token, None)
             return {"ok": False, "error": "worktree identity changed — it was preserved",
                     "worktree": ticket["worktree"], "preserved": True}
         allowed = preview.get("force_remove_allowed") if force else preview.get("remove_allowed")
         if not allowed:
+            with self._cleanup_lock:
+                self._cleanup_tickets.pop(token, None)
             return {"ok": False, "error": preview.get("reason") or
                     "worktree removal is no longer safe", "worktree": ticket["worktree"],
                     "preserved": True}
@@ -4848,6 +5421,8 @@ Treat this as an independent session. Verify the repository state before changin
                     "preserved": os.path.exists(ticket["worktree"]), "unlocked": unlocked}
         self._workstream_cache.clear()
         self._workstreams_snapshot_cache = None
+        with self._cleanup_lock:
+            self._cleanup_tickets.pop(token, None)
         return {"ok": True, "removed": True, "forced": force,
                 "worktree": ticket["worktree"], "branch_preserved": True}
 
@@ -5058,6 +5633,13 @@ Treat this as an independent session. Verify the repository state before changin
     @staticmethod
     def _is_background_claude(reg):
         return str((reg or {}).get("kind") or "").lower() in ("bg", "background")
+
+    @staticmethod
+    def _native_write_failed_before_delivery(result):
+        """Return whether the transport proves that no native input was written."""
+        return (not (result or {}).get("ok") and
+                (result or {}).get("code") in
+                ("injector_not_launched", "background_connection_lost"))
 
     @staticmethod
     def _background_job_id(reg):
@@ -5621,11 +6203,17 @@ Treat this as an independent session. Verify the repository state before changin
         # opaque upload IDs only. An exact attached Codex TUI can still receive
         # those paths through the same terminal transport as direct messages.
         if record.get("target_provider") == "codex":
-            route = self._codex_terminal_route(self.codex.native(sid), force=True)
+            with self.lock:
+                projected = next((item for item in
+                    self.snapshot_cache.get("sessions") or []
+                    if item.get("session_id") == sid and item.get("provider") == "codex"), None)
+            route = (self._codex_terminal_route(self.codex.native(sid), force=True)
+                     if projected and not projected.get("read_only") else None)
             result = (self._write_codex_terminal(action, route) if route else
                       self.codex.act(action))
         elif image_paths:
-            result = self._write_claude_queued_message(action)
+            with self._claude_mutation_lock(sid):
+                result = self._write_claude_queued_message(action)
         else:
             result = self.act(action)
         return {"ok": bool(result.get("ok")), "provider": record.get("target_provider"),
@@ -5640,6 +6228,20 @@ Treat this as an independent session. Verify the repository state before changin
                     if item.get("sessionId") == sid), None)
         if not reg:
             return {"ok": False, "error": "session not live", "queueable": True}
+        if reg.get("status") != "idle":
+            return {"ok": False,
+                    "error": "Claude is no longer available; keep the message queued",
+                    "code": "provider_control_unavailable", "queueable": True}
+        path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+        with self.scan_lock:
+            mt = self.tail_for(path)
+            mt.poll()
+            if (self.hook_pending(sid, reg.get("status")) is not None or mt.pending or
+                    self.compacting_secs(sid, reg.get("cwd", ""), mt) is not None or
+                    self._claude_turn_fenced(sid, reg.get("status"), path, mt)):
+                return {"ok": False,
+                        "error": "Claude is waiting or compacting; keep the message queued",
+                        "code": "provider_control_unavailable", "queueable": True}
         paths = [str(path) for path in (action.get("image_paths") or []) if path]
         if not paths:
             return {"ok": False, "error": "no images"}
@@ -5651,12 +6253,22 @@ Treat this as an independent session. Verify the repository state before changin
         if text.startswith("/") and " " not in text:
             text += " "
         steps = [(text, True)]
+        try:
+            transcript_size = os.path.getsize(path)
+        except OSError:
+            transcript_size = None
+        baseline = {"transcript_size": transcript_size,
+                    "convo_rev": getattr(mt, "convo_rev", None)}
         if self._is_background_claude(reg):
-            return self._write_background_claude(reg, steps, 0.05)
-        tty = self._tty_for_pid(reg["pid"])
-        if not tty:
-            return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
-        return self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05)
+            result = self._write_background_claude(reg, steps, 0.05)
+        else:
+            tty = self._tty_for_pid(reg["pid"])
+            if not tty:
+                return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
+            result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05)
+        if result.get("ok"):
+            self._record_claude_turn_fence(sid, baseline)
+        return result
 
     @staticmethod
     def _message_can_send_now(session):
@@ -5712,10 +6324,9 @@ Treat this as an independent session. Verify the repository state before changin
             snapshot = copy.deepcopy(self.snapshot_cache)
         session = next((item for item in snapshot.get("sessions") or []
                         if str(item.get("session_id") or "") == sid), None)
-        if not session:
+        provider = self._known_message_provider(sid, session)
+        if not provider:
             return {"ok": False, "error": "session not live"}
-        provider = str(session.get("provider") or
-                       ("codex" if sid.startswith("codex:") else "claude"))
         record = {"kind": "when_available", "target_provider": provider,
                   "target_session_id": sid, "updated_at": time.time() - 300}
         target, reason, _ = self.outbox._target_status(record, snapshot)
@@ -5738,6 +6349,41 @@ Treat this as an independent session. Verify the repository state before changin
         if result.get("queueable") or result.get("code") == "provider_control_unavailable":
             return self._queue_when_available(action, provider, result.get("error"))
         return result
+
+    def _dismiss_question_then_send(self, action):
+        """Decline one exact question, then durably send after its TUI is gone.
+
+        The follow-up is always queued after provider acceptance of the dismiss.
+        Writing it immediately would recreate the transition race where text is
+        interpreted as a choice by a native question selector.
+        """
+        sid = str(action.get("session_id") or "")
+        nonce = str(action.get("nonce") or "")
+        if not nonce:
+            return {"ok": False, "error": "question nonce is required"}
+        with self.lock:
+            snapshot = copy.deepcopy(self.snapshot_cache)
+        session = next((item for item in snapshot.get("sessions") or []
+                        if str(item.get("session_id") or "") == sid), None)
+        provider = self._known_message_provider(sid, session)
+        if not provider or not session:
+            return {"ok": False, "error": "session not live"}
+        pending = session.get("pending")
+        if pending and (pending.get("kind") != "question" or
+                        str(pending.get("nonce") or "") != nonce):
+            return {"ok": False,
+                    "error": "the pending request changed — review it before sending"}
+
+        dismissed = self.act({"type": "dismiss", "session_id": sid,
+                              "nonce": nonce})
+        if not dismissed.get("ok"):
+            return dismissed
+        queued = self._queue_when_available(
+            action, provider,
+            "Question dismissed; waiting for the session to become available")
+        if not queued.get("ok"):
+            return queued
+        return {**queued, "dismissed": True, "dismissed_nonce": nonce}
 
     def _queue_codex_recovery(self, action):
         image_paths = list(action.get("image_paths") or [])
@@ -5811,7 +6457,7 @@ Treat this as an independent session. Verify the repository state before changin
         usage = copy.deepcopy(snapshot.get("provider_usage") or {})
         self.outbox.tick(snapshot, usage, self._outbox_dispatch, self._outbox_spawn)
 
-    def act(self, action):
+    def act(self, action, _claude_locked=False):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
         {type:'multiq', session_id, nonce,
@@ -5823,12 +6469,16 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'close_preview', session_id}    (read-only secondary-worktree safety probe) |
         {type:'worktree_cleanup', session_id, cleanup_ticket, force} |
         {type:'reopen', session_id}           (new terminal: claude --resume ID) |
+        {type:'session_settings', session_id, model, effort,
+         expected_model, expected_effort}     (idle-only native model/effort commands) |
         {type:'relay', session_id, agent_id, text}  (subagents have no tty: type a
                                               tagged line into the PARENT for it to
                                               forward with SendMessage) |
         {type:'text', session_id, text:'...'} |
         {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']} |
-        {type:'send_message', session_id, text:'...', upload_ids:['opaque-id']}"""
+        {type:'send_message', session_id, text:'...', upload_ids:['opaque-id']} |
+        {type:'dismiss_then_send', session_id, nonce, text:'...',
+         upload_ids:['opaque-id']}"""
         if not isinstance(action, dict):
             return {"ok": False, "error": "action must be an object"}
         # Double-underscore fields are server-internal. A client must never be
@@ -5844,8 +6494,19 @@ Treat this as an independent session. Verify the repository state before changin
         if action.get("type") == "ping":     # token check for the page's acting banner
             return {"ok": True}
         requested_type = action.get("type")
-        if requested_type == "image_text" or (requested_type == "send_message" and
-                                               action.get("upload_ids")):
+        sid = str(action.get("session_id") or "")
+        if (not _claude_locked and sid and not sid.startswith("codex:") and
+                requested_type in ("text", "image_text", "handoff_text",
+                                   "session_settings", "permission_mode", "option",
+                                   "multiq", "permission", "dismiss", "interrupt",
+                                   "dismiss_then_send", "relay", "noop", "close")):
+            with self._claude_mutation_lock(sid):
+                # Re-enter so every registry/tail gate is freshly evaluated
+                # inside the per-session critical section. The internal flag is
+                # a Python argument, never a client-controlled action field.
+                return self.act(action, _claude_locked=True)
+        if requested_type == "image_text" or (requested_type in
+                ("send_message", "dismiss_then_send") and action.get("upload_ids")):
             paths, error = self._resolve_image_uploads(
                 str(action.get("session_id") or ""), action.get("upload_ids"))
             if error:
@@ -5853,6 +6514,10 @@ Treat this as an independent session. Verify the repository state before changin
             # Client-supplied paths are never accepted. Only this server-side
             # resolution can add image_paths to a provider action.
             action = {**action, "image_paths": paths}
+        if requested_type == "dismiss_then_send":
+            action = {**action,
+                      "type": "image_text" if action.get("image_paths") else "text"}
+            return self._dismiss_question_then_send(action)
         if requested_type == "send_message":
             action = {**action,
                       "type": "image_text" if action.get("image_paths") else "text"}
@@ -5887,7 +6552,7 @@ Treat this as an independent session. Verify the repository state before changin
                 # Prefer exact App Server turn authority. A live terminal is a
                 # fallback for a TUI-owned turn, not a reason to bypass the
                 # post-compaction turn id delivered by the provider.
-                route = (None if session and
+                route = (None if not session or session.get("read_only") or
                          session.get("control_state") == "connected_active" else
                          self._codex_terminal_route(self.codex.native(sid), force=True))
                 if route:
@@ -5923,8 +6588,39 @@ Treat this as an independent session. Verify the repository state before changin
             if result.get("ok"):
                 self._mark_cleanup_ticket_closed(action.get("cleanup_ticket"), sid)
             return result
+        path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+        if action.get("type") in ("text", "image_text", "handoff_text", "relay",
+                                  "session_settings", "permission_mode"):
+            with self._claude_turn_fences_guard:
+                has_turn_fence = sid in self._claude_turn_fences
+            if has_turn_fence:
+                with self.scan_lock:
+                    fence_tail = self.tail_for(path)
+                    fence_tail.poll()
+                    fenced = self._claude_turn_fenced(
+                        sid, reg.get("status"), path, fence_tail)
+                if fenced and not (action.get("type") == "relay" and
+                                   reg.get("status") in ("busy", "shell")):
+                    if action.get("type") in ("text", "image_text", "handoff_text"):
+                        return {"ok": False,
+                                "error": "Claude is starting the previous message; queue this one",
+                                "code": "provider_control_unavailable", "queueable": True}
+                    return {"ok": False,
+                            "error": "Claude is starting the previous message; wait for it to finish"}
         if action.get("type") == "permission_mode" and reg.get("status") != "idle":
             return {"ok": False, "error": "permission mode can change only while Claude is idle"}
+        if action.get("type") == "session_settings" and reg.get("status") != "idle":
+            return {"ok": False,
+                    "error": "Claude model and effort can change only while Claude is idle"}
+        if action.get("type") in ("text", "image_text", "handoff_text") and \
+                reg.get("status") != "idle":
+            # The fleet snapshot used by send-now/Outbox can age between target
+            # selection and dispatch. Revalidate the authoritative registry at
+            # the injection boundary so text never lands in an ask TUI or gets
+            # typed into a busy turn while Fleet claims immediate delivery.
+            return {"ok": False,
+                    "error": "Claude is no longer available; queue the message",
+                    "code": "provider_control_unavailable", "queueable": True}
         # a prompt answer may only go to a session actually blocked on a prompt —
         # a hook-blocked ask leaves a ghost pending file but the session stays
         # 'busy', and injected digits would land in its main input box
@@ -5939,7 +6635,6 @@ Treat this as an independent session. Verify the repository state before changin
         if action.get("type") == "relay" and reg.get("status") == "waiting":
             return {"ok": False, "error": "the parent session is waiting on a prompt — "
                     "answer that first, then relay"}
-        path = os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
         if action.get("type") == "interrupt" and reg.get("status") == "shell":
             with self.scan_lock:
                 shell_tail = self.tail_for(path)
@@ -5948,12 +6643,14 @@ Treat this as an independent session. Verify the repository state before changin
                     return {"ok": False, "error": "the shell command has finished — "
                             "there is no active turn to interrupt"}
         # scan_lock is held by the poll thread while it folds EVERY transcript in the
-        # fleet, so taking it here made a click wait out a whole scan (~300ms of the
-        # measured latency). Only a PROMPT ANSWER needs the freshness re-poll (it
-        # validates the nonce against the live tail); typing, focusing, interrupting
-        # and relaying don't touch the tail at all — build those with no lock.
+        # fleet, so taking it here makes these actions wait out a whole scan (~300ms of
+        # the measured latency). Native-surface mutations need the freshness re-poll:
+        # prompt answers validate their nonce, while controls, direct text/images,
+        # handoffs, and relays must recheck pending/compaction state at the injection
+        # boundary. Focus and interrupt do not fold the tail here.
         needs_tail = action.get("type") in (
-            "option", "multiq", "permission", "dismiss", "permission_mode")
+            "option", "multiq", "permission", "dismiss", "permission_mode",
+            "session_settings", "text", "image_text", "handoff_text", "relay")
         lock = self.scan_lock if needs_tail else contextlib.nullcontext()
         with lock:
             mt = self.tail_for(path)
@@ -5961,11 +6658,73 @@ Treat this as an independent session. Verify the repository state before changin
                 mt.poll()   # NEVER poll unlocked: it would race the poll thread's
                             # fold of the same Tail and double-count its usage
             typ = action.get("type")
+            control_uncertain = self._reconcile_claude_control_state(sid, mt)
+            if control_uncertain and typ in ("session_settings", "permission_mode"):
+                return {"ok": False, "code": "control_delivery_uncertain",
+                        "error": ("the last Claude control change is unconfirmed — "
+                                  "check the terminal and wait for Fleet to observe it")}
             steps = []                  # [(text, send_newline)]
             # free text typed into a TUI row must never smuggle keys: strip control
             # chars (a \r would fire as Enter, \x1b starts an escape sequence)
             clean = lambda t: re.sub(r"[\x00-\x1f\x7f]+", " ", str(t or "")).strip()[:300]
-            if typ == "permission_mode":
+            if typ in ("text", "image_text", "handoff_text", "relay"):
+                hook_request = self.hook_pending(sid, reg.get("status")) is not None
+                transcript_request = bool(mt.pending) and (
+                    typ != "relay" or reg.get("status") == "idle")
+                input_compacting = self.compacting_secs(
+                    sid, reg.get("cwd", ""), mt) is not None
+            else:
+                hook_request = transcript_request = input_compacting = False
+            if hook_request or transcript_request or input_compacting:
+                result = {"ok": False,
+                          "error": "Claude is waiting or compacting; do not inject text",
+                          "code": "provider_control_unavailable"}
+                if typ in ("text", "image_text", "handoff_text"):
+                    result["queueable"] = True
+                return result
+            if typ == "session_settings":
+                # Both commands are composed entirely from the server catalog;
+                # no client-supplied slash command or terminal key is accepted.
+                if (self.hook_pending(sid, reg.get("status")) is not None or
+                        bool(mt.pending)):
+                    return {"ok": False,
+                            "error": "answer Claude's pending request before changing settings"}
+                if self.compacting_secs(sid, reg.get("cwd", ""), mt) is not None:
+                    return {"ok": False,
+                            "error": "Claude is compacting; wait before changing settings"}
+                if "expected_model" not in action or "expected_effort" not in action:
+                    return {"ok": False,
+                            "error": "expected model and effort are required",
+                            "code": "stale_settings"}
+                catalog = {model: list(self.EFFORTS) for model in self.MODELS}
+                target_model = str(action.get("model") or "").strip()
+                target_effort = str(action.get("effort") or "").strip()
+                if target_model not in catalog:
+                    return {"ok": False, "error": "unknown Claude model"}
+                if target_effort not in catalog[target_model]:
+                    return {"ok": False,
+                            "error": "unsupported effort level for this Claude model"}
+                current_model = str(mt.model or "")
+                current_effort = str(self.effort_for(sid) or "")
+                if (str(action.get("expected_model") or "") != current_model or
+                        str(action.get("expected_effort") or "") != current_effort):
+                    return {"ok": False,
+                            "error": "settings changed in another view — refresh and try again",
+                            "code": "stale_settings"}
+                if target_model != current_model:
+                    steps.append((f"/model {target_model}", True))
+                if target_effort != current_effort:
+                    steps.append((f"/effort {target_effort}", True))
+                if not steps:
+                    return {"ok": True, "model": current_model,
+                            "effort": current_effort}
+            elif typ == "permission_mode":
+                if (self.hook_pending(sid, reg.get("status")) is not None or mt.pending):
+                    return {"ok": False,
+                            "error": "answer Claude's pending request before changing permissions"}
+                if self.compacting_secs(sid, reg.get("cwd", ""), mt) is not None:
+                    return {"ok": False,
+                            "error": "Claude is compacting; wait before changing permissions"}
                 target = str(action.get("mode") or "")
                 allowed = self._claude_permission_modes(reg, mt)
                 current = mt.permission_mode
@@ -5998,14 +6757,87 @@ Treat this as an independent session. Verify the repository state before changin
                 hp = self.hook_pending(sid, reg.get("status"))
                 if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
                     return {"ok": False, "error": "stale: the prompt changed — refresh"}
+                with self._claude_delivery_uncertain_guard:
+                    uncertain_nonce = self._claude_delivery_uncertain.get(sid)
+                if uncertain_nonce == nonce:
+                    return {"ok": False,
+                            "error": ("delivery uncertain — check the Claude terminal, "
+                                      "then refresh before answering again"),
+                            "code": "delivery_uncertain"}
+                if uncertain_nonce:
+                    self._clear_claude_delivery_uncertain(sid)
+
+                # The browser's question shape is display data, never terminal-key
+                # authority. Rebuild the exact shape from the nonce-matched hook or
+                # transcript row before deriving any digit/down-arrow sequence. In
+                # particular, trusting client n_options here allowed an authenticated
+                # request to allocate an effectively unbounded list of DOWN keys.
+                questions = None
+                pending_kind = None
+                if hp and hp.get("nonce") == nonce and hp.get("kind") == "question":
+                    pending_kind = "question"
+                    questions = hp.get("questions")
+                elif hp and hp.get("nonce") == nonce:
+                    pending_kind = hp.get("kind")
+                elif nonce in mt.pending:
+                    pending_tool = mt.pending.get(nonce) or {}
+                    if pending_tool.get("name") == "AskUserQuestion":
+                        pending_kind = "question"
+                        questions = (pending_tool.get("input") or {}).get("questions")
+                    else:
+                        pending_kind = "permission"
+
+                if typ in ("option", "multiq") and pending_kind != "question":
+                    return {"ok": False, "error": "this prompt is not a question"}
+                if typ == "permission" and pending_kind != "permission":
+                    return {"ok": False, "error": "this prompt is not a permission request"}
+
+                question_specs = []
+                if typ in ("option", "multiq"):
+                    if not isinstance(questions, list) or not (1 <= len(questions) <= 8):
+                        return {"ok": False, "error": "question shape is unavailable or too large"}
+                    for question in questions:
+                        options = question.get("options") if isinstance(question, dict) else None
+                        if not isinstance(options, list) or not (1 <= len(options) <= 9):
+                            return {"ok": False,
+                                    "error": "question options are unavailable or too large"}
+                        allow_other = question.get("allowOther", True) is not False
+                        if allow_other and len(options) >= 9:
+                            return {"ok": False,
+                                    "error": "question has too many options for its Other row"}
+                        question_specs.append({
+                            "n_options": len(options),
+                            "multi": bool(question.get("multiSelect")),
+                            "allow_other": allow_other,
+                        })
+
+                def answer_digits(raw, n_options):
+                    """Parse only the TUI's one-byte digit keys, bounded by source shape."""
+                    if not isinstance(raw, list) or len(raw) > n_options:
+                        return None
+                    parsed = []
+                    for digit in raw:
+                        if isinstance(digit, bool):
+                            return None
+                        if isinstance(digit, int):
+                            value = digit
+                        elif isinstance(digit, str) and re.fullmatch(r"[1-9]", digit):
+                            value = ord(digit) - ord("0")
+                        else:
+                            return None
+                        if not 1 <= value <= n_options or value in parsed:
+                            return None
+                        parsed.append(value)
+                    return sorted(parsed)
+
                 if typ == "dismiss":
                     # Esc anywhere in the ask TUI = "Chat about this" (sandbox-proven
                     # 2026-07-14: tool returns "User declined to answer questions")
                     steps = [("\x1b", False)]
                 elif typ == "multiq":
                     answers = action.get("answers") or []
-                    if not answers:
-                        return {"ok": False, "error": "no answers"}
+                    if not isinstance(answers, list) or len(answers) != len(question_specs):
+                        return {"ok": False, "error": "answer count does not match the question"}
                     # Sandbox-proven recipes (2026-07-14, every transition captured):
                     # single-select = BARE DIGIT (instant select + advance — a separate
                     # CR write after a digit re-fires on the next view as a "phantom
@@ -6021,15 +6853,23 @@ Treat this as an independent session. Verify the repository state before changin
                     #   Next/Submit, CR.
                     DOWN = "\x1b[B"
                     steps = []
-                    for a in answers[:8]:
-                        digits = sorted({int(d) for d in (a.get("digits") or [])})[:9]
+                    for a, spec in zip(answers, question_specs):
+                        if not isinstance(a, dict):
+                            return {"ok": False, "error": "invalid question answer"}
+                        digits = answer_digits(a.get("digits") or [], spec["n_options"])
+                        if digits is None:
+                            return {"ok": False, "error": "invalid option selection"}
                         other = clean(a.get("other"))
-                        n = int(a.get("n_options") or (max(digits) if digits else 0))
+                        n = spec["n_options"]
                         if not digits and not other:
                             return {"ok": False, "error": "every question needs an answer"}
-                        if other and n < 1:
-                            return {"ok": False, "error": "Other needs n_options"}
-                        if a.get("multi"):
+                        if other and not spec["allow_other"]:
+                            return {"ok": False, "error": "Other is unavailable for this question"}
+                        if not spec["multi"] and len(digits) > 1:
+                            return {"ok": False, "error": "choose one option for this question"}
+                        if not spec["multi"] and other and digits:
+                            return {"ok": False, "error": "choose an option or Other, not both"}
+                        if spec["multi"]:
                             steps += [(str(d), False) for d in digits]
                             if other:
                                 steps.append((str(n + 1), False))
@@ -6047,14 +6887,24 @@ Treat this as an independent session. Verify the repository state before changin
                             steps.append((str(digits[0]), False))
                     steps.append(("1", False))
                 elif typ == "option":
-                    digits = [str(int(d)) for d in action.get("digits", [])][:8]
+                    if len(question_specs) != 1:
+                        return {"ok": False, "error": "answer all questions together"}
+                    spec = question_specs[0]
+                    parsed_digits = answer_digits(action.get("digits") or [], spec["n_options"])
+                    if parsed_digits is None:
+                        return {"ok": False, "error": "invalid option selection"}
+                    digits = [str(d) for d in parsed_digits]
                     other = clean(action.get("other"))
-                    n = int(action.get("n_options") or 0)
+                    n = spec["n_options"]
                     if not digits and not other:
                         return {"ok": False, "error": "no option chosen"}
-                    if other and n < 1:
-                        return {"ok": False, "error": "Other needs n_options"}
-                    if action.get("multi"):
+                    if other and not spec["allow_other"]:
+                        return {"ok": False, "error": "Other is unavailable for this question"}
+                    if not spec["multi"] and len(digits) > 1:
+                        return {"ok": False, "error": "choose one option for this question"}
+                    if not spec["multi"] and other and digits:
+                        return {"ok": False, "error": "choose an option or Other, not both"}
+                    if spec["multi"]:
                         steps = [(d, False) for d in digits]
                         if other:
                             # Other rides the Submit ROW path (goes through the
@@ -6102,7 +6952,8 @@ Treat this as an independent session. Verify the repository state before changin
                 if not body:
                     return {"ok": False, "error": "empty text"}
                 try:
-                    desc = (json.load(open(meta_path)) or {}).get("description", "")
+                    with open(meta_path) as meta_handle:
+                        desc = (json.load(meta_handle) or {}).get("description", "")
                 except Exception:
                     desc = ""
                 aid = action.get("agent_id")
@@ -6139,20 +6990,164 @@ Treat this as an independent session. Verify the repository state before changin
         # re-render, so those wait 0.05s and the click stops feeling laggy.
         fast = typ in ("text", "image_text", "handoff_text", "relay", "focus", "interrupt", "noop")
         step_delay = 0.05 if fast else 0.4
-        if self._is_background_claude(reg):
-            result = (self._focus_background_claude(reg) if typ == "focus" else
-                      self._write_background_claude(reg, steps, step_delay))
-        else:
+        turn_fence_baseline = None
+        if typ in ("text", "image_text", "handoff_text", "relay"):
+            try:
+                transcript_size = os.path.getsize(path)
+            except OSError:
+                transcript_size = None
+            turn_fence_baseline = {"transcript_size": transcript_size,
+                                   "convo_rev": getattr(mt, "convo_rev", None)}
+        background_claude = self._is_background_claude(reg)
+        tty = None
+        if not background_claude:
             tty = self._tty_for_pid(reg["pid"])     # a pid's tty never changes
             if not tty:
                 return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
-            result = self._iterm_write(f"/dev/{tty}", steps, step_delay=step_delay)
+
+        def native_write(write_steps):
+            if background_claude:
+                return (self._focus_background_claude(reg) if typ == "focus" else
+                        self._write_background_claude(reg, write_steps, step_delay))
+            return self._iterm_write(f"/dev/{tty}", write_steps, step_delay=step_delay)
+
+        if typ == "session_settings" and len(steps) > 1:
+            # `/model` and `/effort` are separate Claude commands, not one
+            # transaction. A single mailbox request hid partial acceptance when
+            # the first command landed and the second failed. Acknowledge each
+            # write separately and project the exact accepted prefix.
+            applied_model, applied_effort = current_model, current_effort
+            result = None
+            for index, step in enumerate(steps):
+                result = native_write([step])
+                if not result.get("ok"):
+                    failed_field = "model" if step[0].startswith("/model ") else "effort"
+                    ambiguous = not self._native_write_failed_before_delivery(result)
+                    uncertain_warning = (self._mark_claude_control_uncertain(
+                        sid, mt, [failed_field]) if ambiguous else None)
+                    if applied_model != current_model or applied_effort != current_effort:
+                        accepted = {}
+                        if applied_model != current_model:
+                            accepted["model"] = applied_model
+                        if applied_effort != current_effort:
+                            accepted["effort"] = applied_effort
+                        durable_warning = self._record_claude_control_overrides(
+                            sid, mt, accepted)
+                        with self.scan_lock:
+                            accepted_tail = self.tail_for(path)
+                            accepted_tail.model = applied_model
+                        detail = str(result.get("error") or "the second command failed")[:300]
+                        warning = ("Claude applied part of the change; the remaining "
+                                   f"command {'is unconfirmed' if ambiguous else 'failed'}: "
+                                   f"{detail}")
+                        if durable_warning or uncertain_warning:
+                            warning += "; recovery state could not be saved durably"
+                        return {"ok": True, "model": applied_model,
+                                "effort": applied_effort, "partial": True,
+                                "control_delivery_uncertain": ambiguous,
+                                "warning": warning}
+                    if not ambiguous:
+                        return result
+                    return {**result, "ok": False,
+                            "code": "control_delivery_uncertain",
+                            "error": ("Claude may have applied the control change, but Fleet "
+                                      "lost the result; check the terminal" +
+                                      ("; recovery state is not durable"
+                                       if uncertain_warning else ""))}
+                if step[0].startswith("/model "):
+                    applied_model = target_model
+                elif step[0].startswith("/effort "):
+                    applied_effort = target_effort
+                if index + 1 < len(steps):
+                    time.sleep(0.4)
+        elif typ == "permission_mode" and len(steps) > 1:
+            applied_mode = current
+            result = None
+            current_index = allowed.index(current)
+            for index, step in enumerate(steps):
+                result = native_write([step])
+                if not result.get("ok"):
+                    ambiguous = not self._native_write_failed_before_delivery(result)
+                    uncertain_warning = (self._mark_claude_control_uncertain(
+                        sid, mt, ["permission_mode"]) if ambiguous else None)
+                    if applied_mode != current:
+                        durable_warning = self._record_claude_control_overrides(
+                            sid, mt, {"permission_mode": applied_mode})
+                        with self.scan_lock:
+                            self.tail_for(path).permission_mode = applied_mode
+                        detail = str(result.get("error") or "the next cycle key failed")[:300]
+                        warning = ("Claude changed permission mode partway; the remaining "
+                                   f"cycle key {'is unconfirmed' if ambiguous else 'failed'}: "
+                                   f"{detail}")
+                        if durable_warning or uncertain_warning:
+                            warning += "; recovery state could not be saved durably"
+                        return {"ok": True, "mode": applied_mode, "partial": True,
+                                "control_delivery_uncertain": ambiguous,
+                                "warning": warning}
+                    if not ambiguous:
+                        return result
+                    return {**result, "ok": False,
+                            "code": "control_delivery_uncertain",
+                            "error": ("Claude may have changed permission mode, but Fleet "
+                                      "lost the result; check the terminal" +
+                                      ("; recovery state is not durable"
+                                       if uncertain_warning else ""))}
+                applied_mode = allowed[(current_index + index + 1) % len(allowed)]
+                if index + 1 < len(steps):
+                    time.sleep(0.4)
+        else:
+            result = native_write(steps)
+        if (not result.get("ok") and
+                not self._native_write_failed_before_delivery(result) and
+                typ in ("option", "multiq", "permission", "dismiss")):
+            durable_warning = self._set_claude_delivery_uncertain(
+                sid, str(action.get("nonce") or ""))
+            result = {**result, "ok": False, "code": "delivery_uncertain",
+                      "error": ("delivery uncertain — some terminal keys may have landed; "
+                                "check the Claude terminal, then refresh" +
+                                ("; retry protection could not be saved durably"
+                                 if durable_warning else ""))}
+        if (not result.get("ok") and
+                not self._native_write_failed_before_delivery(result) and
+                typ in ("session_settings", "permission_mode")):
+            failed_field = ("permission_mode" if typ == "permission_mode" else
+                            "model" if steps[0][0].startswith("/model ") else "effort")
+            durable_warning = self._mark_claude_control_uncertain(
+                sid, mt, [failed_field])
+            result = {**result, "ok": False, "code": "control_delivery_uncertain",
+                      "error": ("Claude may have applied the control change, but Fleet lost "
+                                "the result; check the terminal" +
+                                ("; recovery state could not be saved durably"
+                                 if durable_warning else ""))}
         if typ == "permission_mode" and result.get("ok"):
             # Claude may defer its transcript marker until the next prompt. Keep
             # Fleet's state responsive; the next native row remains authoritative.
             with self.scan_lock:
                 self.tail_for(path).permission_mode = target
             result["mode"] = target
+            durable_warning = self._record_claude_control_overrides(
+                sid, mt, {"permission_mode": target})
+            if durable_warning:
+                result["warning"] = (result.get("warning", "") +
+                    " Applied, but restart recovery state could not be saved.").strip()
+        elif typ == "session_settings" and result.get("ok"):
+            # The action reached Claude's idle native command parser using only
+            # allowlisted values. Reflect that accepted selection immediately;
+            # later transcript/statusline rows can supersede it.
+            with self.scan_lock:
+                self.tail_for(path).model = target_model
+            accepted = {}
+            if target_model != current_model:
+                accepted["model"] = target_model
+            if target_effort != current_effort:
+                accepted["effort"] = target_effort
+            durable_warning = self._record_claude_control_overrides(sid, mt, accepted)
+            result.update(model=target_model, effort=target_effort)
+            if durable_warning:
+                result["warning"] = (result.get("warning", "") +
+                    " Applied, but restart recovery state could not be saved.").strip()
+        if result.get("ok") and turn_fence_baseline is not None:
+            self._record_claude_turn_fence(sid, turn_fence_baseline)
         return result
 
     MODELS = ("opus", "sonnet", "haiku", "fable")
@@ -6229,12 +7224,15 @@ Treat this as an independent session. Verify the repository state before changin
             if not link or link.get("destination_provider") != target:
                 return {"ok": False, "error": "stale or mismatched handoff destination"}
             result = self._deliver_existing_handoff(link, preview)
-            status = "delivered" if result.get("ok") else "delivery_failed"
+            uncertain = result.get("code") == "delivery_uncertain"
+            status = ("delivered" if result.get("ok") else
+                      "confirmation_unknown" if uncertain else "delivery_failed")
             self._record_handoff_link(source_sid, source.get("provider") or "claude",
                 retry_sid, target, status, preview_hash, result.get("error"))
             return {**result, "source_session_id": source_sid,
                     "destination_session_id": retry_sid, "provider": target,
-                    "created": False, "retryable": not result.get("ok")}
+                    "created": False,
+                    "retryable": not result.get("ok") and not uncertain}
 
         cwd = os.path.realpath(os.path.expanduser(
             str(action.get("cwd") or source.get("cwd") or "").strip()))
@@ -6306,19 +7304,25 @@ Treat this as an independent session. Verify the repository state before changin
                     "created": True, "retryable": True}
         delivered = self.act({"type": "handoff_text", "session_id": destination_sid,
                               "text": preview})
-        status = "delivered" if delivered.get("ok") else "delivery_failed"
+        uncertain = delivered.get("code") == "delivery_uncertain"
+        status = ("delivered" if delivered.get("ok") else
+                  "confirmation_unknown" if uncertain else "delivery_failed")
         self._record_handoff_link(source_sid, source.get("provider") or "claude",
             destination_sid, target, status, preview_hash, delivered.get("error"))
         return {**delivered, "source_session_id": source_sid,
                 "destination_session_id": destination_sid, "session_id": destination_sid,
                 "provider": target, "cwd": cwd, "created": True,
-                "retryable": not delivered.get("ok")}
+                "retryable": not delivered.get("ok") and not uncertain}
 
     def attach_codex_terminal(self, action):
         """Open a TUI client on the same App Server; never resume a copy."""
         from codex_adapter import codex_command, codex_control_socket
         sid = str(action.get("session_id") or "")
         tid = self.codex.native(sid)
+        session = next((item for item in self.codex.sessions()
+                        if item.get("session_id") == sid), None)
+        if not session or session.get("read_only"):
+            return {"ok": False, "error": "this Codex thread is view only"}
         route = self._codex_terminal_route(tid, force=True)
         if route:
             result = self._iterm_write(
@@ -6327,9 +7331,7 @@ Treat this as an independent session. Verify the repository state before changin
                 result.update(session_id=sid, shared_runtime=True,
                               transport="codex_terminal", focused=True)
             return result
-        session = next((item for item in self.codex.sessions()
-                        if item.get("session_id") == sid), None)
-        if not session or not session.get("capabilities", {}).get("focus_terminal"):
+        if not session.get("capabilities", {}).get("focus_terminal"):
             return {"ok": False, "error": "this Codex thread is view only"}
         cwd = os.path.realpath(os.path.expanduser(session.get("cwd") or HOME))
         if not os.path.isdir(cwd):
@@ -6466,45 +7468,67 @@ Treat this as an independent session. Verify the repository state before changin
         # applet: request file -> open -g applet -> result file. The applet has its
         # own TCC identity and prompts normally on first use.
         import base64
-        req_id = secrets.token_hex(8)
-        lines = [tty, req_id]
-        if step_delay is not None:      # flag 4: how long the applet waits BETWEEN keys
-            lines.append(f"4 {step_delay}")
-        for text, nl in steps:
-            if text == "__FOCUS__":     # flag 3: select that tab, type nothing
-                lines.append("3 ")
-                continue
-            if text:
-                lines.append("0 " + base64.b64encode(text.encode()).decode())
-            if nl:                      # raw CR — raw-mode TUIs' Enter (LF toggles!)
-                lines.append("2 ")
-        req_path = os.path.join(BASE, "inject-request.txt")
-        res_path = os.path.join(BASE, "inject-result.txt")
-        try:
-            os.remove(res_path)
-        except OSError:
-            pass
-        with open(req_path, "w") as f:
-            f.write("\n".join(lines))
-        app = os.path.join(BASE, "FleetDashInjector.app")
-        try:
-            subprocess.run(["open", "-g", app], capture_output=True, timeout=10)
-        except Exception as e:
-            return {"ok": False, "error": f"injector launch failed: {e}"}
-        deadline = time.time() + 30    # generous: first run includes the TCC dialog
-        while time.time() < deadline:
+        with self._inject_lock:
+            req_id = secrets.token_hex(8)
+            lines = [tty, req_id]
+            if step_delay is not None:  # flag 4: how long the applet waits BETWEEN keys
+                lines.append(f"4 {step_delay}")
+            for text, nl in steps:
+                if text == "__FOCUS__":  # flag 3: select that tab, type nothing
+                    lines.append("3 ")
+                    continue
+                if text:
+                    lines.append("0 " + base64.b64encode(text.encode()).decode())
+                if nl:                  # raw CR — raw-mode TUIs' Enter (LF toggles!)
+                    lines.append("2 ")
+            req_path = os.path.join(BASE, "inject-request.txt")
+            res_path = os.path.join(BASE, "inject-result.txt")
             try:
-                out = open(res_path).read().strip()
-                if out.startswith(req_id):
-                    verdict = out[len(req_id):].strip()
-                    if verdict == "ok":
-                        return {"ok": True}
-                    return {"ok": False, "error": verdict[:300]}
+                os.remove(res_path)
             except OSError:
                 pass
-            time.sleep(0.02)            # the applet is done in ~200ms — don't sleep past it
-        return {"ok": False, "error": "injector timed out — if a macOS permission "
-                "dialog appeared, grant it and retry"}
+            tmp_path = f"{req_path}.tmp-{req_id}"
+            try:
+                with open(tmp_path, "w") as f:
+                    f.write("\n".join(lines))
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, req_path)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            app = os.path.join(BASE, "FleetDashInjector.app")
+            try:
+                launched = subprocess.run(
+                    ["open", "-g", app], capture_output=True, text=True, timeout=10)
+            except Exception as e:
+                return {"ok": False, "code": "injector_not_launched",
+                        "error": f"injector launch failed: {e}"}
+            if launched.returncode:
+                detail = (launched.stderr or launched.stdout or
+                          "macOS refused to launch the injector")[:300]
+                return {"ok": False, "code": "injector_not_launched",
+                        "error": f"injector launch failed: {detail}"}
+            deadline = time.time() + 30  # generous: first run includes the TCC dialog
+            while time.time() < deadline:
+                try:
+                    with open(res_path) as result_handle:
+                        out = result_handle.read().strip()
+                    if out.startswith(req_id):
+                        verdict = out[len(req_id):].strip()
+                        if verdict == "ok":
+                            return {"ok": True}
+                        return {"ok": False, "code": "delivery_uncertain",
+                                "error": ("delivery uncertain — the injector launched but "
+                                          f"reported: {verdict[:240]}")}
+                except OSError:
+                    pass
+                time.sleep(0.02)        # the applet is done in ~200ms — don't sleep past it
+            return {"ok": False, "code": "delivery_uncertain",
+                    "error": ("delivery uncertain — the injector launched but its result "
+                              "was lost; check the terminal before retrying")}
 
     # ---------------------------------------------------------------- ntfy
     def _send_legacy_ntfy_test(self, key):

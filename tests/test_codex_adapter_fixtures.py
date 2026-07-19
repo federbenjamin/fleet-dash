@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 
 from codex_adapter import (CodexAdapter, CodexError, _elicitation_pending,
@@ -25,6 +27,8 @@ class FixtureClient:
         self.steered_turns = []
         self.steer_error = None
         self.mode_changed = None
+        self.mode_error = None
+        self.compactions = []
 
     def list_threads(self):
         if self.fail_list:
@@ -69,7 +73,14 @@ class FixtureClient:
             raise self.steer_error
 
     def set_mode(self, thread_id, mode, model, effort):
+        if self.mode_error:
+            raise self.mode_error
         self.mode_changed = (thread_id, mode, model, effort)
+        self.thread_state.setdefault(thread_id, {}).update(
+            collaboration_mode=mode, model=model, effort=effort)
+
+    def compact(self, thread_id):
+        self.compactions.append(thread_id)
 
     def account_limits(self):
         if self.fail_account:
@@ -260,6 +271,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
 
     def test_image_action_builds_native_local_image_inputs(self):
         adapter, client = self.adapter([self.thread("managed")])
+        adapter._remember("managed", "default")
         adapter._sessions = [{"native_session_id": "managed", "read_only": False,
             "capabilities": {"submit": True}, "collaboration_mode": "default",
             "model": "gpt-5.4", "effort": "high"}]
@@ -307,6 +319,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                  "image_paths": ["/private/fleet/photo.jpg"]}):
             with self.subTest(action=action["type"]):
                 adapter, client = self.adapter([self.thread("managed")])
+                adapter._remember("managed", "default")
                 adapter._sessions = [{"native_session_id": "managed", "read_only": False,
                     "capabilities": {"submit": True}, "collaboration_mode": "default",
                     "model": "gpt-5.4", "effort": "high"}]
@@ -361,8 +374,175 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         session = adapter.sessions()[0]
         self.assertEqual(session["state"], "stale")
         self.assertIn("app-server unavailable", session["stale_reason"])
-        self.assertTrue(session["capabilities"]["submit"])
-        self.assertTrue(session["capabilities"]["close"])
+        self.assertFalse(session["capabilities"]["submit"])
+        self.assertTrue(session["capabilities"]["queue_submit"])
+        self.assertFalse(session["capabilities"]["close"])
+
+    def test_unknown_and_external_ids_reject_every_thread_action_without_provider_calls(self):
+        adapter, client = self.adapter([self.thread("external")])
+        adapter._refresh()
+        provider_calls = []
+
+        def record(name):
+            return lambda *args, **kwargs: provider_calls.append((name, args, kwargs)) or {
+                "ok": True}
+
+        for name in ("resume_thread", "start_turn", "steer_turn", "set_mode", "interrupt",
+                     "archive", "compact", "review", "decide", "answer_questions",
+                     "answer_elicitation"):
+            setattr(client, name, record(name))
+        actions = [
+            {"type": "text", "text": "mutate"},
+            {"type": "image_text", "text": "mutate", "image_paths": ["/tmp/x.jpg"]},
+            {"type": "session_settings", "model": "gpt-5.4", "effort": "high",
+             "expected_model": "gpt-5.4", "expected_effort": "high"},
+            {"type": "mode", "mode": "plan"}, {"type": "interrupt"},
+            {"type": "archive"}, {"type": "close"}, {"type": "compact"},
+            {"type": "review"}, {"type": "skill", "name": "reviewer"},
+            {"type": "permission", "nonce": "9", "choice": "allow"},
+            {"type": "multiq", "nonce": "9", "answers": []},
+            {"type": "option", "nonce": "9", "digits": [1]},
+            {"type": "elicitation", "nonce": "9", "choice": "decline"},
+            {"type": "dismiss", "nonce": "9"},
+            {"type": "relay", "agent_id": "child", "text": "mutate"},
+        ]
+        for target in ("codex:forged-unknown", "codex:external"):
+            for action in actions:
+                with self.subTest(target=target, action=action["type"]):
+                    result = adapter.act({**action, "session_id": target})
+                    self.assertFalse(result["ok"], result)
+        self.assertEqual(provider_calls, [])
+
+    def test_stale_projection_disables_mutations_and_rejects_direct_actions(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter._remember("managed", "default")
+        adapter._refresh()
+        client.fail_list = True
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        for capability in ("submit", "interrupt", "archive", "close", "compact", "review",
+                           "answer_structured", "decide_approval", "relay_agent",
+                           "change_model_effort"):
+            self.assertFalse(session["capabilities"][capability], capability)
+        self.assertTrue(session["capabilities"]["queue_submit"])
+        before = (list(client.started_turns), list(client.steered_turns),
+                  list(client.interrupts), client.mode_changed)
+        queued = adapter.act({"type": "text", "session_id": "codex:managed",
+                              "text": "queue me"})
+        self.assertFalse(queued["ok"])
+        self.assertTrue(queued["queueable"])
+        for action in ({"type": "mode", "mode": "plan"},
+                       {"type": "session_settings", "model": "gpt-5.4",
+                        "effort": "high"}, {"type": "interrupt"},
+                       {"type": "archive"}, {"type": "close"}, {"type": "compact"},
+                       {"type": "review"}, {"type": "permission", "nonce": "9",
+                                              "choice": "allow"},
+                       {"type": "option", "nonce": "9", "digits": [1]},
+                       {"type": "relay", "agent_id": "child", "text": "do it"}):
+            with self.subTest(action=action["type"]):
+                result = adapter.act({**action, "session_id": "codex:managed"})
+                self.assertFalse(result["ok"], result)
+        self.assertEqual(before, (client.started_turns, client.steered_turns,
+                                  client.interrupts, client.mode_changed))
+
+    def test_agent_context_requires_exact_parent_membership_before_provider_read(self):
+        parent = self.thread("parent")
+        parent["turns"] = [{"items": [{"type": "subAgentActivity", "kind": "started",
+            "agentThreadId": "child-one", "agentPath": "/agents/one"}]}]
+        sibling = self.thread("sibling")
+        sibling["turns"] = [{"items": [{"type": "subAgentActivity", "kind": "started",
+            "agentThreadId": "child-two", "agentPath": "/agents/two"}]}]
+        adapter, client = self.adapter([parent, sibling])
+        adapter._remember("parent", "default")
+        adapter._remember("sibling", "default")
+        client.details.update({
+            "child-one": {"id": "child-one", "status": {"type": "idle"}, "turns": []},
+            "child-two": {"id": "child-two", "status": {"type": "idle"}, "turns": []},
+        })
+        adapter._refresh()
+        client.read_calls.clear()
+        for invalid in ("child-two", "unknown-child"):
+            result = adapter.agent_context("codex:parent", invalid)
+            self.assertEqual(result, {"ok": False, "error": "no such subagent"})
+        self.assertEqual(client.read_calls, [])
+        self.assertTrue(adapter.agent_context("codex:parent", "child-one")["ok"])
+        self.assertEqual(client.read_calls, ["child-one"])
+
+    def test_malformed_thread_is_isolated_and_next_refresh_recovers(self):
+        bad, healthy = self.thread("bad"), self.thread("healthy")
+        adapter, client = self.adapter([bad, healthy])
+        adapter._remember("bad", "default")
+        adapter._remember("healthy", "default")
+        adapter._refresh()
+        client.threads = [{**bad, "turns": [None]}, healthy]
+        adapter._refresh()
+        sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+        self.assertTrue(sessions["bad"]["stale"])
+        self.assertFalse(sessions["healthy"]["stale"])
+        self.assertFalse(adapter._refreshing)
+        self.assertTrue(adapter.diagnostics()["refresh_errors"])
+        client.threads = [bad, healthy]
+        adapter._refresh()
+        sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+        self.assertFalse(sessions["bad"]["stale"])
+        self.assertFalse(sessions["healthy"]["stale"])
+
+    def test_malformed_owned_thread_has_stale_stub_on_first_refresh(self):
+        bad, healthy = self.thread("bad"), self.thread("healthy")
+        bad["turns"] = [None]
+        adapter, _client = self.adapter([bad, healthy])
+        adapter._remember("bad", "plan", {"cwd": "/work/bad", "model": "gpt-5.4",
+                                             "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+        self.assertIn("bad", sessions)
+        self.assertTrue(sessions["bad"]["stale"])
+        self.assertFalse(sessions["bad"]["capabilities"]["submit"])
+        self.assertFalse(sessions["healthy"]["stale"])
+
+    def test_missing_persisted_owned_thread_is_target_read_after_archive_page(self):
+        adapter, client = self.adapter([self.thread(f"external-{index}") for index in range(100)])
+        adapter._remember("owned-old", "plan", {
+            "cwd": "/work/project", "model": "gpt-5.4", "effort": "high",
+            "unmaterialized": False})
+        client.details["owned-old"] = self.thread("owned-old", updated=1)
+        adapter._refresh()
+        sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+        self.assertIn("owned-old", sessions)
+        self.assertFalse(sessions["owned-old"]["stale"])
+        self.assertIn("owned-old", client.read_calls)
+
+    def test_refresh_detail_reads_obey_one_total_budget(self):
+        release = threading.Event()
+
+        class SlowClient(FixtureClient):
+            def read_thread(self, thread_id):
+                self.read_calls.append(thread_id)
+                if thread_id == "slow":
+                    release.wait(1)
+                return dict(self.details[thread_id])
+
+        threads = [self.thread("slow"), self.thread("fast")]
+        client = SlowClient(threads)
+        adapter = CodexAdapter(
+            client=client, state_path=self.state_path, clock=lambda: 1000,
+            stall_seconds=30, refresh_budget_seconds=.05, refresh_workers=2,
+            models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        adapter._remember("slow", "default")
+        adapter._remember("fast", "default")
+        started = time.monotonic()
+        adapter._refresh()
+        elapsed = time.monotonic() - started
+        try:
+            # The provider read blocks for one second. The adapter returns well
+            # before that even after durable snapshot fsync work on slower CI.
+            self.assertLess(elapsed, .5)
+            sessions = {item["native_session_id"]: item for item in adapter.sessions()}
+            self.assertEqual(set(sessions), {"slow", "fast"})
+            self.assertIn("bounded refresh budget", sessions["slow"]["refresh_warning"])
+            self.assertIsNone(sessions["fast"]["refresh_warning"])
+        finally:
+            release.set()
 
     def test_detail_read_failure_keeps_owned_session_interactive_with_warning(self):
         adapter, client = self.adapter([self.thread()])
@@ -582,6 +762,317 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         meta = adapter._state()["thread_meta"]["managed"]
         self.assertEqual(meta["model"], "gpt-5.4")
         self.assertEqual(meta["effort"], "high")
+        self.assertEqual(meta["settings_revision"], 1)
+
+    def test_mode_change_preserves_explicit_live_null_effort(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        client.thread_state["managed"] = {
+            "status": "idle", "model": "gpt-5.4", "effort": None}
+
+        result = adapter.act({
+            "type": "mode", "session_id": "codex:managed", "mode": "plan"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(client.mode_changed, ("managed", "plan", "gpt-5.4", None))
+        self.assertIsNone(adapter.sessions()[0]["effort"])
+        self.assertIsNone(adapter._state()["thread_meta"]["managed"]["effort"])
+        adapter._refresh()
+        self.assertIsNone(adapter.sessions()[0]["effort"])
+        self.assertIsNone(adapter._state()["thread_meta"]["managed"]["effort"])
+
+    def test_mode_change_wins_over_refresh_derived_before_provider_acceptance(self):
+        thread = self.thread("managed")
+        thread.pop("effort")
+        adapter, client = self.adapter([thread])
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": None, "unmaterialized": False,
+            "settings_revision": 0})
+        adapter._refresh()
+        derived = threading.Event()
+        resume = threading.Event()
+        original_cache = adapter._cache_snapshot
+
+        def pause_after_derivation(*args, **kwargs):
+            derived.set()
+            self.assertTrue(resume.wait(2))
+            return original_cache(*args, **kwargs)
+
+        adapter._cache_snapshot = pause_after_derivation
+        refresh = threading.Thread(target=adapter._refresh)
+        refresh.start()
+        self.assertTrue(derived.wait(2))
+        result = adapter.act({
+            "type": "mode", "session_id": "codex:managed", "mode": "plan"})
+        self.assertEqual(result, {"ok": True, "mode": "plan", "durable": True})
+        resume.set()
+        refresh.join(2)
+        self.assertFalse(refresh.is_alive())
+        session = adapter.sessions()[0]
+        self.assertEqual(session["collaboration_mode"], "plan")
+        self.assertEqual(session["effort"], "medium")
+        self.assertEqual(session["settings_revision"], 1)
+        meta = adapter._state()["thread_meta"]["managed"]
+        self.assertEqual((meta["effort"], meta["settings_revision"]), ("medium", 1))
+        self.assertEqual(client.mode_changed, ("managed", "plan", "gpt-5.4", "medium"))
+
+    def test_mode_provider_acceptance_survives_metadata_failure_with_warning(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        original_remember = adapter._remember
+
+        def fail_mode_persistence(tid, mode=None, meta=None, **kwargs):
+            if mode == "plan" and meta and "settings_revision" in meta:
+                raise OSError("disk full")
+            return original_remember(tid, mode, meta, **kwargs)
+
+        adapter._remember = fail_mode_persistence
+        result = adapter.act({
+            "type": "mode", "session_id": "codex:managed", "mode": "plan"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["durable"])
+        self.assertIn("Applied in Codex", result["warning"])
+        self.assertEqual(client.mode_changed, ("managed", "plan", "gpt-5.4", "high"))
+        self.assertEqual(adapter.sessions()[0]["collaboration_mode"], "plan")
+
+    def test_existing_session_settings_persist_through_compaction_restart_and_next_turn(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter.models = [
+            {"id": "gpt-5.4", "name": "GPT-5.4", "efforts": ["high"]},
+            {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["medium", "xhigh"]},
+        ]
+        adapter._remember("managed", "plan", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+
+        changed = adapter.act({"type": "session_settings",
+            "session_id": "codex:managed", "model": "gpt-5.6-sol", "effort": "xhigh",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+        self.assertEqual(changed, {"ok": True, "model": "gpt-5.6-sol",
+                                   "effort": "xhigh", "durable": True})
+        self.assertEqual(client.mode_changed,
+                         ("managed", "plan", "gpt-5.6-sol", "xhigh"))
+        self.assertEqual(adapter.sessions()[0]["model"], "gpt-5.6-sol")
+        self.assertEqual(adapter.sessions()[0]["effort"], "xhigh")
+        self.assertTrue(adapter.act({"type": "compact",
+                                    "session_id": "codex:managed"})["ok"])
+        self.assertEqual(client.compactions, ["managed"])
+
+        for row in client.threads:
+            row.pop("model", None)
+            row.pop("effort", None)
+        for row in client.details.values():
+            row.pop("model", None)
+            row.pop("effort", None)
+        client.thread_state.clear()
+        restarted = CodexAdapter(
+            client=client, state_path=self.state_path, clock=lambda: 1000,
+            stall_seconds=30,
+            models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        restarted.models = list(adapter.models)
+        restarted._refresh()
+        session = restarted.sessions()[0]
+        self.assertEqual((session["model"], session["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        self.assertTrue(restarted.act({"type": "text", "session_id": "codex:managed",
+                                      "text": "continue after compact"})["ok"])
+        self.assertEqual(client.started_turns[-1], ("managed", "continue after compact", {
+            "mode": "plan", "model": "gpt-5.6-sol", "effort": "xhigh"}))
+
+    def test_settings_save_preserves_newer_live_collaboration_mode(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter.models = [{"id": "gpt-5.4", "name": "GPT-5.4",
+                           "efforts": ["medium", "high"]}]
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        client.thread_state["managed"] = {
+            "status": "idle", "model": "gpt-5.4", "effort": "high",
+            "collaboration_mode": "plan"}
+
+        result = adapter.act({"type": "session_settings",
+            "session_id": "codex:managed", "model": "gpt-5.4", "effort": "medium",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(client.mode_changed,
+                         ("managed", "plan", "gpt-5.4", "medium"))
+        self.assertEqual(adapter._state()["modes"]["managed"], "plan")
+
+    def test_existing_session_settings_reject_invalid_stale_active_and_provider_failure(self):
+        active = self.thread("managed", {"type": "active", "activeFlags": []})
+        adapter, client = self.adapter([active])
+        adapter.models = [{"id": "gpt-5.4", "name": "GPT-5.4",
+                           "efforts": ["medium", "high"]}]
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        self.assertFalse(adapter.sessions()[0]["capabilities"]["change_model_effort"])
+        rejected = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+                                "model": "gpt-5.4", "effort": "medium"})
+        self.assertFalse(rejected["ok"])
+        self.assertIsNone(client.mode_changed)
+
+        client.threads[0]["status"] = {"type": "idle"}
+        client.details["managed"]["status"] = {"type": "idle"}
+        adapter._refresh()
+        invalid = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+                               "model": "gpt-5.4", "effort": "xhigh"})
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid.get("code"), "stale_settings")
+        client.thread_state["managed"] = {"model": "gpt-5.4", "effort": "medium"}
+        live_stale = adapter.act({"type": "session_settings",
+            "session_id": "codex:managed", "model": "gpt-5.4", "effort": "medium",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+        self.assertEqual(live_stale.get("code"), "stale_settings")
+        client.thread_state["managed"] = {"model": "gpt-5.4", "effort": "high"}
+        stale = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+            "model": "gpt-5.4", "effort": "medium",
+            "expected_model": "gpt-5.4", "expected_effort": "low"})
+        self.assertEqual(stale.get("code"), "stale_settings")
+        client.mode_error = CodexError("provider rejected settings")
+        failed = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+            "model": "gpt-5.4", "effort": "medium",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+        self.assertFalse(failed["ok"])
+        self.assertIn("provider rejected", failed["error"])
+        self.assertEqual((adapter.sessions()[0]["model"], adapter.sessions()[0]["effort"]),
+                         ("gpt-5.4", "high"))
+        meta = adapter._state()["thread_meta"]["managed"]
+        self.assertEqual((meta["model"], meta["effort"]), ("gpt-5.4", "high"))
+
+    def test_settings_save_wins_over_refresh_built_from_old_projection(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter.models = [
+            {"id": "gpt-5.4", "name": "GPT-5.4", "efforts": ["high"]},
+            {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["xhigh"]},
+        ]
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False,
+            "settings_revision": 0})
+        adapter._refresh()
+        derived = threading.Event()
+        resume = threading.Event()
+        original_cache = adapter._cache_snapshot
+
+        def pause_after_derivation(*args, **kwargs):
+            derived.set()
+            self.assertTrue(resume.wait(2))
+            return original_cache(*args, **kwargs)
+
+        adapter._cache_snapshot = pause_after_derivation
+        refresh = threading.Thread(target=adapter._refresh)
+        refresh.start()
+        self.assertTrue(derived.wait(2))
+        changed = adapter.act({"type": "session_settings",
+            "session_id": "codex:managed", "model": "gpt-5.6-sol", "effort": "xhigh",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+        self.assertTrue(changed["ok"], changed)
+        resume.set()
+        refresh.join(2)
+        self.assertFalse(refresh.is_alive())
+        session = adapter.sessions()[0]
+        self.assertEqual((session["model"], session["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        meta = adapter._state()["thread_meta"]["managed"]
+        self.assertEqual((meta["model"], meta["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        self.assertFalse(adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "settings_revision": 1},
+            expected_settings_revision=0))
+
+    def test_mutation_lock_serializes_settings_before_next_turn_and_rechecks_blockers(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter.models = [
+            {"id": "gpt-5.4", "name": "GPT-5.4", "efforts": ["high"]},
+            {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["xhigh"]},
+        ]
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        entered = threading.Event()
+        release = threading.Event()
+        original_set_mode = client.set_mode
+
+        def blocked_set_mode(*args):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return original_set_mode(*args)
+
+        client.set_mode = blocked_set_mode
+        results = {}
+        setting = threading.Thread(target=lambda: results.setdefault("settings", adapter.act({
+            "type": "session_settings", "session_id": "codex:managed",
+            "model": "gpt-5.6-sol", "effort": "xhigh",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})))
+        turn = threading.Thread(target=lambda: results.setdefault("turn", adapter.act({
+            "type": "text", "session_id": "codex:managed", "text": "use new settings"})))
+        setting.start()
+        self.assertTrue(entered.wait(2))
+        turn.start()
+        time.sleep(.03)
+        self.assertEqual(client.started_turns, [])
+        release.set()
+        setting.join(2)
+        turn.join(2)
+        self.assertTrue(results["settings"]["ok"], results)
+        self.assertTrue(results["turn"]["ok"], results)
+        self.assertEqual(client.started_turns[-1][2], {
+            "mode": "default", "model": "gpt-5.6-sol", "effort": "xhigh"})
+
+        # Refresh said idle, but a request/compaction appeared before the click.
+        client.approvals["pending"] = {"thread_id": "managed", "state": "pending"}
+        blocked = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+            "model": "gpt-5.4", "effort": "high",
+            "expected_model": "gpt-5.6-sol", "expected_effort": "xhigh"})
+        self.assertIn("waiting on a request", blocked["error"])
+        client.approvals.clear()
+        client.thread_state["managed"].update(compacting=0, turn_id=None, status="idle")
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        self.assertFalse(session["capabilities"]["change_model_effort"])
+        self.assertFalse(session["capabilities"]["compact"])
+        started_before = len(client.started_turns)
+        queued = adapter.act({"type": "text", "session_id": "codex:managed",
+                              "text": "wait for compact"})
+        self.assertFalse(queued["ok"])
+        self.assertTrue(queued["queueable"])
+        self.assertEqual(len(client.started_turns), started_before)
+
+    def test_provider_acceptance_with_metadata_failure_returns_durability_warning(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        adapter.models = [
+            {"id": "gpt-5.4", "name": "GPT-5.4", "efforts": ["high"]},
+            {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["xhigh"]},
+        ]
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.4", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+        original_remember = adapter._remember
+
+        def fail_settings_persistence(tid, mode=None, meta=None, **kwargs):
+            if meta and meta.get("model") == "gpt-5.6-sol":
+                raise OSError("disk full")
+            return original_remember(tid, mode, meta, **kwargs)
+
+        adapter._remember = fail_settings_persistence
+        result = adapter.act({"type": "session_settings", "session_id": "codex:managed",
+            "model": "gpt-5.6-sol", "effort": "xhigh",
+            "expected_model": "gpt-5.4", "expected_effort": "high"})
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["durable"])
+        self.assertIn("Applied in Codex", result["warning"])
+        self.assertEqual(client.mode_changed,
+                         ("managed", "default", "gpt-5.6-sol", "xhigh"))
+        self.assertEqual((adapter.sessions()[0]["model"], adapter.sessions()[0]["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        adapter._refresh()
+        self.assertEqual((adapter.sessions()[0]["model"], adapter.sessions()[0]["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
 
     def test_unmaterialized_thread_missing_from_runtime_is_discarded(self):
         adapter, _ = self.adapter([])

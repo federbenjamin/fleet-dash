@@ -4,7 +4,7 @@ PreToolUse[AskUserQuestion]  -> writes the pending question (full JSON) for the 
 PostToolUse[AskUserQuestion] -> clears it (question answered)
 Notification                 -> writes permission-request prompts; ignores idle nags
 Never blocks: always exits 0 fast."""
-import json, os, sys, time
+import json, os, secrets, sys, time
 
 try:
     d = json.load(sys.stdin)
@@ -41,8 +41,28 @@ elif ev == "Notification":
 if out:
     try:
         os.makedirs(base, exist_ok=True)
-        with open(path, "w") as f:
+        temp = os.path.join(base, f".{sid}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(temp, flags, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(out, f)
+            f.flush()
+            os.fsync(f.fileno())
+        if ev == "Notification":
+            # Install only if no richer question won the race. Linking a fully
+            # written temp is atomic and never clobbers an existing capture.
+            try:
+                os.link(temp, path)
+            except FileExistsError:
+                pass
+            os.unlink(temp)
+        else:
+            os.replace(temp, path)
     except Exception:
-        pass
+        try:
+            os.unlink(temp)
+        except Exception:
+            pass
 sys.exit(0)

@@ -1,8 +1,9 @@
 # Fleet Notification Center and Web Push roadmap
 
-Status: M12 baseline complete · 2026-07-17. M13 global-policy extension implemented on
-`fix/provider-control-recovery`; isolated staging API/read-only browser smoke passes and
-installed-device release gates remain.
+Status: M12 baseline complete · 2026-07-17. M13 global-policy extension implemented; the
+`fix/send-now-or-queue` adversarial hardening amendment adds independent per-kind in-app visibility.
+Current staging and installed-device gates live in
+[`adversarial-bug-scan-roadmap.md`](adversarial-bug-scan-roadmap.md).
 
 Baseline branch: `design/push-notification-redesign`
 
@@ -18,7 +19,8 @@ gate are verified.
 
 The original N0–N6 work shipped a deliberately fixed M12 interruption policy. M13 supersedes only
 that policy layer: one revisioned global policy now applies to every enabled device, and every
-canonical event kind has an Off/Once/Once+reminder/Repeat rule. Device records still own connection,
+canonical event kind has an independent in-app visibility switch plus an
+Off/Once/Once+reminder/Repeat Web Push rule. Device records still own connection,
 permission, qualification, pause, and health. Minimal payloads, exact deep links, capability actions,
 Notification Center lifecycle, snooze, mute, and the Web Push security boundary are unchanged. The
 full M13 implementation and release gates are tracked in
@@ -65,13 +67,16 @@ Claude/Codex/operations event
 5. Every canonical event kind is policy-capable. Defaults preserve the M12 behavior: Needs-you
    requests, approvals, confirmed failures, and stalls may interrupt; completion, artifact, outcome,
    budget, measurement, and Fleet notices begin Off.
-6. Each kind independently selects Off, Once, Once + one reminder, or bounded Repeat until resolved,
-   with initial delay, interval, maximum successful waves, severity floor, and quiet-hours behavior.
+6. Each kind independently controls Notification Center visibility and selects Off, Once, Once +
+   one reminder, or bounded Repeat until resolved for Web Push, with initial delay, interval,
+   maximum successful waves, severity floor, and quiet-hours behavior. Neither control silently
+   changes the other.
 7. Snooze applies to one event. The push shortcut snoozes for 15 minutes; Fleet also offers one hour
    and tomorrow. If still active at expiry, the event may deliver once and does not restart an
    unlimited reminder cycle.
-8. Mute applies to the whole session, across devices, until manually unmuted. Muted events remain
-   visible in Fleet and continue to affect Needs-you counts; only external push is suppressed.
+8. Mute applies to the whole session, across devices, until manually unmuted. It suppresses external
+   push but does not change provider/Needs-you state. Notification Center visibility remains governed
+   by the event kind's independent in-app switch.
 9. Read state and delivery health/pause are per device. Cadence policy, snooze, mute,
    active/resolved state, and notification identity are global.
 10. Notification Center absorbs Fleet Briefing's durable event history. Briefing becomes a summary
@@ -224,7 +229,7 @@ new. Actionable and current failure events enter as `active`.
 
 ## Default global event policy
 
-| Event kind | Initial push | Reminder | Notification Center |
+| Event kind | Initial push | Reminder | Default Notification Center visibility |
 | --- | --- | --- | --- |
 | Permission/command/file approval or MCP form | immediately after confirmed active state | once after 15m | Needs action |
 | Structured question or explicit reply request | immediately after confirmed active state | once after 15m | Needs action |
@@ -671,7 +676,7 @@ badges, exact opens, and the final native N5 interaction were confirmed by the u
 | ACT-NTF-002 | Capabilities are one-use, ten-minute, event/device/action scoped, POST-only, secret-redacted, and revalidated. | N5 |
 | PRIV-001 | Default external title/body reveal only generic state and elapsed time; forbidden prompt/tool/path/branch/cost/account content has deterministic negative tests. | N5 |
 | POLICY-001 | Every canonical kind has one global bounded cadence rule shared by all enabled devices. Defaults retain the former actionable/failure/stall policy; informational kinds remain Off until explicitly enabled, and current active events require explicit apply-to-current. | M13 |
-| POLICY-002 | Snooze replaces reminder timing; Mute is session-wide until manual unmute and never hides in-app state. | N5 |
+| POLICY-002 | Snooze replaces reminder timing; Mute is session-wide until manual unmute and never changes provider/Needs-you state. Per-kind in-app visibility remains independent. | N5 |
 | LEG-001 | ntfy exposes one opt-in fixed-copy manual test only and is never automatic, a fallback, or a duplicate destination. | N6 |
 | QUAL-NTF-001 | Desktop/mobile deterministic tests, fake push endpoints, restart/saturation tests, real iPhone/macOS app-closed delivery, and latency/privacy gates pass. | N0–N6 |
 

@@ -1,7 +1,8 @@
 # Fleet Dash platform roadmap
 
-Status: M0–M12 production-complete. M13 implementation complete on
-`fix/provider-control-recovery`; staging/live-device release gates remain.
+Status: M0–M12 production-complete. M13 and M14 are implemented with automated release gates passed;
+isolated staging and phone validation remain on `fix/send-now-or-queue`. The durable source of truth is
+[`adversarial-bug-scan-roadmap.md`](adversarial-bug-scan-roadmap.md).
 
 ## Implementation progress
 
@@ -20,7 +21,8 @@ Status: M0–M12 production-complete. M13 implementation complete on
 | M10 — Bug-fix and resilience pass | Complete · 2026-07-16 | Strict request/config/outbox/budget validation, bounded HTTP failures, derived-database recovery, request-local ledger reads, Claude pre-transcript visibility, Codex propagation-race recovery, 173 Python tests, 82 deterministic browser checks, 12 live browser checks, and a clean 120-request concurrent refresh soak. |
 | M11 — Dashboard UX and responsiveness | Complete · 2026-07-16 | Action-oriented Now filters, compact Usage, multiline composers, optimistic startup, Claude permission controls, worktree-safe close, adaptive status strips, stable pin order, stale-request cancellation, recoverable interaction feedback, 185 Python tests, 112 deterministic browser checks, 12 live browser checks, and live server-route p95 below 5 ms. |
 | M12 — Notification Center and Web Push | Complete · N0–N6 · 2026-07-16/17 | Encrypted compatibility probe; canonical lifecycle migration; installable shell-only PWA; durable Web Push; responsive canonical Notification Center; installed macOS/iPhone app-closed delivery, badges, exact deep links, production policy, bounded reminders, Snooze/Mute capabilities, minimal lock-screen payloads, manual-only legacy ntfy, restart/saturation/privacy gates, and live p95 contracts. |
-| M13 — Provider control, canonical composer, and global notification controls | Implementation complete; release gates pending · 2026-07-18 | Official Claude background attach/stop transport; connection-generation Codex authority; definitive stale-turn recovery; durable provider-reconnect text/image queue; one full-chat/Markdown composer; poll-stable resizable question drawer; section-routed Settings; global per-kind cadence and quiet-hours policy; 269 Python, 11 Node push/privacy, 137 applicable desktop/mobile browser, and 2 named latency checks. Isolated staging read-only smoke passes; provider and installed-device notification/keyboard checks remain release gates. |
+| M13 — Provider control, canonical composer, and global notification controls | Automated gates complete; staging phone gate pending · 2026-07-18 | Official Claude background attach/stop transport; connection-generation Codex authority; definitive stale-turn recovery; durable provider-reconnect text/image queue; one full-chat/Markdown composer; poll-stable resizable question drawer; section-routed Settings; global per-kind cadence and quiet-hours policy. The consolidated gate now includes 353 Python tests, 11 Node push/privacy tests, two clean complete desktop/mobile matrices, and four named latency inventories. Installed-device provider, notification, and keyboard checks remain release gates. |
+| M14 — Adversarial delivery and control hardening | Automated gates complete; staging phone gate pending · 2026-07-18 | Exact-session send-now-or-queue, durable optimistic receipts/drafts/context, independent in-app/Web Push controls, provider mutation serialization/CAS, existing-chat model/effort controls, mobile/offline resilience, and F01–F57/B1–B15. No production promotion until isolated staging and the user-approved phone gate pass. |
 
 Completion here records the milestone gate, not proof by assertion. M10 reopened the M0–M10
 catalogue rows, verified the current implementation and tests, and recorded the source/runtime
@@ -44,7 +46,8 @@ every existing control, and the current safe-action boundaries.
 - Notification Center owns durable events and Briefing history. Standards-based Web Push is the only
   automatic external transport; ntfy remains manual legacy only. External payloads stay minimal and
   actions stay limited to Open, Snooze, and Mute. One global policy controls every enabled device;
-  every canonical event kind has an Off/Once/Once+reminder/Repeat rule, with conservative defaults.
+  every canonical event kind has an independent in-app visibility switch plus an
+  Off/Once/Once+reminder/Repeat Web Push rule, with conservative defaults.
 - Desktop uses a per-device left/right navigation rail. Mobile uses bottom navigation. M12 adds
   Notifications as a primary destination and moves History under More on mobile.
 - Workstreams are lightweight repository/project groupings, not a new task-management system.
@@ -98,7 +101,7 @@ the current source and running app; a checked box or this document's prose is no
 | DEC-027 | A Claude `kind:bg` session is controlled only through the official fixed-argv `claude attach <job>`/Ctrl-Z detach and `claude stop <job>` paths. A retained PTY fd is not an iTerm route, and Fleet never reads Claude's private daemon roster or credentials. | M13 |
 | DEC-028 | Codex steer/interrupt authority exists only for a live turn notification received on the current App Server connection generation. Transcript observation affects status only. Temporary authority loss may queue an exact idempotent text/image send in the central Outbox; it never forces `thread/resume`. | M13 |
 | DEC-029 | Full chat and Markdown share one canonical main-session composer. Markdown embeds no conversation panel; Chat opens full conversation while preserving the draft. Return inserts a newline and only modified Return or Send submits. | M13 |
-| DEC-030 | One revisioned global notification policy applies to every enabled device. Every canonical kind supports Off, Once, Once + reminder, or bounded Repeat, with severity, delay, quiet-hours, mute, snooze, and explicit apply-to-current semantics. Device rows control delivery health/pause only. | M13 |
+| DEC-030 | One revisioned global notification policy applies to every enabled device. Every canonical kind has independent in-app visibility and supports Off, Once, Once + reminder, or bounded Repeat for Web Push, with severity, delay, quiet-hours, mute, snooze, and explicit apply-to-current semantics. Device rows control delivery health/pause only. | M13/M14 |
 
 ### Navigation, presentation, and interaction
 

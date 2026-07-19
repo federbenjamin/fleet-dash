@@ -52,6 +52,8 @@ class FakeClient:
 
     def set_mode(self, thread_id, mode, model, effort):
         self.mode_changed = (thread_id, mode, model, effort)
+        self.thread_state.setdefault(thread_id, {}).update(
+            collaboration_mode=mode, model=model, effort=effort)
 
     def interrupt(self, thread_id):
         self.interrupted = thread_id
@@ -146,17 +148,18 @@ class CodexAdapterTest(unittest.TestCase):
         self.adapter._refresh()
         out = self.adapter.act({"type": "mode", "session_id": "codex:thr-1",
                                 "mode": "plan"})
-        self.assertEqual(out, {"ok": True, "mode": "plan"})
+        self.assertEqual(out, {"ok": True, "mode": "plan", "durable": True})
         self.assertEqual(self.client.mode_changed,
                          ("thr-1", "plan", "gpt-5.4", "high"))
         self.assertEqual(self.adapter.sessions()[0]["collaboration_mode"], "plan")
 
     def test_relay_routes_through_parent_thread(self):
-        out = self.adapter.act({"type": "relay", "session_id": "codex:parent",
+        self.adapter._refresh()
+        out = self.adapter.act({"type": "relay", "session_id": "codex:thr-1",
                                 "agent_id": "child-1", "text": "continue"})
         self.assertTrue(out["ok"])
         self.assertEqual(out["relayed_via"], "parent")
-        self.assertEqual(self.client.started[0], "parent")
+        self.assertEqual(self.client.started[0], "thr-1")
         self.assertIn("child-1", self.client.started[1])
 
     def test_conversation_exposes_reasoning_and_unknown_items(self):
@@ -229,6 +232,20 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual([item["path"] for item in files], ["/work/project/src/app.py"])
         self.assertFalse(files[0]["delivered"])
 
+    def test_repeated_codex_file_change_becomes_newest_without_duplication(self):
+        thread = {"turns": [
+            {"items": [{"type": "fileChange", "createdAt": 1, "changes": [
+                {"path": "first.md", "kind": "add"},
+                {"path": "second.md", "kind": "add"}]}]},
+            {"items": [{"type": "fileChange", "createdAt": 2, "changes": [
+                {"path": "first.md", "kind": "update"}]}]},
+        ]}
+        files = _files(thread, "/work/project")
+        self.assertEqual([item["path"] for item in files],
+                         ["/work/project/first.md", "/work/project/second.md"])
+        self.assertEqual(len(files), 2)
+        self.assertEqual(files[0]["change_kind"], "update")
+
     def test_local_model_catalog_uses_codex_cache_schema(self):
         path = os.path.join(self.tmp.name, "models-cache.json")
         with open(path, "w") as handle:
@@ -239,6 +256,43 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual(_local_model_catalog(path), [{
             "id": "gpt-next", "name": "GPT Next",
             "efforts": ["low", "high"]}])
+
+    def test_local_model_catalog_filters_hidden_invalid_and_duplicate_rows(self):
+        path = os.path.join(self.tmp.name, "models-cache.json")
+        with open(path, "w") as handle:
+            json.dump({"models": [
+                {"slug": " hidden ", "display_name": "Hidden", "hidden": True},
+                {"slug": "invisible", "display_name": "Invisible", "visible": False},
+                {"slug": "bad\nmodel", "display_name": "Bad"},
+                {"slug": "bad-display", "display_name": "Bad\x00Name"},
+                {"slug": " gpt-next ", "display_name": " GPT Next ",
+                 "supported_reasoning_levels": [
+                    {"effort": " high "}, {"effort": "bad\neffort"}]},
+                {"slug": "gpt-next", "display_name": "Ignored duplicate name",
+                 "supported_reasoning_levels": ["low", "high"]},
+            ]}, handle)
+        self.assertEqual(_local_model_catalog(path), [{
+            "id": "gpt-next", "name": "GPT Next", "efforts": ["high", "low"]}])
+
+    def test_changed_invalid_model_cache_fails_closed(self):
+        path = os.path.join(self.tmp.name, "models-cache.json")
+        with open(path, "w") as handle:
+            json.dump({"models": [{"slug": "gpt-local", "display_name": "GPT Local",
+                                    "supported_reasoning_levels": ["high"]}]}, handle)
+        self.adapter._models_cache_path = path
+        self.adapter._refresh()
+        self.assertEqual([item["id"] for item in self.adapter.models], ["gpt-local"])
+        self.assertTrue(self.adapter.sessions()[0]["capabilities"]["model_effort_settings"])
+
+        with open(path, "w") as handle:
+            handle.write('{"models": [broken cache payload')
+        stat = os.stat(path)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        self.adapter._refresh()
+        self.assertEqual(self.adapter.models, [])
+        session = self.adapter.sessions()[0]
+        self.assertFalse(session["capabilities"]["model_effort_settings"])
+        self.assertFalse(session["capabilities"]["change_model_effort"])
 
     def test_refresh_reads_local_models_without_calling_app_server_model_list(self):
         path = os.path.join(self.tmp.name, "models-cache.json")

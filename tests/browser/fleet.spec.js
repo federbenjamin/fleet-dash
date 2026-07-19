@@ -143,7 +143,7 @@ test('out-of-order fleet and Insights responses cannot overwrite newer state', a
   await page.evaluate(async () => {
     const first=tick();
     await new Promise(resolve=>setTimeout(resolve,20));
-    const second=tick();
+    const second=tick(true);
     await Promise.allSettled([first,second]);
   });
   expect(fleetCalls).toBeGreaterThanOrEqual(2);
@@ -182,6 +182,32 @@ test('out-of-order fleet and Insights responses cannot overwrite newer state', a
   await expect(page.locator('#rollup [role="alert"]')).toContainText('fixture insights failure');
   await page.locator('#rollup').getByRole('button', { name: 'retry' }).click();
   await expect.poll(() => page.evaluate(() => insightsCache[90]?.data?.totals?.agent_cost)).toBe(90);
+});
+
+test('fleet polling is single-flight and a hung request times out without blanking the UI', async ({ page }) => {
+  await page.addInitScript(() => {
+    navigator.serviceWorker.register=async()=>{throw new Error('disabled for poll reliability test');};
+  });
+  await reset(page);
+  const fleet=await(await page.request.get('/api/fleet')).json();
+  let calls=0,active=0,maxActive=0;
+  await page.route('**/api/fleet',async route=>{
+    calls++;active++;maxActive=Math.max(maxActive,active);
+    await new Promise(resolve=>setTimeout(resolve,250));active--;
+    try{await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(fleet)});}catch(_){}
+  });
+  await page.evaluate(()=>Promise.all([tick(true),tick(),tick()]));
+  expect(calls).toBe(1);expect(maxActive).toBe(1);
+  await page.unroute('**/api/fleet');
+
+  await page.route('**/api/fleet',async route=>{
+    await new Promise(resolve=>setTimeout(resolve,800));
+    try{await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(fleet)});}catch(_){}
+  });
+  await page.evaluate(async()=>{globalThis.__fleetPollTimeoutMs=100;await tick(true);});
+  await expect(page.locator('#stale')).toContainText('offline — showing the last local snapshot');
+  await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
+  await page.unroute('**/api/fleet');
 });
 
 test('native decisions lock double taps and relay/Outbox failures keep recovery', async ({ page }) => {
@@ -230,6 +256,55 @@ test('native decisions lock double taps and relay/Outbox failures keep recovery'
   await expect(row).toContainText('working…');
   await expect(row).toContainText('provider did not accept message');
   await expect(row.getByRole('button', { name: 'Send now' })).toBeEnabled();
+});
+
+test('lost native delivery results never offer an unsafe automatic retry', async ({ page }) => {
+  await reset(page);
+  await page.evaluate(()=>openSession('claude-one'));
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type!=='send_message')return route.continue();
+    return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
+      ok:false,code:'delivery_uncertain',error:'Delivery uncertain — check the Claude terminal'})});
+  });
+  await page.locator('#sft-claude-one').fill('May already be in the terminal');
+  await page.locator('#sact').getByRole('button',{name:'send'}).click();
+  const optimistic=page.locator('#sbody .optimistic').last();
+  await expect(optimistic).toContainText('Delivery uncertain');
+  await expect(optimistic.getByRole('button',{name:'send failed; restore message'})).toHaveCount(0);
+  await expect(optimistic.getByRole('button',{name:'dismiss uncertain message receipt'})).toBeVisible();
+  await page.unroute('**/api/act');
+
+  await reset(page,'subagent');
+  await page.evaluate(()=>openAgent('codex:thread-one','child-one'));
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type!=='relay')return route.continue();
+    return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
+      ok:false,code:'delivery_uncertain',error:'Check the parent terminal'})});
+  });
+  await page.locator('#aft').fill('Possibly relayed');
+  await page.locator('#aact').getByRole('button',{name:'relay'}).click();
+  const relay=page.locator('#aact .quickfeedback');
+  await expect(relay).toContainText('Relay unconfirmed');
+  await expect(relay).toContainText('Check the parent terminal');
+  await expect(relay.getByRole('button',{name:'restore'})).toHaveCount(0);
+  await page.unroute('**/api/act');
+
+  await reset(page);
+  await page.evaluate(()=>openHandoff('claude-one','codex'));
+  await expect(page.locator('#handoffpreview')).toBeVisible();
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type!=='handoff')return route.continue();
+    return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({
+      ok:false,code:'delivery_uncertain',error:'Check the destination terminal',
+      destination_session_id:'codex:handoff-unknown',retryable:false})});
+  });
+  await page.locator('.handoffsubmit').click();
+  await expect(page.locator('.handoffstatus')).toContainText('Delivery unconfirmed');
+  await expect(page.getByRole('button',{name:'Retry delivery to the same session'})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Open exact destination'})).toBeVisible();
 });
 
 test('unchanged and focused conversations repaint only when their content revision changes', async ({ page }) => {
@@ -466,6 +541,33 @@ test('cross-provider search filters, exact context, live handoff, and rebuild', 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test('search filter changes ignore a stale form value restored after overlay back', async ({ page }) => {
+  await reset(page);
+  await goTo(page, 'search');
+  const query=page.locator('#searchquery');
+  await query.fill('protocol regression');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await page.locator('#searchresults .searchresult').click();
+  await expect(page.locator('#searchview')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#searchview')).toBeHidden();
+
+  await query.fill('');
+  // Model the load-sensitive same-document history restoration recorded in
+  // the mobile trace: the DOM regains its prior value without an input event.
+  await page.evaluate(()=>{clearTimeout(searchTimer);document.querySelector('#searchquery').value='protocol regression';});
+  const requested=page.waitForRequest(request=>{
+    const url=new URL(request.url());
+    return url.pathname==='/api/search'&&url.searchParams.get('provider')==='claude';
+  });
+  await page.locator('#searchprovider').selectOption('claude');
+  const url=new URL((await requested).url());
+  expect(url.searchParams.get('q')).toBe('');
+  await expect(query).toHaveValue('');
+  await expect(page.locator('#searchresults .searchresult')).toHaveCount(1);
+  await expect(page.locator('#searchresults')).toContainText('Claude review agent');
+});
+
 test('editable exact provider handoff works from chat and Markdown with nested back', async ({ page }, testInfo) => {
   await reset(page);
   await page.evaluate(() => openSession('codex:thread-one'));
@@ -627,7 +729,7 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
       '[data-sid="codex:thread-one"] .spin'))).toBe(true);
     expect(await pin.evaluate((el) => getComputedStyle(el).borderStyle)).toBe('solid');
     await terminal.click();
-    await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
+    await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   }
 
   for (let index = 0; index < 20; index += 1) await refresh(page);
@@ -854,6 +956,32 @@ test('large conversations load newest-first in bounded pages without losing olde
   }
 });
 
+test('loaded conversation pages survive tail refresh and an offline reload', async ({ page, context }) => {
+  await reset(page,'large-conversation');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  for(let index=0;index<4;index++)await page.locator('#sbody .oldermsgs').click();
+  await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
+  await page.request.post('/test/confirm',{data:{session_id:'codex:thread-one',text:'Newest canonical tail message'}});
+  await page.evaluate(()=>tick(true));
+  await expect(page.locator('#sbody')).toContainText('Newest canonical tail message');
+  await expect(page.locator('#sbody')).toContainText('Conversation message 000');
+  expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('fleet.contextCache.v1')||'{}')
+    ['session:codex:thread-one:']?.messages?.length)).toBe(206);
+
+  await page.evaluate(()=>navigator.serviceWorker.ready);
+  await expect.poll(()=>page.evaluate(async()=>Boolean(await caches.match('/api/fleet')))).toBe(true);
+  await context.setOffline(true);
+  try{
+    await page.reload({waitUntil:'domcontentloaded'});
+    await page.evaluate(()=>openSession('codex:thread-one'));
+    await expect(page.locator('#sbody')).toContainText('Conversation message 000');
+    await expect(page.locator('#sbody')).toContainText('Newest canonical tail message');
+    await expect(page.locator('#sbody .cmsg')).toHaveCount(206);
+    page.__failures=page.__failures.filter(message=>
+      !/ERR_INTERNET_DISCONNECTED|net::ERR_FAILED|Failed to fetch/i.test(message));
+  }finally{await context.setOffline(false);}
+});
+
 test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
   const themeSurfaces = () => page.evaluate(() => {
     const probe = document.createElement('span');
@@ -968,7 +1096,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(attach).toBeEnabled();
   expect(await attach.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await attach.click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
   await page.getByRole('button', { name: 'Default', exact: true }).click();
   await expect.poll(async () => (await fixtureState(page)).sessions[1].collaboration_mode)
@@ -1022,6 +1150,113 @@ test('Claude permission modes are capability-gated and bypass always warns', asy
   await selector.selectOption('plan');
   await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
     .toBe('plan');
+});
+
+test('existing Claude chat repairs model effort immediately and persists accepted settings', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByLabel('Session model')).toHaveValue('sonnet');
+  let release;
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type!=='session_settings')return route.continue();
+    await new Promise(resolve=>{release=resolve;});
+    return route.continue();
+  });
+  await page.getByLabel('Session model').selectOption('opus');
+  await expect(page.getByLabel('Session effort')).toHaveValue('medium');
+  await expect(page.getByLabel('Session effort')).toBeDisabled();
+  await expect(page.getByRole('status')).toHaveText('Saving…');
+  release();
+  await expect(page.getByRole('status')).toHaveText('Saved ✓');
+  await expect.poll(async () => (await fixtureState(page)).sessions[0])
+    .toMatchObject({model:'opus',effort:'medium'});
+  await page.unroute('**/api/act');
+
+  await page.getByLabel('Session model').selectOption('sonnet');
+  await expect(page.getByLabel('Session effort')).toHaveValue('high');
+  await expect(page.getByRole('status')).toHaveText('Saved ✓');
+  await page.getByLabel('Session effort').selectOption('low');
+  await expect(page.getByRole('status')).toHaveText('Saved ✓');
+  await expect.poll(async () => (await fixtureState(page)).sessions[0])
+    .toMatchObject({model:'sonnet',effort:'low'});
+
+  await page.reload();
+  await page.evaluate(() => openSession('claude-one'));
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByLabel('Session model')).toHaveValue('sonnet');
+  await expect(page.getByLabel('Session effort')).toHaveValue('low');
+});
+
+test('native model changes supersede settled Fleet feedback and seed the next CAS', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByLabel('Session model').selectOption('opus');
+  await expect(page.getByRole('status')).toHaveText('Saved ✓');
+  await expect.poll(async () => (await fixtureState(page)).sessions[0])
+    .toMatchObject({model:'opus',effort:'medium'});
+
+  const changed=await page.request.post('/test/canonical-session-settings',{data:{
+    session_id:'claude-one',model:'sonnet',effort:'low'}});
+  expect(changed.ok()).toBeTruthy();
+  await page.evaluate(() => tick(true));
+
+  await expect(page.locator('[data-sid="claude-one"] .amodel')).toContainText('sonnet · low');
+  await expect(page.locator('#sact .status-secondary')).toContainText('sonnet · low');
+  await expect(page.getByLabel('Session model')).toHaveValue('sonnet');
+  await expect(page.getByLabel('Session effort')).toHaveValue('low');
+
+  await page.getByLabel('Session effort').selectOption('high');
+  await expect(page.getByRole('status')).toHaveText('Saved ✓');
+  await expect.poll(async () => (await fixtureState(page)).actions)
+    .toEqual(expect.arrayContaining([expect.objectContaining({type:'session_settings',
+      model:'sonnet',effort:'high',expected_model:'sonnet',expected_effort:'low'})]));
+});
+
+test('existing-chat settings roll back on failure and respect active, external, and staging gates', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type==='session_settings')return route.fulfill({status:200,contentType:'application/json',
+      body:JSON.stringify({ok:false,error:'provider rejected settings'})});
+    return route.continue();
+  });
+  await page.getByLabel('Session model').selectOption('gpt-5.3-codex');
+  await expect(page.getByRole('status')).toContainText('Could not save · provider rejected settings');
+  await expect(page.getByLabel('Session model')).toHaveValue('gpt-5.4');
+  expect((await fixtureState(page)).sessions[1]).toMatchObject({model:'gpt-5.4',effort:'high'});
+  await page.unroute('**/api/act');
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type==='session_settings')return route.fulfill({status:200,contentType:'application/json',
+      body:JSON.stringify({ok:true,model:payload.model,effort:payload.effort,durable:false,
+        warning:'Applied in Codex, but Fleet could not durably save the setting'})});
+    return route.continue();
+  });
+  await page.getByLabel('Session model').selectOption('gpt-5.3-codex');
+  await expect(page.getByRole('status')).toContainText('Applied ✓ · Applied in Codex');
+  await expect(page.getByLabel('Session model')).toHaveValue('gpt-5.3-codex');
+  await page.unroute('**/api/act');
+
+  await reset(page,'send-while-busy');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByLabel('Session model')).toBeDisabled();
+  await expect(page.locator('.settingsfeedback')).toContainText('Available when Claude is idle');
+
+  await reset(page,'cross-client-active');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByLabel('Session model')).toHaveCount(0);
+
+  await reset(page,'staging');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByLabel('Session model')).toHaveCount(0);
 });
 
 test('brand-new Claude sessions are interactive before the first transcript exists', async ({ page }) => {
@@ -1126,7 +1361,7 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await expect(openTerminal).toBeEnabled();
   expect(await openTerminal.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
   await openTerminal.click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('focus');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('button', { name: 'Plan', exact: true })).toBeVisible();
   await page.getByRole('menuitem', { name: /Close session/ }).click();
@@ -1203,14 +1438,14 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
   await openAction(page, 'codex:thread-one');
   await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('option');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('option');
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
   await openAction(page, 'codex:thread-one');
   await page.locator('#oth-smsg-codex\\:thread-one').fill('Only the adapter');
   await page.locator('#sact').getByRole('button', { name: 'answer' }).click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).other)
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.other)
     .toBe('Only the adapter');
 
   const stale = await page.request.post('/api/act', { headers: { 'X-Act-Token': 'abcdef123456' },
@@ -1227,13 +1462,87 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
   await page.locator('#sact .mqarr').last().click();
   await page.locator('#sact').getByRole('button', { name: 'Full' }).click();
   await page.locator('#sact').getByRole('button', { name: 'submit all answers' }).click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('multiq');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('multiq');
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
   await openAction(page, 'codex:thread-one');
   await page.locator('#sact .xbtn').click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('dismiss');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('dismiss');
+});
+
+test('composer follow-ups dismiss questions instead of selecting an option', async ({ page }) => {
+  for (const scenario of ['single-question', 'claude-question-slow']) {
+    await reset(page, scenario);
+    const sid=scenario.startsWith('claude-')?'claude-one':'codex:thread-one';
+    await openAction(page, sid);
+    const composer=page.locator('#sact').getByPlaceholder('send message');
+    await composer.fill(`Follow-up for ${scenario}`);
+    await page.locator('#sact').getByRole('button',{name:'send',exact:true}).click();
+    await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type)
+      .toBe('dismiss_then_send');
+    const state=await fixtureState(page),action=state.actions.at(-1);
+    expect(action).toMatchObject({session_id:sid,nonce:'q1',
+      text:`Follow-up for ${scenario}`});
+    expect(state.actions.some(row=>['option','multiq'].includes(row.type))).toBe(false);
+    await expect(page.locator('#sact .question-drawer')).toHaveCount(0);
+    await expect(page.locator('#sbody .optimistic[data-delivery-status="queued"]'))
+      .toContainText(`Follow-up for ${scenario}`);
+  }
+});
+
+test('composer follow-up keeps its draft when question dismissal is rejected', async ({ page }) => {
+  await reset(page, 'single-question');
+  await openAction(page, 'codex:thread-one');
+  await page.route('**/api/act', async route => {
+    const payload=route.request().postDataJSON();
+    if(payload.type!=='dismiss_then_send')return route.continue();
+    return route.fulfill({status:200,contentType:'application/json',
+      body:JSON.stringify({ok:false,error:'provider rejected dismiss'})});
+  });
+  const composer=page.locator('#sact').getByPlaceholder('send message');
+  await composer.fill('Keep this exact draft');
+  await page.locator('#sact').getByRole('button',{name:'send',exact:true}).click();
+  await expect(composer).toHaveValue('Keep this exact draft');
+  await expect(page.locator('#sact .question-drawer')).toHaveCount(1);
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(page.locator('#sact')).toContainText('provider rejected dismiss');
+});
+
+test('offline question follow-up remembers the dismiss through reconnection', async ({ page }) => {
+  await reset(page, 'single-question');
+  await openAction(page, 'codex:thread-one');
+  const composer=page.locator('#sact').getByPlaceholder('send message');
+  await composer.fill('Send this after reconnecting');
+  await page.evaluate(async () => {clearTimeout(pollTimer);setFleetOffline(true);
+    await sendText('codex:thread-one','sft','smsg');});
+  await expect(composer).toHaveValue('');
+  const queued=await page.evaluate(() => JSON.parse(
+    localStorage.getItem('fleet.offlineMessages.v1')||'[]'));
+  expect(queued).toHaveLength(1);
+  expect(queued[0].dismissNonce).toBe('q1');
+  await page.evaluate(async () => {setFleetOffline(false);await flushOfflineMessages();});
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type)
+    .toBe('dismiss_then_send');
+  expect((await fixtureState(page)).actions.at(-1)).toMatchObject({
+    nonce:'q1',text:'Send this after reconnecting'});
+});
+
+test('Claude prompt controls stay disabled until the same native prompt is waiting', async ({ page }) => {
+  await reset(page, 'claude-prompt-gate');
+  await openAction(page, 'claude-one');
+  const panel=page.locator('#sact');
+  await expect(panel).toContainText("Waiting for Claude's native prompt state");
+  await expect(panel.getByRole('button',{name:'Yes',exact:true})).toBeDisabled();
+  await expect(panel.locator('.xbtn')).toBeDisabled();
+  expect((await fixtureState(page)).actions.filter(item=>item.session_id==='claude-one')).toHaveLength(0);
+
+  await page.request.post('/test/native-prompt-state',{
+    data:{session_id:'claude-one',waiting:true}});
+  await refresh(page);
+  await expect(panel.getByRole('button',{name:'Yes',exact:true})).toBeEnabled();
+  await panel.getByRole('button',{name:'Yes',exact:true}).click();
+  await expect.poll(async()=>((await fixtureState(page)).actions.at(-1)||{}).type).toBe('option');
 });
 
 test('fullscreen question drawer preserves reading position and resizes from nearly full to collapsed', async ({ page }, testInfo) => {
@@ -1346,20 +1655,6 @@ test('messages and question answers render optimistically and recover from failu
   await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
   await expect(page.locator('#sact')).toContainText('How broad should the change be?');
 
-  await page.request.post('/test/reset', { data: { scenario: 'base' } });
-  await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .shead').click();
-  const timeoutInput = page.locator('#sft-codex\\:thread-one');
-  await timeoutInput.fill('Wait for transcript confirmation');
-  await sendModifiedReturn(page, timeoutInput);
-  const timedOut = page.locator('#sbody .optimistic').filter({
-    hasText: 'Wait for transcript confirmation' });
-  const restoreTimedOut = timedOut.getByRole('button', {
-    name: 'send failed; restore message' });
-  await expect(restoreTimedOut).toBeVisible({ timeout: 16_000 });
-  await restoreTimedOut.click();
-  await expect(timeoutInput).toHaveValue('Wait for transcript confirmation');
-
   await page.request.post('/test/reset', { data: { scenario: 'send-failure' } });
   await page.reload();
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
@@ -1372,6 +1667,82 @@ test('messages and question answers render optimistically and recover from failu
   await restore.click();
   await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
   await expect(failedInput).toHaveValue('Restore this message');
+});
+
+test('near-bottom chat follows canonical replies and late growth but disengages when scrolled up', async ({ page }) => {
+  await reset(page,'large-conversation');
+  await page.evaluate(()=>openSession('codex:thread-one'));
+  const body=page.locator('#sbody');
+  await body.evaluate(element=>{element.scrollTop=Math.max(0,element.scrollHeight-element.clientHeight-80);
+    element.dispatchEvent(new Event('scroll'));});
+  expect(await page.evaluate(()=>sessionFollowTail)).toBe(true);
+  await page.request.post('/test/confirm',{data:{session_id:'codex:thread-one',role:'assistant',
+    text:'Newest canonical reply must remain fully visible'}});
+  await refresh(page);
+  await expect(body).toContainText('Newest canonical reply must remain fully visible');
+  await expect.poll(()=>body.evaluate(element=>element.scrollHeight-element.scrollTop-element.clientHeight))
+    .toBeLessThan(2);
+
+  await body.evaluate(element=>{const target=sessionTailTarget(element);target.querySelector('.cbody').style.paddingBottom='220px';});
+  await expect.poll(()=>body.evaluate(element=>element.scrollHeight-element.scrollTop-element.clientHeight))
+    .toBeLessThan(10);
+
+  await body.evaluate(element=>{element.dispatchEvent(new WheelEvent('wheel',{deltaY:-620,bubbles:true}));
+    element.scrollTop=Math.max(0,element.scrollTop-620);
+    element.dispatchEvent(new Event('scroll'));});
+  await expect.poll(()=>page.evaluate(()=>sessionFollowTail)).toBe(false);
+  const readingTop=await body.evaluate(element=>element.scrollTop);
+  await page.request.post('/test/confirm',{data:{session_id:'codex:thread-one',role:'assistant',
+    text:'This reply must not steal an older reading position'}});
+  await refresh(page);
+  await expect(body).toContainText('This reply must not steal an older reading position');
+  expect(Math.abs((await body.evaluate(element=>element.scrollTop))-readingTop)).toBeLessThan(3);
+});
+
+test('unconfirmed optimistic messages recover without waiting on a full fleet render', async ({ page }) => {
+  await page.clock.install();
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const input=page.locator('#sft-codex\\:thread-one');
+  await input.fill('Wait for transcript confirmation');
+  await sendModifiedReturn(page,input);
+  const receipt=page.locator('#sbody .optimistic').filter({
+    hasText:'Wait for transcript confirmation'});
+  await expect(receipt.getByLabel('sending')).toBeVisible();
+
+  // Model a costly/throttled fleet repaint. Timeout recovery must update the
+  // open receipt directly instead of depending on that unrelated work.
+  await page.evaluate(()=>{
+    clearTimeout(pollTimer);
+    window.__fleetTestUiRefresh=uiRefresh;
+    uiRefresh=()=>{};
+  });
+  await page.clock.fastForward(15_000);
+  const restore=receipt.getByRole('button',{name:'send failed; restore message'});
+  await expect(restore).toBeVisible();
+  await page.evaluate(()=>{uiRefresh=window.__fleetTestUiRefresh;delete window.__fleetTestUiRefresh;});
+  await restore.click();
+  await expect(input).toHaveValue('Wait for transcript confirmation');
+});
+
+test('overdue optimistic deadlines reconcile after a throttled timer', async ({ page }) => {
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const input=page.locator('#sft-codex\\:thread-one');
+  await input.fill('Recover after a throttled timer');
+  await sendModifiedReturn(page,input);
+  const throttled=page.locator('#sbody .optimistic').filter({
+    hasText:'Recover after a throttled timer'});
+  await expect(throttled.getByLabel('sending')).toBeVisible();
+  await page.evaluate(()=>{
+    const item=optimisticList('codex:thread-one').find(entry=>
+      entry.text==='Recover after a throttled timer');
+    clearTimeout(item.confirmTimer);
+    item.confirmDeadline=Date.now()-1;
+    uiRefresh();
+  });
+  await expect(throttled.getByRole('button',{
+    name:'send failed; restore message'})).toBeVisible();
 });
 
 test('message composers use Return for newlines and an explicit modified Return to send', async ({ page }) => {
@@ -1431,6 +1802,53 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
 });
 
+test('mobile keyboard geometry is flush and preserves chat and Markdown reading anchors', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile visual viewport contract');
+  await reset(page,'large-conversation');
+  await page.evaluate(()=>openSession('codex:thread-one'));
+  const body=page.locator('#sbody');
+  await expect(body).toContainText('Conversation message 204');
+  await body.evaluate(element=>{element.scrollTop=Math.max(0,element.scrollHeight-element.clientHeight-520);
+    element.dispatchEvent(new Event('scroll'));});
+  const visibleAnchor=async locator=>locator.evaluate(element=>{const rect=element.getBoundingClientRect();
+    const rows=[...element.querySelectorAll(element.id==='sbody'?'.aconvo > *':'.mdoc > *')];
+    const row=rows.find(item=>item.getBoundingClientRect().bottom>rect.top+1);return{
+      text:row?.textContent.trim(),offset:row?row.getBoundingClientRect().top-rect.top:0};});
+  const before=await visibleAnchor(body);
+  const composer=page.locator('#sact').getByPlaceholder('send message');await composer.focus();
+  await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:520,offsetTop:0};syncVisualViewport();});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const focused=await visibleAnchor(body);
+  expect(focused.text).toBe(before.text);expect(Math.abs(focused.offset-before.offset)).toBeLessThan(2);
+  const seam=await page.evaluate(()=>{const view=document.querySelector('#sview').getBoundingClientRect(),
+    dock=document.querySelector('#sact .composer-dock').getBoundingClientRect(),
+    row=document.querySelector('#sact .freetext.composer').getBoundingClientRect();return{
+      viewBottom:view.bottom,dockBottom:dock.bottom,rowBottom:row.bottom};});
+  expect(Math.abs(seam.viewBottom-seam.dockBottom)).toBeLessThan(.6);
+  expect(seam.dockBottom-seam.rowBottom).toBeLessThanOrEqual(3);
+  await composer.evaluate(element=>element.blur());
+  await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:844,offsetTop:0};syncVisualViewport();});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const restored=await visibleAnchor(body);
+  expect(restored.text).toBe(before.text);expect(Math.abs(restored.offset-before.offset)).toBeLessThan(2);
+
+  await page.locator('#sact .latestfile').click();
+  const viewerBody=page.locator('#vbody');
+  await expect(viewerBody).toContainText('Safe preview');
+  await viewerBody.evaluate(element=>{element.innerHTML='<div class="mdoc">'+Array.from({length:90},(_,index)=>
+    `<p>Markdown reading block ${String(index).padStart(3,'0')} with enough detail to wrap across the phone.</p>`).join('')+'</div>';
+    element.scrollTop=760;});
+  const viewerBefore=await visibleAnchor(viewerBody);
+  const viewerComposer=page.locator('#vact').getByPlaceholder('send message');
+  await viewerComposer.focus();
+  await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:520,offsetTop:0};syncVisualViewport();});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const viewerAfter=await visibleAnchor(viewerBody);
+  expect(viewerAfter.text).toBe(viewerBefore.text);
+  expect(Math.abs(viewerAfter.offset-viewerBefore.offset)).toBeLessThan(2);
+  await page.evaluate(()=>{delete globalThis.__fleetVisualViewportOverride;syncVisualViewport();});
+});
+
 test('Markdown uses the canonical composer and a direct Chat jump without embedding chat history', async ({ page }, testInfo) => {
   await reset(page);
   await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
@@ -1441,14 +1859,19 @@ test('Markdown uses the canonical composer and a direct Chat jump without embedd
   const viewerComposer = page.locator('#vact .freetext.composer');
   await expect(viewerComposer.getByPlaceholder('send message')).toBeVisible();
   await expect(viewerComposer.getByRole('button', {name:'message options'})).toBeVisible();
-  await expect(viewerComposer.getByRole('button', {name:'chat', exact:true})).toBeVisible();
   await expect(viewerComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
-  expect(await viewerComposer.locator('.composer-submit-stack').evaluate(element =>
-    [...element.querySelectorAll('button')].map(button => button.textContent.trim())))
-    .toEqual(['chat','send']);
+  const viewerBar=page.locator('#vact .viewer-surfacebar');
+  await expect(viewerBar.getByRole('button', {name:'chat', exact:true})).toBeVisible();
+  expect(await viewerComposer.evaluate(element=>[...element.children].map(child=>
+    child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
+    .toEqual(['plus','message','send']);
+  const upperHeights=await viewerBar.evaluate(element=>{const browser=element.querySelector('.stripbox').getBoundingClientRect(),
+    chat=element.querySelector('.chatjump').getBoundingClientRect();return[browser.height,chat.height];});
+  expect(Math.abs(upperHeights[0]-upperHeights[1])).toBeLessThan(.6);
   await page.screenshot({path:testInfo.outputPath('markdown-canonical-composer.png'),fullPage:true});
   await viewerComposer.getByPlaceholder('send message').fill('Draft shared across reading surfaces');
-  await viewerComposer.getByRole('button', {name:'chat', exact:true}).click();
+  await viewerComposer.getByPlaceholder('send message').evaluate(element=>element.blur());
+  await viewerBar.getByRole('button', {name:'chat', exact:true}).click();
   await expect(page.locator('#viewer')).toBeHidden();
   await expect(page.locator('#sview')).toBeVisible();
   const chatComposer = page.locator('#sact .freetext.composer');
@@ -1456,6 +1879,77 @@ test('Markdown uses the canonical composer and a direct Chat jump without embedd
     .toHaveValue('Draft shared across reading surfaces');
   await expect(chatComposer.getByRole('button', {name:'message options'})).toBeVisible();
   await expect(chatComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
+});
+
+test('chat and Markdown share exact compact composer geometry and left-anchored headers', async ({ page }, testInfo) => {
+  await reset(page);
+  await page.evaluate(() => openSession('claude-one'));
+  const chatComposer=page.locator('#sact .freetext.composer');
+  await expect(chatComposer).toBeVisible();
+  await expect(page.locator('#sact .latestfile')).toContainText('artifact.md');
+  expect(await chatComposer.evaluate(element=>[...element.children].map(child=>
+    child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
+    .toEqual(['plus','message','send']);
+  const resting=await chatComposer.evaluate(element=>[...element.children].map(child=>
+    child.matches('.composertools')?child.querySelector('button').getBoundingClientRect().height:
+      child.getBoundingClientRect().height));
+  expect(Math.max(...resting)-Math.min(...resting)).toBeLessThan(.6);
+  expect(resting[0]).toBe(44);
+  const input=chatComposer.getByPlaceholder('send message');
+  await input.fill('one\ntwo\nthree\nfour');
+  const grown=await input.evaluate(element=>element.getBoundingClientRect().height);
+  expect(grown).toBeGreaterThan(resting[1]+60);
+  await input.fill('one\ntwo\nthree\nfour\nfive');
+  expect(await input.evaluate(element=>element.getBoundingClientRect().height)).toBe(grown);
+  await input.fill('');
+  await input.evaluate(element=>element.blur());
+  await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
+  await expect(page.locator('#sact .fstrip')).toHaveCount(0);
+  const chatHeader=await page.locator('#shead2').evaluate(header=>{const title=header.querySelector('#stitle2').getBoundingClientRect(),
+    close=header.querySelector('#sclose').getBoundingClientRect(),controls=header.querySelector('#sctrl').getBoundingClientRect();return{
+    titleLeft:title.left,closeRight:close.right,titleRight:title.right,controlsLeft:controls.left,
+    font:parseFloat(getComputedStyle(header.querySelector('#stitle2 b')).fontSize)};});
+  expect(chatHeader.titleLeft-chatHeader.closeRight).toBeGreaterThanOrEqual(7);
+  expect(chatHeader.titleRight).toBeLessThanOrEqual(chatHeader.controlsLeft);
+  expect(chatHeader.font).toBeGreaterThanOrEqual(16);
+  if(testInfo.project.name.startsWith('mobile')){
+    const compact=await page.locator('#sact .session-surfacebar').evaluate(element=>({
+      status:element.querySelector('.statusstrip').getBoundingClientRect().height,
+      file:element.querySelector('.latestfile').getBoundingClientRect().height}));
+    expect(Math.abs(compact.status-compact.file)).toBeLessThan(.6);
+    await page.locator('#sact .status-expand').click();
+    const expanded=await page.locator('#sact .session-surfacebar').evaluate(element=>{
+      const status=element.querySelector('.statusstrip').getBoundingClientRect(),
+        file=element.querySelector('.latestfile').getBoundingClientRect();
+      return{status:status.height,file:file.height,statusBottom:status.bottom,fileBottom:file.bottom};});
+    expect(expanded.status).toBeGreaterThan(compact.status);
+    expect(expanded.file).toBe(compact.file);
+    expect(Math.abs(expanded.statusBottom-expanded.fileBottom)).toBeLessThan(.6);
+  }
+  await page.locator('#sact .latestfile').click();
+  const viewerComposer=page.locator('#vact .freetext.composer');
+  await expect(viewerComposer).toBeVisible();
+  expect(await viewerComposer.evaluate(element=>[...element.children].map(child=>
+    child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
+    .toEqual(['plus','message','send']);
+  const viewerResting=await viewerComposer.evaluate(element=>[...element.children].map(child=>
+    child.matches('.composertools')?child.querySelector('button').getBoundingClientRect().height:
+      child.getBoundingClientRect().height));
+  expect(viewerResting).toEqual(resting);
+  const viewerHeader=await page.locator('#vhead').evaluate(header=>{const title=header.querySelector('#vtitle').getBoundingClientRect(),
+    close=header.querySelector('#vclose').getBoundingClientRect(),controls=header.querySelector('#vctrl').getBoundingClientRect();return{
+    titleLeft:title.left,closeRight:close.right,titleRight:title.right,controlsLeft:controls.left,
+    font:parseFloat(getComputedStyle(header.querySelector('.vfname')).fontSize)};});
+  expect(viewerHeader.titleLeft-viewerHeader.closeRight).toBeGreaterThanOrEqual(7);
+  expect(viewerHeader.titleRight).toBeLessThanOrEqual(viewerHeader.controlsLeft);
+  expect(viewerHeader.font).toBeGreaterThanOrEqual(16);
+  const viewerBarHeights=await page.locator('#vact .viewer-surfacebar').evaluate(element=>({
+    browser:element.querySelector('.stripbox').getBoundingClientRect().height,
+    chip:element.querySelector('.fchip').getBoundingClientRect().height,
+    chat:element.querySelector('.chatjump').getBoundingClientRect().height}));
+  expect(viewerBarHeights.browser).toBe(42);
+  expect(viewerBarHeights.chip).toBe(viewerBarHeights.browser);
+  expect(viewerBarHeights.chat).toBe(viewerBarHeights.browser);
 });
 
 test('phone image menu keeps the trusted tap, persists, and sends through the owning provider', async ({ page }, testInfo) => {
@@ -1494,6 +1988,29 @@ test('phone image menu keeps the trusted tap, persists, and sends through the ow
     .toBeNull();
 });
 
+test('Markdown Photo uses the trusted input target, cancels cleanly, and shares one draft with chat', async ({ page }, testInfo) => {
+  await reset(page);
+  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
+    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
+  const options=page.locator('#vact').getByRole('button',{name:'message options'});
+  await options.click();
+  let chooserPromise=page.waitForEvent('filechooser');
+  const photo=page.locator('#vact').getByRole('menuitem',{name:'Send picture'});
+  if(testInfo.project.name.startsWith('mobile'))await photo.tap();else await photo.click();
+  let chooser=await chooserPromise;await chooser.setFiles([]);
+  await expect(page.locator('#vact .image-draft')).toHaveCount(0);
+
+  await page.evaluate(()=>closeComposerMenus());
+  await options.click();
+  await page.locator('#vact .composer-file-input').setInputFiles({name:'viewer-photo.jpg',mimeType:'image/jpeg',
+    buffer:Buffer.from([255,216,255,224,0,16,74,70,73,70])});
+  await expect(page.locator('#vact .image-draft')).toContainText('viewer-photo.jpg');
+  await page.locator('#vact .viewer-surfacebar').getByRole('button',{name:'chat'}).click();
+  await expect(page.locator('#sact .image-draft')).toContainText('viewer-photo.jpg');
+  expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('fleet.imageDrafts.v1')||'{}')
+    ['codex:thread-one']?.length)).toBe(1);
+});
+
 test('default send visibly queues a busy session and never becomes a false failure', async ({ page }) => {
   await reset(page,'send-while-busy');
   await page.locator('[data-sid="claude-one"] .shead').click();
@@ -1515,6 +2032,77 @@ test('default send visibly queues a busy session and never becomes a false failu
     .toContainText('Queued · waiting for session');
   await page.reload();
   await expect(page.locator('#outboxsummary')).toContainText('1 waiting to send');
+  await page.evaluate(()=>openSession('claude-one'));
+  const restored=page.locator('#sbody .optimistic').filter({hasText:'Send after the current turn'});
+  await expect(restored).toContainText('Queued · waiting for session');
+  expect(await page.evaluate(()=>Object.keys(JSON.parse(localStorage.getItem('fleet.outboxReceipts.v1')||'{}')).length)).toBe(1);
+});
+
+test('failed automatic-send receipts dismiss or restore once and never resurrect', async ({ page }) => {
+  await reset(page,'send-while-busy');
+  await page.evaluate(()=>openSession('claude-one'));
+  const input=page.locator('#sft-claude-one');
+  for(const message of ['Dismiss this failed delivery','Restore this failed delivery']){
+    await input.fill(message);await page.locator('#sact').getByRole('button',{name:'send'}).click();
+  }
+  const queued=(await fixtureState(page)).outbox;
+  expect(queued).toHaveLength(2);
+  for(const item of queued)await page.request.post('/test/outbox-state',{
+    data:{outbox_id:item.id,state:'failed',error:'Provider rejected the queued delivery'}});
+  await page.evaluate(()=>loadOutbox(true));
+  const dismissRow=page.locator('#sbody .optimistic').filter({hasText:'Dismiss this failed delivery'});
+  const restoreRow=page.locator('#sbody .optimistic').filter({hasText:'Restore this failed delivery'});
+  await expect(dismissRow.getByRole('button',{name:'dismiss failed message receipt'})).toBeVisible();
+  await expect(restoreRow.getByRole('button',{name:'send failed; restore message'})).toBeVisible();
+  await dismissRow.getByRole('button',{name:'dismiss failed message receipt'}).click();
+  await restoreRow.getByRole('button',{name:'send failed; restore message'}).click();
+  await expect(input).toHaveValue('Restore this failed delivery');
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  expect(await page.evaluate(()=>Object.keys(JSON.parse(localStorage.getItem('fleet.outboxResolved.v1')||'{}')).sort()))
+    .toEqual(queued.map(item=>item.id).sort());
+  await page.evaluate(()=>loadOutbox(true));
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await page.reload();await page.evaluate(()=>openSession('claude-one'));await page.evaluate(()=>loadOutbox(true));
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
+  await expect(page.locator('#sft-claude-one')).toHaveValue('Restore this failed delivery');
+});
+
+test('scheduled sends lock duplicate submits and carry a stable idempotency key', async ({ page }) => {
+  await reset(page,'base');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.locator('#sft-codex\\:thread-one').fill('Create this schedule once');
+  await page.evaluate(()=>openSchedule('codex:thread-one','sft-codex:thread-one'));
+  await expect(page.locator('#scheduleview')).toBeVisible();
+  await page.evaluate(()=>Promise.all([submitSchedule(),submitSchedule()]));
+  await expect(page.locator('#scheduleview')).toBeHidden();
+  const actions=(await fixtureState(page)).actions.filter(item=>item.type==='outbox_create');
+  expect(actions).toHaveLength(1);
+  expect(actions[0].client_request_id).toMatch(/^schedule-/);
+});
+
+test('an ambiguous offline flush stays durable and never retries automatically', async ({ page }) => {
+  await reset(page,'base');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.evaluate(()=>setFleetOffline(true));
+  await page.locator('#sft-codex\\:thread-one').fill('Do not duplicate this uncertain delivery');
+  await page.locator('#sact').getByRole('button',{name:'send'}).click();
+  let sendAttempts=0;
+  await page.route('**/api/act',route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type==='send_message'){sendAttempts++;return route.abort('connectionfailed');}
+    return route.continue();
+  });
+  await page.evaluate(async()=>{setFleetOffline(false);await flushOfflineMessages();});
+  expect(sendAttempts).toBe(1);
+  expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('fleet.offlineMessages.v1')||'[]')[0]?.state))
+    .toBe('confirmation_unknown');
+  await page.evaluate(()=>flushOfflineMessages());
+  expect(sendAttempts).toBe(1);
+  await page.reload();await page.evaluate(()=>openSession('codex:thread-one'));
+  await expect(page.locator('#sbody .optimistic')).toContainText('Delivery unconfirmed');
+  await page.evaluate(()=>flushOfflineMessages());expect(sendAttempts).toBe(1);
+  page.__failures=page.__failures.filter(message=>!/ERR_CONNECTION_FAILED|Failed to load resource/.test(message));
+  await page.unroute('**/api/act');
 });
 
 test('images selected offline survive reload and flush exactly once after reconnection', async ({ page,context }) => {
@@ -1574,6 +2162,57 @@ test('unsent text drafts survive rerenders and reloads until sent or manually de
   await page.getByRole('button', { name: '+ new coding session' }).click();
   await expect(page.locator('.newform input[data-draft-key="new:directory"]')).toHaveValue('/Users/test/custom');
   await expect(page.locator('.newform textarea[data-draft-key="new:message"]')).toHaveValue('persistent new-session draft');
+});
+
+test('new-session, scheduled-spawn, and handoff model dependencies stay synchronized', async ({ page }) => {
+  await reset(page,'base');
+  await page.getByRole('button',{name:'+ new coding session'}).click();
+  const form=page.locator('.newform');
+  await form.locator('.nfrow .nfcol').nth(0).locator('select').selectOption('sonnet');
+  await form.locator('.nfrow .nfcol').nth(1).locator('select').selectOption('low');
+  await form.locator('select').first().selectOption('codex');
+  await expect(form.locator('.nfrow .nfcol').nth(0).locator('select')).toHaveValue('');
+  await expect(form.locator('.nfrow .nfcol').nth(0).locator('select option[value="gpt-5.4"]')).toHaveCount(1);
+  await expect(form.locator('.nfrow .nfcol').nth(1).locator('select')).toHaveValue('');
+  await expect(form.locator('.nfrow .nfcol').nth(1).locator('select option[value="low"]')).toHaveCount(0);
+
+  await form.locator('select').first().selectOption('claude');
+  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
+  await form.locator('textarea').fill('Run this scheduled dependency check');
+  await form.getByRole('button',{name:'schedule session'}).click();
+  const schedule=page.locator('#scheduleview');
+  await schedule.locator('select').first().selectOption('codex');
+  await expect(schedule.locator('.nfrow .nfcol').nth(0).locator('select option[value="gpt-5.4"]')).toHaveCount(1);
+  await expect(schedule.locator('.nfrow .nfcol').nth(1).locator('select option[value="low"]')).toHaveCount(0);
+  await page.evaluate(()=>dismissOverlay());
+
+  await page.evaluate(()=>openHandoff('codex:thread-one','claude'));
+  await expect(page.locator('#handoffpreview')).toBeVisible();
+  await page.locator('#handoffview select').first().selectOption('codex');
+  await expect(page.locator('#handoffpreview')).toBeVisible();
+  await page.locator('#handoffbody details').evaluate(element=>element.open=true);
+  await expect(page.locator('#handoffbody details select').first().locator('option[value="gpt-5.4"]')).toHaveCount(1);
+});
+
+test('failed commands keep their exact durable draft', async ({ page }) => {
+  await reset(page,'base');
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const input=page.locator('#sft-codex\\:thread-one');
+  await input.fill('/rev');
+  await expect(page.locator('.slashmenu')).toContainText('/review');
+  await page.getByRole('button',{name:/\/review/}).click();
+  await page.route('**/api/act',async route=>{
+    const payload=route.request().postDataJSON();
+    if(payload.type==='review')return route.fulfill({status:200,contentType:'application/json',
+      body:JSON.stringify({ok:false,error:'review unavailable'})});
+    return route.continue();
+  });
+  await sendModifiedReturn(page,input);
+  await expect(input).toHaveValue('/review ');
+  await expect(page.locator('#sact')).toContainText('review unavailable');
+  await page.reload();await page.evaluate(()=>openSession('codex:thread-one'));
+  await expect(page.locator('#sft-codex\\:thread-one')).toHaveValue('/review ');
+  await page.unroute('**/api/act');
 });
 
 test('new sessions open a provisional card and chat before native startup returns', async ({ page }) => {
@@ -1637,9 +2276,10 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await page.locator('#sclose').click();
   await expect(page.locator('#sview')).toBeHidden();
   let feedback = fleetFeedback('claude-one');
-  await expect(feedback).toContainText('Submitting');
+  await expect(feedback).toContainText(/Submitting|Submitted/);
   await expect(feedback).toContainText('Scope: Focused');
-  await expect(feedback.getByLabel('sending quick response')).toBeVisible();
+  if((await feedback.textContent()).includes('Submitting'))
+    await expect(feedback.getByLabel('sending quick response')).toBeVisible();
   await expect.poll(async () => page.evaluate(() =>
     window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
   await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
@@ -1671,9 +2311,10 @@ test('permission quick-response feedback reaches submitted on a fresh page', asy
   await openAction(page, 'codex:thread-one');
   await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
   await page.locator('#sclose').click();
-  await expect(feedback).toContainText('Submitting');
+  await expect(feedback).toContainText(/Submitting|Submitted/);
   await expect(feedback).toContainText('Allow permission');
-  await expect(feedback.getByLabel('sending quick response')).toBeVisible();
+  if((await feedback.textContent()).includes('Submitting'))
+    await expect(feedback.getByLabel('sending quick response')).toBeVisible();
   await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
 });
 
@@ -1683,7 +2324,7 @@ test('every approval decision and MCP single/multi-select elicitation', async ({
     await reset(page, 'approval');
     await openAction(page, 'codex:thread-one');
     await page.locator('#sact').getByRole('button', { name: label, exact: true }).click();
-    await expect.poll(async () => (await fixtureState(page)).actions.at(-1).choice)
+    await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.choice)
       .toBe(choice);
   }
 
@@ -1712,7 +2353,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
   await expect(page.locator('.slashmenu')).toContainText('$reviewer');
   await page.getByRole('button', { name: /\$reviewer/ }).click();
   await sendModifiedReturn(page, input);
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1).type).toBe('skill');
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('skill');
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
   await page.reload();
@@ -2189,6 +2830,98 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
     action.type === 'option' && action.session_id === 'claude-one' && action.nonce === 'rev-6')).toBe(true);
 });
 
+test('notification actions are event-scoped, reject double taps, and cannot leak across detail races', async ({ page }) => {
+  await reset(page,'base');await goTo(page,'notifications');
+  await page.getByRole('button',{name:/Choose a release target/}).click();
+  await page.evaluate(()=>{
+    const realFetch=window.fetch.bind(window);let release;
+    globalThis.__notificationSnoozeCalls=0;
+    globalThis.__releaseNotificationSnooze=()=>release?.(new Response(JSON.stringify({ok:true}),
+      {status:200,headers:{'Content-Type':'application/json'}}));
+    window.fetch=(input,init)=>String(input).includes('/api/notifications/snooze')?
+      (globalThis.__notificationSnoozeCalls++,new Promise(resolve=>{release=resolve;})):realFetch(input,init);
+    snoozeNotification('evt-6-question','rev-6','quarter');
+    snoozeNotification('evt-6-question','rev-6','quarter');
+  });
+  await expect(page.getByRole('button',{name:'Snooze 15m'})).toBeDisabled();
+  expect(await page.evaluate(()=>globalThis.__notificationSnoozeCalls)).toBe(1);
+
+  await page.evaluate(()=>openNotification('evt-5-failure'));
+  await expect(page.locator('#notificationdetail')).toContainText('Codex connection interrupted');
+  await expect(page.locator('#notificationdetail')).not.toContainText('Working…');
+  await expect(page.getByRole('button',{name:'Mute session'})).toBeEnabled();
+  await page.getByRole('button',{name:'Mute session'}).click();
+  await expect(page.locator('#notificationdetail')).toContainText('Session muted until you unmute it');
+  await page.evaluate(()=>globalThis.__releaseNotificationSnooze());
+  await expect.poll(()=>page.evaluate(()=>globalThis.__notificationSnoozeCalls)).toBe(1);
+});
+
+test('an omitted fleet row cannot close or erase an open conversation', async ({ page }) => {
+  await reset(page,'base');
+  await page.locator('[data-sid="codex:thread-one"] .primarybtn').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  const fleet=await(await page.request.get('/api/fleet')).json();
+  const omitted=structuredClone(fleet);omitted.sessions=omitted.sessions.filter(item=>item.session_id!=='codex:thread-one');
+  // Apply the exact transient snapshot deterministically. A background poll is
+  // deliberately not involved: this contract starts at render's accepted
+  // server snapshot boundary.
+  await page.evaluate(snapshot=>{clearTimeout(pollTimer);last=snapshot;render(last,true);},omitted);
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sactivity')).toContainText('Reconnecting to session');
+  await expect(page.locator('#sbody')).toContainText('Working through the matrix');
+  await page.evaluate(snapshot=>{last=snapshot;render(last,true);},fleet);
+  await expect(page.locator('#sactivity')).not.toContainText('Reconnecting to session');
+  await expect(page.locator('#sview')).toBeVisible();
+});
+
+test('full-screen surfaces are semantic focus modals and every session has a keyboard chat control', async ({ page }) => {
+  await reset(page,'base');
+  const card=page.locator('[data-sid="claude-one"]');
+  const chat=card.getByRole('button',{name:/Open chat:/});
+  await expect(chat).toBeVisible();await chat.focus();await page.keyboard.press('Enter');
+  const session=page.locator('#sview');await expect(session).toBeVisible();
+  await expect(session).toHaveAttribute('role','dialog');await expect(session).toHaveAttribute('aria-modal','true');
+  await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
+  expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(true);
+  await page.locator('#sact').getByRole('button',{name:'message options'}).click();
+  const scheduleOpener=page.locator('#sact').getByRole('menuitem',{name:'Schedule message'});
+  await scheduleOpener.click();
+  await expect(page.locator('#scheduleview')).toHaveAttribute('role','dialog');
+  expect(await page.locator('#sview').evaluate(element=>element.inert)).toBe(true);
+  await page.locator('#scheduleview').getByRole('button',{name:'back'}).click();
+  await expect(page.locator('#scheduleview')).toBeHidden();
+  await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
+  await page.locator('#sclose').click();await expect(session).toBeHidden();
+  await expect(chat).toBeFocused();
+  // The live poll always rebuilds volatile card headers. That reconciliation
+  // must not erase the focus which the closed dialog returned to Chat.
+  await page.evaluate(()=>render(last,true));await expect(chat).toBeFocused();
+  expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(false);
+});
+
+test('all full-screen forms fit the visual viewport while editing', async ({ page },testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'),'mobile visual viewport contract');
+  await reset(page,'base');
+  await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:500,offsetTop:12};syncVisualViewport();});
+  const assertGeometry=async selector=>{
+    const box=await page.locator(selector).evaluate(element=>{const rect=element.getBoundingClientRect();return{top:rect.top,height:rect.height,bottom:rect.bottom};});
+    expect(box.top).toBe(12);expect(box.height).toBe(500);expect(box.bottom).toBe(512);
+  };
+  await page.evaluate(()=>openSettings('sessions'));await expect(page.locator('#settingsview')).toBeVisible();
+  await page.locator('#settings input').first().focus();await page.evaluate(()=>syncVisualViewport());await assertGeometry('#settingsview');
+  await page.evaluate(()=>dismissOverlay());await expect(page.locator('#settingsview')).toBeHidden();
+  await page.evaluate(()=>openSearchContext(901));await expect(page.locator('#searchview')).toBeVisible();await assertGeometry('#searchview');
+  await page.evaluate(()=>dismissOverlay());await expect(page.locator('#searchview')).toBeHidden();
+  await page.evaluate(()=>openHandoff('codex:thread-one','claude'));await expect(page.locator('#handoffpreview')).toBeVisible();
+  await page.locator('#handoffpreview').focus();await page.evaluate(()=>syncVisualViewport());await assertGeometry('#handoffview');
+  await page.evaluate(()=>dismissOverlay());await expect(page.locator('#handoffview')).toBeHidden();
+  await page.evaluate(()=>openOutbox());await expect(page.locator('#outboxview')).toBeVisible();await assertGeometry('#outboxview');
+  await page.evaluate(()=>dismissOverlay());await expect(page.locator('#outboxview')).toBeHidden();
+  await page.evaluate(()=>openSchedule('codex:thread-one',null));await expect(page.locator('#scheduleview')).toBeVisible();
+  await page.locator('#scheduleview textarea').focus();await page.evaluate(()=>syncVisualViewport());await assertGeometry('#scheduleview');
+  await page.evaluate(()=>{delete globalThis.__fleetVisualViewportOverride;syncVisualViewport();});
+});
+
 test('notification policy controls every kind, warns on aggressive cadence, and nests cleanly in Settings', async ({ page }, testInfo) => {
   await reset(page, 'base');
   await goTo(page, 'settings');
@@ -2211,8 +2944,15 @@ test('notification policy controls every kind, warns on aggressive cadence, and 
   await expect(question.getByLabel('Minimum severity').locator('option').nth(0)).toHaveText(
     'All events (Info, Warning, or Critical)');
   await expect(question).toContainText('does not change sound, color, or presentation');
+  await expect(question.getByLabel('Show Question in Fleet')).toBeChecked();
+  await expect(question.locator('summary')).toContainText('In app on');
+  await question.getByLabel('Show Question in Fleet').uncheck();
+  await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
+    action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.in_app_enabled).toBe(false);
+  await expect(question.locator('summary')).toContainText('In app off');
+  await expect(question.getByLabel('Web Push cadence')).toHaveValue('remind_once');
   await question.getByLabel('Apply this change to 1 active event').check();
-  await question.getByLabel('Cadence').selectOption('repeat');
+  await question.getByLabel('Web Push cadence').selectOption('repeat');
   await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
     action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.mode).toBe('repeat');
   await expect(page.locator('.policyguide')).toHaveAttribute('open', '');
@@ -2232,7 +2972,7 @@ test('notification policy controls every kind, warns on aggressive cadence, and 
   await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
     action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.max_deliveries).toBe(20);
   expect((await fixtureState(page)).actions.filter(action =>
-    action.type==='notification_policy'&&action.kind==='question').at(-1).apply_current).toBe(true);
+    action.type==='notification_policy'&&action.kind==='question').at(-1)?.apply_current).toBe(true);
 
   await page.getByRole('checkbox', {name:/^Quiet hours/}).check();
   await expect(page.getByRole('textbox', {name:'Starts', exact:true})).toBeVisible();

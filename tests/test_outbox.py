@@ -204,6 +204,7 @@ class OutboxTests(unittest.TestCase):
                           lambda row: calls.append(row) or {"ok": True}, lambda _: {})
         self.assertFalse(calls)
         usage["codex"]["buckets"][0]["reset"] = reset + 7 * 86400
+        self.clock.advance(1)
         self.manager.tick(snapshot(session()), usage,
                           lambda row: calls.append(row) or {"ok": True}, lambda _: {})
         self.assertEqual(len(calls), 1)
@@ -262,6 +263,49 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(calls, [f"message {index:02d}" for index in range(45)])
         self.assertEqual(self.manager.counts()["states"]["sent"], 45)
 
+    def test_waiting_batch_rotates_so_a_later_ready_row_is_not_starved(self):
+        sessions = []
+        for index in range(20):
+            sid = f"codex:busy-{index:02d}"
+            self.create(message=f"busy {index:02d}", target_session_id=sid)
+            sessions.append(session(sid, group="working", state="running"))
+        ready = self.create(message="ready", target_session_id="codex:ready")
+        sessions.append(session("codex:ready"))
+        calls = []
+
+        self.manager.tick(snapshot(*sessions), {},
+                          lambda row: calls.append(row["id"]) or {"ok": True}, lambda _: {})
+        self.assertFalse(calls)
+        self.assertTrue(all(
+            self.manager.get(f"out-{index:04d}")["next_attempt_at"] > self.clock()
+            for index in range(20)))
+
+        # No clock advance is needed. The first batch moved itself into the
+        # future, so the unexamined due row rotates to the front immediately.
+        self.manager.tick(snapshot(*sessions), {},
+                          lambda row: calls.append(row["id"]) or {"ok": True}, lambda _: {})
+        self.assertEqual(calls, [ready["id"]])
+        self.assertEqual(self.manager.get(ready["id"])["state"], "sent")
+
+    def test_usage_reset_without_fresh_evidence_is_deferred_fairly(self):
+        reset = self.clock() - 1
+        waiting = self.create(kind="usage_reset", message="after reset",
+            usage_account_id="acct", usage_window_id="weekly", observed_reset_at=reset)
+        ready = self.create(message="ready now")
+        usage = {"codex": {"account_id": "acct", "buckets": [
+            {"id": "weekly", "reset": reset}]}}
+        calls = []
+        self.manager.max_batch = 1
+
+        self.manager.tick(snapshot(session()), usage,
+                          lambda row: calls.append(row["id"]) or {"ok": True}, lambda _: {})
+        deferred = self.manager.get(waiting["id"])
+        self.assertEqual(deferred["state"], "waiting_usage_reset")
+        self.assertGreater(deferred["next_attempt_at"], self.clock())
+        self.manager.tick(snapshot(session()), usage,
+                          lambda row: calls.append(row["id"]) or {"ok": True}, lambda _: {})
+        self.assertEqual(calls, [ready["id"]])
+
     def test_expired_dispatch_becomes_confirmation_unknown_and_never_retries(self):
         item = self.create()
         with self.manager._transaction(immediate=True) as db:
@@ -275,6 +319,19 @@ class OutboxTests(unittest.TestCase):
         row = self.manager.get(item["id"])
         self.assertEqual(row["state"], "confirmation_unknown")
         self.assertTrue(row["retryable"])
+
+    def test_lost_provider_ack_becomes_confirmation_unknown_without_automatic_retry(self):
+        item = self.create()
+        calls = []
+        self.manager.tick(snapshot(session()), {}, lambda row: calls.append(row) or {
+            "ok": False, "code": "delivery_uncertain",
+            "error": "provider result was lost"}, lambda _: {})
+        row = self.manager.get(item["id"])
+        self.assertEqual(row["state"], "confirmation_unknown")
+        self.assertEqual(len(calls), 1)
+        self.manager.tick(snapshot(session()), {}, lambda row: calls.append(row) or {
+            "ok": True}, lambda _: {})
+        self.assertEqual(len(calls), 1)
 
     def test_restart_recovers_only_a_proven_exact_spawn_destination(self):
         item = self.create(kind="new_session", trigger_at=self.clock(),
@@ -314,6 +371,50 @@ class OutboxTests(unittest.TestCase):
         self.assertNotEqual(retry["id"], original["id"])
         with self.assertRaises(OutboxError):
             self.manager.cancel(original["id"])
+
+    def test_schedule_create_is_idempotent_and_active_retry_cannot_duplicate(self):
+        payload = {"kind": "when_available", "message": "hello",
+            "target_provider": "codex", "target_session_id": "codex:one",
+            "created_zone": "America/New_York",
+            "client_request_id": "schedule-request-0001"}
+        first = self.manager.create(payload)
+        replay = self.manager.create(payload)
+        self.assertEqual(replay["id"], first["id"])
+        self.assertEqual(len(self.manager.list(limit=20)["items"]), 1)
+
+        self.manager._terminal(first["id"], "failed", error="provider rejected")
+        retry = self.manager.retry(first["id"])
+        with self.assertRaises(OutboxError) as duplicate:
+            self.manager.retry(first["id"])
+        self.assertEqual(duplicate.exception.code, "stale")
+        self.assertEqual(self.manager.get(retry["id"])["retry_of"], first["id"])
+
+    def test_edit_requires_exact_expected_version(self):
+        original = self.create(message="before")
+        version = original["version"]
+        with self.assertRaises(OutboxError) as missing:
+            self.manager.update(original["id"], {"message": "missing version"})
+        self.assertEqual(missing.exception.code, "stale")
+
+        first = self.manager.update(
+            original["id"], {"message": "first edit"}, expected_version=version)
+        self.assertEqual(first["message"], "first edit")
+        self.assertEqual(first["version"], version + 1)
+        with self.assertRaises(OutboxError) as stale:
+            self.manager.update(
+                original["id"], {"message": "stale edit"}, expected_version=version)
+        self.assertEqual(stale.exception.code, "stale")
+        self.assertEqual(self.manager.get(original["id"])["message"], "first edit")
+
+    def test_edit_accepts_embedded_version_and_retarget_enforces_it(self):
+        original = self.create(message="before")
+        updated = self.manager.retarget(original["id"], {
+            "message": "after", "expected_version": original["version"]})
+        self.assertEqual(updated["message"], "after")
+        with self.assertRaises(OutboxError) as stale:
+            self.manager.retarget(original["id"], {
+                "message": "too late", "expected_version": original["version"]})
+        self.assertEqual(stale.exception.code, "stale")
 
     def test_scheduled_codex_spawn_can_deliver_initial_message_atomically(self):
         item = self.create(kind="new_session", trigger_at=self.clock(),
@@ -402,6 +503,70 @@ class OutboxTests(unittest.TestCase):
                           lambda row: sent.append(row) or {"ok": True}, lambda _: {})
         self.assertEqual(len(sent), 1)
         self.assertEqual(self.manager.get(first["id"])["image_count"], 0)
+
+    def test_retry_copies_images_into_independently_owned_storage(self):
+        source = os.path.join(self.upload_root, "retry-source.jpg")
+        payload = b"retry image bytes"
+        with open(source, "wb") as image:
+            image.write(payload)
+        original = self.manager.create_delivery(
+            message="inspect retry", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="retry-image-request-0001",
+            image_paths=[source])
+        self.manager._terminal(original["id"], "failed", error="provider rejected")
+        original_paths = self.manager.get_internal(original["id"])["_image_paths"]
+
+        retry = self.manager.retry(original["id"])
+        retry_paths = self.manager.get_internal(retry["id"])["_image_paths"]
+        self.assertEqual(retry["image_count"], 1)
+        self.assertNotEqual(original_paths, retry_paths)
+        with open(retry_paths[0], "rb") as image:
+            self.assertEqual(image.read(), payload)
+
+        self.manager._clear_assets_for(original["id"])
+        self.assertFalse(os.path.exists(original_paths[0]))
+        self.assertTrue(os.path.exists(retry_paths[0]))
+        sent = []
+        self.manager.tick(snapshot(session("claude-one", provider="claude")), {},
+            lambda row: sent.append(row) or {"ok": True}, lambda _: {})
+        self.assertEqual(sent[0]["_image_paths"], retry_paths)
+        self.assertEqual(self.manager.get(retry["id"])["state"], "sent")
+
+    def test_retry_refuses_expired_images_instead_of_sending_text_only(self):
+        source = os.path.join(self.upload_root, "expired-source.jpg")
+        with open(source, "wb") as image:
+            image.write(b"image")
+        original = self.manager.create_delivery(
+            message="do not drop image", target_provider="claude",
+            target_session_id="claude-one", idempotency_key="retry-image-request-0002",
+            image_paths=[source])
+        self.manager._terminal(original["id"], "failed", error="provider rejected")
+        self.manager._remove_asset_paths(
+            self.manager.get_internal(original["id"])["_image_paths"])
+        with self.assertRaises(OutboxError) as expired:
+            self.manager.retry(original["id"])
+        self.assertEqual(expired.exception.code, "attachments_unavailable")
+        self.assertEqual(len(self.manager.list()["items"]), 1)
+
+    def test_successful_retry_supersedes_entire_failed_attention_chain(self):
+        original = self.create(message="first attempt")
+        self.manager._terminal(original["id"], "failed", error="first failure")
+        first_retry = self.manager.retry(original["id"], {"message": "second attempt"})
+        self.manager._terminal(first_retry["id"], "failed", error="second failure")
+        final_retry = self.manager.retry(first_retry["id"], {"message": "final attempt"})
+        self.assertEqual(self.manager.counts()["attention"], 2)
+
+        self.manager.tick(snapshot(session()), {}, lambda _: {"ok": True}, lambda _: {})
+        self.assertEqual(self.manager.get(final_retry["id"])["state"], "sent")
+        self.assertEqual(self.manager.get(first_retry["id"])["state"], "superseded")
+        superseded = self.manager.get(original["id"])
+        self.assertEqual(superseded["state"], "superseded")
+        self.assertEqual(superseded["error"], "first failure")
+        self.assertFalse(superseded["retryable"])
+        self.assertEqual(self.manager.counts()["attention"], 0)
+        history = self.manager.list(limit=20)["items"]
+        self.assertEqual({item["id"] for item in history},
+                         {original["id"], first_retry["id"], final_retry["id"]})
 
     def test_recovery_waits_for_authority_then_dispatches_once_and_cleans_assets(self):
         source = os.path.join(self.upload_root, "upload.jpg")

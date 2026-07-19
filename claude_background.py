@@ -160,6 +160,7 @@ class ClaudeBackgroundTransport:
         with self._job_lock(job_id):
             master = slave = None
             process = None
+            wrote_any = False
             try:
                 master, slave = pty.openpty()
                 self._set_window(slave)
@@ -176,6 +177,8 @@ class ClaudeBackgroundTransport:
                     while view:
                         try:
                             written = os.write(master, view)
+                            if written:
+                                wrote_any = True
                             view = view[written:]
                         except BlockingIOError:
                             select.select([], [master], [], .05)
@@ -198,11 +201,18 @@ class ClaudeBackgroundTransport:
                     raise ClaudeBackgroundError("Claude background attachment did not detach cleanly")
                 return {"ok": True, "transport": "claude_attach"}
             except ClaudeBackgroundError as exc:
-                return {"ok": False, "code": "background_connection_lost",
-                        "error": str(exc)[:300]}
+                return {"ok": False,
+                        "code": ("delivery_uncertain" if wrote_any else
+                                 "background_connection_lost"),
+                        "error": (("delivery uncertain — check the Claude terminal: "
+                                   if wrote_any else "") + str(exc))[:300]}
             except Exception:
-                return {"ok": False, "code": "background_connection_lost",
-                        "error": "Claude background connection failed"}
+                return {"ok": False,
+                        "code": ("delivery_uncertain" if wrote_any else
+                                 "background_connection_lost"),
+                        "error": ("delivery uncertain — check the Claude terminal"
+                                  if wrote_any else
+                                  "Claude background connection failed")}
             finally:
                 if slave is not None:
                     try:
