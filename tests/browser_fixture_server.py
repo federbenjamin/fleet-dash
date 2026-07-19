@@ -23,7 +23,9 @@ def capabilities(**overrides):
            "decide_approval": False, "spawn_agent": True, "relay_agent": True,
            "relay_agent_direct": False, "account_usage": True, "exact_cost": False,
            "measured_throughput": False, "archive": True, "compact": True,
-           "review": True, "files": True, "change_permission_mode": False}
+           "review": True, "files": True, "change_permission_mode": False,
+           "model_effort_settings": False, "change_model_effort": False,
+           "change_model_effort_reason": ""}
     out.update(overrides)
     return out
 
@@ -94,7 +96,8 @@ def base_session(provider, sid, title):
                  "confidence": "confirmed"}],
             "capabilities": capabilities(exact_cost=not codex,
                 focus_terminal=True, focus_terminal_mode="attach" if codex else None,
-                measured_throughput=not codex, change_permission_mode=not codex)}
+                measured_throughput=not codex, change_permission_mode=not codex,
+                model_effort_settings=True, change_model_effort=True)}
     session["status_line"] = fixture_status_line(provider)
     return session
 
@@ -583,7 +586,8 @@ def fleet():
                 for key in ("submit", "interrupt", "close", "compact", "review",
                             "focus_terminal", "answer_structured", "decide_approval",
                             "spawn_agent", "relay_agent", "relay_agent_direct",
-                            "change_permission_mode"):
+                            "change_permission_mode", "model_effort_settings",
+                            "change_model_effort"):
                     session["capabilities"][key] = False
     closed = [{**item, "ui_group": "history", "reason_label": "Closed",
         "primary_action": "reopen" if item.get("can_reopen") else "view",
@@ -670,8 +674,9 @@ def fleet():
             "closed": closed,
             "recent_dirs": [{"path": "/Users/test/fleet-dash", "trusted": True}],
             "models": ["sonnet", "opus"], "efforts": ["low", "medium", "high"],
-            "models_by_provider": {"claude": [{"id": "sonnet", "name": "sonnet",
-                "efforts": ["low", "high"]}], "codex": [{"id": "gpt-5.4",
+            "models_by_provider": {"claude": [{"id": "sonnet", "name": "Sonnet",
+                "efforts": ["low", "high"]}, {"id": "opus", "name": "Opus",
+                "efforts": ["medium"]}], "codex": [{"id": "gpt-5.4",
                 "name": "GPT-5.4", "efforts": ["medium", "high"]},
                 {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex",
                  "efforts": ["medium", "high"]}]},
@@ -697,7 +702,7 @@ def set_scenario(name):
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
         name.startswith("mobile-needs-you") or name.startswith("close-worktree") or
-        name in ("notification-request", "send-while-busy")) else codex_session()
+        name in ("notification-request", "send-while-busy", "claude-prompt-gate")) else codex_session()
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -716,7 +721,15 @@ def set_scenario(name):
                     "question": "Which release target should Fleet use?", "multiSelect": False,
                     "allowOther": True, "options": [
                         {"label": "Staging", "description": "Verify before production."},
-                        {"label": "Production", "description": "Ship the approved build."}]}]})
+                    {"label": "Production", "description": "Ship the approved build."}]}]})
+    elif name == "claude-prompt-gate":
+        session.update(state="needs_you", normalized_state="needs_you", reg_status="idle",
+            pending={"kind": "question", "nonce": "native-gate", "questions": [{
+                "header": "Native gate", "question": "Can Fleet answer yet?",
+                "multiSelect": False, "allowOther": False,
+                "options": [{"label": "Yes"}, {"label": "No"}]}]})
+        session["capabilities"].update(answer_structured=False, decide_approval=False,
+            answer_reason="Waiting for Claude's native prompt state")
     elif name in ("mobile-needs-you", "mobile-needs-you-missing-action"):
         session.update(title="Get 429 into a mergable state", name="hazy-hatching-curry-d8",
             project="hazy-hatching-curry", branch="fix/pr-429", state="needs_you",
@@ -783,13 +796,15 @@ def set_scenario(name):
                        codex_source="vscode", read_only_reason=
                        "ChatGPT Desktop and VS Code use a different App Server; this transcript is view only")
         session["capabilities"] = capabilities(submit=False, takeover=False, close=False,
-            archive=False, files=False, relay_agent=False, focus_terminal=False)
+            archive=False, files=False, relay_agent=False, focus_terminal=False,
+            model_effort_settings=False, change_model_effort=False)
     elif name == "organization":
         session.update(state="idle", pending=None, headless=True, read_only=True,
                        codex_source="vscode", read_only_reason=
                        "ChatGPT Desktop and VS Code use a different App Server; this transcript is view only")
         session["capabilities"] = capabilities(submit=False, takeover=False, close=False,
-            archive=False, files=False, relay_agent=False, focus_terminal=False)
+            archive=False, files=False, relay_agent=False, focus_terminal=False,
+            model_effort_settings=False, change_model_effort=False)
         dormant = base_session("claude", "claude-dormant", "Dormant migration")
         dormant.update(state="dormant", quiet_s=8_000,
                        last_msg={"role": "assistant", "text": "Paused for later."})
@@ -798,7 +813,9 @@ def set_scenario(name):
         session.update(state="stale", error="app-server exited", stale=True,
                        stale_reason="app-server exited")
         STATE["codex_error"] = "app-server exited"
-        session["capabilities"] = capabilities(submit=False, interrupt=False, close=False)
+        session["capabilities"] = capabilities(submit=False, interrupt=False, close=False,
+            model_effort_settings=True, change_model_effort=False,
+            change_model_effort_reason="Provider state is stale")
     elif name == "cross-client-active":
         session.update(state="running", reg_status="running", quiet_s=1,
                        headless=True, read_only=True, codex_source="vscode",
@@ -807,7 +824,7 @@ def set_scenario(name):
                        last_msg={"role": "assistant", "text": "Working in ChatGPT desktop."})
         session["capabilities"] = capabilities(
             submit=False, interrupt=False, close=False, compact=False, review=False,
-            focus_terminal=False)
+            focus_terminal=False, model_effort_settings=False, change_model_effort=False)
     elif name == "markdown-peek":
         preview = (
             "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear\n\n"+
@@ -821,6 +838,8 @@ def set_scenario(name):
                        reg_status="running", ui_group="working",
                        reason_label="Working")
         session["capabilities"]["interrupt"] = True
+        session["capabilities"]["change_model_effort"] = False
+        session["capabilities"]["change_model_effort_reason"] = "Available when Claude is idle"
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
     elif name.startswith("close-worktree"):
@@ -903,6 +922,16 @@ def set_scenario(name):
                        branch="feature/action-inbox", project="fleet-dash")
         if name == "repo-action-failure":
             STATE["fail_repo_once"] = True
+
+    # F50 made native prompt authority explicit. Ordinary waiting fixtures must
+    # opt into the capability they are intended to exercise; the prompt-gate
+    # scenario intentionally stays disabled until its test advances the native
+    # registry state through /test/native-prompt-state.
+    pending_kind = (session.get("pending") or {}).get("kind")
+    if name != "claude-prompt-gate" and pending_kind == "question":
+        session["capabilities"].update(answer_structured=True, answer_reason="")
+    if pending_kind == "permission":
+        session["capabilities"].update(decide_approval=True, answer_reason="")
 
 
 def authorized(handler):
@@ -1267,6 +1296,28 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/test/reset":
                 set_scenario(payload.get("scenario") or "base")
                 return self.json_reply({"ok": True})
+            if route == "/test/canonical-session-settings":
+                session = next((item for item in STATE["sessions"]
+                                if item["session_id"] == payload.get("session_id")), None)
+                if not session:
+                    return self.json_reply({"ok": False, "error": "unknown session"}, 404)
+                session["model"] = str(payload.get("model") or "")
+                session["effort"] = str(payload.get("effort") or "")
+                session["status_line"].update(model=session["model"], effort=session["effort"])
+                return self.json_reply({"ok": True, "model": session["model"],
+                                        "effort": session["effort"]})
+            if route == "/test/native-prompt-state":
+                session = next((item for item in STATE["sessions"]
+                                if item["session_id"] == payload.get("session_id")), None)
+                if not session:
+                    return self.json_reply({"ok": False, "error": "unknown session"}, 404)
+                waiting = payload.get("waiting") is True
+                session["reg_status"] = "waiting" if waiting else "idle"
+                session["capabilities"].update(answer_structured=waiting,
+                    decide_approval=waiting,
+                    answer_reason="" if waiting else
+                        "Waiting for Claude's native prompt state")
+                return self.json_reply({"ok": True})
             if route == "/test/confirm":
                 sid = payload.get("session_id")
                 context = STATE.setdefault("contexts", {}).setdefault(sid, [])
@@ -1274,12 +1325,32 @@ class Handler(BaseHTTPRequestHandler):
                     context.append({"role": "event", "kind": "qa", "title": "You answered",
                         "level": "info", "detail": "", "qa": payload.get("answers") or []})
                 else:
-                    context.append({"role": "user", "text": payload.get("text") or ""})
+                    context.append({"role": "assistant" if payload.get("role") == "assistant" else "user",
+                                    "text": payload.get("text") or ""})
                 session = next((item for item in STATE["sessions"]
                                 if item["session_id"] == sid), None)
                 if session:
                     session["convo_v"] = "confirmed:" + str(time.time_ns())
                 return self.json_reply({"ok": True})
+            if route == "/test/outbox-state":
+                item = next((row for row in STATE["outbox"]
+                             if row["id"] == payload.get("outbox_id")), None)
+                if not item:
+                    return self.json_reply({"ok": False, "error": "outbox message not found"}, 404)
+                state = payload.get("state")
+                if state not in ("waiting_availability", "blocked", "failed",
+                                 "confirmation_unknown", "sent"):
+                    return self.json_reply({"ok": False, "error": "invalid outbox state"}, 400)
+                item.update(state=state, state_label={
+                    "waiting_availability": "Waiting for availability", "blocked": "Blocked",
+                    "failed": "Failed", "confirmation_unknown": "Delivery unconfirmed",
+                    "sent": "Sent"}[state], updated_at=time.time(),
+                    error=payload.get("error") if state in ("failed", "confirmation_unknown") else None,
+                    blocked_reason=payload.get("error") if state == "blocked" else None,
+                    editable=state == "waiting_availability",
+                    cancellable=state == "waiting_availability",
+                    retryable=state in ("blocked", "failed", "confirmation_unknown"))
+                return self.json_reply({"ok": True, "item": copy.deepcopy(item)})
             if route in ("/api/act", "/api/upload-image", "/api/settings", "/api/search/rebuild",
                          "/api/notifications/read", "/api/notifications/snooze",
                          "/api/notifications/wake", "/api/notifications/mute",
@@ -1705,6 +1776,47 @@ class Handler(BaseHTTPRequestHandler):
                 if not session:
                     return self.json_reply({"ok": False, "error": "stale session"})
                 typ = payload.get("type")
+                if typ == "dismiss_then_send":
+                    pending = session.get("pending") or {}
+                    if pending.get("kind") != "question" or \
+                            payload.get("nonce") != pending.get("nonce"):
+                        return self.json_reply({"ok": False,
+                                                "error": "stale request"})
+                    if STATE.get("fail_dismiss"):
+                        return self.json_reply({"ok": False,
+                                                "error": "provider rejected dismiss"})
+                    session.update(state="turn_done", reg_status="idle", pending=None)
+                    request_id = payload.get("client_request_id")
+                    item = next((row for row in STATE["outbox"]
+                                 if row.get("idempotency_key") == request_id), None)
+                    if not item:
+                        now = time.time()
+                        item = {"id": f"fixture-out-{len(STATE['outbox']) + 1}",
+                            "created_at": now, "updated_at": now,
+                            "created_zone": "UTC", "local_time": None,
+                            "trigger_fold": None, "kind": "when_available",
+                            "state": "waiting_availability",
+                            "state_label": "Waiting for availability",
+                            "message": payload.get("text"),
+                            "target_provider": session.get("provider"),
+                            "target_session_id": session.get("session_id"),
+                            "target_agent_id": None, "trigger_at": None,
+                            "usage_account_id": None, "usage_window_id": None,
+                            "observed_reset_at": None, "spawn_spec": None,
+                            "destination_session_id": None, "provider_receipt": None,
+                            "sent_at": None, "error": None,
+                            "blocked_reason": "Question dismissed; waiting for the session to become available",
+                            "retry_of": None, "origin": "automatic_fallback",
+                            "idempotency_key": request_id,
+                            "image_count": len(payload.get("upload_ids") or []),
+                            "version": 1, "editable": True,
+                            "cancellable": True, "retryable": False}
+                        STATE["outbox"].append(item)
+                    return self.json_reply({"ok": True, "queued": True,
+                        "dismissed": True, "dismissed_nonce": payload.get("nonce"),
+                        "outbox_id": item["id"], "queue_state": item["state"],
+                        "message": "Queued · waiting for session",
+                        "queue_reason": item["blocked_reason"]})
                 if typ == "send_message":
                     if STATE.get("fail_text"):
                         return self.json_reply({"ok": False,
@@ -1779,6 +1891,8 @@ class Handler(BaseHTTPRequestHandler):
                     session.update(state="running", reg_status="running")
                     session["capabilities"].update(
                         interrupt=True, focus_terminal=False,
+                        change_model_effort=False,
+                        change_model_effort_reason="Available when the turn is idle",
                         focus_terminal_mode=None, focus_terminal_label="turn active",
                         focus_terminal_reason=
                         "Wait for the current Codex turn to finish before attaching")
@@ -1786,12 +1900,38 @@ class Handler(BaseHTTPRequestHandler):
                     session.update(state="turn_done", reg_status="idle")
                     session["capabilities"].update(
                         interrupt=False, focus_terminal=True,
+                        change_model_effort=True, change_model_effort_reason="",
                         focus_terminal_mode="attach", focus_terminal_label="attach",
                         focus_terminal_reason=
                         "Open a Codex TUI attached to Fleet's shared App Server")
                 elif typ == "mode":
                     session["collaboration_mode"] = payload.get("mode")
                     return self.json_reply({"ok": True, "mode": payload.get("mode")})
+                elif typ == "session_settings":
+                    if not session.get("capabilities", {}).get("change_model_effort"):
+                        return self.json_reply({"ok": False,
+                            "error": "model and effort can change only while idle"})
+                    expected = (str(payload.get("expected_model") or ""),
+                                str(payload.get("expected_effort") or ""))
+                    current = (str(session.get("model") or ""),
+                               str(session.get("effort") or ""))
+                    if expected != current:
+                        return self.json_reply({"ok": False,
+                            "error": "settings changed in another view — refresh and try again"})
+                    catalogs = {
+                        "claude": {"sonnet": ["low", "high"], "opus": ["medium"]},
+                        "codex": {"gpt-5.4": ["medium", "high"],
+                                  "gpt-5.3-codex": ["medium", "high"]},
+                    }
+                    model = str(payload.get("model") or "")
+                    effort = str(payload.get("effort") or "")
+                    if model not in catalogs.get(session.get("provider"), {}):
+                        return self.json_reply({"ok": False, "error": "unknown model"})
+                    if effort not in catalogs[session["provider"]][model]:
+                        return self.json_reply({"ok": False, "error": "unsupported effort"})
+                    session.update(model=model, effort=effort)
+                    session["status_line"].update(model=model, effort=effort)
+                    return self.json_reply({"ok": True, "model": model, "effort": effort})
                 elif typ == "permission_mode":
                     if not session.get("capabilities", {}).get("change_permission_mode"):
                         return self.json_reply({"ok": False, "error": "Claude is not idle"})

@@ -35,14 +35,18 @@ the provider's native control path. Built 2026-07-13; still evolving.
   manual unmute, delivery retry, and expired-device reconnect. Exact links use
   `#notifications/<event-id>` and participate in refresh and browser/native back. Desktop keeps a
   split list/detail view; mobile opens detail as a full-height drawer. Briefing now lives here instead
-  of competing with the live Action Inbox on Now.
+  of competing with the live Action Inbox on Now. Every event type has two independent controls:
+  **Show in Fleet Notification Center** governs in-app history/badges, while **Web Push** governs
+  lock-screen delivery and cadence.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
   Search, Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes
   a fixed bottom bar; History, Insights, and Settings live under More. The URL hash preserves destinations
   across refresh and browser/native back gestures. Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
   filters whose named saved views remain on this device. Settings and History paint their visible
-  destination immediately, then do heavier rendering/fetch work on the next frame.
+  destination immediately, then do heavier rendering/fetch work on the next frame. Returning to
+  History preserves the loaded page; only **Show more** fetches the next 100 sessions. New Session
+  and notification actions paint local feedback without rebuilding the fleet or Notification Center.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
   canonical cwd, missing or unknown locations stay separate, and symlink/nested-repository cases do
@@ -61,7 +65,11 @@ the provider's native control path. Built 2026-07-13; still evolving.
   accept the message now; otherwise Fleet saves it durably in the server Outbox and shows
   **Queued · waiting for session** until that session becomes available. A **Needs you** card caused
   only by the assistant asking for a reply remains immediately writable; that placement does not
-  mean the provider is busy. Commands and skills remain immediate-only and stay as drafts while
+  mean the provider is busy. If a native structured question is visibly open, normal composer Send
+  declines that exact question first and then durably queues the typed text/images as the follow-up;
+  it can never type the message into the option selector. A changed or rejected question keeps the
+  draft untouched, and an offline queued follow-up remembers the question nonce through reconnection.
+  Commands and skills remain immediate-only and stay as drafts while
   offline. A brief provider-discovery gap after Fleet restarts leaves exact-session messages waiting
   for up to two minutes instead of falsely declaring the session gone. The full-chat composer also accepts up to four
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
@@ -69,6 +77,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.
   On phones the composer stays docked immediately above the keyboard, the full-screen view follows
   the visible iOS viewport, and a vertical drag on conversation history dismisses the keyboard.
+  Fleet also keeps a bounded last-good cache of recently opened session, closed-session, and
+  subagent conversations on that device. A failed refresh or offline reload shows saved history as
+  stale instead of replacing it with an empty/error screen; refreshed tails merge with older pages.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
   including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
@@ -153,7 +164,11 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   thread/turn APIs. A transient `thread/read` failure keeps the last conversation and leaves a
   Fleet-owned thread interactive; a provider-wide list failure keeps its last placement and
   controls under one stale-data banner. Lifecycle timeouts recycle only Fleet's client connection,
-  not the shared runtime. Detail reads back off after a failure instead of retrying every poll.
+  not the shared runtime. Stale rows disable direct mutation while still allowing durable queueing
+  where ownership is proven. Archive discovery pages up to a bounded 1,000 threads; persisted
+  Fleet-owned IDs missing from that window receive targeted reads before they can vanish. Detail
+  reads use bounded concurrency and one total refresh budget, then back off after a failure. Unknown
+  or external IDs cannot gain mutation or unprojected context/file access by supplying a UUID.
 - Model choices come from Codex's bounded, credential-free `~/.codex/models_cache.json` catalog.
   Fleet does not call `model/list` during session refresh, so a slow model-manager refresh cannot
   block thread health or detach live chats.
@@ -249,7 +264,17 @@ the provider without affecting Claude sessions.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
-  the agent definition's frontmatter pin, or the parent session's effort when it pins none.
+  the agent definition's frontmatter pin, or the parent session's effort when it pins none. In an
+  existing full-screen chat, the top-right menu can change model and effort while the provider is
+  idle. Options come from Fleet's server-owned provider catalogs; changing model immediately repairs
+  an incompatible effort. Claude uses its native `/model` and `/effort` commands, while Fleet-owned
+  Codex threads use App Server `thread/settings/update`. External, stale, active, and staging-observed
+  sessions never claim an unsafe control. A definitive failure before Claude receives a command
+  restores the prior selection. Partial acceptance or a lost native result keeps the exact accepted
+  values, shows an unconfirmed warning, and disables another control change until newer terminal
+  evidence reconciles it. A newer model, effort, or Codex mode chosen directly in the provider
+  replaces Fleet's settled feedback on the next refresh. Rapid follow-up Claude messages queue while
+  its registry catches up with a just-started turn, so they cannot land in the wrong terminal state.
 - A Claude card's whole header opens Fleet chat; the redundant second chat button is gone. **Terminal**
   (desktop only) brings that Claude iTerm tab to the front. A managed
   Codex card shows **Attach**, which opens a new Codex TUI connected to the canonical shared runtime.
@@ -297,7 +322,8 @@ the provider without affecting Claude sessions.
   confirmation before sending.
 - **⤢ full view** (button beside the "recent conversation" header) → the whole session
   full-screen: the complete conversation with room to read, the send box (with `/`
-  autocomplete), the amber question block when it's blocked on you, and a delivered-file strip.
+  autocomplete), the amber question block when it's blocked on you, and a compact upper strip with
+  session status plus the most recently received file.
   Its top-right **⋮ menu** contains Codex Plan/Default or Claude permission mode (when applicable),
   light/dark mode, Stop turn, and Close session. Stop and close both confirm first. Closing an active session stops its current
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
@@ -308,10 +334,12 @@ the provider without affecting Claude sessions.
   session closes; unrelated Git worktree locks remain blocked. The conversation moves to **History**.
   The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
-  The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping a
-  file chip in chat opens that file, while the viewer's **Chat** button opens the canonical full
+  The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping the
+  latest-file button or an inline file chip in chat opens that file, while the viewer's **Chat**
+  button beside its file browser opens the canonical full
   conversation and preserves the current draft. Both surfaces call the same composer renderer and
-  therefore have the same textarea, ＋ menu, image drafts, Send behavior, and delivery feedback.
+  therefore use the exact `＋ | message | Send` row, image drafts, Send behavior, and delivery
+  feedback. Its resting controls are one 44px row; newline input grows upward to four lines.
   Session chat, Markdown, and subagent chat also share the persisted reading-width setting.
 - **Tap a card** → detail panel, top to bottom: recent conversation (with its ⤢ full-view
   button), a one-line horizontal strip of delivered-file chips (quick open), then the "session
@@ -341,6 +369,10 @@ the provider without affecting Claude sessions.
     answered-count, a per-question "selected:" line + Other input, and one "submit all
     answers" button (single-select picks auto-advance, like the terminal).
   - Permission request → the notification text + allow / always allow / deny buttons.
+  - A transcript fallback can remain visible for context before Claude's native terminal is ready.
+    Its controls stay disabled until the live registry confirms the same prompt is actually waiting.
+    If Fleet loses acknowledgement after sending any answer key, that nonce stays blocked across
+    reload/restart; check the terminal instead of retrying it blindly.
   - The selector disappears the moment an answer sends — no waiting on the next poll.
   - If a file was delivered shortly before the question (the deliver-then-ask pattern), the box
     leads with a **"read first" chip** — visible even on a collapsed card. Window:
@@ -352,14 +384,19 @@ the provider without affecting Claude sessions.
   that spinner becomes the visible **Queued · waiting for session** state and the durable Outbox
   keeps the message editable/cancellable across browser exit or a daemon restart. After Outbox
   delivery it shows **Sent** until the provider transcript replaces the placeholder. An immediate
-  request that fails, or remains unconfirmed after 15 seconds, gets a red `!`; tapping it restores
-  the text to the composer and never retries an ambiguous delivery automatically. Message and
+  request that definitively fails before native launch, or receives no canonical transcript
+  confirmation after 15 seconds, gets a red `!`; tapping it restores the text to the composer. If
+  native delivery may already have happened but Fleet lost the acknowledgement, the row instead says
+  **Delivery unconfirmed**, offers no restore/retry, and requires a terminal check. Failed and
+  unconfirmed receipts can be dismissed; restoring a definite failure fills the composer without
+  retrying. Either choice is remembered so a durable Outbox row cannot resurrect the receipt or
+  force chat back to the bottom. Message and
   subagent-relay composers are multiline: **Return adds a
   newline**, **Command-Return sends on macOS**, and **Control-Return sends elsewhere**; the explicit
   Send/Relay button remains available. The full-chat **＋** menu offers **Send picture** and
   **Schedule message**. The picture action opens the phone camera/photo picker (or desktop file
-  picker); the menu preserves the original trusted tap on iOS before closing, so choosing either
-  action cannot dismiss without opening it. Selected images are shown beside the composer and delivered to
+  picker) through the native file input that receives the original iOS tap. Cancel changes nothing;
+  selection closes the menu and persists one shared draft. Selected images are shown beside the composer and delivered to
   either Claude or Codex with the message. Structured-question answers use the selected option labels and the
   same placeholder behavior (secret free text is shown only as “private answer”). The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
@@ -379,16 +416,21 @@ the provider without affecting Claude sessions.
   caption — so the message explaining the file sits right with it. The detail panel also has a
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   markdown rendered and images inline; viewing contents requires the act token (same `?token=`
-  opt-in); files since deleted show "(gone)".
+  opt-in); files since deleted show "(gone)". Re-delivering or updating a previously listed path
+  moves it back to newest without duplicating it, so chat's latest-file button is accurate.
 - **File viewer** extras: its slim toolbar shows only close, filename, and file/session actions—no
   duplicate session title/project/model header or separator. The same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
   actions that apply to the owning session. Light mode gives the document a paper theme; the choice
   is persisted per device and shared with the full chat and subagent views. A **📄 files strip**
   (header button) expands a one-line horizontally
   scrolling selector of everything the session delivered, for switching files without leaving
-  the viewer. Its docked action bar has no embedded conversation disclosure: it uses the canonical
-  composer, with **Chat** directly above **Send** to the right of the textarea. The ＋ menu owns
-  **Send picture** and **Schedule message** on both reading surfaces.
+  the viewer. Its docked action bar has no embedded conversation disclosure: the upper strip is the
+  flexible file browser plus an equal-height **Chat** button, followed by the same compact
+  `＋ | message | Send` composer as full chat. The ＋ menu owns **Send picture** and
+  **Schedule message** on both reading surfaces. On phones the dock sits directly against the iOS
+  keyboard edge. Opening or closing the keyboard preserves the visible message/paragraph; chat that
+  is already near its bottom follows canonical replies and late image/font growth, while an actual
+  upward reader gesture disengages follow-tail.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
 - **History destination:** inactive sessions plus every surviving top-level Claude transcript
@@ -446,8 +488,10 @@ network first and keeps the last successful `/api/fleet` snapshot on that device
 connection loss or a reload, Fleet opens the cached dashboard immediately as explicitly offline and
 read-only except for its device-local ordinary-message queue. Queued messages send in order after a
 live fleet poll confirms reconnection; a connection drop during an attempted send requires manual
-restore so Fleet cannot duplicate a message with an unknown outcome. Conversation-detail,
-notification, settings, action, search, and token-bearing responses stay network-only. Web Push delivery runs
+restore so Fleet cannot duplicate a message with an unknown outcome. Conversation-detail endpoints
+stay network-only, but the bounded last successful conversation is retained on that device and shown
+as stale until a live refresh succeeds. Notification, settings, action, search, and token-bearing
+responses stay network-only. Web Push delivery runs
 in a supervised Node helper outside provider scans and HTTP request locks. Fleet creates its VAPID
 and action keys once in ignored `push-secrets.json` with mode 0600; an invalid or loosened secret
 file disables delivery instead of silently replacing keys and breaking registered devices. Its
@@ -528,8 +572,9 @@ with staging.
 other devices can be renamed, tested, paused/resumed, or removed remotely. Removing a device revokes
 its subscription and suppresses queued delivery while retaining redacted delivery history.
 
-Settings → **Notifications** controls one global push policy shared by every enabled device. It has
-a master switch, quiet hours/timezone, and a rule for each event kind. A rule may be Off, Once,
+Settings → **Notifications** controls in-app visibility plus one global push policy shared by every
+enabled device. Each event kind has a separate **Show in Fleet Notification Center** switch. Its
+push rule may be Off, Once,
 Once + reminder, or Repeat until resolved, with bounded delay, interval, maximum count, minimum
 severity, and optional quiet-hours bypass. Changing an Off rule does not backfill existing active
 events unless you explicitly select **Apply this change**. Session mute and event snooze always

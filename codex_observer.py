@@ -21,6 +21,9 @@ import time
 
 THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,79}")
 MAX_ROW_BYTES = 2 * 1024 * 1024
+READ_CHUNK_BYTES = 64 * 1024
+MAX_READ_BYTES_PER_OBSERVE = 4 * 1024 * 1024
+MAX_READ_SECONDS_PER_OBSERVE = 0.05
 
 
 def _epoch(value):
@@ -65,7 +68,8 @@ class CodexRolloutObserver:
 
     def _fresh(self, path, stat):
         return {"path": path, "inode": (stat.st_dev, stat.st_ino), "offset": 0,
-                "remainder": b"", "messages": deque(maxlen=self.max_messages),
+                "remainder": b"", "discarding_oversized": False,
+                "messages": deque(maxlen=self.max_messages),
                 "active": False, "turn_id": None, "started_at": None,
                 "completed_at": None, "last_activity_at": None,
                 "revision": 0, "malformed_rows": 0, "oversized_rows": 0,
@@ -143,18 +147,44 @@ class CodexRolloutObserver:
                             stat.st_size < entry.get("offset", 0))
                 if replaced:
                     entry = self._entries[thread_id] = self._fresh(path, stat)
+                rows_seen = 0
+                bytes_left = MAX_READ_BYTES_PER_OBSERVE
+                deadline = time.monotonic() + MAX_READ_SECONDS_PER_OBSERVE
                 with open(path, "rb") as handle:
                     handle.seek(entry["offset"])
-                    chunk = handle.read()
-                entry["offset"] += len(chunk)
-                data = entry["remainder"] + chunk
-                lines = data.split(b"\n")
-                entry["remainder"] = lines.pop() if lines else data
-                for raw in lines:
-                    if raw:
-                        self._line(entry, raw)
-                if lines:
-                    entry["revision"] += len(lines)
+                    while bytes_left > 0 and time.monotonic() < deadline:
+                        chunk = handle.read(min(READ_CHUNK_BYTES, bytes_left))
+                        if not chunk:
+                            break
+                        entry["offset"] += len(chunk)
+                        bytes_left -= len(chunk)
+
+                        # Once a row crosses MAX_ROW_BYTES, retain no more of it.
+                        # Scan bounded chunks until its newline instead of joining
+                        # an attacker-sized append into one bytes object first.
+                        if entry["discarding_oversized"]:
+                            newline = chunk.find(b"\n")
+                            if newline < 0:
+                                continue
+                            entry["discarding_oversized"] = False
+                            rows_seen += 1
+                            chunk = chunk[newline + 1:]
+                            if not chunk:
+                                continue
+
+                        data = entry["remainder"] + chunk
+                        lines = data.split(b"\n")
+                        entry["remainder"] = lines.pop() if lines else data
+                        for raw in lines:
+                            rows_seen += 1
+                            if raw:
+                                self._line(entry, raw)
+                        if len(entry["remainder"]) > MAX_ROW_BYTES:
+                            entry["oversized_rows"] += 1
+                            entry["remainder"] = b""
+                            entry["discarding_oversized"] = True
+                if rows_seen:
+                    entry["revision"] += rows_seen
                 entry["error"] = None
                 return self._snapshot(thread_id, entry)
         except (OSError, ValueError) as exc:

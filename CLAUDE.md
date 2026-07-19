@@ -68,7 +68,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
    single-question multi (append the "1") whereas the right-arrow ✔ Submit TAB skips Review —
    both verified same-day, keep the no-Other multi path on the TAB. Esc anywhere = "User
    declined to answer questions" (same outcome as Chat about this) — the dashboard's ✕.
-   Other text is control-char-stripped server-side (a smuggled \r would fire as Enter). Debug
+   Other text is control-char-stripped server-side (a smuggled \r would fire as Enter). The
+   browser's `n_options`, `multi`, and answer counts are display hints only: `act()` rebuilds the
+   nonce-matched prompt kind, option count, multi flag, and Other availability from authoritative
+   hook/transcript data, caps the shape, and rejects a mismatched action type before building keys. Debug
    rig: spawn a sandbox `claude --model haiku` in a new iTerm tab, make it ask, drive it via
    scratchpad sbx2.py — never experiment on real sessions.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
@@ -202,7 +205,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
     labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
     ourselves would defeat a security gate from a remote device — don't.
-22. **Effort exists ONLY in the statusline payload.** `"effort":{"level":…}` is piped to the
+22. **Claude's reported effort exists only in the statusline payload.** `"effort":{"level":…}` is piped to the
     statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
     cannot derive it. `~/.claude/statusline-command.sh` side-writes it to
     `fleet-dash/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
@@ -210,7 +213,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
     (`.claude/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
     the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
-    types (`plugin:agent`) have no local file: fall back to the parent.
+    types (`plugin:agent`) have no local file: fall back to the parent. The narrow exception is a
+    Fleet-issued, successfully delivered native `/effort` change: persist its accepted value with the
+    current statusline mtime so a daemon restart cannot revert the UI. A newer statusline side-write
+    remains authoritative and retires the override.
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     reads the ledger's validated `transcript_path` (falling back to the legacy cwd mapping only for
     old rows). Its overlay is read-only — no send box, no stop, no mute. A closed Claude session may
@@ -222,10 +228,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     one-keystroke `focus` cost 850ms while a ping cost 2ms. (a) The applet delays only BETWEEN
     steps, never after the last; (b) the delay is per-request (flag 4) — 0.4s ONLY for ask-TUI
     key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay;
-    (c) `act()` takes `scan_lock` + re-polls the tail ONLY for prompt answers (the poll thread
-    holds that lock while folding the whole fleet, so a click used to wait out a full scan) —
-    but `mt.poll()` must stay INSIDE the lock or it races the fold and double-counts; (d) the
-    result file is polled every 20ms, not 300ms. The applet is stay-open
+    (c) `act()` takes `scan_lock` + re-polls the tail only for native-surface mutations that need
+    final freshness: prompt answers, controls, direct text/images, handoffs, and relays. Focus and
+    interrupt keep the no-tail fast path. The poll thread holds that lock while folding the whole
+    fleet, so these actions may wait out a scan, but `mt.poll()` must stay INSIDE the lock or it races
+    the fold and double-counts; (d) the
+    result file is polled every 20ms, not 300ms. The applet owns one fixed request/result mailbox,
+    so a dedicated Engine lock serializes the complete atomic request publish, `open`, and matching-
+    result wait; concurrent HTTP/Outbox actions must never share that exchange. The applet is stay-open
     (`OSAAppletStayOpen`), so `open -g` reopens the resident process (`on reopen`) instead of
     launching one. Net: 850ms → ~260ms. Any change here is re-verified in the SANDBOX with a
     real multi-question ask before shipping.
@@ -321,8 +331,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `thread_meta` at creation and on later settings changes, and use them as the refresh fallback;
     otherwise a daemon restart after compaction leaves a Plan-mode session unable to start its next
     turn. A lifecycle timeout closes only Fleet's client transport so the next call
-    reconnects to the detached runtime. A provider-wide list outage marks cached state stale but
-    preserves its existing owned capabilities and interactive access. Reconnection is not evidence
+    reconnects to the detached runtime. A provider-wide list outage marks cached state stale,
+    disables direct mutation/close/archive/answer controls, and exposes only durable queue submit
+    where ownership is proven. Reconnection is not evidence
     that a thread is unloaded: check `thread/loaded/list` before an exact on-demand resume and never
     resume every remembered thread, because `thread/resume` may abort an active turn.
     `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: only
@@ -344,6 +355,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     running evidence, then retry the exact text/image payload once through `turn/start`. An expected-
     turn mismatch instead proves that another turn exists: clear local authority and queue the
     payload. Timeouts and unknown errors remain ambiguous and must never trigger a direct retry.
+    Every existing-thread mutation requires both an exact current projection and persisted
+    `runtime_owner=fleet_shared`; terminal fallback and focus obey the same gate. Live context
+    requires an exact current projection, while closed context/file access requires an exact closed
+    ledger row. `thread/list` pages to a bounded 1,000 rows and targeted-reads persisted owned IDs
+    omitted from that window. Detail reads run in a bounded worker pool under one total refresh
+    deadline. A malformed row is isolated as a stale, non-mutable row, including on first refresh.
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
@@ -406,8 +423,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Control-Return elsewhere sends.
 40. **Claude permission mode is a native, state-gated control.** `Tail.permission_mode` accepts only
     Claude's allowlisted transcript values. Live changes are allowed only for an idle registered
-    Claude session whose process exposes the target in `permission_modes`; `act(permission_mode)`
-    composes fixed Shift+Tab steps and retains the 0.4s native-TUI inter-key delay. `dontAsk` is a
+    Claude session with no hook/transcript request, compaction, turn-start fence, or unresolved
+    control delivery, and whose process exposes the target in `permission_modes`;
+    `act(permission_mode)` composes fixed Shift+Tab steps and retains the 0.4s native-TUI inter-key
+    delay. Each key is acknowledged separately, every accepted intermediate mode is persisted, and
+    a lost acknowledgement fails closed across restart until newer native evidence arrives.
+    `dontAsk` is a
     new-session-only Advanced choice because it is not in Claude's live cycle. `bypassPermissions`
     is exposed only when the already-running process was launched with Claude's enabling flag and
     the client must show a separate high-warning confirmation every time. Fleet never accepts
@@ -501,11 +522,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     incremental: its signature contains only push-relevant actions, mutes, eligible stalls, provider
     failures, and the in-process Briefing generation. An unchanged signature performs no projection
     I/O; a provider failure bypasses the cache until corroborated, and daemon restart always runs one
-    full reconciliation.
+    full reconciliation. `notification_kind_policy.in_app_enabled` is independent of push cadence.
+    Ordinary lists, active/unread counts, title/app badges, and delivery-problem projections include
+    only enabled kinds after their in-app effective edge. Exact event deep links remain readable so
+    a push can open canonical detail even when that kind is hidden from in-app lists.
 48. **Production Web Push is globally policy-bounded and capability-authenticated.** One durable
     global policy applies to every enabled device. `notification_global_policy` owns master state,
     quiet hours, timezone, and revision; `notification_kind_policy` has one row for every canonical
-    kind with Off/Once/Once+reminder/Repeat, severity floor, initial delay, repeat interval, maximum
+    kind with an independent in-app switch plus Off/Once/Once+reminder/Repeat, severity floor,
+    initial delay, repeat interval, maximum
     successful wave count, and quiet-hours bypass. Defaults preserve the former interruption
     behavior: question/approval/form/reply/failure use one reminder, stall sends once, and
     informational kinds are Off. Device rows own connection, enable/pause, permission,
@@ -513,7 +538,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     quiet hours and kind rules. Quiet hours hold/coalesce rather than replay missed intervals. A rule
     newly enabled for existing active events schedules nothing unless `apply_current` is explicit;
     a worst case above 12 pushes/day requires high-cadence confirmation. Policy writes use expected
-    revisions, and every schedule/claim/retry/wake revalidates its policy revision so obsolete jobs
+    revisions. In-app-only edits increment the public row revision but not `push_revision`, so they
+    cannot suppress unrelated push jobs; every schedule/claim/retry/wake revalidates the push
+    revision so obsolete jobs
     become suppressed. Transport retries do not consume another user cadence count. A target device
     must still be enabled, permission-granted, subscription-present, explicitly test-qualified, and
     healthy. Delivery rows persist an explicit purpose plus source and policy revisions. Mute is
@@ -558,7 +585,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     commands and skills stay as drafts because their semantics may be destructive. Remove a queue row
     after provider acceptance or a known rejection. If the connection drops after dispatch begins,
     remove it from automatic retry and show a manual restore failure: delivery is unknown and an
-    automatic retry could duplicate the message. Never send from the service worker.
+    automatic retry could duplicate the message. A bounded `fleet.contextCache.v1` retains recent
+    main/subagent/closed conversations on that device. Refresh merges the newest tail by stable
+    identity/cursor without discarding loaded older pages; fetch failure preserves last-good messages
+    with stale/error metadata. Never send from the service worker.
 53. **Full-chat work activity is independent of transcript output.** `#sactivity` is a non-overlay
     footer below the `#sbody` scroll area, so it remains visible without covering messages. Show the
     main indicator for session `running`/`stalled`, and a separate count for every child not in
@@ -570,17 +600,26 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     queue ids in localStorage. `/api/upload-image` is token-gated, rejects chunked or oversized bodies,
     validates magic bytes, ignores the client filename for path construction, normalizes through fixed-
     argv `sips`, and removes every JPEG APP/COM metadata segment (including EXIF GPS/XMP). Files and
-    0600 metadata live under the 0700 `fleet-dash/uploads` directory, are bound to one live interactive
-    session, and expire after 24 hours. `image_text` and the default `send_message` path resolve ids
+    0600 metadata live under the 0700 `fleet-dash/uploads` directory, are bound to one server-observed
+    live or ledger-backed session, and expire after 24 hours. A temporarily missing known session may
+    accept the upload only for a durable exact-session queue; an unknown id remains rejected.
+    `image_text` and the default `send_message` path resolve ids
     server-side: Codex receives native `localImage` inputs; Claude receives only Fleet-managed
-    absolute paths in injected text. Image
+    absolute paths in injected text. Upload IDs are immutable and collision-rejected. Live upload
+    storage is capped at 32 files/80 MB per session and 200 files/512 MB globally; raw and normalized
+    retained sizes are checked under the upload lock, and cleanup rotates through the whole directory
+    rather than sampling the same prefix forever. Image
     uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
     service worker never caches image bytes.
 55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
     existing loading-spinner pattern before building the full settings tree. History navigation must
-    reveal the already-rendered destination before starting its fetch/render in the next animation
-    frame. Keep both deferrals: synchronously rebuilding these surfaces produced 265–947 ms desktop
-    first-feedback outliers even though their network work was asynchronous.
+    reveal the already-rendered destination before starting its first fetch/render in the next
+    animation frame; revisiting History must never paginate implicitly—only **Show more** owns the
+    next 100 rows. New Session paints only `#newsess`, not a synchronous full-fleet render. A
+    notification detail action paints its busy/success state inside the active detail pane, not by
+    rebuilding the list and every filter; canonical list reconciliation remains asynchronous. Keep
+    these narrow commits: rebuilding whole surfaces produced 133–1026 ms first-feedback outliers even
+    though their network work was asynchronous.
 56. **Production and staging are hard-separated instances.** Production code runs from the dedicated
     `~/.claude/fleet-dash-prod` checkout on 8377; development/staging runs from
     `~/.claude/fleet-dash` on 8378. `server.APP_ROOT` is always the directory containing `server.py`;
@@ -609,14 +648,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     a vertical drag starting in `#sbody` blurs the composer, while a tap does not. Textareas use 16px
     type on coarse pointers to prevent iOS focus zoom, auto-grow only to a bounded height, and keep
     Return as newline-only. `renderComposer` is the sole main-session composer for both full chat and
-    Markdown: it owns the textarea, draft/image state, ＋ menu, send path, and feedback. Markdown
-    embeds no conversation disclosure; its right-hand stack is **Chat** above **Send**, and Chat
-    preserves the draft while opening full chat. The upward **＋** menu is the only entry point for
-    **Send picture** and **Schedule message**; selecting either closes it. The picture button must
-    call the hidden picker as the FIRST state-changing operation in its trusted `click`; only after
-    `picker.click()` may it close the menu, blur the textarea, or settle viewport geometry. A touch
-    `pointerdown` must never tear down the menu before iOS delivers `click`. The attachment then stays
-    drafted without refocusing. Safari's native keyboard
+    Markdown: it owns one exact `＋ | textarea | Send` row, draft/image state, menu, send path, and
+    feedback. All three resting controls share the 44px token; newline input grows upward through four
+    lines. Chat's separate upper strip is `status | latest received file`; Markdown's is
+    `file browser | Chat`, with equal 42px controls. Chat's collapsed status and fixed latest-file
+    button are 44px; the expansion chevron lives inside the compact status rather than adding a third
+    row. The file button bottom-aligns when status expands and must never stretch. The upward **＋**
+    menu is the only entry point
+    for **Send picture** and **Schedule message**. Photo must be the actual transparent file input/
+    label tap target—never a synthetic `picker.click()` after mutating or dismissing the menu—so iOS
+    retains trusted activation. Cancel changes nothing; selection closes the menu and stays drafted
+    without refocusing. Safari's native keyboard
     accessory bar is not controllable from a web app, so layout must remain correct with it present.
 59. **Settings is section-routed and mutation-safe.** The overlay owns Notifications, Devices &
     delivery, Sessions, Appearance, Budgets & spawning, and Advanced at exact
@@ -658,6 +700,100 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     daemon restart: an exact target missing from one snapshot waits through a bounded 120-second
     reconnect grace and dispatches if it reappears. Only continuous absence beyond that grace may
     block the delivery.
+
+62. **Polling and context refresh are single-flight and last-good.** The two-second fleet poll starts
+    its next request only after the current one settles; a bounded timeout marks a genuinely hung
+    request offline, while force-refresh alone may supersede an older generation. Never abort every
+    slow-but-progressing response on the next interval. Main, closed, and subagent context failures
+    retain the last-good in-memory/device cache. Conversation revision refreshes merge the current
+    tail into older loaded pages and preserve the reader's scroll anchor.
+
+63. **Full-screen overlays are stack-aware modals.** File/session/subagent/Settings/Search/Handoff/
+    Outbox/Schedule/Confirm surfaces have dialog semantics, an accessible name, focus entry/trap,
+    inert lower layers, and opener restoration. The highest visible z-index owns focus. Every one of
+    those surfaces uses the shared visual viewport on phones; focused fields scroll into the
+    remaining viewport instead of exposing the screen beneath the keyboard. Every session card
+    exposes a real labelled Chat button for keyboard and screen-reader entry.
+
+64. **Outbox identity and retries are concurrency-safe.** Scheduled creation persists the browser's
+    stable `client_request_id` as the unique idempotency key. Editable updates/retargets require the
+    exact expected version in the SQL predicate. A retry copies queue-owned images into independent
+    storage and refuses missing bytes; one source may have only one active direct retry. A proven
+    successful descendant marks failed ancestors `superseded`, preserving audit text while clearing
+    attention. Fair selection orders by `next_attempt_at` so unavailable rows cannot starve ready
+    work; unchanged usage-reset rows always move their next check forward.
+
+65. **Existing-chat model/effort changes are provider-native and compare-and-set.** The full-chat
+    overflow renders controls only from `models_by_provider` plus explicit session capabilities.
+    Active rows disable them; external/view-only and staging-observed rows expose no control. The
+    browser repairs effort immediately when model changes, serializes model/effort/mode/permission
+    writes per session, and versions responses. A definitive pre-launch failure restores the last
+    accepted pair; partial acceptance or a lost acknowledgement retains the exact accepted prefix,
+    shows a warning, and never invites a contradictory retry. Only
+    an in-flight request may override canonical values; settled success/error feedback can remain,
+    but a newer provider snapshot immediately owns the labels, selectors, and next expected pair. The
+    server requires both expected values, revalidates them against live provider state, and checks
+    the server-owned catalog. Codex catalog rows are bounded, stripped, control-character-free,
+    visibility-filtered, and deterministically deduplicated; a changed cache that fails parsing
+    clears the catalog and controls rather than retaining stale options. Claude accepts this
+    action only while its registry is idle with no hook/transcript request and no active compaction,
+    and composes only exact `/model <allowlisted-id>` and `/effort <allowlisted-level>` commands;
+    arbitrary command text is never accepted. `/model` and `/effort` are separate acknowledged
+    native transactions so a second-command failure cannot erase the first accepted value. Accepted
+    Claude model/effort/permission projections persist with transcript byte offsets or statusline
+    mtimes across daemon restart, and retire only on newer native evidence; transcript row timestamps
+    are not ordering authority because compaction can append older-timestamp rows. A per-session
+    Claude mutation lock spans the fresh
+    registry/tail checks, terminal write, and accepted projection, including Outbox image delivery.
+    After a submitted message, a turn-start fence blocks or queues registry-lag follow-ups until
+    Claude reports active then idle, or the changed transcript folds to awaiting input. Codex uses
+    `thread/settings/update`; one per-thread mutation lock serializes settings, mode, turn starts,
+    and compaction, with live active/pending/compacting state rechecked immediately before mutation.
+    Persisted settings revisions cover both settings and mode changes, use compare-and-set, and
+    refresh projection commits reconcile under
+    the same barrier so an old in-flight refresh cannot overwrite an accepted save. Write
+    `thread_meta` only after App Server acceptance. If that durability write fails, return success
+    with an explicit warning and keep the accepted runtime/UI projection; never report a false
+    provider rejection. Model/effort saves preserve a newer live collaboration mode; mode saves
+    preserve an explicitly null live effort rather than reviving stale metadata. Refresh, compaction,
+    daemon restart, and the next turn retain durable values.
+
+66. **Unknown native delivery is never safely retryable.** The applet launch result divides
+    definitive pre-launch failure from post-launch confirmation loss. If Claude may have received
+    message, image, relay, handoff, prompt keys, or a control, Fleet returns delivery uncertainty and
+    does not auto-retry. Outbox records content as `confirmation_unknown`; direct surfaces tell the
+    user to check the terminal and do not offer Restore/retry. Prompt uncertainty is durable and
+    nonce-scoped, including one-key dismiss/deny: the same nonce emits no more keys across daemon
+    restart. Hook captures use private atomic replace so partial JSON cannot erase that fence, and
+    their reader closes every file deterministically. A missing capture while the registry still
+    says `waiting` retains uncertainty. So does a non-waiting registry sample while the exact same
+    capture remains valid: permission captures have no clear hook and can mask a later Notification.
+    Clear only for a different valid nonce, session removal, or capture disappearance corroborated
+    by provider completion. Question/approval controls are advertised only while that exact pending
+    request and registry `waiting` agree. Background transport and every Engine caller likewise
+    distinguish a proven failure before the first native write from ambiguity after any write.
+
+67. **Full-screen reading position has explicit authority.** `captureReadingAnchor` /
+    `restoreReadingAnchor` preserve the first visible chat message or Markdown block synchronously
+    across composer focus, visual-viewport changes, and dock rerenders, then repeat after paint for
+    WebKit geometry. Chat opens in follow-tail mode and stays there while its canonical tail remains
+    within 120px; canonical replies and `ResizeObserver` growth repin after layout. Only a wheel,
+    touch, scrollbar, or navigation-key gesture may disengage it—layout-generated scroll events do
+    not. Failed/uncertain optimistic receipts are never tail authority. Definite failures expose
+    Restore and Dismiss; uncertain rows expose Dismiss only. Resolving a server Outbox receipt writes
+    a bounded tombstone so reconciliation and reload cannot recreate it. Repeated Claude or Codex
+    file deliveries move the existing path to newest without duplication; chat exposes only that
+    newest file beside status, while Markdown retains the full file browser.
+
+68. **Composer text cannot answer a native question.** When `pendingQuestion(sid)` is visible,
+    `sendText` submits one `dismiss_then_send` action containing that exact nonce and the captured
+    text/image upload ids. `Engine._dismiss_question_then_send` must accept the provider's nonce-bound
+    dismiss first and then create an idempotent when-available Outbox row; it always queues after
+    dismissal and never writes during the selector-to-chat transition. A changed nonce, rejected
+    dismiss, or uncertain native delivery sends no message and leaves the composer draft/images in
+    place. The device-local offline queue persists `dismissNonce` and replays the same compound action
+    after reconnection. Never implement this as text followed by Escape, parallel requests, or a
+    timer: text could select an option, and a delay cannot prove which native surface owns input.
 
 ## Dev workflow
 

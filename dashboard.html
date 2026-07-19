@@ -37,7 +37,7 @@
     <section class="destination" id="route-now" data-destination="now">
       <div class="desthead"><div class="nowtitle"><h1>Now</h1>
         <button id="usagechip" aria-haspopup="dialog" aria-expanded="false" onclick="toggleUsage()">Usage</button></div>
-        <button class="headprimary" onclick="newOpen=true;render(last,true);document.getElementById('newsess').scrollIntoView({behavior:'smooth'})">+ New session</button></div>
+        <button class="headprimary" onclick="openNewSessionComposer(true)">+ New session</button></div>
       <div class="commandbar" role="search">
         <label class="commandinput"><span>⌕</span><input id="nowfilter" data-draft-key="filter:now" placeholder="Filter sessions" autocomplete="off"
           oninput="setNowFilter(this.value)"></label>
@@ -87,14 +87,14 @@
         <button class="headsecondary" id="search-rebuild" onclick="rebuildSearch()">Rebuild index</button></div>
       <div class="searchbar" role="search">
         <label class="commandinput"><span>⌕</span><input id="searchquery" data-draft-key="filter:search" placeholder="Search every transcript" autocomplete="off"
-          oninput="queueSearch(true)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
+          oninput="setSearchQuery(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
         <div class="searchfilters">
-          <label><span>Provider</span><select id="searchprovider" onchange="runSearch(true)">
+          <label><span>Provider</span><select id="searchprovider" onchange="setSearchFilter('provider',this.value)">
             <option value="">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
-          <label><span>Type</span><select id="searchkind" onchange="runSearch(true)">
+          <label><span>Type</span><select id="searchkind" onchange="setSearchFilter('kind',this.value)">
             <option value="">All</option><option value="message">Messages</option><option value="reasoning">Reasoning</option>
             <option value="tool">Tools</option><option value="event">Events</option><option value="artifact">Artifacts</option></select></label>
-          <label><span>Project</span><select id="searchproject" onchange="runSearch(true)"><option value="">All</option></select></label>
+          <label><span>Project</span><select id="searchproject" onchange="setSearchFilter('project',this.value)"><option value="">All</option></select></label>
         </div>
       </div>
       <div id="searchstatus" aria-live="polite"></div>

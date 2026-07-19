@@ -116,6 +116,109 @@ class CodexProtocolTest(unittest.TestCase):
         self.assertEqual(got["beta"], {"method": "beta"})
         client.close()
 
+    def test_concurrent_first_requests_wait_for_one_complete_initialization(self):
+        init_seen = threading.Event()
+
+        class GatedInitializeProcess(ScriptedProcess):
+            def __init__(self):
+                super().__init__(None)
+                self.initialize_id = None
+
+            def receive(self, message):
+                self.received.append(message)
+                if message.get("method") == "initialize":
+                    self.initialize_id = message["id"]
+                    init_seen.set()
+                elif message.get("id") is not None:
+                    self.emit({"id": message["id"],
+                               "result": {"method": message["method"]}})
+
+            def finish_initialize(self):
+                self.emit({"id": self.initialize_id, "result": {}})
+
+        process = GatedInitializeProcess()
+        client = CodexAppServer(command=["/bin/false", "app-server"], timeout=.5,
+                                process_factory=lambda *args, **kwargs: process)
+        got, errors = {}, []
+
+        def request(name):
+            try:
+                got[name] = client.request(name)
+            except Exception as exc:
+                errors.append(exc)
+
+        first = threading.Thread(target=request, args=("alpha",))
+        second = threading.Thread(target=request, args=("beta",))
+        first.start()
+        self.assertTrue(init_seen.wait(.2))
+        second.start()
+        time.sleep(.03)
+        self.assertEqual([item["method"] for item in process.received], ["initialize"])
+        process.finish_initialize()
+        first.join(1)
+        second.join(1)
+        self.assertEqual(errors, [])
+        self.assertEqual(got, {"alpha": {"method": "alpha"},
+                               "beta": {"method": "beta"}})
+        self.assertEqual(len([item for item in process.received
+                              if item.get("method") == "initialize"]), 1)
+        client.close()
+
+    def test_failed_initialize_closes_transport_and_next_request_retries_cleanly(self):
+        processes = []
+
+        class FailingInitializeProcess(ScriptedProcess):
+            def receive(self, message):
+                self.received.append(message)
+                if message.get("method") == "initialize":
+                    self.emit({"id": message["id"],
+                               "error": {"message": "initialize denied"}})
+
+        def factory(*args, **kwargs):
+            if not processes:
+                process = FailingInitializeProcess(None)
+            else:
+                process = ScriptedProcess(lambda current, message: (
+                    current.emit({"id": message["id"],
+                                  "result": {"method": message["method"]}})
+                    if message.get("id") is not None else None))
+            processes.append(process)
+            return process
+
+        client = CodexAppServer(command=["/bin/false", "app-server"], timeout=.2,
+                                process_factory=factory)
+        with self.assertRaisesRegex(CodexError, "initialize denied"):
+            client.request("first")
+        self.assertEqual(processes[0].returncode, -15)
+        self.assertIsNone(client.proc)
+        self.assertEqual(client.connection_state, "stopped")
+        self.assertEqual(client.request("second"), {"method": "second"})
+        self.assertEqual(len(processes), 2)
+        client.close()
+
+    def test_thread_list_pages_past_one_hundred_rows(self):
+        rows = [{"id": f"thread-{index}"} for index in range(150)]
+        calls = []
+
+        def handler(process, message):
+            if message.get("method") != "thread/list":
+                return
+            calls.append(message["params"])
+            start = int(message["params"].get("cursor") or 0)
+            end = min(len(rows), start + int(message["params"]["limit"]))
+            process.emit({"id": message["id"], "result": {
+                "data": rows[start:end],
+                "nextCursor": str(end) if end < len(rows) else None}})
+
+        client, _ = self.client(handler)
+        listed = client.list_threads()
+        self.assertEqual(len(listed), 150)
+        self.assertEqual(listed[-1]["id"], "thread-149")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("cursor", calls[0])
+        self.assertEqual(calls[1]["cursor"], "100")
+        client.close()
+
     def test_startup_prerequisite_runs_before_transport(self):
         events = []
 

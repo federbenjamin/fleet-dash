@@ -3,7 +3,8 @@ import os
 import tempfile
 import unittest
 
-from codex_observer import CodexRolloutObserver
+from codex_observer import (CodexRolloutObserver, MAX_READ_BYTES_PER_OBSERVE,
+                            MAX_ROW_BYTES)
 
 
 class CodexRolloutObserverTests(unittest.TestCase):
@@ -83,6 +84,30 @@ class CodexRolloutObserverTests(unittest.TestCase):
     def test_rejects_untrusted_ids_and_missing_rollouts(self):
         self.assertIsNone(self.observer.observe("../../config"))
         self.assertIsNone(self.observer.observe("019f63f8-a459-79b0-deadbeef"))
+
+    def test_large_append_is_chunked_and_oversized_row_is_discarded(self):
+        huge = b'{"type":"event_msg","payload":{"type":"agent_message","message":"' + \
+            (b"x" * (MAX_READ_BYTES_PER_OBSERVE + MAX_ROW_BYTES)) + b'"}}\n'
+        valid = json.dumps(self.event(
+            "2026-07-16T00:00:05Z", "agent_message", message="after huge"),
+            separators=(",", ":")).encode() + b"\n"
+        with open(self.path, "wb") as handle:
+            handle.write(huge)
+            handle.write(valid)
+
+        first = self.observer.observe(self.THREAD)
+        entry = self.observer._entries[self.THREAD]
+        self.assertLessEqual(entry["offset"], MAX_READ_BYTES_PER_OBSERVE)
+        self.assertLessEqual(len(entry["remainder"]), MAX_ROW_BYTES)
+        self.assertTrue(entry["discarding_oversized"])
+        self.assertIn("oversized rollout row", first["warning"])
+
+        for _ in range(4):
+            final = self.observer.observe(self.THREAD)
+            if final["messages"]:
+                break
+        self.assertEqual([item["text"] for item in final["messages"]], ["after huge"])
+        self.assertFalse(self.observer._entries[self.THREAD]["discarding_oversized"])
 
 
 if __name__ == "__main__":

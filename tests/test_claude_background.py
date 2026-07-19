@@ -3,9 +3,29 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from claude_background import (ClaudeBackgroundError, ClaudeBackgroundTransport,
                                resolve_claude_command)
+
+
+class _FakeAttachProcess:
+    def __init__(self, wait_returncode=0):
+        self.returncode = None
+        self.wait_returncode = wait_returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = self.wait_returncode
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
 
 
 class ClaudeBackgroundTransportTest(unittest.TestCase):
@@ -48,6 +68,72 @@ class ClaudeBackgroundTransportTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "background_connection_lost")
         self.assertEqual(process, [])
+
+    def test_readiness_failure_before_first_write_is_connection_lost(self):
+        process = _FakeAttachProcess()
+        transport = ClaudeBackgroundTransport(
+            sys.executable, popen=lambda *args, **kwargs: process)
+        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+                mock.patch.object(transport, "_set_window"), \
+                mock.patch.object(transport, "_nonblocking"), \
+                mock.patch.object(transport, "_read_ready",
+                                  side_effect=ClaudeBackgroundError("not ready")), \
+                mock.patch("claude_background.os.close"), \
+                mock.patch("claude_background.os.write") as write:
+            result = transport.write("A1B2C3D4", [("hello", False)])
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "background_connection_lost")
+        self.assertNotIn("delivery uncertain", result["error"])
+        write.assert_not_called()
+
+    def test_failure_after_first_partial_write_is_delivery_uncertain(self):
+        process = _FakeAttachProcess()
+        transport = ClaudeBackgroundTransport(
+            sys.executable, popen=lambda *args, **kwargs: process)
+        writes = []
+
+        def write(_fd, data):
+            writes.append(bytes(data))
+            if len(writes) == 1:
+                return 1
+            raise OSError("fixture write failure")
+
+        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+                mock.patch.object(transport, "_set_window"), \
+                mock.patch.object(transport, "_nonblocking"), \
+                mock.patch.object(transport, "_read_ready"), \
+                mock.patch("claude_background.os.close"), \
+                mock.patch("claude_background.os.write", side_effect=write):
+            result = transport.write("A1B2C3D4", [("hello", False)], step_delay=0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "delivery_uncertain")
+        self.assertIn("delivery uncertain", result["error"])
+        self.assertEqual(writes[:2], [b"hello", b"ello"])
+
+    def test_unclean_detach_after_write_is_delivery_uncertain(self):
+        process = _FakeAttachProcess(wait_returncode=7)
+        transport = ClaudeBackgroundTransport(
+            sys.executable, popen=lambda *args, **kwargs: process, sleep=lambda _delay: None)
+        writes = []
+
+        def write(_fd, data):
+            writes.append(bytes(data))
+            return len(data)
+
+        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+                mock.patch.object(transport, "_set_window"), \
+                mock.patch.object(transport, "_nonblocking"), \
+                mock.patch.object(transport, "_read_ready"), \
+                mock.patch("claude_background.os.close"), \
+                mock.patch("claude_background.os.write", side_effect=write):
+            result = transport.write("A1B2C3D4", [("hello", False)], step_delay=0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "delivery_uncertain")
+        self.assertIn("did not detach cleanly", result["error"])
+        self.assertEqual(writes, [b"hello", b"\x1a"])
 
     def test_stop_uses_fixed_argv_and_returns_bounded_error(self):
         calls = []

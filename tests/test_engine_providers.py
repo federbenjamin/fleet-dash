@@ -158,6 +158,8 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(codex["muted"])
         self.assertFalse(claude["muted"])
         self.assertTrue(claude["capabilities"]["close"])
+        self.assertTrue(claude["capabilities"]["model_effort_settings"])
+        self.assertTrue(claude["capabilities"]["change_model_effort"])
         self.assertTrue(codex["capabilities"]["close"])
         self.assertTrue(fleet["totals"]["cost_partial"])
         self.assertGreaterEqual(fleet["totals"]["session_cost"], 0)
@@ -180,6 +182,9 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(claude["staging_observer"])
         self.assertEqual(claude["access"], "view_only")
         self.assertFalse(claude["capabilities"]["submit"])
+        self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        self.assertFalse(claude["capabilities"]["model_effort_settings"])
+        self.assertFalse(claude["capabilities"]["change_model_effort"])
         self.assertFalse(claude["capabilities"]["change_permission_mode"])
         self.assertTrue(codex["staging_owned"])
         self.assertTrue(codex["capabilities"]["submit"])
@@ -205,6 +210,27 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(result["delivery"], "sent_now")
         self.assertEqual(writes, [
             ("/dev/ttys001", [("Deliver immediately", True)], 0.05)])
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
+
+    def test_direct_claude_text_and_image_lost_ack_are_never_auto_retried(self):
+        self.engine.scan()
+        uncertain = {"ok": False, "code": "delivery_uncertain",
+                     "error": "injector result was lost"}
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write", return_value=uncertain):
+            text = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "May already exist", "client_request_id": "lost-text-0001"})
+        self.assertEqual(text.get("code"), "delivery_uncertain")
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
+
+        with mock.patch.object(self.engine, "_resolve_image_uploads",
+                               return_value=(["/private/tmp/image.png"], None)), \
+             mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write", return_value=uncertain):
+            image = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "Inspect", "upload_ids": ["upload-1"],
+                "client_request_id": "lost-image-0001"})
+        self.assertEqual(image.get("code"), "delivery_uncertain")
         self.assertEqual(self.engine.outbox.counts()["pending"], 0)
 
     def test_send_message_queues_busy_claude_and_dispatches_once_when_idle(self):
@@ -240,6 +266,94 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(self.engine.outbox.get(queued["outbox_id"])["state"], "sent")
         self.assertEqual(writes, [
             ("/dev/ttys001", [("Wait for this turn", True)], 0.05)])
+
+    def test_send_message_revalidates_claude_before_terminal_injection(self):
+        registry = os.path.join(self.sessions, "same.json")
+        self.engine.scan()  # cached snapshot says idle
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "waiting", "name": "Claude", "startedAt": 1}, handle)
+        writes = []
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys001"), \
+             mock.patch.object(self.engine, "_iterm_write",
+                side_effect=lambda tty, steps, step_delay=None:
+                    writes.append((tty, steps, step_delay)) or {"ok": True}):
+            result = self.engine.act({"type": "send_message", "session_id": "same",
+                "text": "Do not type into the question", "client_request_id":
+                    "send-stale-claude-0001"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["queued"])
+        self.assertFalse(writes)
+        self.assertEqual(self.engine.outbox.get(result["outbox_id"])["state"],
+                         "waiting_availability")
+
+    def test_composer_followup_dismisses_claude_question_before_queueing_text(self):
+        reg = {"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+               "status": "waiting", "name": "Claude", "startedAt": 1}
+        pending = {"kind": "question", "nonce": "q-followup", "questions": [{
+            "question": "Choose", "multiSelect": False, "allowOther": False,
+            "options": [{"label": "One"}, {"label": "Two"}]}]}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine.hook_pending = lambda sid, status: pending
+        self.engine.compacting_secs = lambda sid, cwd, tail: None
+        writes = []
+        self.engine._tty_cache[os.getpid()] = "ttys-test"
+        self.engine._iterm_write = mock.Mock(side_effect=lambda tty, steps,
+            step_delay=None: writes.append((tty, steps, step_delay)) or {"ok": True})
+        self.engine.scan()
+
+        result = self.engine.act({"type": "dismiss_then_send",
+            "session_id": "same", "nonce": "q-followup",
+            "text": "Here is the context instead",
+            "client_request_id": "question-followup-claude-0001"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["dismissed"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.4)])
+        row = self.engine.outbox.get(result["outbox_id"])
+        self.assertEqual(row["message"], "Here is the context instead")
+        self.assertEqual(row["target_session_id"], "same")
+
+    def test_composer_followup_dismisses_codex_question_before_queueing_text(self):
+        self.codex.session.update(state="needs_you", reg_status="waiting",
+            pending={"kind": "question", "nonce": "q-codex", "questions": [{
+                "question": "Choose", "options": [{"label": "One"}]}]})
+        self.codex.session["capabilities"].update(
+            submit=False, answer_structured=True, decide_approval=True)
+        self.engine.scan()
+
+        result = self.engine.act({"type": "dismiss_then_send",
+            "session_id": "codex:same", "nonce": "q-codex",
+            "text": "Follow this instruction instead",
+            "client_request_id": "question-followup-codex-0001"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["dismissed"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(self.codex.actions, [{"type": "dismiss",
+            "session_id": "codex:same", "nonce": "q-codex"}])
+        self.assertEqual(self.engine.outbox.get(result["outbox_id"])["message"],
+                         "Follow this instruction instead")
+
+    def test_composer_followup_refuses_changed_question_without_sending(self):
+        self.codex.session.update(state="needs_you", reg_status="waiting",
+            pending={"kind": "question", "nonce": "new-question", "questions": [{
+                "question": "New", "options": [{"label": "One"}]}]})
+        self.codex.session["capabilities"].update(
+            submit=False, answer_structured=True, decide_approval=True)
+        self.engine.scan()
+
+        result = self.engine.act({"type": "dismiss_then_send",
+            "session_id": "codex:same", "nonce": "old-question",
+            "text": "Must not become an option",
+            "client_request_id": "question-followup-stale-0001"})
+
+        self.assertFalse(result["ok"])
+        self.assertIn("changed", result["error"])
+        self.assertEqual(self.codex.actions, [])
+        self.assertEqual(self.engine.outbox.counts()["pending"], 0)
 
     def test_send_message_steers_fleet_owned_active_codex_turn_immediately(self):
         self.codex.session.update(state="running", reg_status="running",
@@ -412,6 +526,119 @@ class EngineProviderTest(unittest.TestCase):
             "codex:same", "opaque_image_2", "fake.jpg", "image/jpeg", data)
         self.assertFalse(mismatch["ok"])
 
+        collision = self.engine.store_image_upload(
+            "same", "opaque_image_1", "replace.png", "image/png", data)
+        self.assertFalse(collision["ok"])
+        self.assertIn("already exists", collision["error"])
+        paths_after, error = self.engine._resolve_image_uploads(
+            "codex:same", ["opaque_image_1"])
+        self.assertIsNone(error)
+        self.assertEqual(paths_after, paths)
+
+    def test_temporarily_missing_known_session_accepts_photo_and_queues_delivery(self):
+        self.engine.scan()
+        with self.engine.lock:
+            self.engine.snapshot_cache["sessions"] = []
+        image_path = os.path.join(os.path.dirname(__file__), "..", "static", "icons",
+                                  "fleet-192.png")
+        with open(image_path, "rb") as handle:
+            data = handle.read()
+
+        uploaded = self.engine.store_image_upload(
+            "same", "missing-session-photo", "phone.png", "image/png", data)
+        self.assertTrue(uploaded["ok"], uploaded)
+        result = self.engine.act({
+            "type": "send_message", "session_id": "same",
+            "text": "Inspect this after reconnecting",
+            "upload_ids": ["missing-session-photo"],
+            "client_request_id": "missing-session-send-0001",
+        })
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["queued"], result)
+        queued = self.engine.outbox.get_internal(result["outbox_id"])
+        self.assertEqual(queued["target_session_id"], "same")
+        self.assertEqual(queued["target_provider"], "claude")
+        self.assertEqual(queued["message"], "Inspect this after reconnecting")
+        self.assertEqual(len(queued["_image_paths"]), 1)
+        self.assertTrue(os.path.isfile(queued["_image_paths"][0]))
+
+        unknown = self.engine.store_image_upload(
+            "never-seen", "unknown-session-photo", "phone.png", "image/png", data)
+        self.assertFalse(unknown["ok"])
+        self.assertIn("not available", unknown["error"])
+
+    def test_repeated_claude_file_delivery_becomes_newest_without_duplication(self):
+        tail = Tail(self.transcript)
+        tail._file_add("/work/first.md", "first", 1)
+        tail._file_add("/work/second.md", "second", 2)
+        tail._file_add("/work/first.md", "first again", 3)
+        self.assertEqual([item["path"] for item in tail.files],
+                         ["/work/second.md", "/work/first.md"])
+        self.assertEqual(len(tail.files), 2)
+        self.assertEqual(tail.files[-1]["caption"], "first again")
+
+    def test_image_upload_quota_rejects_before_conversion(self):
+        self.engine.scan()
+        root = os.path.join(self.base, "uploads")
+        os.makedirs(root, exist_ok=True)
+        for index in range(engine_module.IMAGE_UPLOAD_SESSION_COUNT):
+            upload_id = f"quota-{index}"
+            _, image_path, meta_path = self.engine._image_upload_paths(upload_id)
+            with open(image_path, "wb") as image:
+                image.write(b"x")
+            with open(meta_path, "w") as meta:
+                json.dump({"session_id": "codex:same", "size": 1,
+                           "expires_at": time.time() + 300}, meta)
+        image_path = os.path.join(os.path.dirname(__file__), "..", "static", "icons",
+                                  "fleet-192.png")
+        with open(image_path, "rb") as handle:
+            data = handle.read()
+        with mock.patch.object(engine_module.subprocess, "run") as convert:
+            rejected = self.engine.store_image_upload(
+                "codex:same", "quota-overflow", "phone.png", "image/png", data)
+        self.assertFalse(rejected["ok"])
+        self.assertIn("limit is full", rejected["error"])
+        convert.assert_not_called()
+
+    def test_image_upload_quota_rechecks_normalized_size(self):
+        self.engine.scan()
+        root = os.path.join(self.base, "uploads")
+        os.makedirs(root, exist_ok=True)
+        _, image_path, meta_path = self.engine._image_upload_paths("quota-existing")
+        with open(image_path, "wb") as image:
+            image.write(b"x" * 85)
+        with open(meta_path, "w") as meta:
+            json.dump({"session_id": "codex:same", "size": 85,
+                       "expires_at": time.time() + 300}, meta)
+
+        def convert(argv, **_kwargs):
+            with open(argv[-1], "wb") as output:
+                output.write(b"placeholder")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.object(engine_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
+             mock.patch.object(engine_module.subprocess, "run", side_effect=convert), \
+             mock.patch.object(self.engine, "_strip_jpeg_metadata", return_value=b"j" * 20):
+            rejected = self.engine.store_image_upload(
+                "codex:same", "quota-normalized", "phone.png", "image/png",
+                b"\x89PNG\r\n\x1a\n")
+        self.assertFalse(rejected["ok"])
+        self.assertIn("limit is full", rejected["error"])
+        _, final_image, final_meta = self.engine._image_upload_paths("quota-normalized")
+        self.assertFalse(os.path.exists(final_image))
+        self.assertFalse(os.path.exists(final_meta))
+
+    def test_image_cleanup_rotates_beyond_first_batch(self):
+        root = os.path.join(self.base, "uploads")
+        os.makedirs(root, exist_ok=True)
+        for index in range(2100):
+            with open(os.path.join(root, f"expired-{index}.json"), "w") as meta:
+                json.dump({"expires_at": 1}, meta)
+        for _ in range(3):
+            self.engine._cleanup_image_uploads(now=100)
+        self.assertFalse(any(name.endswith(".json") for name in os.listdir(root)))
+        self.assertEqual(self.engine._image_cleanup_skip, 0)
+
     def test_large_nul_path_probe_keeps_only_a_bounded_sample(self):
         probe = self.engine._bounded_nul_paths([
             sys.executable, "-c",
@@ -497,6 +724,26 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(context["messages"][-1]["text"], "child complete")
         self.assertEqual(context["info"]["status_line"]["cache_write"], 200)
         self.assertIn(("same", aid), self.engine._claude_agent_context_snapshots)
+
+    def test_codex_agent_context_requires_exact_parent_membership(self):
+        calls = []
+        self.codex.agent_context = lambda sid, aid: (
+            calls.append((sid, aid)) or {"ok": True, "messages": []})
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"sessions": [{
+                "session_id": "codex:parent-one", "provider": "codex",
+                "agents": [{"agent_id": "child-one", "state": "running"}]}, {
+                "session_id": "codex:parent-two", "provider": "codex",
+                "agents": [{"agent_id": "child-two", "state": "running"}]}]}
+
+        denied = self.engine.agent_context("codex:parent-one", "child-two")
+        missing = self.engine.agent_context("codex:missing", "child-one")
+        allowed = self.engine.agent_context("codex:parent-one", "child-one")
+
+        self.assertFalse(denied["ok"])
+        self.assertFalse(missing["ok"])
+        self.assertTrue(allowed["ok"])
+        self.assertEqual(calls, [("codex:parent-one", "child-one")])
 
     def test_claude_usage_includes_email_and_all_local_transcript_token_types(self):
         with open(self.claude_account, "w") as handle:
@@ -728,12 +975,25 @@ class EngineProviderTest(unittest.TestCase):
         action = {"type": "text", "session_id": "codex:same", "text": "go"}
         self.assertEqual(self.engine.act(action)["provider"], "codex")
         self.assertEqual(self.codex.actions, [action])
-        self.assertTrue(self.engine.closed_context("codex:same")["closed"])
         self.engine.snapshot_cache = {"sessions": [codex_session()]}
+        self.assertTrue(self.engine.session_context("codex:same")["closed"])
         self.assertEqual(self.engine.commands("codex:same")["commands"][0]["name"],
                          "/compact")
         self.assertEqual(self.engine.file_content("codex:same", "/work/repo/a.txt"),
                          ("text/plain", b"codex", None))
+
+        self.codex.context = mock.Mock(side_effect=AssertionError(
+            "unknown Codex IDs must not reach the provider"))
+        self.codex.file_content = mock.Mock(side_effect=AssertionError(
+            "unknown Codex IDs must not reach the provider"))
+        self.assertEqual(self.engine.session_context("codex:unknown"),
+                         {"ok": False, "error": "unknown session"})
+        self.assertEqual(self.engine.closed_context("codex:unknown"),
+                         {"ok": False, "error": "unknown session"})
+        self.assertEqual(self.engine.file_content("codex:unknown", "/work/private"),
+                         (None, None, "unknown session"))
+        self.codex.context.assert_not_called()
+        self.codex.file_content.assert_not_called()
 
     def test_codex_terminal_attaches_to_shared_runtime(self):
         session = codex_session()
@@ -871,6 +1131,26 @@ class EngineProviderTest(unittest.TestCase):
             ("/dev/ttys001", [("__FOCUS__", False)], 0.05)])
         self.assertEqual(self.codex.actions, [])
 
+    def test_unknown_codex_id_cannot_use_discovered_terminal_route(self):
+        self.engine.scan()
+        self.engine._codex_terminal_route = lambda value, force=False: {
+            "tty": "/dev/ttys001", "pid": 101}
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        provider_calls = []
+        self.codex.act = lambda action: (
+            provider_calls.append(action) or {"ok": False, "error": "unknown Codex session"})
+
+        result = self.engine.act({"type": "text", "session_id": "codex:forged",
+                                  "text": "must not reach a terminal"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(provider_calls), 1)
+        self.assertEqual(writes, [])
+        focused = self.engine.act({"type": "focus", "session_id": "codex:forged"})
+        self.assertFalse(focused["ok"])
+        self.assertEqual(writes, [])
+
     def test_codex_spawn_starts_visible_initial_hi(self):
         with mock.patch.object(engine_module, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({
@@ -992,6 +1272,10 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes[-1][1], [("__FOCUS__", False)])
 
         reg["status"] = "busy"
+        # Observing the provider's active transition closes the post-send
+        # registry-lag state machine once this session later returns idle.
+        self.assertTrue(self.engine.act({"type": "text", "session_id": "same",
+                                         "text": "too soon"})["queueable"])
         self.assertTrue(self.engine.act({"type": "interrupt",
                                          "session_id": "same"})["ok"])
         self.assertEqual(writes[-1][1], [("\x1b", False)])
@@ -1003,11 +1287,30 @@ class EngineProviderTest(unittest.TestCase):
             "session_id": "same"})["error"])
         reg["status"] = "waiting"
         self.engine.hook_pending = lambda sid, status: {
-            "kind": "question", "nonce": "q1", "questions": []}
+            "kind": "question", "nonce": "q1", "questions": [{
+                "question": "Choose", "multiSelect": False, "allowOther": True,
+                "options": [{"label": "One"}, {"label": "Two"}]}]}
         answered = self.engine.act({"type": "option", "session_id": "same",
                                     "nonce": "q1", "digits": [1], "n_options": 2})
         self.assertTrue(answered["ok"])
         self.assertEqual(writes[-1][1], [("1", False), ("", True)])
+
+        # Client counts and mode are hints only. Even a maliciously large count
+        # cannot expand the key sequence beyond the authoritative hook shape.
+        answered = self.engine.act({"type": "option", "session_id": "same",
+                                    "nonce": "q1", "digits": [2],
+                                    "n_options": 1_000_000_000, "multi": True})
+        self.assertTrue(answered["ok"])
+        self.assertEqual(writes[-1][1], [("2", False), ("", True)])
+        rejected = self.engine.act({"type": "option", "session_id": "same",
+                                    "nonce": "q1", "digits": [3],
+                                    "n_options": 1_000_000_000})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("invalid option", rejected["error"])
+        forged_permission = self.engine.act({"type": "permission", "session_id": "same",
+                                             "nonce": "q1", "choice": "allow"})
+        self.assertFalse(forged_permission["ok"])
+        self.assertIn("not a permission", forged_permission["error"])
 
         self.engine.hook_pending = lambda sid, status: {
             "kind": "permission", "nonce": "p1"}
@@ -1016,12 +1319,27 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(allowed["ok"])
         self.assertEqual(writes[-1][1], [("1", False), ("", True)])
         reg["status"] = "idle"
+        self.engine.hook_pending = lambda sid, status: None
+        tail.pending = {}
         self.engine._agent_paths = lambda sid, aid: (self.transcript,
                                                      os.path.join(self.tmp.name, "missing-meta"))
         relayed = self.engine.act({"type": "relay", "session_id": "same",
             "agent_id": "agent-child", "text": "report status"})
         self.assertTrue(relayed["ok"])
         self.assertIn("agent-child", writes[-1][1][0][0])
+
+    def test_queued_claude_image_revalidates_idle_before_injection(self):
+        self.engine.live_sessions = lambda: [{"sessionId": "same", "pid": os.getpid(),
+                                               "cwd": self.cwd, "status": "waiting"}]
+        self.engine._iterm_write = mock.Mock(side_effect=AssertionError(
+            "a queued image must not be typed into a prompt"))
+        result = self.engine._write_claude_queued_message({
+            "session_id": "same", "text": "Inspect",
+            "image_paths": [os.path.join(self.base, "outbox-images", "image.jpg")]})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["queueable"])
+        self.assertEqual(result["code"], "provider_control_unavailable")
+        self.engine._iterm_write.assert_not_called()
 
     def test_background_claude_session_uses_supported_attach_transport(self):
         pid = 424245
@@ -1051,6 +1369,92 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(result["transport"], "claude_attach")
         self.assertEqual(attached, [("1a2b3c4d", [("hello", True)], 0.05)])
         self.assertNotIn(pid, self.engine._tty_cache)
+
+    def test_background_prewrite_failure_keeps_prompt_actions_safely_retryable(self):
+        reg = {"sessionId": "same", "pid": 424248, "cwd": self.cwd,
+               "status": "waiting", "name": "Claude", "kind": "bg",
+               "jobId": "1a2b3c4d"}
+        self.engine.live_sessions = lambda: [reg]
+        tail = SimpleNamespace(pending={}, poll=lambda: None,
+                               model="sonnet", permission_mode="default",
+                               model_evidence_offset=1,
+                               permission_mode_evidence_offset=1)
+        self.engine.tail_for = lambda path: tail
+        failure = {"ok": False, "code": "background_connection_lost",
+                   "error": "Claude background attachment was not ready"}
+        success = {"ok": True, "transport": "claude_attach"}
+        cases = [
+            ({"kind": "question", "nonce": "single", "questions": [{
+                "question": "One?", "multiSelect": False,
+                "options": [{"label": "A"}, {"label": "B"}]}]},
+             {"type": "option", "nonce": "single", "digits": [1]}),
+            ({"kind": "question", "nonce": "multi", "questions": [{
+                "question": "Many?", "multiSelect": True,
+                "options": [{"label": "A"}, {"label": "B"}]}]},
+             {"type": "option", "nonce": "multi", "digits": [1]}),
+            ({"kind": "question", "nonce": "dismiss", "questions": [{
+                "question": "Dismiss?", "multiSelect": False,
+                "options": [{"label": "A"}]}]},
+             {"type": "dismiss", "nonce": "dismiss"}),
+            ({"kind": "permission", "nonce": "deny", "tool": "Bash"},
+             {"type": "permission", "nonce": "deny", "choice": "deny"}),
+        ]
+        for pending, payload in cases:
+            with self.subTest(nonce=pending["nonce"]):
+                self.engine.hook_pending = lambda sid, status, value=pending: value
+                writer = mock.Mock(side_effect=[failure, success])
+                self.engine._claude_background = SimpleNamespace(write=writer)
+
+                first = self.engine.act({"session_id": "same", **payload})
+                self.assertEqual(first.get("code"), "background_connection_lost")
+                self.assertNotIn("same", self.engine._claude_delivery_uncertain)
+                retried = self.engine.act({"session_id": "same", **payload})
+                self.assertTrue(retried["ok"], retried)
+                self.assertEqual(writer.call_count, 2)
+
+    def test_background_prewrite_failure_keeps_control_actions_safely_retryable(self):
+        pid = 424249
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude", "kind": "bg",
+               "jobId": "1a2b3c4d"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, tail: None
+        self.engine.effort_for = lambda sid: "medium"
+        tail = SimpleNamespace(pending={}, poll=lambda: None,
+                               model="sonnet", permission_mode="default",
+                               model_evidence_offset=1,
+                               permission_mode_evidence_offset=1)
+        self.engine.tail_for = lambda path: tail
+        failure = {"ok": False, "code": "background_connection_lost",
+                   "error": "Claude background attachment was not ready"}
+        success = {"ok": True, "transport": "claude_attach"}
+        cases = [
+            ({"type": "session_settings", "model": "opus", "effort": "medium",
+              "expected_model": "sonnet", "expected_effort": "medium"}, 1),
+            ({"type": "session_settings", "model": "opus", "effort": "high",
+              "expected_model": "sonnet", "expected_effort": "medium"}, 2),
+            ({"type": "permission_mode", "mode": "acceptEdits"}, 1),
+            ({"type": "permission_mode", "mode": "plan"}, 2),
+        ]
+        with mock.patch.object(self.engine, "_record_claude_control_overrides",
+                               return_value=None):
+            for payload, successful_writes in cases:
+                with self.subTest(action=payload):
+                    tail.model = "sonnet"
+                    tail.permission_mode = "default"
+                    self.engine._claude_control_uncertain.clear()
+                    writer = mock.Mock(side_effect=[failure] +
+                                      [success] * successful_writes)
+                    self.engine._claude_background = SimpleNamespace(write=writer)
+
+                    first = self.engine.act({"session_id": "same", **payload})
+                    self.assertEqual(first.get("code"), "background_connection_lost")
+                    self.assertNotIn("same", self.engine._claude_control_uncertain)
+                    retried = self.engine.act({"session_id": "same", **payload})
+                    self.assertTrue(retried["ok"], retried)
+                    self.assertEqual(writer.call_count, 1 + successful_writes)
 
     def test_foreground_claude_tty_fallback_rejects_non_terminal_paths(self):
         pid = 424246
@@ -1100,7 +1504,8 @@ class EngineProviderTest(unittest.TestCase):
         self.engine._tty_cache[pid] = "ttys-test"
         self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
         tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
-                               model="claude-sonnet-5")
+                               model="claude-sonnet-5", model_evidence_offset=1,
+                               permission_mode_evidence_offset=1)
         self.engine.tail_for = lambda path: tail
         writes = []
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
@@ -1109,8 +1514,9 @@ class EngineProviderTest(unittest.TestCase):
         changed = self.engine.act({"type": "permission_mode", "session_id": "same",
                                    "mode": "plan"})
         self.assertEqual(changed, {"ok": True, "mode": "plan"})
-        self.assertEqual(writes[-1], ("/dev/ttys-test",
-            [("\x1b[Z", False), ("\x1b[Z", False)], 0.4))
+        self.assertEqual(writes[-2:], [
+            ("/dev/ttys-test", [("\x1b[Z", False)], 0.4),
+            ("/dev/ttys-test", [("\x1b[Z", False)], 0.4)])
         self.assertEqual(tail.permission_mode, "plan")
 
         self.engine._claude_command_cache[pid] = (
@@ -1124,14 +1530,713 @@ class EngineProviderTest(unittest.TestCase):
         auto = self.engine.act({"type": "permission_mode", "session_id": "same",
                                 "mode": "auto"})
         self.assertTrue(auto["ok"])
-        self.assertEqual(writes[-1][1], [("\x1b[Z", False), ("\x1b[Z", False)])
+        self.assertEqual([item[1] for item in writes[-2:]],
+                         [[("\x1b[Z", False)], [("\x1b[Z", False)]])
 
+        tail.permission_mode_evidence_offset += 1
         tail.permission_mode = "dontAsk"
         self.assertIn("startup-only", self.engine.act({"type": "permission_mode",
             "session_id": "same", "mode": "default"})["error"])
         reg["status"] = "busy"
         self.assertIn("idle", self.engine.act({"type": "permission_mode",
             "session_id": "same", "mode": "plan"})["error"])
+
+    def test_claude_existing_session_settings_are_idle_allowlisted_and_failure_safe(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet")
+        self.engine.tail_for = lambda path: tail
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        changed = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "opus", "effort": "high",
+            "expected_model": "claude-sonnet", "expected_effort": ""})
+        self.assertEqual(changed, {"ok": True, "model": "opus", "effort": "high"})
+        self.assertEqual(writes[-2:], [
+            ("/dev/ttys-test", [("/model opus", True)], 0.4),
+            ("/dev/ttys-test", [("/effort high", True)], 0.4)])
+        self.assertEqual(tail.model, "opus")
+        self.assertEqual(self.engine.effort_for("same"), "high")
+
+        effort_only = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "opus", "effort": "low",
+            "expected_model": "opus", "expected_effort": "high"})
+        self.assertTrue(effort_only["ok"], effort_only)
+        self.assertEqual(writes[-1], ("/dev/ttys-test", [("/effort low", True)], 0.4))
+
+        before = list(writes)
+        invalid = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "/quit", "effort": "low"})
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(writes, before)
+        stale = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "sonnet", "effort": "high",
+            "expected_model": "opus", "expected_effort": "high"})
+        self.assertEqual(stale.get("code"), "stale_settings")
+        self.assertEqual(writes, before)
+
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: {
+            "ok": False, "code": "injector_not_launched",
+            "error": "provider rejected command"}
+        failed = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "sonnet", "effort": "high",
+            "expected_model": "opus", "expected_effort": "low"})
+        self.assertFalse(failed["ok"])
+        self.assertEqual(tail.model, "opus")
+        self.assertEqual(self.engine.effort_for("same"), "low")
+
+        reg["status"] = "busy"
+        busy = self.engine.act({"type": "session_settings", "session_id": "same",
+                                "model": "sonnet", "effort": "high"})
+        self.assertFalse(busy["ok"])
+        self.assertIn("idle", busy["error"])
+
+    def test_claude_control_sequences_report_the_exact_accepted_prefix(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine._claude_command_cache[pid] = "/usr/local/bin/claude --model sonnet"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet")
+        self.engine.tail_for = lambda path: tail
+        results = iter(({"ok": True}, {"ok": False, "code": "injector_not_launched",
+                                        "error": "second command did not launch"}))
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: next(results)
+        with mock.patch.object(engine_module.time, "sleep"):
+            settings = self.engine.act({"type": "session_settings", "session_id": "same",
+                "model": "opus", "effort": "high",
+                "expected_model": "claude-sonnet", "expected_effort": ""})
+        self.assertTrue(settings["ok"], settings)
+        self.assertTrue(settings["partial"])
+        self.assertEqual((settings["model"], settings["effort"]), ("opus", ""))
+        self.assertEqual(tail.model, "opus")
+
+        tail.permission_mode = "default"
+        results = iter(({"ok": True}, {"ok": False, "code": "injector_not_launched",
+                                        "error": "second key did not launch"}))
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: next(results)
+        with mock.patch.object(engine_module.time, "sleep"):
+            permission = self.engine.act({"type": "permission_mode",
+                "session_id": "same", "mode": "plan"})
+        self.assertTrue(permission["ok"], permission)
+        self.assertTrue(permission["partial"])
+        self.assertEqual(permission["mode"], "acceptEdits")
+        self.assertEqual(tail.permission_mode, "acceptEdits")
+
+    def test_claude_accepted_controls_survive_restart_until_newer_native_evidence(self):
+        pid = os.getpid()
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+
+        accepted = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "opus", "effort": "high",
+            "expected_model": "claude-sonnet", "expected_effort": ""})
+        self.assertTrue(accepted["ok"], accepted)
+
+        with open(os.path.join(self.base, "config.json")) as handle:
+            restored_cfg = dict(DEFAULT_CONFIG)
+            restored_cfg.update(json.load(handle))
+        restored_cfg["codex_enabled"] = False
+        restarted = Engine(restored_cfg)
+        restarted.codex = FakeCodex(None)
+        try:
+            fleet = restarted.scan()
+            session = next(item for item in fleet["sessions"]
+                           if item["session_id"] == "same")
+            self.assertEqual(session["model"], "opus")
+            self.assertEqual(session["effort"], "high")
+
+            # This row is appended later but deliberately carries an older
+            # timestamp, matching Claude's compaction timestamp inversion.
+            with open(self.transcript, "a") as handle:
+                handle.write(json.dumps({"type": "assistant",
+                    "timestamp": "2020-01-01T00:00:00Z",
+                    "message": {"role": "assistant", "model": "claude-haiku",
+                        "stop_reason": "end_turn", "usage": {"input_tokens": 1},
+                        "content": [{"type": "text", "text": "native"}]}}) + "\n")
+            effort_dir = os.path.join(self.base, "effort")
+            os.makedirs(effort_dir, exist_ok=True)
+            effort_path = os.path.join(effort_dir, "same")
+            with open(effort_path, "w") as handle:
+                handle.write("low")
+            os.utime(effort_path, (time.time() + 5, time.time() + 5))
+            fleet = restarted.scan()
+            session = next(item for item in fleet["sessions"]
+                           if item["session_id"] == "same")
+            self.assertEqual(session["model"], "claude-haiku")
+            self.assertEqual(session["effort"], "low")
+
+            with open(self.transcript, "a") as handle:
+                handle.write(json.dumps({"type": "permission-mode",
+                    "timestamp": "2020-01-01T00:00:01Z",
+                    "permissionMode": "default"}) + "\n")
+            restarted.scan()
+            restarted._tty_cache[pid] = "ttys-test"
+            results = iter(({"ok": True}, {"ok": False,
+                "code": "injector_not_launched", "error": "second key failed"}))
+            restarted._iterm_write = lambda tty, steps, step_delay=None: next(results)
+            with mock.patch.object(engine_module.time, "sleep"):
+                partial = restarted.act({"type": "permission_mode",
+                    "session_id": "same", "mode": "plan"})
+            self.assertTrue(partial["partial"], partial)
+            self.assertEqual(partial["mode"], "acceptEdits")
+
+            with open(os.path.join(self.base, "config.json")) as handle:
+                third_cfg = dict(DEFAULT_CONFIG)
+                third_cfg.update(json.load(handle))
+            third_cfg["codex_enabled"] = False
+            third = Engine(third_cfg)
+            third.codex = FakeCodex(None)
+            try:
+                fleet = third.scan()
+                session = next(item for item in fleet["sessions"]
+                               if item["session_id"] == "same")
+                self.assertEqual(session["permission_mode"], "acceptEdits")
+                with open(self.transcript, "a") as handle:
+                    handle.write(json.dumps({"type": "permission-mode",
+                        "timestamp": "2019-01-01T00:00:00Z",
+                        "permissionMode": "plan"}) + "\n")
+                fleet = third.scan()
+                session = next(item for item in fleet["sessions"]
+                               if item["session_id"] == "same")
+                self.assertEqual(session["permission_mode"], "plan")
+            finally:
+                if third.db:
+                    third.db.close()
+        finally:
+            if restarted.db:
+                restarted.db.close()
+
+    def test_claude_lost_control_ack_fails_closed_across_restart(self):
+        pid = os.getpid()
+        effort_dir = os.path.join(self.base, "effort")
+        os.makedirs(effort_dir, exist_ok=True)
+        with open(os.path.join(effort_dir, "same"), "w") as handle:
+            handle.write("high")
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._iterm_write = mock.Mock(return_value={
+            "ok": False, "code": "delivery_uncertain", "error": "lost result"})
+        uncertain = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "opus", "effort": "high",
+            "expected_model": "claude-sonnet", "expected_effort": "high"})
+        self.assertEqual(uncertain.get("code"), "control_delivery_uncertain")
+
+        with open(os.path.join(self.base, "config.json")) as handle:
+            cfg = dict(DEFAULT_CONFIG)
+            cfg.update(json.load(handle))
+        cfg["codex_enabled"] = False
+        restarted = Engine(cfg)
+        restarted.codex = FakeCodex(None)
+        try:
+            fleet = restarted.scan()
+            session = next(item for item in fleet["sessions"]
+                           if item["session_id"] == "same")
+            self.assertTrue(session["control_delivery_uncertain"])
+            self.assertFalse(session["capabilities"]["change_model_effort"])
+            with open(self.transcript, "a") as handle:
+                handle.write(json.dumps({"type": "assistant",
+                    "timestamp": "2020-01-01T00:00:00Z",
+                    "message": {"role": "assistant", "model": "opus",
+                        "stop_reason": "end_turn", "usage": {"input_tokens": 1},
+                        "content": []}}) + "\n")
+            fleet = restarted.scan()
+            session = next(item for item in fleet["sessions"]
+                           if item["session_id"] == "same")
+            self.assertFalse(session["control_delivery_uncertain"])
+
+            with open(self.transcript, "a") as handle:
+                handle.write(json.dumps({"type": "permission-mode",
+                    "timestamp": "2020-01-01T00:00:01Z",
+                    "permissionMode": "default"}) + "\n")
+            restarted.scan()
+            restarted._tty_cache[pid] = "ttys-test"
+            restarted._iterm_write = mock.Mock(return_value={
+                "ok": False, "code": "delivery_uncertain", "error": "lost result"})
+            permission = restarted.act({"type": "permission_mode",
+                "session_id": "same", "mode": "acceptEdits"})
+            self.assertEqual(permission.get("code"), "control_delivery_uncertain")
+            with open(os.path.join(self.base, "config.json")) as handle:
+                final_cfg = dict(DEFAULT_CONFIG)
+                final_cfg.update(json.load(handle))
+            final_cfg["codex_enabled"] = False
+            final = Engine(final_cfg)
+            final.codex = FakeCodex(None)
+            try:
+                session = next(item for item in final.scan()["sessions"]
+                               if item["session_id"] == "same")
+                self.assertFalse(session["capabilities"]["change_permission_mode"])
+            finally:
+                if final.db:
+                    final.db.close()
+        finally:
+            if restarted.db:
+                restarted.db.close()
+
+    def test_claude_prompt_lost_ack_blocks_every_retry_shape_across_restart(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "waiting", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+
+        cases = [
+            ({"kind": "question", "nonce": "single", "questions": [{
+                "question": "One?", "multiSelect": False,
+                "options": [{"label": "A"}, {"label": "B"}]}]},
+             {"type": "option", "nonce": "single", "digits": [1]}),
+            ({"kind": "question", "nonce": "multi", "questions": [{
+                "question": "Many?", "multiSelect": True,
+                "options": [{"label": "A"}, {"label": "B"}]}]},
+             {"type": "option", "nonce": "multi", "digits": [1]}),
+            ({"kind": "question", "nonce": "dismiss", "questions": [{
+                "question": "Dismiss?", "multiSelect": False,
+                "options": [{"label": "A"}]}]},
+             {"type": "dismiss", "nonce": "dismiss"}),
+            ({"kind": "permission", "nonce": "deny", "tool": "Bash"},
+             {"type": "permission", "nonce": "deny", "choice": "deny"}),
+        ]
+        for pending, payload in cases:
+            with self.subTest(nonce=pending["nonce"]):
+                self.engine.hook_pending = lambda sid, status, value=pending: value
+                writer = mock.Mock(return_value={"ok": False,
+                    "code": "delivery_uncertain", "error": "lost result"})
+                self.engine._iterm_write = writer
+                result = self.engine.act({"session_id": "same", **payload})
+                self.assertEqual(result.get("code"), "delivery_uncertain")
+                calls = writer.call_count
+                retry = self.engine.act({"session_id": "same", **payload})
+                self.assertEqual(retry.get("code"), "delivery_uncertain")
+                self.assertEqual(writer.call_count, calls)
+
+        with open(os.path.join(self.base, "config.json")) as handle:
+            cfg = dict(DEFAULT_CONFIG)
+            cfg.update(json.load(handle))
+        cfg["codex_enabled"] = False
+        restarted = Engine(cfg)
+        restarted.codex = FakeCodex(None)
+        restarted.live_sessions = lambda: [reg]
+        restarted._tty_cache[pid] = "ttys-test"
+        restarted.compacting_secs = lambda sid, cwd, mt: None
+        try:
+            # A transient unreadable/partial hook file must not erase the
+            # durable nonce while the registry still reports waiting.
+            restarted.hook_pending = lambda sid, status: None
+            restarted.scan()
+            self.assertEqual(restarted._claude_delivery_uncertain.get("same"), "deny")
+            pending, payload = cases[-1]
+            restarted.hook_pending = lambda sid, status: pending
+            writer = mock.Mock(return_value={"ok": True})
+            restarted._iterm_write = writer
+            retry = restarted.act({"session_id": "same", **payload})
+            self.assertEqual(retry.get("code"), "delivery_uncertain")
+            writer.assert_not_called()
+
+            # One registry transition is not enough while the same permission
+            # capture remains valid. Permission captures have no clear hook and
+            # can suppress the Notification for a newer prompt, then become
+            # visible again when the registry returns to waiting.
+            reg["status"] = "busy"
+            restarted.scan()
+            self.assertEqual(restarted._claude_delivery_uncertain.get("same"), "deny")
+            reg["status"] = "waiting"
+            restarted.scan()
+            retry = restarted.act({"session_id": "same", **payload})
+            self.assertEqual(retry.get("code"), "delivery_uncertain")
+            writer.assert_not_called()
+
+            # A different valid nonce is canonical evidence that the old
+            # native surface has changed and retires the old fence.
+            fresh = {"kind": "permission", "nonce": "fresh", "tool": "Bash"}
+            restarted.hook_pending = lambda sid, status: fresh
+            restarted.scan()
+            self.assertNotIn("same", restarted._claude_delivery_uncertain)
+        finally:
+            if restarted.db:
+                restarted.db.close()
+
+    def test_hook_pending_closes_capture_file(self):
+        pending_dir = os.path.join(self.base, "pending")
+        os.makedirs(pending_dir)
+        path = os.path.join(pending_dir, "same.json")
+        with open(path, "w") as handle:
+            json.dump({"kind": "permission", "nonce": "p-close",
+                       "message": "Allow?", "ts": time.time()}, handle)
+
+        real_open = open
+        handles = []
+
+        def tracked_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            handles.append(handle)
+            return handle
+
+        with mock.patch("builtins.open", side_effect=tracked_open):
+            pending = self.engine.hook_pending("same", "waiting")
+        self.assertEqual(pending["nonce"], "p-close")
+        self.assertEqual(len(handles), 1)
+        self.assertTrue(handles[0].closed)
+
+    def test_claude_pending_capabilities_match_native_registry_gate(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        pending = {"kind": "question", "nonce": "q-parity", "questions": [{
+            "question": "Choose", "multiSelect": False,
+            "options": [{"label": "One"}, {"label": "Two"}]}]}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine.hook_pending = lambda sid, status: pending
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+
+        idle = next(item for item in self.engine.scan()["sessions"]
+                    if item["session_id"] == "same")
+        self.assertFalse(idle["capabilities"]["answer_structured"])
+        self.assertIn("native prompt", idle["capabilities"]["answer_reason"])
+        rejected = self.engine.act({"type": "option", "session_id": "same",
+                                    "nonce": "q-parity", "digits": [1]})
+        self.assertFalse(rejected["ok"])
+        self.engine._iterm_write.assert_not_called()
+
+        reg["status"] = "waiting"
+        waiting = next(item for item in self.engine.scan()["sessions"]
+                       if item["session_id"] == "same")
+        self.assertTrue(waiting["capabilities"]["answer_structured"])
+        accepted = self.engine.act({"type": "option", "session_id": "same",
+                                    "nonce": "q-parity", "digits": [1]})
+        self.assertTrue(accepted["ok"], accepted)
+
+    def test_claude_settings_block_fresh_hook_requests_and_compaction(self):
+        pending = {"kind": "permission", "nonce": "pending-settings",
+                   "tool": "Bash", "input_summary": "approval required"}
+        with mock.patch.object(self.engine, "hook_pending", return_value=pending), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=None):
+            fleet = self.engine.scan()
+        claude = next(item for item in fleet["sessions"]
+                      if item["session_id"] == "same")
+        self.assertFalse(claude["capabilities"]["change_model_effort"])
+        self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        self.assertIn("request", claude["capabilities"]["change_model_effort_reason"])
+
+        with mock.patch.object(self.engine, "hook_pending", return_value=None), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=4):
+            fleet = self.engine.scan()
+        claude = next(item for item in fleet["sessions"]
+                      if item["session_id"] == "same")
+        self.assertFalse(claude["capabilities"]["change_model_effort"])
+        self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        self.assertIn("compaction", claude["capabilities"]["change_model_effort_reason"])
+
+        transcript_tail = self.engine.tail_for(self.transcript)
+        transcript_tail.pending = {
+            "transcript-request": {"name": "Bash", "input": {"command": "pwd"}}}
+        with mock.patch.object(self.engine, "hook_pending", return_value=None), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=None):
+            fleet = self.engine.scan()
+        claude = next(item for item in fleet["sessions"]
+                      if item["session_id"] == "same")
+        self.assertFalse(claude["capabilities"]["change_model_effort"])
+        self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        self.assertIn("request", claude["capabilities"]["change_model_effort_reason"])
+        transcript_tail.pending.clear()
+
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0)
+        self.engine.tail_for = lambda path: tail
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+        action = {"type": "session_settings", "session_id": "same",
+                  "model": "opus", "effort": "high",
+                  "expected_model": "claude-sonnet", "expected_effort": ""}
+        with mock.patch.object(self.engine, "hook_pending", return_value=pending), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=None):
+            rejected = self.engine.act(action)
+            permission_rejected = self.engine.act({"type": "permission_mode",
+                "session_id": "same", "mode": "plan"})
+        self.assertFalse(rejected["ok"])
+        self.assertFalse(permission_rejected["ok"])
+        self.assertIn("pending request", rejected["error"])
+        with mock.patch.object(self.engine, "hook_pending", return_value=None), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=2):
+            rejected = self.engine.act(action)
+            permission_rejected = self.engine.act({"type": "permission_mode",
+                "session_id": "same", "mode": "plan"})
+        self.assertFalse(rejected["ok"])
+        self.assertFalse(permission_rejected["ok"])
+        self.assertIn("compacting", rejected["error"])
+        tail.pending = {"transcript-request": {"name": "Bash", "input": {}}}
+        with mock.patch.object(self.engine, "hook_pending", return_value=None), \
+             mock.patch.object(self.engine, "compacting_secs", return_value=None):
+            rejected = self.engine.act(action)
+            permission_rejected = self.engine.act({"type": "permission_mode",
+                "session_id": "same", "mode": "plan"})
+        self.assertFalse(rejected["ok"])
+        self.assertFalse(permission_rejected["ok"])
+        self.assertIn("pending request", rejected["error"])
+        self.assertEqual(writes, [])
+
+    def test_claude_session_mutation_lock_orders_settings_before_text(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0)
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        entered = threading.Event()
+        release = threading.Event()
+        writes = []
+
+        def blocked_write(tty, steps, step_delay=None):
+            writes.append((tty, steps, step_delay))
+            if steps and steps[0][0].startswith("/model"):
+                entered.set()
+                self.assertTrue(release.wait(2))
+            return {"ok": True}
+
+        self.engine._iterm_write = blocked_write
+        results = {}
+        setting = threading.Thread(target=lambda: results.setdefault("settings",
+            self.engine.act({"type": "session_settings", "session_id": "same",
+                "model": "opus", "effort": "high",
+                "expected_model": "claude-sonnet", "expected_effort": ""})))
+        text = threading.Thread(target=lambda: results.setdefault("text",
+            self.engine.act({"type": "text", "session_id": "same",
+                             "text": "use the accepted settings"})))
+        setting.start()
+        self.assertTrue(entered.wait(2))
+        text.start()
+        time.sleep(.03)
+        self.assertEqual(len(writes), 1)
+        release.set()
+        setting.join(2)
+        text.join(2)
+        self.assertFalse(setting.is_alive())
+        self.assertFalse(text.is_alive())
+        self.assertTrue(results["settings"]["ok"], results)
+        self.assertTrue(results["text"]["ok"], results)
+        self.assertEqual(writes[0][1], [("/model opus", True)])
+        self.assertEqual(writes[1][1], [("/effort high", True)])
+        self.assertEqual(writes[2][1], [("use the accepted settings", True)])
+
+    def test_claude_direct_text_and_image_never_enter_a_pending_or_compacting_tui(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={"tool-1": {"name": "Bash", "input": {}}},
+                               poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0)
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._resolve_image_uploads = lambda sid, ids: (
+            ["/private/tmp/fleet-image.png"], None)
+        self.engine._iterm_write = mock.Mock()
+
+        text = self.engine.act({"type": "text", "session_id": "same", "text": "hello"})
+        image = self.engine.act({"type": "image_text", "session_id": "same",
+                                 "text": "inspect", "upload_ids": ["upload-1"]})
+        self.assertFalse(text["ok"])
+        self.assertTrue(text["queueable"])
+        self.assertFalse(image["ok"])
+        self.assertTrue(image["queueable"])
+        self.engine._iterm_write.assert_not_called()
+
+        tail.pending = {}
+        self.engine.compacting_secs = lambda sid, cwd, mt: 1
+        compacting = self.engine.act({"type": "text", "session_id": "same",
+                                      "text": "still unsafe"})
+        self.assertFalse(compacting["ok"])
+        self.assertTrue(compacting["queueable"])
+        self.engine._iterm_write.assert_not_called()
+
+    def test_claude_busy_relay_ignores_transcript_tool_pending_but_idle_relay_does_not(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "busy", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={"tool-1": {"name": "Bash", "input": {}}},
+                               poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0)
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        meta = os.path.join(self.tmp.name, "agent.meta.json")
+        with open(meta, "w") as handle:
+            json.dump({"description": "worker"}, handle)
+        self.engine._agent_paths = lambda sid, aid: (self.transcript, meta)
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        relayed = self.engine.act({"type": "relay", "session_id": "same",
+                                   "agent_id": "agent-worker", "text": "status?"})
+        self.assertTrue(relayed["ok"], relayed)
+        self.assertEqual(len(writes), 1)
+        reg["status"] = "idle"
+        rejected = self.engine.act({"type": "relay", "session_id": "same",
+                                    "agent_id": "agent-worker", "text": "again"})
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(len(writes), 1)
+
+    def test_claude_session_mutation_lock_makes_second_settings_cas_stale(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0)
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        entered = threading.Event()
+        release = threading.Event()
+        writes = []
+
+        def blocked_write(tty, steps, step_delay=None):
+            writes.append((tty, steps, step_delay))
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"ok": True}
+
+        self.engine._iterm_write = blocked_write
+        results = {}
+        first = threading.Thread(target=lambda: results.setdefault("first",
+            self.engine.act({"type": "session_settings", "session_id": "same",
+                "model": "opus", "effort": "high",
+                "expected_model": "claude-sonnet", "expected_effort": ""})))
+        second = threading.Thread(target=lambda: results.setdefault("second",
+            self.engine.act({"type": "session_settings", "session_id": "same",
+                "model": "haiku", "effort": "low",
+                "expected_model": "claude-sonnet", "expected_effort": ""})))
+        first.start()
+        self.assertTrue(entered.wait(2))
+        second.start()
+        time.sleep(.03)
+        self.assertEqual(len(writes), 1)
+        release.set()
+        first.join(2)
+        second.join(2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(results["first"]["ok"], results)
+        self.assertFalse(results["second"]["ok"], results)
+        self.assertEqual(results["second"].get("code"), "stale_settings")
+        self.assertEqual(len(writes), 2)
+
+    def test_claude_queued_image_uses_same_session_mutation_lock(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0, convo_rev=1)
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        entered = threading.Event()
+        release = threading.Event()
+        writes = []
+
+        def blocked_write(tty, steps, step_delay=None):
+            writes.append((tty, steps, step_delay))
+            if steps and steps[0][0].startswith("/model"):
+                entered.set()
+                self.assertTrue(release.wait(2))
+            return {"ok": True}
+
+        self.engine._iterm_write = blocked_write
+        results = {}
+        setting = threading.Thread(target=lambda: results.setdefault("settings",
+            self.engine.act({"type": "session_settings", "session_id": "same",
+                "model": "opus", "effort": "high",
+                "expected_model": "claude-sonnet", "expected_effort": ""})))
+        queued = threading.Thread(target=lambda: results.setdefault("queued",
+            self.engine._outbox_dispatch({"target_provider": "claude",
+                "destination_session_id": "same", "message": "inspect this",
+                "_image_paths": ["/private/tmp/fleet-image.png"]})))
+        setting.start()
+        self.assertTrue(entered.wait(2))
+        queued.start()
+        time.sleep(.03)
+        self.assertEqual(len(writes), 1)
+        release.set()
+        setting.join(2)
+        queued.join(2)
+        self.assertFalse(setting.is_alive())
+        self.assertFalse(queued.is_alive())
+        self.assertTrue(results["settings"]["ok"], results)
+        self.assertTrue(results["queued"]["ok"], results)
+        self.assertEqual(len(writes), 3)
+        self.assertIn("Images attached through Fleet", writes[2][1][0][0])
+
+    def test_claude_turn_start_fence_blocks_registry_lag_until_busy_then_idle(self):
+        pid = os.getpid()
+        reg = {"sessionId": "same", "pid": pid, "cwd": self.cwd,
+               "status": "idle", "name": "Claude"}
+        self.engine.live_sessions = lambda: [reg]
+        self.engine._tty_cache[pid] = "ttys-test"
+        tail = SimpleNamespace(pending={}, poll=lambda: None, permission_mode="default",
+                               model="claude-sonnet", last_compact_ep=0, convo_rev=1,
+                               turn_state=lambda: "awaiting_input")
+        self.engine.tail_for = lambda path: tail
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps, step_delay)) or {"ok": True})
+
+        first = self.engine.act({"type": "text", "session_id": "same",
+                                 "text": "start the turn"})
+        self.assertTrue(first["ok"], first)
+        rapid_text = self.engine.act({"type": "text", "session_id": "same",
+                                      "text": "too soon"})
+        self.assertFalse(rapid_text["ok"])
+        self.assertTrue(rapid_text["queueable"])
+        rapid_settings = self.engine.act({"type": "session_settings",
+            "session_id": "same", "model": "opus", "effort": "high",
+            "expected_model": "claude-sonnet", "expected_effort": ""})
+        self.assertFalse(rapid_settings["ok"])
+        self.assertEqual(len(writes), 1)
+
+        reg["status"] = "busy"
+        active = self.engine.act({"type": "text", "session_id": "same",
+                                  "text": "still active"})
+        self.assertFalse(active["ok"])
+        reg["status"] = "idle"
+        after_idle = self.engine.act({"type": "session_settings",
+            "session_id": "same", "model": "opus", "effort": "high",
+            "expected_model": "claude-sonnet", "expected_effort": ""})
+        self.assertTrue(after_idle["ok"], after_idle)
+        self.assertEqual(len(writes), 3)
 
     def test_claude_close_interrupts_then_terminates_only_registered_process(self):
         pid = 424242
@@ -1329,6 +2434,50 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes[-1][0], "/dev/ttys-exact")
         self.assertEqual(writes[-1][1], [("Exact destination", True)])
         self.assertNotEqual(result["destination_session_id"], "similar-but-wrong")
+
+    def test_new_and_existing_claude_handoffs_preserve_unknown_delivery_without_retry(self):
+        self.engine.scan()
+        self.engine.is_trusted = lambda cwd, trusted=None: True
+        original_live = self.engine.live_sessions
+        spawned_ids = []
+
+        def live():
+            if not spawned_ids:
+                return original_live()
+            return [{"sessionId": spawned_ids[-1], "pid": 9090, "cwd": self.cwd,
+                     "status": "idle", "name": "Handoff"}]
+
+        def uncertain_new(tty, steps, step_delay=None):
+            if tty == "SPAWN":
+                spawned_ids.append(steps[0][0].split("--session-id ", 1)[1].split()[0])
+                return {"ok": True}
+            return {"ok": False, "code": "delivery_uncertain",
+                    "error": "delivery result was lost"}
+
+        self.engine.live_sessions = live
+        self.engine._tty_cache[9090] = "ttys-exact"
+        self.engine._iterm_write = uncertain_new
+        created = self.engine.execute_handoff({"type": "handoff",
+            "session_id": "codex:same", "provider": "claude", "cwd": self.cwd,
+            "preview": "Exact but unconfirmed"})
+        self.assertEqual(created.get("code"), "delivery_uncertain")
+        self.assertFalse(created["retryable"])
+        link = self.engine._handoff_link("codex:same", created["destination_session_id"])
+        self.assertEqual(link["status"], "confirmation_unknown")
+
+        self.engine.live_sessions = original_live
+        self.engine._tty_cache[os.getpid()] = "ttys-source"
+        self.engine._record_handoff_link("codex:same", "codex", "same", "claude",
+                                         "delivery_failed", "old", "old failure")
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: {
+            "ok": False, "code": "delivery_uncertain", "error": "lost result"}
+        existing = self.engine.execute_handoff({"type": "handoff",
+            "session_id": "codex:same", "provider": "claude", "preview": "retry",
+            "destination_session_id": "same"})
+        self.assertEqual(existing.get("code"), "delivery_uncertain")
+        self.assertFalse(existing["retryable"])
+        self.assertEqual(self.engine._handoff_link("codex:same", "same")["status"],
+                         "confirmation_unknown")
 
     def test_same_provider_handoff_remains_an_independent_codex_thread(self):
         self.engine.scan()
@@ -2290,6 +3439,83 @@ class EngineProviderTest(unittest.TestCase):
         tail = Tail(path)
         self.assertTrue(tail.poll())
         self.assertEqual(tail.permission_mode, "plan")
+
+    def test_iterm_mailbox_serializes_concurrent_actions(self):
+        active = 0
+        maximum = 0
+        seen = []
+        guard = threading.Lock()
+
+        def injector(_args, **_kwargs):
+            nonlocal active, maximum
+            with open(os.path.join(self.base, "inject-request.txt")) as handle:
+                tty, request_id, *_ = handle.read().splitlines()
+            with guard:
+                active += 1
+                maximum = max(maximum, active)
+                seen.append(tty)
+            time.sleep(0.04)
+            with open(os.path.join(self.base, "inject-result.txt"), "w") as handle:
+                handle.write(f"{request_id} ok")
+            with guard:
+                active -= 1
+            return SimpleNamespace(returncode=0)
+
+        results = []
+        barrier = threading.Barrier(3)
+
+        def write(tty):
+            barrier.wait()
+            results.append(self.engine._iterm_write(tty, [("hello", True)], 0.05))
+
+        threads = [threading.Thread(target=write, args=(tty,))
+                   for tty in ("/dev/ttys101", "/dev/ttys202")]
+        with mock.patch.object(engine_module.subprocess, "run", side_effect=injector):
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertEqual(maximum, 1)
+        self.assertCountEqual(seen, ["/dev/ttys101", "/dev/ttys202"])
+        self.assertEqual(results, [{"ok": True}, {"ok": True}])
+
+    def test_worktree_cleanup_ticket_survives_process_closing_retry(self):
+        token = "retry-cleanup-ticket"
+        worktree = os.path.join(self.tmp.name, "closing-worktree")
+        os.makedirs(worktree)
+        ticket = {"session_id": "same", "provider": "claude", "root": self.cwd,
+                  "worktree": worktree, "revision": "same-revision", "pid": 424242,
+                  "expires": time.time() + 300, "closed_at": time.time()}
+        with self.engine._cleanup_lock:
+            self.engine._cleanup_tickets[token] = ticket
+        running = {"value": True}
+
+        def process(argv, **_kwargs):
+            if argv[:2] == ["ps", "-p"]:
+                return SimpleNamespace(stdout="claude --session" if running["value"] else "")
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        preview = {"inspect_ok": True, "revision": "same-revision",
+                   "root": self.cwd, "worktree": worktree, "remove_allowed": True,
+                   "force_remove_allowed": False, "owned_lock": False}
+        with mock.patch.object(engine_module.subprocess, "run", side_effect=process), \
+             mock.patch.object(self.engine, "close_worktree_preview", return_value=preview), \
+             mock.patch.object(self.engine, "_bounded_process",
+                               return_value={"ok": True, "stdout": "", "stderr": ""}):
+            first = self.engine.cleanup_closed_worktree({
+                "session_id": "same", "cleanup_ticket": token, "force": False})
+            self.assertFalse(first["ok"])
+            self.assertIn("still closing", first["error"])
+            self.assertIn(token, self.engine._cleanup_tickets)
+
+            running["value"] = False
+            second = self.engine.cleanup_closed_worktree({
+                "session_id": "same", "cleanup_ticket": token, "force": False})
+
+        self.assertTrue(second["ok"], second)
+        self.assertNotIn(token, self.engine._cleanup_tickets)
 
 
 if __name__ == "__main__":

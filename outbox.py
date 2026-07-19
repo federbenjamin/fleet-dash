@@ -20,7 +20,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PENDING_STATES = {"scheduled", "waiting_availability", "waiting_usage_reset",
                   "waiting_provider"}
-TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancelled"}
+TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancelled",
+                   "superseded"}
 TARGET_RECONNECT_GRACE_SECONDS = 120
 ALL_STATES = PENDING_STATES | TERMINAL_STATES | {"spawning", "sending"}
 KINDS = {"at_time", "when_available", "usage_reset", "new_session",
@@ -38,6 +39,7 @@ STATE_LABELS = {
     "blocked": "Blocked",
     "failed": "Failed",
     "cancelled": "Cancelled",
+    "superseded": "Superseded by successful retry",
 }
 
 
@@ -250,6 +252,16 @@ class OutboxManager:
         return message
 
     @staticmethod
+    def _idempotency_key(value, *, required=False):
+        key = str(value or "")
+        if not key and not required:
+            return None
+        if not (8 <= len(key) <= 160) or any(ord(char) < 33 or ord(char) > 126
+                                             for char in key):
+            raise OutboxError("invalid message request ID")
+        return key
+
+    @staticmethod
     def _zone(value):
         if value is not None and not isinstance(value, str):
             raise OutboxError("invalid IANA timezone", code="bad_timezone")
@@ -343,10 +355,20 @@ class OutboxManager:
     def create(self, payload):
         now = self.clock()
         values = self._normalize_create(payload, now=now)
+        key = self._idempotency_key(
+            payload.get("client_request_id") or payload.get("idempotency_key"))
+        if key:
+            values["idempotency_key"] = key
         outbox_id = self.id_factory()
         columns = ["id", "created_at", "updated_at", *values.keys()]
         params = [outbox_id, now, now, *values.values()]
         with self._transaction(immediate=True) as db:
+            if key:
+                existing = db.execute(
+                    "SELECT * FROM outbox_messages WHERE idempotency_key=?", (key,)
+                ).fetchone()
+                if existing:
+                    return self._public(existing)
             db.execute(
                 f"INSERT INTO outbox_messages({','.join(columns)}) "
                 f"VALUES({','.join('?' for _ in columns)})", params)
@@ -369,10 +391,7 @@ class OutboxManager:
             raise OutboxError("provider recovery queue is unavailable for this provider")
         if origin not in ("automatic_fallback", "direct_send_recovery"):
             raise OutboxError("invalid delivery origin")
-        key = str(idempotency_key or "")
-        if not (8 <= len(key) <= 160) or any(ord(char) < 33 or ord(char) > 126
-                                             for char in key):
-            raise OutboxError("invalid message request ID")
+        key = self._idempotency_key(idempotency_key, required=True)
         with self._connect() as db:
             existing = db.execute(
                 "SELECT * FROM outbox_messages WHERE idempotency_key=?", (key,)).fetchone()
@@ -479,13 +498,63 @@ class OutboxManager:
             db.execute("UPDATE outbox_messages SET image_paths_json='[]' WHERE id=?",
                        (outbox_id,))
 
+    def _copy_retry_assets(self, outbox_id, source_paths):
+        """Give a retry its own queue-owned copies before publishing its row.
+
+        Terminal attempts retain images for a bounded recovery window. A retry
+        must never share those paths: cleanup of either audit row would otherwise
+        break the other attempt. Missing retained bytes are an explicit failure,
+        never a silent text-only retry.
+        """
+        sources = list(source_paths or [])
+        if not sources:
+            return []
+        if len(sources) > 4:
+            raise OutboxError("queued image recovery data is invalid")
+        asset_dir = os.path.join(self.asset_root, outbox_id)
+        owned_paths = []
+        root = self.asset_root + os.sep
+        try:
+            os.makedirs(asset_dir, mode=0o700, exist_ok=False)
+            os.chmod(asset_dir, 0o700, follow_symlinks=False)
+            for index, source in enumerate(sources):
+                source = os.path.realpath(str(source or ""))
+                if not source.startswith(root):
+                    raise OutboxError("queued image recovery data is invalid")
+                try:
+                    info = os.lstat(source)
+                except OSError:
+                    raise OutboxError(
+                        "attached images expired; attach them again before retrying",
+                        code="attachments_unavailable")
+                if not os.path.isfile(source) or not 1 <= info.st_size <= 10_000_000:
+                    raise OutboxError("queued image recovery data is invalid")
+                destination = os.path.join(asset_dir, f"image-{index + 1}.jpg")
+                try:
+                    with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
+                        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
+                except OSError:
+                    raise OutboxError(
+                        "attached images expired; attach them again before retrying",
+                        code="attachments_unavailable")
+                os.chmod(destination, 0o600, follow_symlinks=False)
+                owned_paths.append(destination)
+            return owned_paths
+        except Exception:
+            self._remove_asset_paths(owned_paths)
+            try:
+                os.rmdir(asset_dir)
+            except OSError:
+                pass
+            raise
+
     def cleanup_terminal_assets(self):
         """Bound private recovery storage without weakening failure visibility."""
         cutoff = self.clock() - RECOVERY_ASSET_RETENTION_SECONDS
         with self._connect() as db:
             rows = db.execute(
                 "SELECT id FROM outbox_messages WHERE image_paths_json IS NOT NULL "
-                "AND image_paths_json!='[]' AND (state IN ('sent','cancelled') OR "
+                "AND image_paths_json!='[]' AND (state IN ('sent','cancelled','superseded') OR "
                 "(state IN ('blocked','failed','confirmation_unknown') AND updated_at<=?))",
                 (cutoff,)).fetchall()
         for row in rows:
@@ -520,7 +589,7 @@ class OutboxManager:
             rows = db.execute(
                 "SELECT * FROM outbox_messages" + where +
                 " ORDER BY CASE WHEN state IN ('blocked','failed','confirmation_unknown') "
-                "THEN 0 WHEN state='sent' THEN 2 ELSE 1 END, "
+                "THEN 0 WHEN state IN ('sent','superseded') THEN 2 ELSE 1 END, "
                 "COALESCE(trigger_at, created_at), created_at, id LIMIT ? OFFSET ?",
                 (*states, limit + 1, cursor)).fetchall()
         more = len(rows) > limit
@@ -537,13 +606,25 @@ class OutboxManager:
                         ("blocked", "failed", "confirmation_unknown"))
         return {"pending": pending, "attention": attention, "states": values}
 
-    def update(self, outbox_id, patch):
+    def update(self, outbox_id, patch, expected_version=None):
+        patch = dict(patch or {})
+        embedded_version = patch.pop("expected_version", None)
+        if expected_version is None:
+            expected_version = embedded_version
+        try:
+            expected_version = int(expected_version)
+        except (TypeError, ValueError):
+            raise OutboxError("outbox version is required; refresh", code="stale")
+        if expected_version < 1:
+            raise OutboxError("outbox version is invalid; refresh", code="stale")
         current = self.get(outbox_id)
         if not current:
             raise OutboxError("outbox message not found", code="stale")
+        if int(current.get("version") or 0) != expected_version:
+            raise OutboxError("outbox message changed; refresh", code="stale")
         if not current["editable"]:
             raise OutboxError("only unclaimed pending messages can be edited", code="immutable")
-        merged = {**current, **dict(patch or {})}
+        merged = {**current, **patch}
         if "spawn_spec" not in merged:
             merged["spawn_spec"] = current.get("spawn_spec")
         values = self._normalize_create(merged)
@@ -553,8 +634,8 @@ class OutboxManager:
                 "UPDATE outbox_messages SET " + ",".join(f"{key}=?" for key in values) +
                 ",updated_at=?,version=version+1 WHERE id=? AND state IN "
                 "('scheduled','waiting_availability','waiting_usage_reset','waiting_provider') "
-                "AND claimed_at IS NULL",
-                (*values.values(), now, outbox_id))
+                "AND claimed_at IS NULL AND version=?",
+                (*values.values(), now, outbox_id, expected_version))
             if result.rowcount != 1:
                 raise OutboxError("outbox message changed; refresh", code="stale")
         return self.get(outbox_id)
@@ -574,7 +655,7 @@ class OutboxManager:
         return self.get(outbox_id)
 
     def retry(self, outbox_id, patch=None):
-        current = self.get(outbox_id)
+        current = self.get_internal(outbox_id)
         if not current or not current.get("retryable"):
             raise OutboxError("that outbox message cannot be retried", code="immutable")
         payload = {key: current.get(key) for key in (
@@ -586,18 +667,46 @@ class OutboxManager:
                 patch and ("trigger_at" in patch or "local_time" in patch)):
             payload["trigger_at"] = self.clock()
             payload["local_time"] = None
-        created = self.create(payload)
-        with self._transaction(immediate=True) as db:
-            db.execute("UPDATE outbox_messages SET retry_of=? WHERE id=?",
-                       (outbox_id, created["id"]))
-        return self.get(created["id"])
+        now = self.clock()
+        values = self._normalize_create(payload, now=now)
+        retry_id = self.id_factory()
+        owned_paths = self._copy_retry_assets(retry_id, current.get("_image_paths"))
+        values.update(retry_of=outbox_id,
+                      image_paths_json=json.dumps(owned_paths, separators=(",", ":")))
+        columns = ["id", "created_at", "updated_at", *values.keys()]
+        params = [retry_id, now, now, *values.values()]
+        try:
+            with self._transaction(immediate=True) as db:
+                source = db.execute(
+                    "SELECT state,origin FROM outbox_messages WHERE id=?", (outbox_id,)
+                ).fetchone()
+                if not source or source["origin"] == "direct_send_recovery" or \
+                        source["state"] not in {"blocked", "failed", "confirmation_unknown"}:
+                    raise OutboxError("that outbox message cannot be retried", code="immutable")
+                active_retry = db.execute("""SELECT id FROM outbox_messages
+                    WHERE retry_of=? AND state NOT IN
+                    ('blocked','failed','cancelled','superseded') LIMIT 1""",
+                    (outbox_id,)).fetchone()
+                if active_retry:
+                    raise OutboxError("a retry for that message is already active", code="stale")
+                db.execute(
+                    f"INSERT INTO outbox_messages({','.join(columns)}) "
+                    f"VALUES({','.join('?' for _ in columns)})", params)
+        except Exception:
+            self._remove_asset_paths(owned_paths)
+            try:
+                os.rmdir(os.path.join(self.asset_root, retry_id))
+            except OSError:
+                pass
+            raise
+        return self.get(retry_id)
 
-    def retarget(self, outbox_id, patch):
+    def retarget(self, outbox_id, patch, expected_version=None):
         current = self.get(outbox_id)
         if not current:
             raise OutboxError("outbox message not found", code="stale")
         if current.get("editable"):
-            return self.update(outbox_id, patch)
+            return self.update(outbox_id, patch, expected_version=expected_version)
         if current.get("retryable"):
             return self.retry(outbox_id, patch)
         raise OutboxError("sent and cancelled messages are immutable", code="immutable")
@@ -731,6 +840,23 @@ class OutboxManager:
                        (state, now, str(error or "")[:1000] or None,
                         str(reason or "")[:1000] or None, bounded_receipt, destination,
                         now if state == "sent" else None, outbox_id))
+            if state == "sent":
+                # Only a proven successful replacement resolves prior failures.
+                # Walk the whole retry chain so repeated failed retries do not
+                # leave an older ancestor permanently counted as attention.
+                db.execute("""WITH RECURSIVE retry_ancestors(id) AS (
+                        SELECT retry_of FROM outbox_messages
+                        WHERE id=? AND retry_of IS NOT NULL
+                        UNION ALL
+                        SELECT parent.retry_of FROM outbox_messages parent
+                        JOIN retry_ancestors child ON parent.id=child.id
+                        WHERE parent.retry_of IS NOT NULL
+                    )
+                    UPDATE outbox_messages SET state='superseded',updated_at=?,
+                        version=version+1
+                    WHERE id IN (SELECT id FROM retry_ancestors)
+                    AND state IN ('blocked','failed','confirmation_unknown')""",
+                           (outbox_id, now))
         self._missing_targets.pop(str(outbox_id), None)
 
     def recover_expired(self, snapshot):
@@ -780,8 +906,9 @@ class OutboxManager:
                 "SELECT * FROM outbox_messages WHERE state IN "
                 "('scheduled','waiting_availability','waiting_usage_reset','waiting_provider') "
                 "AND claimed_at IS NULL AND COALESCE(next_attempt_at,0)<=? "
-                "ORDER BY COALESCE(trigger_at,created_at),created_at,id LIMIT ?",
-                (now, self.max_batch)).fetchall()
+                "AND (state!='scheduled' OR trigger_at IS NULL OR trigger_at<=?) "
+                "ORDER BY COALESCE(next_attempt_at,0),updated_at,created_at,id LIMIT ?",
+                (now, now, self.max_batch)).fetchall()
         for raw in rows:
             record = self._internal(raw)
             if record["state"] == "scheduled" and record.get("trigger_at") is not None \
@@ -797,12 +924,17 @@ class OutboxManager:
                     continue
                 observed = float(record.get("observed_reset_at") or 0)
                 if now < observed:
-                    if reset_at != observed:
-                        self._set_waiting(record["id"], "waiting_usage_reset",
-                                          "The provider moved the reported reset time",
-                                          observed_reset=reset_at)
+                    self._set_waiting(
+                        record["id"], "waiting_usage_reset",
+                        ("The provider moved the reported reset time" if reset_at != observed
+                         else "Waiting for the reported usage reset"),
+                        next_attempt=now + 1,
+                        observed_reset=reset_at if reset_at != observed else None)
                     continue
                 if reset_at <= observed:
+                    self._set_waiting(record["id"], "waiting_usage_reset",
+                                      "Waiting for fresh post-reset usage evidence",
+                                      next_attempt=now + 1)
                     continue
                 record["state"] = "waiting_availability"
                 self._set_waiting(record["id"], "waiting_availability",
@@ -864,6 +996,11 @@ class OutboxManager:
             if result.get("ok"):
                 self._terminal(record["id"], "sent", receipt=result,
                                destination=record.get("destination_session_id"))
+            elif result.get("code") in ("delivery_uncertain",
+                                         "control_delivery_uncertain"):
+                self._terminal(record["id"], "confirmation_unknown",
+                               error=result.get("error") or
+                                     "Provider delivery could not be confirmed")
             elif result.get("queueable") or result.get("code") == \
                     "provider_control_unavailable":
                 self._set_waiting(record["id"], "waiting_provider",

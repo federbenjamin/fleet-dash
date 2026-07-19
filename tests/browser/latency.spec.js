@@ -29,7 +29,7 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       else if (flow === 'insights_usage') document.querySelector('#usagechip')?.click();
       else if (flow === 'settings') openSettings();
       else if (flow === 'outbox_handoff') document.querySelector('#outboxchip')?.click();
-      else if (flow === 'file_markdown') document.querySelector('#sact .fchip')?.click();
+      else if (flow === 'file_markdown') document.querySelector('#sact .latestfile')?.click();
       else if (flow === 'pinning') document.querySelector('[data-sid="claude-one"] .spin')?.click();
       else if (flow === 'mobile_pin_hold') {
         const target = document.querySelector('[data-sid="claude-one"] .shead');
@@ -52,7 +52,7 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
         }
       }
       if (flow === 'notification_action') {
-        while (notificationActionState.busy) {
+        while (notificationActionStates.get('evt-6-question')?.busy) {
           await new Promise(resolve => setTimeout(resolve, 2));
         }
       }
@@ -105,7 +105,7 @@ test('named interaction inventory meets first-feedback and local completion budg
   }
 
   await page.evaluate(() => openSession('codex:thread-one'));
-  await expect(page.locator('#sact .fchip')).toBeVisible();
+  await expect(page.locator('#sact .latestfile')).toBeVisible();
   const fileSamples = await paintedSamples(page, 'file_markdown');
   results.file_markdown = { samples: fileSamples.length, p95: p95(fileSamples) };
   expect(fileSamples).toHaveLength(SAMPLE_COUNT);

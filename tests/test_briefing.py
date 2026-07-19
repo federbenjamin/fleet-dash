@@ -740,6 +740,80 @@ class BriefingTests(unittest.TestCase):
         self.assertNotIn("subscription", repr(snapshot))
         self.assertNotIn("endpoint", repr(snapshot))
 
+    def test_in_app_and_push_kind_settings_are_independent(self):
+        self.qualify_push_device("phone")
+        baseline = self.ops.notification_snapshot("phone")
+        self.ops.notification_mark_read("phone", baseline["event_cursor"])
+        question = next(item for item in self.ops.notification_policy_snapshot()["kinds"]
+                        if item["kind"] == "question")
+        self.assertTrue(question["in_app_enabled"])
+
+        disabled = self.ops.notification_policy_update({
+            "scope": "kind", "kind": "question",
+            "expected_revision": question["revision"],
+            "patch": {"in_app_enabled": False}})
+        disabled_question = next(item for item in disabled["kinds"]
+                                 if item["kind"] == "question")
+        self.assertFalse(disabled_question["in_app_enabled"])
+        self.assertEqual(disabled_question["mode"], question["mode"])
+        self.assertEqual(disabled_question["push_revision"], question["push_revision"])
+
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        hidden = self.ops.notification_snapshot("phone")
+        self.assertFalse(any(item["kind"] == "question" for item in hidden["events"]))
+        self.assertEqual(hidden["unread"], 0)
+        self.assertEqual(hidden["active"], 0)
+        pushed = self.ops.notification_claim_delivery()
+        self.assertIsNotNone(pushed)
+        self.assertEqual(pushed["event"]["kind"], "question")
+        self.ops.notification_finish_delivery(pushed["id"], {"ok": True, "status": 201})
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM notification_events WHERE kind='question'").fetchone()[0], 1)
+
+        # The inverse combination stays visible in Fleet while producing no push.
+        self.clock.advance(1)
+        enabled = self.ops.notification_policy_update({
+            "scope": "kind", "kind": "question",
+            "expected_revision": disabled_question["revision"],
+            "patch": {"in_app_enabled": True, "mode": "off"}})
+        enabled_question = next(item for item in enabled["kinds"]
+                                if item["kind"] == "question")
+        self.assertTrue(enabled_question["in_app_enabled"])
+        self.assertEqual(enabled_question["mode"], "off")
+        self.clock.advance(1)
+        self.ops.observe(fleet(self.clock, actions=[action(nonce="ask-2")]), self.workstream)
+        visible = self.ops.notification_snapshot("phone")
+        self.assertTrue(any(item["kind"] == "question" and
+                            item["source_revision"] == "ask-2"
+                            for item in visible["events"]))
+        self.assertIsNone(self.ops.notification_claim_delivery())
+
+    def test_disabling_failure_in_app_hides_delivery_problem_projection(self):
+        ops = FleetOperations(self.path, clock=self.clock, delivery_retry_delays=(0,),
+                              delivery_jitter=lambda delay: delay)
+        self.ops = ops
+        self.qualify_push_device("phone")
+        self.clock.advance(1)
+        ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
+        delivery = ops.notification_claim_delivery()
+        ops.notification_finish_delivery(delivery["id"], {"ok": False, "status": 503})
+        retry = ops.notification_claim_delivery()
+        ops.notification_finish_delivery(retry["id"], {"ok": False, "status": 503})
+        visible = ops.notification_snapshot("phone")
+        self.assertEqual(len(visible["delivery_problems"]), 1)
+        self.assertTrue(any(item["kind"] == "failure" for item in visible["events"]))
+
+        failure = next(item for item in ops.notification_policy_snapshot()["kinds"]
+                       if item["kind"] == "failure")
+        ops.notification_policy_update({"scope": "kind", "kind": "failure",
+            "expected_revision": failure["revision"],
+            "patch": {"in_app_enabled": False}})
+        hidden = ops.notification_snapshot("phone")
+        self.assertEqual(hidden["delivery_problems"], [])
+        self.assertFalse(any(item["kind"] == "failure" for item in hidden["events"]))
+
     def test_explicit_push_test_survives_global_and_kind_policy_edits(self):
         self.ops.notification_register_device(
             "phone", "Phone", "iOS", push_subscription())
@@ -882,7 +956,8 @@ class BriefingTests(unittest.TestCase):
         self.qualify_push_device("phone")
         self.ops.observe(fleet(self.clock, actions=[action()]), self.workstream)
         with sqlite3.connect(self.path) as db:
-            db.execute("UPDATE notification_kind_policy SET revision=revision+1 "
+            db.execute("UPDATE notification_kind_policy SET revision=revision+1, "
+                       "push_revision=push_revision+1 "
                        "WHERE kind='question'")
         self.assertIsNone(self.ops.notification_claim_delivery())
         with sqlite3.connect(self.path) as db:
