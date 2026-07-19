@@ -679,6 +679,37 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         adapter._refresh()
         self.assertEqual(adapter.sessions()[0]["agents"][0]["state"], "done")
 
+    def test_child_lifecycle_has_its_own_budget_and_terminal_state_is_sticky(self):
+        class SlowParentClient(FixtureClient):
+            def read_thread(self, thread_id):
+                self.read_calls.append(thread_id)
+                if thread_id == "managed":
+                    time.sleep(.04)
+                return dict(self.details[thread_id])
+
+        parent = self.thread()
+        parent["turns"] = [{"items": [{"type": "subAgentActivity", "kind": "started",
+            "agentThreadId": "child", "agentPath": "/agents/reviewer"}]}]
+        client = SlowParentClient([parent])
+        client.details["child"] = {"id": "child", "status": {"type": "idle"},
+            "turns": [{"status": "completed", "items": [
+                {"type": "agentMessage", "text": "done"}]}]}
+        adapter = CodexAdapter(
+            client=client, state_path=self.state_path, clock=lambda: 1000,
+            stall_seconds=30, refresh_budget_seconds=.02, refresh_workers=2,
+            models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        adapter._remember("managed", "default")
+
+        adapter._refresh()
+        self.assertEqual(adapter.sessions()[0]["agents"][0]["state"], "done")
+        child_reads = client.read_calls.count("child")
+
+        # Parent projections contain only started/interacted activity. A later
+        # partial refresh must neither re-read nor resurrect a terminal child.
+        adapter._refresh()
+        self.assertEqual(adapter.sessions()[0]["agents"][0]["state"], "done")
+        self.assertEqual(client.read_calls.count("child"), child_reads)
+
     def test_unmaterialized_empty_thread_archive_discards_local_state(self):
         adapter, client = self.adapter([self.thread()])
         adapter._remember("managed", "plan")

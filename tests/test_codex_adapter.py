@@ -181,6 +181,16 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual(agents[0]["session_id"], "codex:parent-1")
         self.assertEqual(agents[0]["state"], "done")
 
+    def test_subagent_terminal_state_survives_stale_running_projection(self):
+        agents = _agents({"turns": [{"items": [
+            {"type": "subAgentActivity", "kind": "completed",
+             "agentThreadId": "child-1", "agentPath": "/root/worker"},
+            {"type": "collabAgentToolCall", "prompt": "review",
+             "receiverThreadIds": ["child-1"],
+             "agentsStates": {"child-1": {"status": "running"}}}]}]},
+            "parent-1")
+        self.assertEqual(agents[0]["state"], "done")
+
     def test_codex_question_answers_use_option_labels(self):
         client = ResponseClient()
         client.approvals["9"] = {"request_id": 9, "method": "item/tool/requestUserInput",

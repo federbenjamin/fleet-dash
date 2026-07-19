@@ -1237,6 +1237,11 @@ class CodexAdapter:
             if session.get("stale"):
                 continue
             for agent in session.get("agents") or []:
+                # Child thread ids are immutable. Once canonical child detail
+                # proves a terminal state, the parent projection's historical
+                # started/interacted rows can never make that child live again.
+                if agent.get("state") in ("done", "ended"):
+                    continue
                 aid = agent.get("agent_id")
                 if aid:
                     targets.setdefault(str(aid), []).append(agent)
@@ -1513,6 +1518,23 @@ class CodexAdapter:
             if (observation or {}).get("messages"):
                 messages = observation["messages"]
             agents = _agents(thread, tid)
+            previous_agents = {
+                item.get("agent_id"): item
+                for item in ((previous_by_tid.get(tid) or {}).get("agents") or [])
+                if item.get("agent_id")}
+            for agent in agents:
+                previous_agent = previous_agents.get(agent.get("agent_id"))
+                if (previous_agent or {}).get("state") not in ("done", "ended"):
+                    continue
+                # Parent thread/read does not emit a completion activity for
+                # every Codex child. Preserve terminal child detail across a
+                # later partial refresh instead of resurrecting it from the
+                # parent's old started/interacted event.
+                agent["state"] = previous_agent["state"]
+                for key in ("convo_v", "model", "total_tokens", "tokens",
+                            "started", "last", "last_msg"):
+                    if previous_agent.get(key) is not None:
+                        agent[key] = previous_agent[key]
             agents_running = sum(a["state"] in ("running", "stalled") for a in agents)
             revision = _revision(thread, live)
             if observation and observation.get("revision"):
@@ -1701,7 +1723,11 @@ class CodexAdapter:
                                                   modes.get(tid) or "default"))
                 else:
                     self._forget(tid)
-        self._enrich_agents_bounded(out, detail_deadline)
+        # Parent detail and child lifecycle reads are separate bounded phases.
+        # Reusing the parent deadline meant it was normally expired before a
+        # single child could be checked, leaving completed agents active forever.
+        agent_deadline = time.monotonic() + self._refresh_budget_seconds
+        self._enrich_agents_bounded(out, agent_deadline)
         with self._projection_commit_lock:
             latest = self._state()
             latest_meta = latest.get("thread_meta") or {}
@@ -2886,6 +2912,14 @@ def _elicitation_pending(nonce, params):
 
 def _agents(thread, parent_id):
     found = {}
+
+    def remember(aid, agent):
+        previous = found.get(aid)
+        if (previous and previous.get("state") in ("done", "ended") and
+                agent.get("state") not in ("done", "ended")):
+            agent["state"] = previous["state"]
+        found[aid] = agent
+
     for turn in thread.get("turns") or []:
         for item in turn.get("items") or []:
             if item.get("type") == "subAgentActivity":
@@ -2895,15 +2929,15 @@ def _agents(thread, parent_id):
                     state = ({"completed": "done", "interrupted": "ended",
                               "failed": "ended", "errored": "ended",
                               "shutdown": "ended"}.get(activity, "running"))
-                    found[aid] = {"agent_id": aid, "session_id": f"codex:{parent_id}",
-                                  "agent_type": (item.get("agentPath") or "codex").split("/")[-1],
-                                  "description": item.get("agentPath") or "Codex subagent",
-                                  "depth": 0, "model": "", "family": "codex", "effort": None,
-                                  "state": state,
-                                  "total_tokens": None, "cost": None,
-                                  "cost_source": "unavailable", "tokens": {}, "spark": [],
-                                  "tok_per_s": None, "started": None, "last": None,
-                                  "last_msg": None, "convo_v": 0}
+                    remember(aid, {
+                        "agent_id": aid, "session_id": f"codex:{parent_id}",
+                        "agent_type": (item.get("agentPath") or "codex").split("/")[-1],
+                        "description": item.get("agentPath") or "Codex subagent",
+                        "depth": 0, "model": "", "family": "codex", "effort": None,
+                        "state": state, "total_tokens": None, "cost": None,
+                        "cost_source": "unavailable", "tokens": {}, "spark": [],
+                        "tok_per_s": None, "started": None, "last": None,
+                        "last_msg": None, "convo_v": 0})
                 continue
             if item.get("type") != "collabAgentToolCall":
                 continue
@@ -2913,12 +2947,13 @@ def _agents(thread, parent_id):
                 state = {"pendingInit": "running", "running": "running",
                          "completed": "done", "interrupted": "ended",
                          "errored": "ended", "shutdown": "ended"}.get(raw, "running")
-                found[aid] = {"agent_id": aid, "session_id": f"codex:{parent_id}",
-                              "agent_type": "codex", "description": item.get("prompt") or "",
-                              "depth": 0, "model": item.get("model") or "",
-                              "family": "codex", "effort": item.get("reasoningEffort"),
-                              "state": state, "total_tokens": None, "cost": None,
-                              "cost_source": "unavailable", "tokens": {}, "spark": [],
-                              "tok_per_s": None,
-                              "started": None, "last": None, "last_msg": None}
+                remember(aid, {
+                    "agent_id": aid, "session_id": f"codex:{parent_id}",
+                    "agent_type": "codex", "description": item.get("prompt") or "",
+                    "depth": 0, "model": item.get("model") or "",
+                    "family": "codex", "effort": item.get("reasoningEffort"),
+                    "state": state, "total_tokens": None, "cost": None,
+                    "cost_source": "unavailable", "tokens": {}, "spark": [],
+                    "tok_per_s": None,
+                    "started": None, "last": None, "last_msg": None})
     return list(found.values())
