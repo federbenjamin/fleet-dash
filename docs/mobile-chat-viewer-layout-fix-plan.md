@@ -1,6 +1,6 @@
 # Mobile chat + Markdown viewer layout fix plan
 
-Status: implementation and automated verification complete; staging/prod promotion in progress.
+Status: implementation, automated verification, and staging health verification complete; ready for promotion.
 Branch: `fix/send-now-or-queue`
 Release policy: isolated staging first; user approved production promotion after the release gates.
 
@@ -137,5 +137,6 @@ Status: settled as recommended.
 - Security heuristic review: the new notification-detail `innerHTML` assignment renders only the
   existing `notificationDetailHtml` builder, whose dynamic event fields are escaped; it introduces
   no raw server- or user-controlled HTML path.
-- Real-iPhone staging gate: automated staging health check pending in this release step; screenshots
-  were explicitly waived.
+- Staging release gate: the restarted staging API reported `mode=staging`, both Claude and Codex
+  healthy, and 29 visible sessions. The user explicitly waived screenshots and authorized production
+  promotion after the automated release gates; a new manual phone walkthrough was not required.

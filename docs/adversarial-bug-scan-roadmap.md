@@ -2,7 +2,7 @@
 
 Status: automated implementation and release gates complete on `fix/send-now-or-queue`; isolated
 staging API smoke passed, real-phone validation pending.
-Scope: current draft PR and isolated staging only; production promotion remains user-gated.
+Scope: current draft PR and isolated staging; production promotion is approved after merge.
 Evidence date: 2026-07-18.
 
 Follow-on mobile chat/Markdown layout work is tracked separately in
