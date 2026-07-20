@@ -146,22 +146,39 @@
     <button aria-label="close usage" onclick="closeUsage()">✕</button></div>
   <div id="usagebody"></div>
 </div>
-<div id="viewer">
-  <div id="vhead"><button id="vclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="vtitle"></span><span id="vctrl"></span></div>
-  <div id="vbody"></div>
-  <div id="vact"></div>
-</div>
 <div id="confirm"></div>
-<div id="aview">
-  <div id="ahead"><button id="aclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="atitle"></span>
-    <span id="actrl"></span></div>
-  <div id="abody"></div>
-  <div id="aact"></div>
-</div>
-<div id="sview">
-  <div id="shead2"><button id="sclose" onclick="closeOverflow();dismissOverlay()">✕</button><span id="stitle2"></span>
+<div id="sview" role="dialog" aria-modal="true" aria-label="Session workspace">
+  <div id="shead2"><button id="sclose" aria-label="close session workspace" onclick="closeOverflow();exitSessionWorkspace()">✕</button><span id="stitle2"></span>
     <span id="sctrl"></span></div>
-  <div id="sworkspace"><div id="schat"><div id="sbody"></div><div id="sactivity"></div></div><aside id="sevidence" aria-label="Session state evidence"></aside></div>
+  <nav id="stabs" role="tablist" aria-label="Session sections">
+    <button id="stab-chat" role="tab" onclick="setSessionSection('chat')">Chat</button>
+    <button id="stab-files" role="tab" onclick="setSessionSection('files')">Files <small id="sfilecount"></small></button>
+    <button id="stab-subagents" role="tab" onclick="setSessionSection('subagents')">Subagents <small id="sagentcount"></small></button>
+    <button id="stab-details" role="tab" onclick="setSessionSection('details')">Details</button>
+  </nav>
+  <div id="sworkspace">
+    <section id="spanel-chat" class="workspacepanel" role="tabpanel" aria-labelledby="stab-chat">
+      <div id="schat"><div id="sbody"></div><div id="sactivity"></div></div>
+    </section>
+    <section id="spanel-files" class="workspacepanel" role="tabpanel" aria-labelledby="stab-files" hidden>
+      <div id="sfilebrowser" class="workspacebrowser"><aside id="sfilelist" aria-label="Session files"></aside>
+        <div class="workspacedivider" role="separator" aria-label="Resize file list" aria-orientation="vertical" tabindex="0"
+          onpointerdown="startWorkspaceSplit(event,'files')" onkeydown="workspaceSplitKey(event,'files')"></div>
+        <article id="sfilepreview"><button class="workspaceback" onclick="clearWorkspaceSelection()">← Back to files</button>
+          <header id="vtitle"></header><div id="vbody"></div></article></div>
+    </section>
+    <section id="spanel-subagents" class="workspacepanel" role="tabpanel" aria-labelledby="stab-subagents" hidden>
+      <div id="sagentbrowser" class="workspacebrowser"><aside id="sagentlistpane" aria-label="Session subagents">
+          <div id="sagentfilters" role="group" aria-label="Subagent filter"></div><div id="sagentlist"></div></aside>
+        <div class="workspacedivider" role="separator" aria-label="Resize subagent list" aria-orientation="vertical" tabindex="0"
+          onpointerdown="startWorkspaceSplit(event,'subagents')" onkeydown="workspaceSplitKey(event,'subagents')"></div>
+        <article id="sagentdetail"><button class="workspaceback" onclick="clearWorkspaceSelection()">← Back to subagents</button>
+          <header id="atitle"></header><div id="abody"></div></article></div>
+    </section>
+    <section id="spanel-details" class="workspacepanel" role="tabpanel" aria-labelledby="stab-details" hidden>
+      <nav id="sdetailindex" aria-label="Details subsections"></nav><div id="sdetails"></div>
+    </section>
+  </div>
   <div id="sact"></div>
 </div>
 <div id="handoffview">

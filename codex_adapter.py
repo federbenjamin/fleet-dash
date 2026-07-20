@@ -1932,7 +1932,8 @@ class CodexAdapter:
             if old.get("revision") == revision:
                 return
             snapshots[tid] = {"revision": revision, "messages": messages[-300:],
-                              "files": files[-100:], "updated_at": self.clock(),
+                              "files": files[-100:], "agents": _agents(thread, tid)[-100:],
+                              "updated_at": self.clock(),
                               "info": {"session_id": self.key(tid),
                                        "cwd": thread.get("cwd") or "",
                                        "model": thread.get("model") or "",
@@ -1980,6 +1981,34 @@ class CodexAdapter:
             self._loaded_threads.add(tid)
             self._loaded_generation = getattr(self.client, "generation", None)
         return thread or {}
+
+    def resume_capability(self, key):
+        """Return whether a saved thread is explicitly owned by Fleet's runtime."""
+        tid = self.native(key)
+        if not self.enabled:
+            return False, "Codex App Server is unavailable"
+        state = self._state()
+        meta = (state.get("thread_meta") or {}).get(tid) or {}
+        if tid not in (state.get("threads") or []) or \
+                meta.get("runtime_owner") != "fleet_shared":
+            return False, "external Codex thread is view only"
+        if meta.get("unmaterialized"):
+            return False, "the Codex thread never created a saved conversation"
+        return True, None
+
+    def resume_owned_thread(self, key):
+        """Load one exact Fleet-owned thread without adopting an external thread."""
+        allowed, reason = self.resume_capability(key)
+        if not allowed:
+            return {"ok": False, "error": reason}
+        tid = self.native(key)
+        try:
+            self._ensure_loaded(tid)
+            with self._lock:
+                self._last_refresh = 0
+            return {"ok": True, "session_id": self.key(tid), "resumed": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def start_thread(self, cwd, model=None, effort=None, mode="plan",
                      initial_text=None):
@@ -2127,14 +2156,16 @@ class CodexAdapter:
             revision = _revision(thread, self.client.thread_state.get(tid, {}))
             self._cache_snapshot(tid, messages, files, revision, thread)
             return {"ok": True, "messages": messages, "files": files,
+                    "agents": _agents(thread, tid),
                     "revision": revision}
         except Exception as exc:
             if "not materialized yet" in str(exc):
-                return {"ok": True, "messages": [], "files": []}
+                return {"ok": True, "messages": [], "files": [], "agents": []}
             snapshot = (self._state().get("snapshots") or {}).get(tid)
             if snapshot:
                 return {"ok": True, "messages": snapshot.get("messages") or [],
-                        "files": snapshot.get("files") or [], "closed": True,
+                        "files": snapshot.get("files") or [],
+                        "agents": snapshot.get("agents") or [], "closed": True,
                         "stale": True, "error": str(exc), "info": snapshot.get("info") or {},
                         "revision": snapshot.get("revision")}
             return {"ok": False, "error": str(exc)}
@@ -2147,7 +2178,11 @@ class CodexAdapter:
                            if item.get("native_session_id") == parent_id), None)
             member = next((item for item in (parent or {}).get("agents") or []
                            if str(item.get("agent_id") or "") == agent_id), None)
-        if not parent or not member:
+        if not parent:
+            historical = self.context(key)
+            member = next((item for item in (historical.get("agents") or [])
+                           if str(item.get("agent_id") or "") == agent_id), None)
+        if not member:
             return {"ok": False, "error": "no such subagent"}
         out = self.context(self.key(agent_id))
         if out.get("ok"):
@@ -2213,7 +2248,11 @@ class CodexAdapter:
         ext = os.path.splitext(fpath)[1].lower()
         ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp",
-                 ".svg": "image/svg+xml"}.get(ext, "text/plain; charset=utf-8")
+                 ".svg": "image/svg+xml", ".pdf": "application/pdf",
+                 ".json": "application/json; charset=utf-8"}.get(
+                     ext, "text/plain; charset=utf-8")
+        # Keep HTML inert at the authenticated endpoint. The browser client
+        # renders it only inside its sandboxed static-preview iframe.
         return ctype, data, None
 
     def act(self, action, _mutation_locked=False):
@@ -2833,11 +2872,11 @@ def _last_message(messages, fallback=None):
         if message.get("role") in ("user", "assistant") and message.get("text"):
             text = str(message["text"]).strip()
             return {"role": message["role"],
-                    "text": text[:499] + "…" if len(text) > 500 else text}
+                    "text": text[:799] + "…" if len(text) > 800 else text}
     if fallback:
         text = str(fallback).strip()
         return {"role": "user",
-                "text": text[:499] + "…" if len(text) > 500 else text}
+                "text": text[:799] + "…" if len(text) > 800 else text}
     return None
 
 

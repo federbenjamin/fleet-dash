@@ -577,6 +577,77 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(len(tail.files), 2)
         self.assertEqual(tail.files[-1]["caption"], "first again")
 
+    def test_claude_file_preview_content_types_keep_html_inert(self):
+        paths = {"preview.html": b"<h1>safe static preview</h1>",
+                 "report.pdf": b"%PDF-1.4\n%%EOF\n",
+                 "data.json": b'{"ok":true}'}
+        delivered = []
+        for name, data in paths.items():
+            path = os.path.join(self.cwd, name)
+            with open(path, "wb") as handle:
+                handle.write(data)
+            delivered.append(path)
+        row = {"type": "assistant", "timestamp": "2026-07-15T00:00:02Z",
+               "message": {"role": "assistant", "model": "claude-sonnet",
+                   "stop_reason": "tool_use", "usage": {}, "content": [{
+                       "type": "tool_use", "id": "send-preview-files",
+                       "name": "SendUserFile",
+                       "input": {"files": delivered, "caption": "Preview files"}}]}}
+        with open(self.transcript, "a") as handle:
+            handle.write(json.dumps(row) + "\n")
+        self.engine.scan()
+        expected = {"preview.html": "text/plain; charset=utf-8",
+                    "report.pdf": "application/pdf",
+                    "data.json": "application/json; charset=utf-8"}
+        for path in delivered:
+            ctype, data, error = self.engine.file_content(
+                "same", self.engine.file_id("same", path))
+            self.assertIsNone(error)
+            self.assertEqual(ctype, expected[os.path.basename(path)])
+            self.assertEqual(data, paths[os.path.basename(path)])
+
+    def test_missing_claude_delivery_uses_confined_file_history_backup(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        delivered = os.path.join(self.tmp.name, "removed-scratch", "plan.md")
+        backup_name = "abcdef1234567890@v2"
+        transcript = os.path.join(os.path.dirname(self.transcript), sid + ".jsonl")
+        rows = [
+            {"type": "assistant", "timestamp": "2026-07-15T00:00:02Z",
+             "message": {"role": "assistant", "model": "claude-sonnet",
+                         "stop_reason": "tool_use", "usage": {}, "content": [{
+                             "type": "tool_use", "id": "send-file", "name": "SendUserFile",
+                             "input": {"files": [delivered], "caption": "Durable plan"}}]}},
+            {"type": "file-history-snapshot", "timestamp": "2026-07-15T00:00:03Z",
+             "snapshot": {"trackedFileBackups": {
+                 delivered: {"backupFileName": backup_name},
+                 "/untrusted": {"backupFileName": "../../config.json"}}}},
+        ]
+        with open(transcript, "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        with open(os.path.join(self.sessions, sid + ".json"), "w") as handle:
+            json.dump({"sessionId": sid, "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "idle", "name": "Claude", "startedAt": 2}, handle)
+        backup_dir = os.path.join(self.tmp.name, ".claude", "file-history", sid)
+        os.makedirs(backup_dir)
+        with open(os.path.join(backup_dir, backup_name), "wb") as handle:
+            handle.write(b"# recovered plan\n")
+
+        self.engine.scan()
+        context = self.engine.session_context(sid)
+        self.assertTrue(context["ok"])
+        self.assertNotIn("path", context["files"][0])
+        self.assertEqual(context["files"][0]["file_id"],
+                         self.engine.file_id(sid, delivered))
+        self.assertFalse(context["files"][0]["missing"])
+        ctype, data, error = self.engine.file_content(
+            sid, self.engine.file_id(sid, delivered))
+        self.assertIsNone(error)
+        self.assertEqual(ctype, "text/plain; charset=utf-8")
+        self.assertEqual(data, b"# recovered plan\n")
+        self.assertNotIn("/untrusted", self.engine.tail_for(transcript).file_backups)
+        self.assertIsNone(self.engine._claude_file_backup(sid, "../../config.json"))
+
     def test_image_upload_quota_rejects_before_conversion(self):
         self.engine.scan()
         root = os.path.join(self.base, "uploads")
@@ -979,7 +1050,11 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(self.engine.session_context("codex:same")["closed"])
         self.assertEqual(self.engine.commands("codex:same")["commands"][0]["name"],
                          "/compact")
-        self.assertEqual(self.engine.file_content("codex:same", "/work/repo/a.txt"),
+        self.codex.context = lambda sid: {
+            "ok": True, "messages": [],
+            "files": [{"path": "/work/repo/a.txt", "name": "a.txt"}], "closed": True}
+        self.assertEqual(self.engine.file_content(
+            "codex:same", self.engine.file_id("codex:same", "/work/repo/a.txt")),
                          ("text/plain", b"codex", None))
 
         self.codex.context = mock.Mock(side_effect=AssertionError(
@@ -990,10 +1065,37 @@ class EngineProviderTest(unittest.TestCase):
                          {"ok": False, "error": "unknown session"})
         self.assertEqual(self.engine.closed_context("codex:unknown"),
                          {"ok": False, "error": "unknown session"})
-        self.assertEqual(self.engine.file_content("codex:unknown", "/work/private"),
+        self.assertEqual(self.engine.file_content("codex:unknown", "0" * 24),
                          (None, None, "unknown session"))
         self.codex.context.assert_not_called()
         self.codex.file_content.assert_not_called()
+
+    def test_closed_resume_request_is_durable_idempotent_and_exact(self):
+        sid = "codex:closed-owned"
+        self.engine.closed_resume_capability = mock.Mock(return_value=(True, None))
+        self.codex.resume_owned_thread = mock.Mock(return_value={
+            "ok": True, "session_id": sid, "resumed": True})
+        self.engine.snapshot_cache = {"sessions": [], "providers": {
+            "codex": {"ok": True}, "claude": {"ok": True}}}
+        action = {"session_id": sid, "text": "continue the saved work",
+                  "client_request_id": "resume-request-123"}
+
+        first = self.engine.resume_and_send(action)
+        second = self.engine.resume_and_send(action)
+        self.assertTrue(first["ok"])
+        self.assertEqual(second["outbox_id"], first["outbox_id"])
+        self.assertEqual(first["queue_state"], "waiting_availability")
+        self.codex.resume_owned_thread.assert_called_once_with(sid)
+        row = self.engine.outbox.get(first["outbox_id"])
+        self.assertEqual(row["target_session_id"], sid)
+        self.assertEqual(row["origin"], "closed_resume")
+
+        self.engine.closed_resume_capability = mock.Mock(
+            return_value=(False, "external Codex thread is view only"))
+        refused = self.engine.resume_and_send({**action,
+            "session_id": "codex:external", "client_request_id": "resume-request-456"})
+        self.assertFalse(refused["ok"])
+        self.assertIn("view only", refused["error"])
 
     def test_codex_terminal_attaches_to_shared_runtime(self):
         session = codex_session()
@@ -1219,7 +1321,7 @@ class EngineProviderTest(unittest.TestCase):
         ctype, data, error = self.engine.file_content("same", self.transcript)
         self.assertIsNone(ctype)
         self.assertIsNone(data)
-        self.assertIn("not a file this session delivered", error)
+        self.assertEqual(error, "invalid file selector")
 
     def test_legacy_ntfy_is_manual_generic_and_disabled_by_default(self):
         self.engine.cfg["ntfy_topic"] = "private-topic"
@@ -1243,15 +1345,20 @@ class EngineProviderTest(unittest.TestCase):
         self.assertNotIn("dashboard_url", fleet["settings"])
 
     def test_token_cookie_requires_exact_cookie_name_and_value(self):
-        def check(cookie="", header=""):
-            obj = SimpleNamespace(eng=SimpleNamespace(cfg={"act_token": "secret"}),
+        def check(cookie="", header="", mode="production"):
+            obj = SimpleNamespace(eng=SimpleNamespace(cfg={"act_token": "secret",
+                                                           "instance_mode": mode}),
                                   headers={"Cookie": cookie, "X-Act-Token": header})
             return Handler.token_ok(obj)
 
-        self.assertTrue(check(cookie="act_token=secret"))
+        self.assertTrue(check(cookie="act_token_production=secret"))
+        self.assertTrue(check(cookie="act_token_staging=secret", mode="staging"))
         self.assertTrue(check(header="secret"))
+        self.assertFalse(check(cookie="act_token=secret"))
+        self.assertFalse(check(cookie="act_token_staging=secret"))
+        self.assertFalse(check(cookie="act_token_production=secret", mode="staging"))
         self.assertFalse(check(cookie="xact_token=secret"))
-        self.assertFalse(check(cookie="act_token=secret-suffix"))
+        self.assertFalse(check(cookie="act_token_production=secret-suffix"))
 
     def test_claude_actions_share_validated_engine_surface(self):
         reg = {"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
@@ -3343,12 +3450,21 @@ class EngineProviderTest(unittest.TestCase):
         tail = Tail(self.transcript)
         text = "### Default width\n\nUse **Fit the screen**."
         tail.convo.append({"role": "assistant", "text": text})
-        self.assertEqual(tail.last_message(500), {"role": "assistant", "text": text})
-        long_text = "x" * 600
+        self.assertEqual(tail.last_message(800), {"role": "assistant", "text": text})
+        long_text = "x" * 900
         tail.convo.append({"role": "assistant", "text": long_text})
-        preview = tail.last_message(500)["text"]
-        self.assertEqual(len(preview), 500)
+        preview = tail.last_message(800)["text"]
+        self.assertEqual(len(preview), 800)
         self.assertTrue(preview.endswith("…"))
+
+    def test_claude_full_chat_keeps_complete_large_messages(self):
+        tail = Tail(self.transcript)
+        first = "a" * 5001
+        second = "b" * 5002
+        tail._convo_add("assistant", first, "2026-07-20T10:00:00Z")
+        tail._convo_add("assistant", second, "2026-07-20T10:00:01Z")
+        self.assertEqual(len(tail.convo), 1)
+        self.assertEqual(tail.convo[0]["text"], first + "\n\n" + second)
 
     def test_task_notification_ends_killed_agent_but_not_a_resumed_agent(self):
         subdir = os.path.join(self.tmp.name, "agent-parent", "subagents")

@@ -15,6 +15,39 @@ async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
 }
 
+async function fixtureFile(page, sid, name) {
+  const response = await page.request.get(`/api/context?sid=${encodeURIComponent(sid)}`);
+  const context = await response.json();
+  const file = (context.files || []).find(item => item.name === name);
+  expect(file, `fixture file ${name} for ${sid}`).toBeTruthy();
+  expect(file).not.toHaveProperty('path');
+  return file;
+}
+
+async function openFixtureFile(page, sid, name) {
+  const file = await fixtureFile(page, sid, name);
+  await page.evaluate(({ sessionId, fileId }) =>
+    viewFile(encodeURIComponent(sessionId), encodeURIComponent(fileId)),
+  { sessionId: sid, fileId: file.file_id });
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected', 'true');
+  return file;
+}
+
+async function openSubagent(page, sid, agentId, { all = false } = {}) {
+  await page.evaluate(sessionId => {
+    if (globalThis.settingsOpen) closeSettings();
+    openSession(sessionId);
+    setSessionSection('subagents');
+  }, sid);
+  await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
+  if (all) await page.evaluate(() => setSubagentFilter('all'));
+  await page.evaluate(({ sessionId, aid }) =>
+    selectWorkspaceAgent(encodeURIComponent(sessionId), encodeURIComponent(aid)),
+  { sessionId: sid, aid: agentId });
+  await expect(page.locator('#atitle')).not.toHaveText('Subagents');
+}
+
 async function sendModifiedReturn(page, locator) {
   const mac = await page.evaluate(() => /Mac|iPhone|iPad|iPod/.test(navigator.platform || ''));
   await locator.press(mac ? 'Meta+Enter' : 'Control+Enter');
@@ -59,12 +92,19 @@ test.afterEach(async ({ page }) => {
 
 test('staging is unmistakable and controls only staging-owned sessions', async ({ page }) => {
   await reset(page, 'staging');
+  expect(await page.context().cookies()).toEqual(expect.arrayContaining([
+    expect.objectContaining({name:'act_token_staging',value:'abcdef123456'})]));
   await expect(page.locator('#instancebanner')).toBeVisible();
   await expect(page.locator('#instancebanner')).toContainText('STAGING');
   await expect(page).toHaveTitle(/Fleet Staging/);
   await expect(page.locator('[data-sid="claude-one"] .accessbadge')).toHaveText('view only');
   await page.locator('[data-sid="claude-one"] .shead').click();
   await expect(page.locator('#sact .composer')).toHaveCount(0);
+  await page.locator('#sact .latestfile').click();
+  await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#vbody')).toContainText('Safe preview');
+  await page.locator('#sclose').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
   await page.locator('#sclose').click();
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sact .composer')).toBeVisible();
@@ -216,12 +256,12 @@ test('native decisions lock double taps and relay/Outbox failures keep recovery'
   await expect(page.locator('#sact .optbtn').first()).toBeVisible();
   await page.locator('#sact .optbtn').first().evaluate(button => { button.click(); button.click(); });
   await expect(page.locator('#sbody .optimistic')).toHaveCount(1);
-  await expect(page.locator('#sact .optbtn').first()).toBeDisabled();
+  await expect(page.locator('#sact .optbtn')).toHaveCount(0);
   await page.waitForTimeout(850);
   expect((await fixtureState(page)).actions.filter(item => item.type === 'option')).toHaveLength(1);
 
   await reset(page, 'subagent');
-  await page.evaluate(() => openAgent('codex:thread-one', 'child-one'));
+  await page.evaluate(() => openAgent('codex:thread-one', 'agent-child-one'));
   await expect(page.locator('#aft')).toBeVisible();
   await page.route('**/api/act', async route => {
     const payload = route.request().postDataJSON();
@@ -231,10 +271,10 @@ test('native decisions lock double taps and relay/Outbox failures keep recovery'
       body: JSON.stringify({ ok: false, error: 'relay path unavailable' }) });
   });
   await page.locator('#aft').fill('Preserve this exact relay');
-  await page.locator('#aact').getByRole('button', { name: 'relay' }).click();
-  await expect(page.locator('#aact .quickfeedback')).toContainText('Relaying');
-  await expect(page.locator('#aact .quickfeedback')).toContainText('relay path unavailable');
-  await page.locator('#aact .quickfeedback').getByRole('button', { name: 'restore' }).click();
+  await page.locator('#sact').getByRole('button', { name: 'relay' }).click();
+  await expect(page.locator('#sact .quickfeedback')).toContainText('Relaying');
+  await expect(page.locator('#sact .quickfeedback')).toContainText('relay path unavailable');
+  await page.locator('#sact .quickfeedback').getByRole('button', { name: 'restore' }).click();
   await expect(page.locator('#aft')).toHaveValue('Preserve this exact relay');
   await page.unroute('**/api/act');
 
@@ -276,7 +316,7 @@ test('lost native delivery results never offer an unsafe automatic retry', async
   await page.unroute('**/api/act');
 
   await reset(page,'subagent');
-  await page.evaluate(()=>openAgent('codex:thread-one','child-one'));
+  await page.evaluate(()=>openAgent('codex:thread-one','agent-child-one'));
   await page.route('**/api/act',async route=>{
     const payload=route.request().postDataJSON();
     if(payload.type!=='relay')return route.continue();
@@ -284,8 +324,8 @@ test('lost native delivery results never offer an unsafe automatic retry', async
       ok:false,code:'delivery_uncertain',error:'Check the parent terminal'})});
   });
   await page.locator('#aft').fill('Possibly relayed');
-  await page.locator('#aact').getByRole('button',{name:'relay'}).click();
-  const relay=page.locator('#aact .quickfeedback');
+  await page.locator('#sact').getByRole('button',{name:'relay'}).click();
+  const relay=page.locator('#sact .quickfeedback');
   await expect(relay).toContainText('Relay unconfirmed');
   await expect(relay).toContainText('Check the parent terminal');
   await expect(relay.getByRole('button',{name:'restore'})).toHaveCount(0);
@@ -316,11 +356,11 @@ test('unchanged and focused conversations repaint only when their content revisi
   expect(await page.evaluate(() => document.querySelector('#sbody .aconvo') === window.__stableConversation)).toBe(true);
 
   await reset(page, 'subagent');
-  await page.evaluate(() => openAgent('codex:thread-one', 'child-one'));
+  await page.evaluate(() => openAgent('codex:thread-one', 'agent-child-one'));
   const relay = page.locator('#aft');
   await relay.fill('draft survives transcript repaint');
   await page.evaluate(() => {
-    const key = agentCacheKey('codex:thread-one', 'child-one');
+    const key = agentCacheKey('codex:thread-one', 'agent-child-one');
     agentCache[key].messages.push({ role: 'assistant', text: 'New row while typing' });
     renderAgent();
   });
@@ -377,24 +417,22 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
   await expect(strip.locator('.status-cost-breakdown')).toContainText('Review protocol mapping');
   await page.locator('#sclose').click();
 
-  const codexCard=page.locator('[data-sid="codex:thread-one"]');
-  await codexCard.getByRole('button', { name: /more/ }).click();
-  await codexCard.getByText(/completed agents/).click();
-  await codexCard.getByText('reviewer', { exact: true }).click();
-  const agentStrip=page.locator('#aact .statusstrip');
+  await openSubagent(page,'codex:thread-one','agent-child-one',{all:true});
+  const agentStrip=page.locator('#sact .statusstrip');
   await expect(agentStrip).toBeVisible();
   await expect(agentStrip).toHaveClass(/frozen/);
   await expect(agentStrip).toContainText('GPT-5.4 · high');
   await expect(agentStrip).not.toContainText('$0.00');
   await expect(agentStrip.locator('.status-cache')).toHaveCount(0);
-  await page.locator('#aclose').click();
+  await page.locator('#sclose').click();
 
   await goTo(page,'history');
   await page.locator('[data-history-sid="codex:closed"]').getByRole('button',{name:'View'}).click();
   const closedStrip=page.locator('#sact .statusstrip');
   await expect(closedStrip).toBeVisible();
   await expect(closedStrip).toHaveClass(/frozen/);
-  await expect(page.locator('#sact textarea')).toHaveCount(0);
+  await expect(page.locator('#sact textarea')).toBeVisible();
+  await expect(page.locator('#sact textarea')).toBeDisabled();
 });
 
 test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
@@ -448,7 +486,8 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await expect(child).toContainText('fleet-dash · Codex parity work · codex-integration');
   await expect(page.locator('#pinned > *, #actioninbox > *, #needsyou > *, #working > *, #sessions > *')).toHaveCount(0);
   await child.click();
-  await expect(page.locator('#aview')).toBeVisible();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#atitle')).toContainText('Review protocol mapping');
 });
 
@@ -473,24 +512,69 @@ test('desktop navigation side and nested Settings preserve the full chat state',
 
   await page.evaluate(() => openSession('codex:thread-one'));
   await expect(page.locator('#sbody')).toContainText('Conversation message 204');
-  await page.getByRole('button', { name: 'Why here?' }).click();
-  await expect(page.locator('#sevidence')).toBeVisible();
   await page.evaluate(() => { document.querySelector('#sbody').scrollTop = 125; });
   const before = await page.locator('#sbody').evaluate(element => element.scrollTop);
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#spanel-details')).toBeVisible();
+  await expect(page.locator('#detail-placement')).toContainText('Available');
   await page.evaluate(() => navigateTo('settings'));
   await expect(page.locator('#settingsview')).toBeVisible();
-  await expect(page.locator('#sevidence')).toBeVisible();
   await page.goBack();
   await expect(page.locator('#settingsview')).toBeHidden();
   await expect(page.locator('#sview')).toBeVisible();
-  await expect(page.locator('#sevidence')).toBeVisible();
-  expect(await page.locator('#sbody').evaluate(element => element.scrollTop)).toBe(before);
+  await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-chat').click();
+  expect(Math.abs(await page.locator('#sbody').evaluate(element => element.scrollTop)-before)).toBeLessThan(4);
 
-  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
-    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
-  await expect(page.locator('#vtitle')).toHaveText('📄 artifact.md — artifact');
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
+  await expect(page.locator('#vtitle')).toContainText('artifact.md');
+  await expect(page.locator('#vtitle')).toContainText('Codex updated this file');
   await expect(page.locator('#vtitle')).not.toContainText('Codex parity work');
   await expect(page.locator('#vtitle .vfsep')).toHaveCount(0);
+});
+
+test('generic file viewer renders isolated inline-script HTML, PDF, and formatted JSON', async ({ page }) => {
+  await reset(page);
+  await page.evaluate(() => { window.__unsafeHtmlRan=false; });
+  const htmlFile=await openFixtureFile(page,'codex:thread-one','preview.html');
+  const htmlFrame=page.locator('#vbody .htmlpreview');
+  await expect(htmlFrame).toBeVisible();
+  await expect(htmlFrame).toHaveAttribute('sandbox','allow-scripts');
+  await expect(htmlFrame).toHaveAttribute('referrerpolicy','no-referrer');
+  const sandboxedDoc=await htmlFrame.evaluate(frame=>{
+    const doc=new DOMParser().parseFromString(frame.srcdoc,'text/html');
+    return{heading:doc.querySelector('h1')?.textContent,inlineScripts:doc.querySelectorAll(
+      'script:not([src])').length,externalScripts:doc.querySelectorAll('script[src]').length,
+      formAction:doc.querySelector('form')?.getAttribute('action'),
+      imageSource:doc.querySelector('img')?.getAttribute('src'),
+      csp:doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content};
+  });
+  expect(sandboxedDoc).toMatchObject({heading:'Rendered HTML',inlineScripts:1,externalScripts:0,
+    formAction:null,imageSource:null});
+  expect(sandboxedDoc.csp).toContain("default-src 'none'");
+  expect(sandboxedDoc.csp).toContain("script-src 'unsafe-inline'");
+  expect(sandboxedDoc.csp).toContain("connect-src 'none'");
+  await expect(page.frameLocator('#vbody .htmlpreview').locator('#generated')).toHaveText('Inline chart rendered');
+  expect(await page.evaluate(()=>window.__unsafeHtmlRan)).toBe(false);
+  const htmlResponse=await page.request.get(
+    `/api/file?sid=codex%3Athread-one&fid=${htmlFile.file_id}`);
+  expect(htmlResponse.headers()['content-type']).toContain('text/plain');
+
+  await openFixtureFile(page,'codex:thread-one','data.json');
+  await expect(page.locator('#vbody .jsondoc')).toContainText('"status": "ready"');
+  await expect(page.locator('#vbody .jsondoc')).toContainText('"items": [');
+  await expect(page.locator('#vbody')).not.toHaveClass(/frameview/);
+
+  const pdfFile=await fixtureFile(page,'codex:thread-one','report.pdf');
+  const pdfResponse=await page.request.get(
+    `/api/file?sid=codex%3Athread-one&fid=${pdfFile.file_id}`);
+  expect(pdfResponse.headers()['content-type']).toContain('application/pdf');
+  expect(pdfResponse.headers()['x-content-type-options']).toBe('nosniff');
+  await openFixtureFile(page,'codex:thread-one','report.pdf');
+  const pdfFrame=page.locator('#vbody .pdfpreview');
+  await expect(pdfFrame).toBeVisible();
+  await expect(pdfFrame).not.toHaveAttribute('sandbox',/./);
+  await expect(pdfFrame).toHaveAttribute('src',new RegExp(pdfFile.file_id));
 });
 
 test('cross-provider search filters, exact context, live handoff, and rebuild', async ({ page }, testInfo) => {
@@ -529,9 +613,9 @@ test('cross-provider search filters, exact context, live handoff, and rebuild', 
   await page.locator('#searchresults .searchresult').click();
   await expect(page.locator('#searchviewaction')).toContainText('Open artifact');
   await page.locator('#searchviewaction').getByRole('button', { name: 'Open artifact' }).click();
-  await expect(page.locator('#viewer')).toBeVisible();
+  await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
   await expect(page.locator('#vbody')).toContainText('Safe preview');
-  await page.locator('#vclose').click();
+  await page.locator('#sclose').click();
 
   await page.locator('#search-rebuild').click();
   await expect(page.locator('#confirm')).toBeVisible();
@@ -601,10 +685,8 @@ test('editable exact provider handoff works from chat and Markdown with nested b
   await page.locator('#handoffclose').click();
   await expect(page.locator('#sview')).toContainText('Durable closed conversation');
 
-  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
-    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
-  await expect(page.locator('#viewer')).toBeVisible();
-  await page.locator('#vctrl .ovbtn').click();
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
+  await page.locator('#sctrl .ovbtn').click();
   await expect(page.getByRole('menuitem', { name: /Continue in Codex/ })).toBeVisible();
   await page.getByRole('menuitem', { name: /Continue in Claude/ }).click();
   await page.locator('#handoffpreview').fill((await page.locator('#handoffpreview').inputValue()) + '\n\nAccepted edit.');
@@ -744,39 +826,80 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(form.locator('select').filter({ has: page.locator('option[value="plan"]') })).toHaveValue('plan');
   await expect(form).toContainText('gpt-5.4');
 
-  await codex.getByRole('button', { name: /more/ }).click();
-  await expect(codex).toContainText('unavailable — App Server reports tokens, not currency');
-  await codex.getByText(/changed \/ generated files/).click();
-  await codex.getByRole('button', { name: /artifact.md/ }).click();
-  await expect(page.locator('#viewer')).toBeVisible();
+  await codex.locator('.shead').click();
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#detail-overview')).toContainText('unavailable');
+  await page.locator('#stab-files').click();
+  await page.getByRole('button', { name: /artifact\.md/ }).click();
   await expect(page.locator('#vbody')).toContainText('Safe preview');
   await page.screenshot({ path: testInfo.outputPath('artifact-preview.png'), fullPage: true });
 });
 
-test('session placement evidence is visible on cards and in a paged desktop/mobile rail', async ({ page }, testInfo) => {
+test('session placement evidence lives in the Details section', async ({ page }, testInfo) => {
   await reset(page);
   const card = page.locator('[data-sid="claude-one"]');
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.locator('details.statewhy > summary').click();
-  await expect(card.locator('.statewhybody')).toContainText('placement.default.available');
-  await expect(card.locator('.statewhybody')).toContainText('Provider signal');
-
   await card.locator('.shead').click();
   await expect(page.locator('#sview')).toBeVisible();
-  await page.getByRole('button', { name: /Why here/ }).click();
-  const rail = page.locator('#sevidence');
-  await expect(rail).toBeVisible();
-  await expect(rail).toContainText('Why Fleet put this here');
-  await expect(rail).toContainText('Available');
-  await expect(rail).toContainText('placement.default.available');
-  await expect(rail.locator('.evidenceevent')).toHaveCount(2);
-  await expect(rail).toContainText('Working');
+  await page.locator('#stab-details').click();
+  const details = page.locator('#spanel-details');
+  await expect(details).toBeVisible();
+  const panelLayout = await page.evaluate(() => {
+    const workspace = document.querySelector('#sworkspace').getBoundingClientRect();
+    const chat = document.querySelector('#spanel-chat');
+    const selected = document.querySelector('#spanel-details').getBoundingClientRect();
+    return {workspaceTop: workspace.top, selectedTop: selected.top,
+      chatDisplay: getComputedStyle(chat).display, chatHeight: chat.getBoundingClientRect().height};
+  });
+  expect(panelLayout.chatDisplay).toBe('none');
+  expect(panelLayout.chatHeight).toBe(0);
+  expect(Math.abs(panelLayout.selectedTop-panelLayout.workspaceTop)).toBeLessThan(1);
+  await expect(details.locator('#detail-placement')).toContainText('Available');
+  await expect(details.locator('#detail-placement')).toContainText('placement.default.available');
+  await expect(details.locator('#detail-placement')).toContainText('Provider signal');
+  await expect(details.locator('.evidenceevent')).toHaveCount(2);
+  await expect(details).not.toContainText('changed / generated files');
+  await expect(details).not.toContainText('completed agents');
   if (testInfo.project.name.startsWith('mobile')) {
-    expect(await rail.evaluate(element => element.getBoundingClientRect().width <= window.innerWidth)).toBe(true);
+    await expect(page.locator('#sdetailindex')).toHaveCSS('overflow-x','auto');
   }
   await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
-  await rail.getByRole('button', { name: 'close state evidence' }).click();
-  await expect(rail).toBeHidden();
+});
+
+test('workspace uses active agent counts, persistent desktop splits, and one parent composer height', async ({ page }, testInfo) => {
+  await reset(page, 'subagent');
+  await page.evaluate(() => {
+    workspaceSplitWidths={files:300,subagents:300};persistWorkspaceSplits();
+    const session=last.sessions.find(item=>item.session_id==='codex:thread-one');
+    session.agents.push({...session.agents[0],agent_id:'agent-completed-two',state:'done',
+      description:'Completed child'});
+    session.agents_total=2;render(last,true);openSession('codex:thread-one');
+  });
+  await expect(page.locator('#stab-subagents')).toHaveText('Subagents 1');
+  const actionHeight=()=>page.locator('#sact').evaluate(element=>element.getBoundingClientRect().height);
+  const heights=[await actionHeight()];
+
+  await page.locator('#stab-files').click();
+  heights.push(await actionHeight());
+  const fileDivider=page.getByRole('separator',{name:'Resize file list'});
+  if(testInfo.project.name==='desktop'){
+    await expect(fileDivider).toBeVisible();
+    const before=await page.locator('#sfilelist').evaluate(element=>element.getBoundingClientRect().width);
+    await fileDivider.focus();await fileDivider.press('ArrowRight');
+    const after=await page.locator('#sfilelist').evaluate(element=>element.getBoundingClientRect().width);
+    expect(after-before).toBeGreaterThan(10);
+  }else await expect(fileDivider).toBeHidden();
+
+  await page.locator('#stab-subagents').click();
+  heights.push(await actionHeight());
+  const agentDivider=page.getByRole('separator',{name:'Resize subagent list'});
+  if(testInfo.project.name==='desktop'){
+    await agentDivider.focus();await agentDivider.press('ArrowLeft');
+    const saved=await page.evaluate(()=>JSON.parse(localStorage.getItem(WORKSPACE_SPLIT_STORE_KEY)));
+    expect(saved.files).toBeGreaterThan(saved.subagents);
+  }
+  await page.locator('#stab-details').click();
+  heights.push(await actionHeight());
+  expect(Math.max(...heights)-Math.min(...heights)).toBeLessThan(1);
 });
 
 test('context gauge, Markdown peek, and shared reading width stay legible', async ({ page }, testInfo) => {
@@ -795,15 +918,26 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
   await expect(card).toHaveClass(/fixedpeek/);
-  await expand.click();
+  await peekRow.locator('.lmwho').click();
   await expect(peekRow).toHaveClass(/expanded/);
   await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
   const expandedBox = await peek.evaluate(el => el.getBoundingClientRect().height);
   expect(expandedBox).toBeGreaterThan(peekBox.height);
   const expandedText = await peek.innerText();
-  expect(expandedText.length).toBeLessThanOrEqual(500);
+  expect(expandedText.length).toBeLessThanOrEqual(800);
   expect(expandedText.endsWith('…')).toBe(true);
+  await page.evaluate(() => {
+    window.__peekLinkClicks = 0;
+    document.querySelector('.sessionpeek a').addEventListener('click', event => {
+      event.preventDefault();window.__peekLinkClicks++;
+    });
+  });
+  await peekRow.getByRole('link', { name: 'Fleet docs' }).dispatchEvent('click');
+  await expect(peekRow).toHaveClass(/expanded/);
+  expect(await page.evaluate(() => window.__peekLinkClicks)).toBe(1);
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
+  await peekRow.locator('.lmwho').click();
+  await expect(peekRow).toHaveClass(/expanded/);
   await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
   await expect(peekRow).toHaveClass(/truncated/);
   await expect(card).toHaveClass(/fixedpeek/);
@@ -871,26 +1005,37 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   expect(Math.abs(centeredChat.left - centeredChat.right)).toBeLessThan(2);
   await page.locator('#sclose').click();
 
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.getByText(/changed \/ generated files/).click();
-  await card.getByRole('button', { name: /artifact.md/ }).click();
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
   const doc = page.locator('#vbody > .mdoc');
-  const centeredDoc = await doc.evaluate(el => ({ width: el.getBoundingClientRect().width,
-    left: el.getBoundingClientRect().left,
-    right: innerWidth - el.getBoundingClientRect().right }));
+  const centeredDoc = await doc.evaluate(el => {const rect=el.getBoundingClientRect(),parent=el.parentElement.getBoundingClientRect();return({
+    width:rect.width,left:rect.left-parent.left,right:parent.right-rect.right});});
   expect(centeredDoc.width).toBeLessThanOrEqual(760);
   expect(Math.abs(centeredDoc.left - centeredDoc.right)).toBeLessThan(2);
-  await page.locator('#vclose').click();
-
-  await card.getByText(/completed agents/).click();
-  await card.getByText('reviewer', { exact: true }).click();
+  await openSubagent(page,'codex:thread-one','agent-child-one',{all:true});
   const agent = page.locator('#abody > .aconvo');
-  const centeredAgent = await agent.evaluate(el => ({ width: el.getBoundingClientRect().width,
-    left: el.getBoundingClientRect().left,
-    right: innerWidth - el.getBoundingClientRect().right }));
+  const centeredAgent = await agent.evaluate(el => {const rect=el.getBoundingClientRect(),parent=el.parentElement.getBoundingClientRect();return({
+    width:rect.width,left:rect.left-parent.left,right:parent.right-rect.right});});
   expect(centeredAgent.width).toBeLessThanOrEqual(760);
   expect(Math.abs(centeredAgent.left - centeredAgent.right)).toBeLessThan(2);
   await page.screenshot({ path: testInfo.outputPath('centered-reading-width.png'), fullPage: true });
+});
+
+test('a fully visible collapsed peek has no expansion action', async ({ page }) => {
+  await reset(page);
+  const peek = page.locator('[data-sid="codex:thread-one"] .sessionpeek');
+  await expect(peek).not.toHaveClass(/truncated|expanded/);
+  await peek.locator('.lmwho').click();
+  await expect(peek).not.toHaveClass(/truncated|expanded/);
+  await expect(peek.getByRole('button', { name: 'collapse latest message' })).toHaveCount(0);
+});
+
+test('full chat renders a large message without discarding text', async ({ page }) => {
+  await reset(page, 'large-message');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const body = page.locator('#sbody .cmsg.assistant .cbody');
+  await expect(body).toContainText('Large response begins.');
+  await expect(body).toContainText('END-OF-LARGE-RESPONSE');
+  expect((await body.innerText()).length).toBeGreaterThan(10_000);
 });
 
 test('saving a numeric setting does not swallow the next control click', async ({ page }) => {
@@ -923,17 +1068,14 @@ test('large conversations load newest-first in bounded pages without losing olde
   await expect(page.locator('#sbody')).toContainText('Conversation message 000');
   await page.locator('#sclose').click();
 
-  const card = page.locator('[data-sid="codex:thread-one"]');
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.getByText(/completed agents/).click();
-  await card.getByText('reviewer', { exact: true }).click();
+  await openSubagent(page,'codex:thread-one','agent-child-one',{all:true});
   await expect(page.locator('#abody')).toContainText('Subagent report 204');
   for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
     await page.locator('#abody .oldermsgs').click();
   }
   await expect(page.locator('#abody .cmsg')).toHaveCount(205);
   await expect(page.locator('#abody')).toContainText('Subagent report 000');
-  await page.locator('#aclose').click();
+  await page.locator('#sclose').click();
 
   await goTo(page, 'history');
   const closed = page.locator('[data-history-sid="closed-large"]');
@@ -950,7 +1092,7 @@ test('large conversations load newest-first in bounded pages without losing olde
     '/api/context?sid=codex%3Athread-one&limit=50&cursor=999')).json();
   expect(invalid.ok).toBe(false);
   for (const route of ['/api/closed_context?sid=closed-large',
-    '/api/agent_context?sid=codex%3Athread-one&aid=child-one']) {
+    '/api/agent_context?sid=codex%3Athread-one&aid=agent-child-one']) {
     const response = await (await page.request.get(route+'&limit=50&cursor=999')).json();
     expect(response.ok).toBe(false);
   }
@@ -982,7 +1124,7 @@ test('loaded conversation pages survive tail refresh and an offline reload', asy
   }finally{await context.setOffline(false);}
 });
 
-test('session card surfaces distinguish active, available, and expanded information', async ({ page }, testInfo) => {
+test('session cards remove More and show only populated active-agent preview rows', async ({ page }, testInfo) => {
   const themeSurfaces = () => page.evaluate(() => {
     const probe = document.createElement('span');
     document.body.appendChild(probe);
@@ -1005,16 +1147,14 @@ test('session card surfaces distinguish active, available, and expanded informat
   expect((await cardStyle(idle)).opacity).toBe('1');
   const peekFrame = await idle.evaluate(card => {
     const peek = card.querySelector('.sessionpeek');
-    const more = card.querySelector('.morebtn');
     const body = peek.querySelector('.peekbody');
     const peekRect = peek.getBoundingClientRect();
-    return {gap: more.getBoundingClientRect().top - peekRect.bottom,
-      peekHeight: peekRect.height,
+    return {peekHeight: peekRect.height,
       bodyBottomGap: peekRect.bottom - body.getBoundingClientRect().bottom};
   });
-  expect(peekFrame.gap).toBeLessThan(1);
   expect(peekFrame.peekHeight).toBeGreaterThan(40);
   expect(peekFrame.bodyBottomGap).toBeLessThan(8);
+  await expect(idle.locator('.morebtn,.detail,.agentminipreview')).toHaveCount(0);
 
   await reset(page, 'subagent');
   surfaces = await themeSurfaces();
@@ -1022,23 +1162,13 @@ test('session card surfaces distinguish active, available, and expanded informat
   await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
   expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
     .toBe(surfaces.card2);
-  const activePeekFrame = await running.evaluate(card => {
-    const peek = card.querySelector('.sessionpeek');
-    const lines = Number(getComputedStyle(card).getPropertyValue('--session-card-lines'));
-    const peekRect = peek.getBoundingClientRect();
-    const agentsRect = card.querySelector('.agents').getBoundingClientRect();
-    return {height: peekRect.height, expected: 13 + lines * 17.4,
-      gapToAgents: agentsRect.top - peekRect.bottom};
-  });
-  expect(activePeekFrame.height).toBeGreaterThanOrEqual(activePeekFrame.expected - 1);
-  expect(activePeekFrame.gapToAgents).toBeLessThan(1);
-  const more = running.getByRole('button', { name: /more/ });
-  expect(await more.evaluate(el => getComputedStyle(el).paddingTop)).toBe('2px');
-  expect(await more.evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(22);
-  await more.click();
-  await expect(running.locator('.detail')).toBeVisible();
-  expect(await running.locator('.detail').evaluate(el => getComputedStyle(el).backgroundColor))
-    .toBe(surfaces.card);
+  const preview=running.locator('.agentminipreview');
+  await expect(preview).toBeVisible();
+  await expect(preview.locator('.agentminirow')).toHaveCount(1);
+  await expect(preview.locator('.agentminirow.empty')).toHaveCount(0);
+  await expect(preview).toContainText('Review protocol mapping');
+  await expect(preview).not.toContainText(/tokens|cost|GPT-5\.4/);
+  await expect(running.locator('.morebtn,.detail')).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('active-card-contrast.png'), fullPage: true });
 
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
@@ -1066,25 +1196,35 @@ test('quiet in-flight subagents use an uncertain amber signal, not stopped red',
   expect(colors.actual).toBe(colors.expected);
 });
 
-test('full chat keeps main and subagent work visible in a sticky activity footer', async ({ page }) => {
+test('full chat renders main work as the newest non-interactive conversation row', async ({ page }) => {
   await reset(page, 'subagent');
   await page.evaluate(() => openSession('codex:thread-one'));
   const activity = page.locator('#sactivity');
   await expect(activity).toBeVisible();
-  await expect(activity).toContainText('Main session working');
-  await expect(activity).toContainText('1 active subagent');
-  await activity.locator('summary').click();
-  await expect(activity).toContainText('Review protocol mapping');
-  await expect(activity.locator('details')).toHaveAttribute('open', '');
+  await expect(activity).toContainText('Main agent working');
+  await expect(activity.locator('.mainworkingrow')).toBeVisible();
+  await expect(activity.locator('button,summary,details')).toHaveCount(0);
+  await expect(activity).not.toContainText('active subagent');
 
   await reset(page, 'cross-client-active');
   await page.evaluate(() => openSession('codex:thread-one'));
-  await expect(activity).toContainText('Main session working');
-  await expect(activity).not.toContainText('active subagent');
+  await expect(activity).toContainText('Main agent working');
 
   await reset(page, 'base');
   await page.evaluate(() => openSession('codex:thread-one'));
   await expect(activity).toBeHidden();
+});
+
+test('quiet age is limited to working session cards', async ({ page }) => {
+  await reset(page);
+  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveCount(0);
+  await expect(page.locator('[data-sid="codex:thread-one"] .squiet')).toHaveCount(0);
+
+  await reset(page, 'single-question');
+  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveCount(0);
+
+  await reset(page, 'send-while-busy');
+  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveText('quiet 3s');
 });
 
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
@@ -1143,11 +1283,10 @@ test('Claude permission modes are capability-gated and bypass always warns', asy
     .toBe('bypassPermissions');
 
   await page.locator('#sclose').click();
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.getByText('session info', { exact: true }).click();
-  const selector = card.locator('select.permissionselect');
-  await expect(selector).toHaveValue('bypassPermissions');
-  await selector.selectOption('plan');
+  await card.locator('.shead').click();
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await expect(page.getByRole('button',{name:'Bypass permissions',exact:true})).toHaveAttribute('aria-pressed','true');
+  await page.getByRole('button',{name:'Plan',exact:true}).click();
   await expect.poll(async () => (await fixtureState(page)).sessions[0].permission_mode)
     .toBe('plan');
 });
@@ -1299,21 +1438,15 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
 
 test('subagent transcripts stay isolated when different parents reuse an agent id', async ({ page }) => {
   await reset(page, 'agent-collision');
-  const openAgentFor = async sid => {
-    const card = page.locator(`[data-sid="${sid}"]`);
-    await card.getByRole('button', { name: /more/ }).click();
-    await card.getByText(/completed agents/).click();
-    await card.getByText('reviewer', { exact: true }).click();
-  };
-  await openAgentFor('codex:thread-one');
+  await openSubagent(page,'codex:thread-one','agent-child-one',{all:true});
   await expect(page.locator('#abody')).toContainText('First parent report');
-  await page.locator('#aclose').click();
-  await openAgentFor('codex:thread-two');
+  await page.locator('#sclose').click();
+  await openSubagent(page,'codex:thread-two','agent-child-one',{all:true});
   await expect(page.locator('#abody')).toContainText('Second parent report');
   await expect(page.locator('#abody')).not.toContainText('First parent report');
 });
 
-test('overflow menus cover chat, Markdown, subagents, theme, and close history', async ({ page }, testInfo) => {
+test('the shared workspace header keeps session controls across every section', async ({ page }, testInfo) => {
   await reset(page);
   let card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
@@ -1326,32 +1459,24 @@ test('overflow menus cover chat, Markdown, subagents, theme, and close history',
   await expect(page.locator('#sbody')).toHaveClass(/light/);
   await page.locator('#sclose').click();
 
-  card = page.locator('[data-sid="codex:thread-one"]');
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.getByText(/changed \/ generated files/).click();
-  await card.getByRole('button', { name: /artifact.md/ }).click();
-  await page.getByRole('button', { name: 'viewer actions' }).click();
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
+  await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('button', { name: 'Plan', exact: true })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /Appearance.*light \/ dark/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath('viewer-overflow-menu.png'), fullPage: true });
-  await page.locator('#vclose').click();
+  await page.locator('#sclose').click();
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
   await page.reload();
-  card = page.locator('[data-sid="codex:thread-one"]');
-  await card.getByText('reviewer', { exact: true }).click();
-  await expect(page.locator('#abody')).toHaveClass(/light/);
-  await page.getByRole('button', { name: 'subagent actions' }).click();
+  await openSubagent(page,'codex:thread-one','agent-child-one');
+  await expect(page.locator('#sview')).toHaveClass(/light/);
+  await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Appearance.*light \/ dark/ })).toBeVisible();
-  await expect(page.getByRole('menuitem', { name: /Stop parent turn/ })).toBeEnabled();
-  await expect(page.getByRole('menuitem', { name: /Close session/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Plan', exact: true })).toHaveCount(0);
-  await page.getByRole('menuitem', { name: /Stop parent turn/ }).click();
-  await expect(page.locator('#confirm')).toContainText('parent session');
-  await page.locator('#confirm').getByRole('button', { name: 'cancel' }).click();
-  await page.locator('#aclose').click();
+  await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeEnabled();
+  await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeEnabled();
+  await page.locator('#sclose').click();
 
   await reset(page);
   const claude = page.locator('[data-sid="claude-one"]');
@@ -1442,7 +1567,7 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await openAction(page, 'codex:thread-one');
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#oth-smsg-codex\\:thread-one').fill('Only the adapter');
   await page.locator('#sact').getByRole('button', { name: 'answer' }).click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.other)
@@ -1457,7 +1582,7 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
 
   await page.request.post('/test/reset', { data: { scenario: 'multi-question' } });
   await page.reload();
-  await openAction(page, 'codex:thread-one');
+  await expect(page.locator('#sact')).toContainText('Targets');
   await page.locator('#sact').getByRole('button', { name: 'Desktop' }).click();
   await page.locator('#sact .mqarr').last().click();
   await page.locator('#sact').getByRole('button', { name: 'Full' }).click();
@@ -1466,7 +1591,7 @@ test('single, multi, free-text, dismiss, invalid, and stale questions', async ({
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await openAction(page, 'codex:thread-one');
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#sact .xbtn').click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('dismiss');
 });
@@ -1575,12 +1700,13 @@ test('fullscreen question drawer preserves reading position and resizes from nea
   const geometry=await page.evaluate(()=>{
     const view=document.querySelector('#sview').getBoundingClientRect();
     const head=document.querySelector('#shead2').getBoundingClientRect();
+    const tabs=document.querySelector('#stabs').getBoundingClientRect();
     const drawer=document.querySelector('#sact .question-drawer').getBoundingClientRect();
     const composer=document.querySelector('#sact .composer-dock').getBoundingClientRect();
-    return {viewBottom:view.y+view.height,headBottom:head.y+head.height,drawerTop:drawer.y,
+    return {viewBottom:view.y+view.height,headBottom:head.y+head.height,tabsBottom:tabs.y+tabs.height,drawerTop:drawer.y,
       composerBottom:composer.y+composer.height};
   });
-  expect(geometry.drawerTop).toBeLessThanOrEqual(geometry.headBottom+20);
+  expect(geometry.drawerTop).toBeLessThanOrEqual(geometry.tabsBottom+20);
   expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
 
   let expandedGrip=null;
@@ -1632,11 +1758,12 @@ test('messages and question answers render optimistically and recover from failu
 
   await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
   await page.reload();
-  await openAction(page, 'codex:thread-one');
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   const answer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
   await expect(answer).toBeVisible();
-  await expect(answer.locator('.delivery')).toHaveCount(0);
+  await expect(answer.getByLabel('sending')).toBeVisible();
+  await expect(page.locator('#sact .pend')).toHaveCount(0);
   await page.request.post('/test/confirm', { data: { session_id: 'codex:thread-one',
     kind: 'answer', answers: [{ header: 'Scope', q: 'How broad?', a: 'Focused' }] } });
   await refresh(page);
@@ -1645,19 +1772,37 @@ test('messages and question answers render optimistically and recover from failu
 
   await page.request.post('/test/reset', { data: { scenario: 'answer-failure' } });
   await page.reload();
-  await openAction(page, 'codex:thread-one');
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   const failedAnswer = page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
   const restoreAnswer = failedAnswer.getByRole('button', {
     name: 'send failed; restore message' });
   await expect(restoreAnswer).toBeVisible();
+  await expect(page.locator('#sact .pend')).toHaveCount(0);
   await restoreAnswer.click();
   await expect(page.locator('#sbody .optimistic')).toHaveCount(0);
   await expect(page.locator('#sact')).toContainText('How broad should the change be?');
+  await expect(page.locator('#sact').getByRole('button', { name: /Focused/ })).toHaveClass(/sel/);
+
+  await page.request.post('/test/reset', { data: { scenario: 'single-question' } });
+  await page.reload();
+  await expect(page.locator('#sact')).toContainText('How broad should the change be?');
+  await page.route('**/api/act', route => {
+    const payload=route.request().postDataJSON();
+    return payload.type==='option'?route.abort('connectionfailed'):route.continue();
+  });
+  await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
+  const uncertainAnswer=page.locator('#sbody .optimistic').filter({ hasText: 'Scope: Focused' });
+  await expect(uncertainAnswer).toContainText('Delivery uncertain');
+  await expect(uncertainAnswer.getByRole('button', { name: /restore/i })).toHaveCount(0);
+  await expect(page.locator('#sact .pend')).toHaveCount(0);
+  await page.unroute('**/api/act');
+  page.__failures=page.__failures.filter(message=>
+    message!=='Failed to load resource: net::ERR_CONNECTION_FAILED');
 
   await page.request.post('/test/reset', { data: { scenario: 'send-failure' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(page.locator('#sview')).toBeVisible();
   const failedInput = page.locator('#sft-codex\\:thread-one');
   await failedInput.fill('Restore this message');
   await sendModifiedReturn(page, failedInput);
@@ -1760,7 +1905,7 @@ test('message composers use Return for newlines and an explicit modified Return 
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"]').getByText('reviewer', { exact: true }).click();
+  await openSubagent(page,'codex:thread-one','agent-child-one');
   const relay = page.locator('#aft');
   await relay.fill('Relay line');
   await relay.press('Enter');
@@ -1802,6 +1947,38 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
 });
 
+test('mobile session swipes are bounded, ignore horizontal readers, and edge-exit', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile workspace gestures');
+  await reset(page);
+  await page.evaluate(()=>openSession('codex:thread-one'));
+  const swipe=async (fromX,toX,target='#sworkspace')=>page.locator(target).evaluate((node,{fromX,toX})=>{
+    const fire=(type,x)=>{const event=new Event(type,{bubbles:true,cancelable:true});
+      const point={clientX:x,clientY:360};
+      Object.defineProperty(event,'touches',{value:type==='touchend'?[]:[point]});
+      Object.defineProperty(event,'changedTouches',{value:[point]});node.dispatchEvent(event);};
+    fire('touchstart',fromX);fire('touchmove',toX);fire('touchend',toX);
+  },{fromX,toX});
+
+  await swipe(330,90);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
+  await swipe(330,90);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
+  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await swipe(70,320);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
+  await swipe(70,320);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
+  await swipe(70,320);await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+
+  await page.locator('#sbody').evaluate(body=>{const scroller=document.createElement('div');
+    scroller.id='gesture-scroll-probe';scroller.style.cssText='overflow-x:auto;width:120px';
+    scroller.innerHTML='<span style="display:block;width:600px">horizontal reader</span>';body.prepend(scroller);});
+  await swipe(330,90,'#gesture-scroll-probe');
+  await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+
+  await swipe(8,180);
+  await expect(page.locator('#sview')).toBeHidden();
+  await expect(page.locator('#route-now')).toBeVisible();
+  await expect(page).not.toHaveURL(/#session\//);
+});
+
 test('mobile keyboard geometry is flush and preserves chat and Markdown reading anchors', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile visual viewport contract');
   await reset(page,'large-conversation');
@@ -1839,7 +2016,7 @@ test('mobile keyboard geometry is flush and preserves chat and Markdown reading 
     `<p>Markdown reading block ${String(index).padStart(3,'0')} with enough detail to wrap across the phone.</p>`).join('')+'</div>';
     element.scrollTop=760;});
   const viewerBefore=await visibleAnchor(viewerBody);
-  const viewerComposer=page.locator('#vact').getByPlaceholder('send message');
+  const viewerComposer=page.locator('#sact').getByPlaceholder('send message');
   await viewerComposer.focus();
   await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:520,offsetTop:0};syncVisualViewport();});
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
@@ -1849,31 +2026,24 @@ test('mobile keyboard geometry is flush and preserves chat and Markdown reading 
   await page.evaluate(()=>{delete globalThis.__fleetVisualViewportOverride;syncVisualViewport();});
 });
 
-test('Markdown uses the canonical composer and a direct Chat jump without embedding chat history', async ({ page }, testInfo) => {
+test('Files uses the canonical composer and the persistent Chat tab', async ({ page }, testInfo) => {
   await reset(page);
-  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
-    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
-  await expect(page.locator('#viewer')).toBeVisible();
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
   await expect(page.locator('#vbody')).toContainText('Safe preview');
   await expect(page.locator('#vbody .aconvo')).toHaveCount(0);
-  const viewerComposer = page.locator('#vact .freetext.composer');
+  const viewerComposer = page.locator('#sact .freetext.composer');
   await expect(viewerComposer.getByPlaceholder('send message')).toBeVisible();
   await expect(viewerComposer.getByRole('button', {name:'message options'})).toBeVisible();
   await expect(viewerComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
-  const viewerBar=page.locator('#vact .viewer-surfacebar');
-  await expect(viewerBar.getByRole('button', {name:'chat', exact:true})).toBeVisible();
+  await expect(page.locator('#stab-chat')).toBeVisible();
   expect(await viewerComposer.evaluate(element=>[...element.children].map(child=>
     child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
     .toEqual(['plus','message','send']);
-  const upperHeights=await viewerBar.evaluate(element=>{const browser=element.querySelector('.stripbox').getBoundingClientRect(),
-    chat=element.querySelector('.chatjump').getBoundingClientRect();return[browser.height,chat.height];});
-  expect(Math.abs(upperHeights[0]-upperHeights[1])).toBeLessThan(.6);
   await page.screenshot({path:testInfo.outputPath('markdown-canonical-composer.png'),fullPage:true});
   await viewerComposer.getByPlaceholder('send message').fill('Draft shared across reading surfaces');
   await viewerComposer.getByPlaceholder('send message').evaluate(element=>element.blur());
-  await viewerBar.getByRole('button', {name:'chat', exact:true}).click();
-  await expect(page.locator('#viewer')).toBeHidden();
-  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#stab-chat').click();
+  await expect(page.locator('#spanel-chat')).toBeVisible();
   const chatComposer = page.locator('#sact .freetext.composer');
   await expect(chatComposer.getByPlaceholder('send message'))
     .toHaveValue('Draft shared across reading surfaces');
@@ -1881,7 +2051,7 @@ test('Markdown uses the canonical composer and a direct Chat jump without embedd
   await expect(chatComposer.getByRole('button', {name:'send', exact:true})).toBeVisible();
 });
 
-test('chat and Markdown share exact compact composer geometry and left-anchored headers', async ({ page }, testInfo) => {
+test('Chat and Files share exact composer geometry and one persistent header', async ({ page }, testInfo) => {
   await reset(page);
   await page.evaluate(() => openSession('claude-one'));
   const chatComposer=page.locator('#sact .freetext.composer');
@@ -1927,7 +2097,7 @@ test('chat and Markdown share exact compact composer geometry and left-anchored 
     expect(Math.abs(expanded.statusBottom-expanded.fileBottom)).toBeLessThan(.6);
   }
   await page.locator('#sact .latestfile').click();
-  const viewerComposer=page.locator('#vact .freetext.composer');
+  const viewerComposer=page.locator('#sact .freetext.composer');
   await expect(viewerComposer).toBeVisible();
   expect(await viewerComposer.evaluate(element=>[...element.children].map(child=>
     child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
@@ -1936,20 +2106,14 @@ test('chat and Markdown share exact compact composer geometry and left-anchored 
     child.matches('.composertools')?child.querySelector('button').getBoundingClientRect().height:
       child.getBoundingClientRect().height));
   expect(viewerResting).toEqual(resting);
-  const viewerHeader=await page.locator('#vhead').evaluate(header=>{const title=header.querySelector('#vtitle').getBoundingClientRect(),
-    close=header.querySelector('#vclose').getBoundingClientRect(),controls=header.querySelector('#vctrl').getBoundingClientRect();return{
-    titleLeft:title.left,closeRight:close.right,titleRight:title.right,controlsLeft:controls.left,
-    font:parseFloat(getComputedStyle(header.querySelector('.vfname')).fontSize)};});
-  expect(viewerHeader.titleLeft-viewerHeader.closeRight).toBeGreaterThanOrEqual(7);
-  expect(viewerHeader.titleRight).toBeLessThanOrEqual(viewerHeader.controlsLeft);
-  expect(viewerHeader.font).toBeGreaterThanOrEqual(16);
-  const viewerBarHeights=await page.locator('#vact .viewer-surfacebar').evaluate(element=>({
-    browser:element.querySelector('.stripbox').getBoundingClientRect().height,
-    chip:element.querySelector('.fchip').getBoundingClientRect().height,
-    chat:element.querySelector('.chatjump').getBoundingClientRect().height}));
-  expect(viewerBarHeights.browser).toBe(42);
-  expect(viewerBarHeights.chip).toBe(viewerBarHeights.browser);
-  expect(viewerBarHeights.chat).toBe(viewerBarHeights.browser);
+  await expect(page.locator('#shead2')).toBeVisible();
+  await expect(page.locator('#stabs [role="tab"]')).toHaveCount(4);
+  const panes=await page.locator('#sfilebrowser').evaluate(element=>({
+    width:element.getBoundingClientRect().width,
+    list:element.querySelector('#sfilelist').getBoundingClientRect().width,
+    divider:element.querySelector('.workspacedivider').getBoundingClientRect().width,
+    preview:element.querySelector('#sfilepreview').getBoundingClientRect().width}));
+  expect(panes.list+panes.divider+panes.preview).toBeGreaterThanOrEqual(panes.width-2);
 });
 
 test('phone image menu keeps the trusted tap, persists, and sends through the owning provider', async ({ page }, testInfo) => {
@@ -1988,24 +2152,23 @@ test('phone image menu keeps the trusted tap, persists, and sends through the ow
     .toBeNull();
 });
 
-test('Markdown Photo uses the trusted input target, cancels cleanly, and shares one draft with chat', async ({ page }, testInfo) => {
+test('Files Photo uses the trusted input target and shares one draft with Chat', async ({ page }, testInfo) => {
   await reset(page);
-  await page.evaluate(() => viewFile('codex:thread-one', encodeURIComponent('/fixture/artifact.md'),
-    encodeURIComponent('artifact.md'), 'text', encodeURIComponent('artifact')));
-  const options=page.locator('#vact').getByRole('button',{name:'message options'});
+  await openFixtureFile(page,'codex:thread-one','artifact.md');
+  const options=page.locator('#sact').getByRole('button',{name:'message options'});
   await options.click();
   let chooserPromise=page.waitForEvent('filechooser');
-  const photo=page.locator('#vact').getByRole('menuitem',{name:'Send picture'});
+  const photo=page.locator('#sact').getByRole('menuitem',{name:'Send picture'});
   if(testInfo.project.name.startsWith('mobile'))await photo.tap();else await photo.click();
   let chooser=await chooserPromise;await chooser.setFiles([]);
-  await expect(page.locator('#vact .image-draft')).toHaveCount(0);
+  await expect(page.locator('#sact .image-draft')).toHaveCount(0);
 
   await page.evaluate(()=>closeComposerMenus());
   await options.click();
-  await page.locator('#vact .composer-file-input').setInputFiles({name:'viewer-photo.jpg',mimeType:'image/jpeg',
+  await page.locator('#sact .composer-file-input').setInputFiles({name:'viewer-photo.jpg',mimeType:'image/jpeg',
     buffer:Buffer.from([255,216,255,224,0,16,74,70,73,70])});
-  await expect(page.locator('#vact .image-draft')).toContainText('viewer-photo.jpg');
-  await page.locator('#vact .viewer-surfacebar').getByRole('button',{name:'chat'}).click();
+  await expect(page.locator('#sact .image-draft')).toContainText('viewer-photo.jpg');
+  await page.locator('#stab-chat').click();
   await expect(page.locator('#sact .image-draft')).toContainText('viewer-photo.jpg');
   expect(await page.evaluate(()=>JSON.parse(localStorage.getItem('fleet.imageDrafts.v1')||'{}')
     ['codex:thread-one']?.length)).toBe(1);
@@ -2146,12 +2309,10 @@ test('unsent text drafts survive rerenders and reloads until sent or manually de
   await page.locator('#sft-codex\\:thread-one').fill('unsent composer draft');
   await page.reload();
   await expect(page.locator('#nowfilter')).toHaveValue('codex');
-  await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const composer=page.locator('#sft-codex\\:thread-one');
   await expect(composer).toHaveValue('unsent composer draft');
   await composer.fill('');
   await page.reload();
-  await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sft-codex\\:thread-one')).toHaveValue('');
 
   await page.locator('#sclose').click();
@@ -2273,6 +2434,7 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   let card = await openAction(page, 'claude-one');
   await page.locator('#sact').getByRole('button', { name: /Focused/ }).click();
   await expect(page.locator('#sbody .optimistic').getByLabel('sending')).toBeVisible();
+  await expect(page.locator('#sact .pend')).toHaveCount(0);
   await page.locator('#sclose').click();
   await expect(page.locator('#sview')).toBeHidden();
   let feedback = fleetFeedback('claude-one');
@@ -2283,7 +2445,7 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await expect.poll(async () => page.evaluate(() =>
     window.__fleetPerf.summary().input_feedback_ms.p95)).toBeLessThan(100);
   await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
-  await expect(feedback.getByLabel('response submitted')).toBeVisible();
+  await expect(feedback.getByLabel('sending quick response')).toBeVisible();
 
   await page.request.post('/test/confirm', { data: { session_id: 'claude-one',
     kind: 'answer', answers: [{ header: 'Scope', q: 'How broad?', a: 'Focused' }] } });
@@ -2342,12 +2504,13 @@ test('every approval decision and MCP single/multi-select elicitation', async ({
 test('mute persistence, native commands, skills, and parent-routed subagents', async ({ page }) => {
   await reset(page);
   const card = page.locator('[data-sid="codex:thread-one"]');
-  await card.getByRole('button', { name: /more/ }).click();
-  await card.locator('button.bell').click();
-  await refresh(page);
-  await expect(card.locator('button.bell')).toHaveClass(/muted/);
-
   await card.locator('.shead').click();
+  await page.locator('#stab-details').click();
+  await page.locator('#detail-notifications button.bell').click();
+  await refresh(page);
+  await expect(page.locator('#detail-notifications button.bell')).toHaveClass(/muted/);
+
+  await page.locator('#stab-chat').click();
   const input = page.locator('#sft-codex\\:thread-one');
   await input.fill('$rev');
   await expect(page.locator('.slashmenu')).toContainText('$reviewer');
@@ -2357,13 +2520,13 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
 
   await page.request.post('/test/reset', { data: { scenario: 'subagent' } });
   await page.reload();
-  await card.getByText('reviewer', { exact: true }).click();
-  await expect(page.locator('#aview')).toBeVisible();
+  await openSubagent(page,'codex:thread-one','agent-child-one');
+  await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
   await page.locator('#aft').fill('Report the risky mappings');
-  await page.locator('#aact').getByRole('button', { name: 'relay' }).click();
+  await page.locator('#sact').getByRole('button', { name: 'relay' }).click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1))
-    .toMatchObject({ type: 'relay', agent_id: 'child-one' });
-  await expect(page.locator('#aact')).toContainText('parent thread');
+    .toMatchObject({ type: 'relay', agent_id: 'agent-child-one' });
+  await expect(page.locator('#sact')).toContainText('parent thread');
 });
 
 test('closed, external view-only, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
@@ -2427,7 +2590,8 @@ test('backfilled Claude history supports both view and reopen', async ({ page })
 
   await row.getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Durable closed conversation');
-  await expect(page.getByRole('button', { name: 'reopen in terminal' })).toBeVisible();
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#detail-continuation').getByRole('button', { name: 'reopen in terminal' })).toBeVisible();
   await page.locator('#sclose').click();
 
   await row.getByRole('button', { name: 'Reopen' }).click();
@@ -2720,6 +2884,15 @@ test('message Outbox schedules exact session delivery and exposes durable centra
   await expect(page.locator('.outboxrow').first()).toContainText('Sent');
   await expect.poll(async () => (await fixtureState(page)).outbox[0].message).toBe('Edited queued message');
   await page.screenshot({ path: testInfo.outputPath('message-outbox.png'), fullPage: true });
+  await page.locator('.outboxrow').first().getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.locator('#confirm')).toContainText('original delivery outcome remains');
+  await page.locator('#confirm').getByRole('button', { name: 'delete message' }).click();
+  await expect.poll(async () => (await fixtureState(page)).outbox[0].cancelled).toBe(true);
+  await expect(page.locator('.outboxrow')).toHaveCount(0);
+  await page.locator('.outboxtools').getByRole('button', { name: 'Cancelled', exact: true }).click();
+  await expect(page.locator('.outboxrow').first()).toContainText('Cancelled');
+  await expect(page.locator('.outboxrow').first()).toContainText('was Sent');
+  await expect(page.locator('.outboxrow').first().getByRole('button', { name: 'Delete' })).toHaveCount(0);
 });
 
 test('usage-reset and scheduled-new-session forms keep full target configuration', async ({ page }) => {
@@ -2874,11 +3047,18 @@ test('an omitted fleet row cannot close or erase an open conversation', async ({
   await expect(page.locator('#sview')).toBeVisible();
 });
 
-test('full-screen surfaces are semantic focus modals and every session has a keyboard chat control', async ({ page }) => {
+test('full-screen surfaces are semantic focus modals and session headers open Chat by keyboard', async ({ page }) => {
   await reset(page,'base');
   const card=page.locator('[data-sid="claude-one"]');
-  const chat=card.getByRole('button',{name:/Open chat:/});
-  await expect(chat).toBeVisible();await chat.focus();await page.keyboard.press('Enter');
+  const header=card.locator('.shead');
+  await expect(card.locator('.sessionopen')).toHaveCount(0);
+  await card.locator('.spin').click();
+  await expect(page.locator('#sview')).toBeHidden();
+  await card.locator('.smeta').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sclose').click();
+  await expect(page.locator('#sview')).toBeHidden();
+  await header.focus();await page.keyboard.press('Enter');
   const session=page.locator('#sview');await expect(session).toBeVisible();
   await expect(session).toHaveAttribute('role','dialog');await expect(session).toHaveAttribute('aria-modal','true');
   await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
@@ -2892,10 +3072,10 @@ test('full-screen surfaces are semantic focus modals and every session has a key
   await expect(page.locator('#scheduleview')).toBeHidden();
   await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
   await page.locator('#sclose').click();await expect(session).toBeHidden();
-  await expect(chat).toBeFocused();
+  await expect(header).toBeFocused();
   // The live poll always rebuilds volatile card headers. That reconciliation
-  // must not erase the focus which the closed dialog returned to Chat.
-  await page.evaluate(()=>render(last,true));await expect(chat).toBeFocused();
+  // must not erase the focus which the closed dialog returned to the header.
+  await page.evaluate(()=>render(last,true));await expect(header).toBeFocused();
   expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(false);
 });
 

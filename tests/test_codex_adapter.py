@@ -111,9 +111,24 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertEqual([m["role"] for m in out["messages"]],
                          ["user", "assistant", "tool"])
 
+    def test_file_preview_content_types_keep_html_inert(self):
+        expected = {"preview.html": "text/plain; charset=utf-8",
+                    "report.pdf": "application/pdf",
+                    "data.json": "application/json; charset=utf-8"}
+        for name, ctype in expected.items():
+            path = os.path.join(self.tmp.name, name)
+            with open(path, "wb") as handle:
+                handle.write(b"preview")
+            self.adapter.context = lambda _key, value=path: {
+                "ok": True, "files": [{"path": value}]}
+            actual, data, error = self.adapter.file_content("codex:thr-1", path)
+            self.assertIsNone(error)
+            self.assertEqual(actual, ctype)
+            self.assertEqual(data, b"preview")
+
     def test_empty_unmaterialized_thread_has_empty_context(self):
         out = CodexAdapter(client=EmptyThreadClient()).context("codex:thr-empty")
-        self.assertEqual(out, {"ok": True, "messages": [], "files": []})
+        self.assertEqual(out, {"ok": True, "messages": [], "files": [], "agents": []})
 
     def test_actions_strip_provider_prefix(self):
         self.adapter._refresh()
@@ -122,6 +137,24 @@ class CodexAdapterTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(self.client.started, ("thr-1", "continue", {
             "mode": "default", "model": "gpt-5.4", "effort": "high"}))
+
+    def test_resume_requires_explicit_fleet_runtime_ownership(self):
+        allowed, reason = self.adapter.resume_capability("codex:thr-1")
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+        self.assertEqual(self.adapter.resume_owned_thread("codex:thr-1"), {
+            "ok": True, "session_id": "codex:thr-1", "resumed": True})
+
+        state = self.adapter._state()
+        state["threads"].append("external-thread")
+        state.setdefault("thread_meta", {})["external-thread"] = {
+            "runtime_owner": "external", "unmaterialized": False}
+        self.adapter._save_state(state)
+        allowed, reason = self.adapter.resume_capability("codex:external-thread")
+        self.assertFalse(allowed)
+        self.assertIn("view only", reason)
+        self.assertFalse(self.adapter.resume_owned_thread(
+            "codex:external-thread")["ok"])
 
     def test_new_thread_sends_visible_initial_hi_and_marks_materialized(self):
         thread = self.adapter.start_thread("/work/app", "gpt-5.4", "high",

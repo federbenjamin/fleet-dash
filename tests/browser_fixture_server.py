@@ -16,6 +16,26 @@ TOKEN = "abcdef123456"
 LOCK = threading.Lock()
 
 
+def file_id(sid, path):
+    return hashlib.sha256((str(sid) + "\0" + os.path.realpath(path)).encode()).hexdigest()[:24]
+
+
+def fixture_file_rows():
+    return [
+        ("/fixture/artifact.md", "Codex updated this file"),
+        ("/fixture/preview.html", "Interactive preview"),
+        ("/fixture/data.json", "Structured output"),
+        ("/fixture/report.pdf", "Report"),
+    ]
+
+
+def fixture_files(sid):
+    return [{"name": os.path.basename(path),
+             "file_id": file_id(sid, path),
+             "kind": "text", "missing": False, "caption": caption,
+             "delivered": False} for path, caption in fixture_file_rows()]
+
+
 def capabilities(**overrides):
     out = {"submit": True, "interrupt": False, "takeover": False,
            "close": True,
@@ -156,7 +176,7 @@ def fixture_notification(sequence, kind, state, title, summary, provider="claude
 def fresh_state():
     claude = base_session("claude", "claude-one", "Claude parser fix")
     codex = base_session("codex", "codex:thread-one", "Codex parity work")
-    codex["agents"] = [{"agent_id": "child-one", "session_id": codex["session_id"],
+    codex["agents"] = [{"agent_id": "agent-child-one", "session_id": codex["session_id"],
         "agent_type": "reviewer", "description": "Review protocol mapping", "depth": 0,
         "model": "gpt-5.4", "family": "codex", "effort": "high",
         "state": "done", "total_tokens": None, "cost": None,
@@ -607,7 +627,8 @@ def fleet():
                 *copy.deepcopy(STATE["closed"])]]
     outbox_states = {}
     for item in STATE["outbox"]:
-        outbox_states[item["state"]] = outbox_states.get(item["state"], 0) + 1
+        state = "cancelled" if item.get("cancelled") else item["state"]
+        outbox_states[state] = outbox_states.get(state, 0) + 1
     outbox_pending = sum(outbox_states.get(state, 0) for state in
         ("scheduled", "waiting_availability", "waiting_usage_reset", "spawning", "sending"))
     outbox_attention = sum(outbox_states.get(state, 0) for state in
@@ -827,10 +848,15 @@ def set_scenario(name):
             focus_terminal=False, model_effort_settings=False, change_model_effort=False)
     elif name == "markdown-peek":
         preview = (
-            "### Default width\n\nUse **Fit the screen** with `compact code`.\n\n- Fast\n- Clear\n\n"+
-            ("bounded preview content " * 30))
+            "### Default width\n\nUse **Fit the screen** with `compact code` and "
+            "[Fleet docs](https://example.com/docs).\n\n- Fast\n- Clear\n\n"+
+            ("bounded preview content " * 45))
         session["last_msg"] = {"role": "assistant",
-                               "text": preview[:499] + "…"}
+                               "text": preview[:799] + "…"}
+    elif name == "large-message":
+        large = "Large response begins.\n\n" + ("complete-message-segment " * 500) + "\n\nEND-OF-LARGE-RESPONSE"
+        STATE["contexts"]["codex:thread-one"] = [
+            {"role": "assistant", "text": large}]
     elif name == "send-failure":
         STATE["fail_text"] = True
     elif name == "send-while-busy":
@@ -936,7 +962,9 @@ def set_scenario(name):
 
 def authorized(handler):
     cookie = SimpleCookie(handler.headers.get("Cookie", ""))
-    return ((cookie.get("act_token") and cookie["act_token"].value == TOKEN) or
+    mode = "staging" if STATE.get("scenario") == "staging" else "production"
+    cookie_name = "act_token_" + mode
+    return ((cookie.get(cookie_name) and cookie[cookie_name].value == TOKEN) or
             handler.headers.get("X-Act-Token") == TOKEN)
 
 
@@ -963,6 +991,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if urlparse(self.path).path == "/api/file":
+            self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -1079,16 +1109,18 @@ class Handler(BaseHTTPRequestHandler):
                             "source_title": "Claude review agent" if claude else
                                             ("artifact.md" if artifact else "Codex parity work"),
                             "source_error": None,
-                            "artifact_path": "/fixture/artifact.md" if artifact else None},
+                            "file_id": file_id("codex:thread-one", "/fixture/artifact.md")
+                                if artifact else None},
                         "messages": [{"id": document_id - 1, "role": "user",
                             "kind": "message", "timestamp": "2026-07-16T12:00:00Z",
-                            "text": "Find the protocol regression", "artifact_path": None,
+                            "text": "Find the protocol regression", "file_id": None,
                             "hit": False}, {"id": document_id,
                             "role": "assistant", "kind": "message",
                             "timestamp": "2026-07-16T12:00:01Z",
                             "text": "Indexed artifact preview." if artifact else
                                     "Indexed exact context for the protocol regression.",
-                            "artifact_path": "/fixture/artifact.md" if artifact else None,
+                            "file_id": file_id("codex:thread-one", "/fixture/artifact.md")
+                                if artifact else None,
                             "hit": True}]})
                 q = ((query.get("q") or [""])[0]).lower()
                 provider = (query.get("provider") or [""])[0]
@@ -1100,7 +1132,7 @@ class Handler(BaseHTTPRequestHandler):
                     "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
                     "title": "Codex parity work", "role": "assistant", "kind": "message",
                     "timestamp": "2026-07-16T12:00:01Z", "timestamp_epoch": time.time(),
-                    "artifact_path": None,
+                    "file_id": None,
                     "snippet": "Indexed exact context for the protocol regression.", "rank": -1},
                     {"id": 902, "source_id": 42, "provider": "claude",
                     "source_kind": "subagent", "session_id": "claude-one",
@@ -1108,7 +1140,7 @@ class Handler(BaseHTTPRequestHandler):
                     "cwd": "/Users/test/fleet-dash", "branch": "codex-integration",
                     "title": "Claude review agent", "role": "assistant",
                     "kind": "reasoning", "timestamp": "2026-07-16T11:59:00Z",
-                    "timestamp_epoch": time.time() - 60, "artifact_path": None,
+                    "timestamp_epoch": time.time() - 60, "file_id": None,
                     "snippet": "Reviewed parser migration and protocol states.", "rank": -0.5},
                     {"id": 903, "source_id": 43, "provider": "codex",
                     "source_kind": "artifact", "session_id": "codex:thread-one",
@@ -1117,7 +1149,7 @@ class Handler(BaseHTTPRequestHandler):
                     "title": "artifact.md", "role": "artifact", "kind": "artifact",
                     "timestamp": "2026-07-16T11:58:00Z",
                     "timestamp_epoch": time.time() - 120,
-                    "artifact_path": "/fixture/artifact.md",
+                    "file_id": file_id("codex:thread-one", "/fixture/artifact.md"),
                     "snippet": "Indexed artifact preview.", "rank": -0.25}]
                 rows = [item for item in rows if
                         (not q or q in (item["title"] + " " + item["snippet"]).lower()) and
@@ -1196,10 +1228,7 @@ class Handler(BaseHTTPRequestHandler):
                 if page is None:
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
-                return self.json_reply({"ok": True, **page,
-                    "files": [{"name": "artifact.md", "path": "/fixture/artifact.md",
-                    "kind": "text", "missing": False, "caption": "Codex updated this file",
-                    "delivered": False}]})
+                return self.json_reply({"ok": True, **page, "files": fixture_files(sid)})
             if route == "/api/agent_context":
                 sid = (query.get("sid") or [""])[0]
                 messages = ([{"role": "assistant", "text": f"Subagent report {index:03d}"}
@@ -1213,13 +1242,14 @@ class Handler(BaseHTTPRequestHandler):
                 if page is None:
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
-                return self.json_reply({"ok": True, **page, "info": {"agent_id": "child-one",
+                return self.json_reply({"ok": True, **page, "info": {"agent_id": "agent-child-one",
                     "agent_type": "reviewer", "description": "Review protocol mapping",
                     "model": "gpt-5.4", "effort": "high", "tokens": {},
                     "total_tokens": None, "cost": None, "state": "done",
                     "status_line": {**fixture_status_line("codex", frozen=True),
                         "model": "GPT-5.4", "cost_label": "agent"}}})
             if route == "/api/closed_context":
+                sid = (query.get("sid") or [""])[0]
                 messages = ([{"role": "assistant", "text": f"Closed report {index:03d}"}
                             for index in range(205)] if STATE["scenario"] == "large-conversation" else
                             [{"role": "assistant", "text": "Durable closed conversation"}])
@@ -1228,7 +1258,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply({"ok": False,
                                             "error": "invalid conversation pagination"})
                 return self.json_reply({"ok": True, "closed": True, **page,
+                    "files": fixture_files(sid), "agents": [],
                     "info": {"project": "fleet-dash", "branch": "old",
+                        "can_resume_and_send": False,
+                        "resume_disabled_reason": "Fixture session is view only",
                         "status_line": fixture_status_line("claude", frozen=True)}})
             if route == "/api/commands":
                 if not authorized(self):
@@ -1243,6 +1276,25 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/file":
                 if not authorized(self):
                     return self.reply(403, "text/plain", "missing act token")
+                sid = (query.get("sid") or [""])[0]
+                selector = (query.get("fid") or [""])[0]
+                path = next((path for path, _ in fixture_file_rows()
+                             if file_id(sid, path) == selector), "")
+                if not path:
+                    return self.reply(404, "text/plain", "not a file owned by this session")
+                if path.endswith("preview.html"):
+                    return self.reply(200, "text/plain; charset=utf-8", """<!doctype html>
+<html><head><style>h1{color:rgb(35,120,70)}</style></head><body>
+<h1>Rendered HTML</h1><form action=\"https://example.test/submit\"><input value=\"private\"><button>Submit</button></form>
+<div id=\"generated\"></div><img src=\"https://example.test/tracker.png\">
+<script>document.getElementById('generated').textContent='Inline chart rendered';try{parent.__unsafeHtmlRan=true}catch{}</script>
+<script src=\"https://example.test/external.js\"></script></body></html>""")
+                if path.endswith("data.json"):
+                    return self.reply(200, "application/json; charset=utf-8",
+                                      '{"status":"ready","items":[1,2]}')
+                if path.endswith("report.pdf"):
+                    return self.reply(200, "application/pdf",
+                                      b"%PDF-1.4\n% Fleet fixture\n%%EOF\n")
                 return self.reply(200, "text/plain; charset=utf-8", "# Artifact\n\nSafe preview.")
             if route == "/api/insights":
                 return self.json_reply({"ok": True, "totals": {"agent_cost": 0,
@@ -1598,7 +1650,10 @@ class Handler(BaseHTTPRequestHandler):
                             "destination_session_id": None, "provider_receipt": None,
                             "sent_at": None, "error": None, "blocked_reason": None,
                             "retry_of": None, "version": 1, "editable": True,
-                            "cancellable": True, "retryable": False}
+                            "cancellable": True, "retryable": False,
+                            "cancelled": False, "deletable": True,
+                            "cancelled_at": None, "cancelled_from_state": None,
+                            "cancelled_from_label": None}
                         STATE["outbox"].append(item)
                     elif not item:
                         return self.json_reply({"ok": False, "error": "outbox message not found"})
@@ -1612,10 +1667,29 @@ class Handler(BaseHTTPRequestHandler):
                         item["updated_at"] = time.time()
                     elif typ == "outbox_cancel":
                         item.update(state="cancelled", state_label="Cancelled", editable=False,
-                                    cancellable=False, retryable=False, updated_at=time.time())
+                                    cancellable=False, retryable=False, cancelled=True,
+                                    deletable=False, cancelled_at=time.time(),
+                                    cancelled_from_state=item["state"],
+                                    cancelled_from_label=item["state_label"],
+                                    updated_at=time.time())
+                    elif typ == "outbox_delete":
+                        if item["state"] in ("spawning", "sending"):
+                            return self.json_reply({"ok": False,
+                                "error": "a message being delivered cannot be deleted"})
+                        previous_state, previous_label = item["state"], item["state_label"]
+                        if previous_state in ("scheduled", "waiting_availability",
+                                              "waiting_usage_reset", "waiting_provider"):
+                            item["state"] = "cancelled"
+                        item.update(state_label=("Cancelled" if item["state"] == "cancelled"
+                                                 else previous_label),
+                                    editable=False, cancellable=False, retryable=False,
+                                    cancelled=True, deletable=False, cancelled_at=time.time(),
+                                    cancelled_from_state=previous_state,
+                                    cancelled_from_label=previous_label, updated_at=time.time())
                     elif typ == "outbox_send_now":
                         item.update(state="sent", state_label="Sent", editable=False,
-                                    cancellable=False, retryable=False, sent_at=time.time(),
+                                    cancellable=False, retryable=False, deletable=True,
+                                    sent_at=time.time(),
                                     provider_receipt={"accepted": True}, updated_at=time.time())
                     elif typ in ("outbox_retry", "outbox_retarget"):
                         patch = payload.get("patch") or {}
@@ -1624,6 +1698,8 @@ class Handler(BaseHTTPRequestHandler):
                             "retry_of": item["id"], "created_at": now, "updated_at": now,
                             "state": "waiting_availability", "state_label": "Waiting for availability",
                             "editable": True, "cancellable": True, "retryable": False,
+                            "cancelled": False, "deletable": True, "cancelled_at": None,
+                            "cancelled_from_state": None, "cancelled_from_label": None,
                             "error": None, "blocked_reason": None}
                         STATE["outbox"].append(item)
                     return self.json_reply({"ok": True, "item": copy.deepcopy(item),

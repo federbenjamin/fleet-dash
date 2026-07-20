@@ -596,6 +596,9 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         text = "### Default width\n\nUse **Fit the screen**."
         self.assertEqual(_last_message([{"role": "assistant", "text": text}]),
                          {"role": "assistant", "text": text})
+        preview = _last_message([{"role": "assistant", "text": "x" * 900}])["text"]
+        self.assertEqual(len(preview), 800)
+        self.assertTrue(preview.endswith("…"))
 
     def test_native_skills_and_actions_are_intentional(self):
         adapter, _ = self.adapter([self.thread()])
