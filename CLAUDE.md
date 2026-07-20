@@ -795,6 +795,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     after reconnection. Never implement this as text followed by Escape, parallel requests, or a
     timer: text could select an option, and a delay cannot prove which native surface owns input.
 
+69. **Codex child lifecycle has its own bounded refresh phase.** A parent `thread/read` supplies
+    discovery metadata, but its `subAgentActivity` history may stop at `started` or `interacted` even
+    after the child finishes. Reconcile every nonterminal child against the child thread: latest turn
+    `completed` → `done`; `failed`/`interrupted` → `ended`; an idle/notLoaded child with turns →
+    `done`. The child reads get a fresh `_refresh_budget_seconds` deadline after parent detail reads;
+    never reuse the already-spent parent deadline. Child ids are immutable, so terminal state is
+    monotonic across refreshes and terminal children are not re-read. A stale parent projection or a
+    later timeout must never resurrect one into the active-subagent count.
+
 ## Dev workflow
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,

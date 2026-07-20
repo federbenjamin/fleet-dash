@@ -186,8 +186,10 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   from the dashboard.
 - Codex subagent conversations and lifecycle events are visible. App Server exposes no public client
   RPC for direct subagent input or stop, so relay and stop actions go through the parent turn and are
-  labelled that way. Per-agent tokens are shown only when App Server supplies them; currency cost and
-  throughput remain unavailable instead of displaying fabricated zeroes.
+  labelled that way. Active counts are reconciled against each child thread's canonical turn status;
+  a completed child stays completed even when the parent history contains only older started/activity
+  events. Per-agent tokens are shown only when App Server supplies them; currency cost and throughput
+  remain unavailable instead of displaying fabricated zeroes.
 - App Server file-change and generated-image items appear as changed/generated artifacts with the
   same root-containment, size, and preview-type checks as Claude files. They are not labelled as
   explicitly delivered files because Codex has no SendUserFile-equivalent event.
