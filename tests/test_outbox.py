@@ -250,6 +250,71 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "immutable")
         self.assertEqual(self.manager.get(item["id"])["state"], "sending")
 
+    def test_delete_moves_pending_message_to_cancelled(self):
+        item = self.create()
+        deleted = self.manager.dismiss(item["id"])
+        self.assertEqual(deleted["state"], "cancelled")
+        self.assertTrue(deleted["cancelled"])
+        self.assertEqual(deleted["cancelled_from_state"], "waiting_availability")
+        self.assertFalse(deleted["deletable"])
+        self.assertEqual(self.manager.counts()["pending"], 0)
+        self.assertEqual(self.manager.counts()["states"]["cancelled"], 1)
+        self.assertEqual([row["id"] for row in
+                          self.manager.list(state="cancelled")["items"]], [item["id"]])
+
+    def test_delete_terminal_message_preserves_delivery_outcome(self):
+        item = self.create()
+        self.manager.tick(snapshot(session()), {}, lambda _: {"ok": True}, lambda _: {})
+        deleted = self.manager.dismiss(item["id"])
+        self.assertEqual(deleted["state"], "sent")
+        self.assertTrue(deleted["cancelled"])
+        self.assertEqual(deleted["cancelled_from_state"], "sent")
+        self.assertEqual(deleted["cancelled_from_label"], "Sent")
+        self.assertEqual(self.manager.list(state="sent")["items"], [])
+        self.assertEqual(self.manager.list(state="cancelled")["items"][0]["id"], item["id"])
+        self.assertEqual(self.manager.counts()["states"], {"cancelled": 1})
+
+    def test_delete_refuses_message_with_active_delivery_claim(self):
+        item = self.create()
+        self.assertTrue(self.manager._claim(self.manager.get(item["id"]), "sending"))
+        with self.assertRaises(OutboxError) as error:
+            self.manager.dismiss(item["id"])
+        self.assertEqual(error.exception.code, "immutable")
+        self.assertEqual(self.manager.get(item["id"])["state"], "sending")
+
+    def test_closed_resume_is_idempotent_and_delivers_once_after_exact_session_returns(self):
+        first = self.manager.create_closed_resume(
+            message="continue this exact thread", target_provider="codex",
+            target_session_id="codex:closed", idempotency_key="resume-request-1")
+        duplicate = self.manager.create_closed_resume(
+            message="continue this exact thread", target_provider="codex",
+            target_session_id="codex:closed", idempotency_key="resume-request-1")
+        self.assertEqual(duplicate["id"], first["id"])
+
+        spawns = []
+        deliveries = []
+        self.manager.tick(snapshot(), {},
+            lambda row: deliveries.append(row["id"]) or {"ok": True},
+            lambda row: spawns.append(row["id"]) or {
+                "ok": True, "session_id": "codex:closed",
+                "message_delivered": False})
+        queued = self.manager.get(first["id"])
+        self.assertEqual(spawns, [first["id"]])
+        self.assertEqual(queued["state"], "waiting_availability")
+        self.assertEqual(queued["destination_session_id"], "codex:closed")
+        self.assertFalse(deliveries)
+
+        self.clock.advance(1)
+        self.manager.tick(snapshot(session("codex:closed")), {},
+            lambda row: deliveries.append(row["id"]) or {"ok": True},
+            lambda row: spawns.append(row["id"]) or {"ok": True})
+        self.manager.tick(snapshot(session("codex:closed")), {},
+            lambda row: deliveries.append(row["id"]) or {"ok": True},
+            lambda row: spawns.append(row["id"]) or {"ok": True})
+        self.assertEqual(spawns, [first["id"]])
+        self.assertEqual(deliveries, [first["id"]])
+        self.assertEqual(self.manager.get(first["id"])["state"], "sent")
+
     def test_large_due_queue_is_bounded_per_tick_and_keeps_order(self):
         for index in range(45):
             self.create(kind="at_time", message=f"message {index:02d}",

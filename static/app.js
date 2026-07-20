@@ -6,12 +6,21 @@ const OUTBOX_RESOLVED_STORE_KEY='fleet.outboxResolved.v1';
 const CONTEXT_STORE_KEY='fleet.contextCache.v1';
 const IMAGE_DRAFT_STORE_KEY='fleet.imageDrafts.v1';
 const QUESTION_PANEL_STORE_KEY='fleet.questionPanels.v1';
+const WORKSPACE_SPLIT_STORE_KEY='fleet.workspaceSplits.v1';
 const IMAGE_DB_NAME='fleet-images-v1',IMAGE_STORE='images';
 const IMAGE_MAX_BYTES=10*1024*1024,IMAGE_MAX_COUNT=4,IMAGE_TTL_MS=24*60*60*1000;
 let draftStore=(()=>{try{
   const value=JSON.parse(localStorage.getItem(DRAFT_STORE_KEY)||'{}');
   return value&&typeof value==='object'&&!Array.isArray(value)?value:{};
 }catch(_){return {};}})();
+let workspaceSplitWidths=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(WORKSPACE_SPLIT_STORE_KEY)||'{}');
+  return Object.fromEntries(['files','subagents'].map(kind=>[kind,
+    Math.max(220,Math.min(520,Number(value?.[kind])||300))]));
+}catch(_){return{files:300,subagents:300};}})();
+function persistWorkspaceSplits(){try{
+  localStorage.setItem(WORKSPACE_SPLIT_STORE_KEY,JSON.stringify(workspaceSplitWidths));
+}catch(error){console.warn('Fleet could not persist workspace divider widths',error);}}
 function draftValue(key,fallback=''){
   return Object.prototype.hasOwnProperty.call(draftStore,key)?String(draftStore[key]):String(fallback??'');
 }
@@ -118,12 +127,14 @@ const contextStoreKey=(scope,sid,aid='')=>`${scope}:${sid}:${aid}`;
 function savedConversation(scope,sid,aid=''){
   const saved=persistedContexts[contextStoreKey(scope,sid,aid)];
   if(!saved||!Array.isArray(saved.messages))return null;
-  return{...saved,messages:[...saved.messages],files:[...(saved.files||[])],info:{...(saved.info||{})},stale:true};
+  return{...saved,messages:[...saved.messages],files:[...(saved.files||[])],agents:[...(saved.agents||[])],
+    info:{...(saved.info||{})},stale:true};
 }
 function persistConversation(scope,sid,aid,cache){
   if(!cache||!Array.isArray(cache.messages))return;
   const key=contextStoreKey(scope,sid,aid),entry={v:cache.v,messages:cache.messages,
-    files:cache.files||[],info:cache.info||{},next_cursor:cache.next_cursor,
+    files:cache.files||[],agents:cache.agents||[],closed:Boolean(cache.closed),
+    info:cache.info||{},next_cursor:cache.next_cursor,
     message_total:cache.message_total,saved:Date.now()};
   persistedContexts[key]=entry;
   let rows=Object.entries(persistedContexts).sort((a,b)=>(b[1].saved||0)-(a[1].saved||0)).slice(0,18);
@@ -210,16 +221,39 @@ function recordInputFeedback(started,flow='input'){
 }
 let pushActionFallback=(()=>{const value=new URLSearchParams(location.search).get('push_action');
   return ['snooze','mute'].includes(value)?value:'';})();
+let pendingActToken='';
 (()=>{const url=new URL(location.href),token=url.searchParams.get('token');
-  if(token&&/^[0-9a-f]+$/.test(token))
-    document.cookie=`act_token=${token};path=/;max-age=31536000;SameSite=Lax`;
+  if(token&&/^[0-9a-f]+$/.test(token))pendingActToken=token;
   if(token||pushActionFallback){url.searchParams.delete('token');url.searchParams.delete('push_action');
     history.replaceState(history.state,'',url.pathname+url.search+url.hash);}})();
+const actCookieName=instance=>`act_token_${instance?.mode==='staging'?'staging':'production'}`;
+function applyInstanceAuth(instance){
+  const cookieName=actCookieName(instance);
+  if(pendingActToken){
+    document.cookie=`${cookieName}=${pendingActToken};path=/;max-age=31536000;SameSite=Lax`;
+    pendingActToken='';
+  }
+  return document.cookie.split(';').some(item=>item.trim().startsWith(cookieName+'='));
+}
 const open=new Set();
 const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
 const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights',settings:'Settings'};
 const validRoutes=new Set(Object.keys(routeNames));
+const workspaceSections=new Set(['chat','files','subagents','details']);
+function parseSessionHash(){
+  const parts=location.hash.replace(/^#/,'').split('/');
+  if(parts[0]!=='session'||!parts[1])return null;
+  try{
+    const sid=decodeURIComponent(parts[1]),section=workspaceSections.has(parts[2])?parts[2]:'chat';
+    let item=parts[3]?decodeURIComponent(parts.slice(3).join('/')):null;
+    if(section==='files'&&item&&!/^[0-9a-f]{24}$/.test(item))item=null;
+    if(section==='subagents'&&item&&!/^agent-[A-Za-z0-9_-]{1,64}$/.test(item))item=null;
+    if(!['files','subagents'].includes(section))item=null;
+    return{sid,section,item};
+  }catch(_){return null;}
+}
+let pendingWorkspaceRoute=parseSessionHash();
 function hashDestination(){
   const parts=location.hash.replace(/^#/,'').split('/'),route=parts[0];
   let detail=null;
@@ -509,7 +543,7 @@ function searchSourceAction(source){
   const session=((last&&last.sessions)||[]).find(item=>item.session_id===sid);
   const active=Boolean(session);
   const closed=isClosedSession(sid);
-  if(source.source_kind==='artifact'&&source.artifact_path&&active)
+  if(source.source_kind==='artifact'&&source.file_id&&active)
     return`<button class="headprimary" onclick="switchSearchView('artifact')">Open artifact</button>`;
   if(source.source_kind==='subagent'&&source.agent_id&&
       (session?.agents||[]).some(agent=>agent.agent_id===source.agent_id))
@@ -542,9 +576,7 @@ function switchSearchView(kind){
   closeSearchView();
   if(kind==='agent')openAgent(source.session_id,source.agent_id);
   else if(kind==='artifact'){
-    const name=String(source.artifact_path||'artifact').split('/').pop();
-    viewFile(source.session_id,encodeURIComponent(source.artifact_path),encodeURIComponent(name),
-      'text',encodeURIComponent('Indexed artifact'));
+    viewFile(encodeURIComponent(source.session_id),encodeURIComponent(source.file_id));
   }
   else if(kind==='closed')openClosed(source.session_id);else openSession(source.session_id);
 }
@@ -805,7 +837,8 @@ function reconcileOutboxOptimistic(){
 function renderOutboxCompact(){
   const el=$('#outboxsummary');if(!el)return;
   const summary=outboxData.summary||last?.outbox_summary||{};
-  const current=(outboxData.items||[]).filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
+  const current=(outboxData.items||[]).filter(item=>!item.cancelled&&
+    (outboxPending.has(item.state)||outboxAttention.has(item.state)));
   if(!summary.pending&&!summary.attention&&!outboxData.error){el.innerHTML='';return;}
   const rows=current.slice(0,3).map(item=>`<div class="outboxmini"><span class="oboxstate">${esc(item.state_label||item.state)}</span><span class="oboxmsg">${esc(item.message||'')}</span><small>${esc(outboxWhen(item))}</small></div>`).join('');
   el.innerHTML=`<section class="outboxcompact${summary.attention?' attention':''}"><button class="outboxcompacthead" onclick="openOutbox()">
@@ -820,23 +853,27 @@ function closeOutbox(){$('#outboxview').style.display='none';$('#outboxbody').in
 function setOutboxFilter(value){outboxFilter=value;renderOutboxFull();}
 function visibleOutboxItems(){
   const items=outboxData.items||[];
-  if(outboxFilter==='pending')return items.filter(item=>outboxPending.has(item.state));
-  if(outboxFilter==='attention')return items.filter(item=>outboxAttention.has(item.state));
-  if(outboxFilter==='sent')return items.filter(item=>item.state==='sent');
+  if(outboxFilter==='pending')return items.filter(item=>!item.cancelled&&outboxPending.has(item.state));
+  if(outboxFilter==='attention')return items.filter(item=>!item.cancelled&&outboxAttention.has(item.state));
+  if(outboxFilter==='sent')return items.filter(item=>!item.cancelled&&item.state==='sent');
+  if(outboxFilter==='cancelled')return items.filter(item=>item.cancelled);
   if(outboxFilter==='all')return items;
-  return items.filter(item=>outboxPending.has(item.state)||outboxAttention.has(item.state));
+  return items.filter(item=>!item.cancelled&&
+    (outboxPending.has(item.state)||outboxAttention.has(item.state)));
 }
 function outboxRow(item){
   const action=outboxActions.get(item.id)||{};
   const error=action.error||item.error||item.blocked_reason;
   const canEdit=item.editable,canRetry=item.retryable;
-  return`<article class="outboxrow ${esc(item.state)}"><div class="outboxtop"><span class="outboxstate">${esc(item.state_label||item.state)}</span>
+  const rowState=item.cancelled?'cancelled':item.state,stateLabel=item.cancelled?'Cancelled':(item.state_label||item.state);
+  return`<article class="outboxrow ${esc(rowState)}"><div class="outboxtop"><span class="outboxstate">${esc(stateLabel)}</span>
     <span class="outboxtime">${esc(outboxWhen(item))}</span></div><div class="outboxmessage">${esc(item.message||'')}</div>
-    <div class="outboxmeta">${esc(outboxTarget(item))} · ${esc(String(item.kind||'').replaceAll('_',' '))}${item.created_zone?` · ${esc(item.created_zone)}`:''}</div>
+    <div class="outboxmeta">${esc(outboxTarget(item))} · ${esc(String(item.kind||'').replaceAll('_',' '))}${item.created_zone?` · ${esc(item.created_zone)}`:''}${item.cancelled_from_label?` · was ${esc(item.cancelled_from_label)}`:''}</div>
     ${error?`<div class="outboxerror" role="alert">${esc(error)}</div>`:''}<div class="outboxactions">
       ${action.busy?'<span class="outboxworking" role="status"><span class="delivery sending" aria-hidden="true">◌</span> working…</span>':''}
-      ${canEdit?`<button ${action.busy?'disabled':''} onclick="editOutbox('${item.id}')">Edit</button><button class="primary" ${action.busy?'disabled':''} onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button><button ${action.busy?'disabled':''} onclick="confirmCancelOutbox('${item.id}')">Cancel</button>`:''}
+      ${canEdit?`<button ${action.busy?'disabled':''} onclick="editOutbox('${item.id}')">Edit</button><button class="primary" ${action.busy?'disabled':''} onclick="outboxAction('${item.id}','outbox_send_now')">Send now</button>`:''}
       ${canRetry?`<button class="primary" ${action.busy?'disabled':''} onclick="editOutbox('${item.id}','retry')">Retry / retarget</button>`:''}
+      ${item.deletable?`<button class="outboxdelete" ${action.busy?'disabled':''} onclick="confirmDeleteOutbox('${item.id}')">Delete</button>`:''}
     </div></article>`;
 }
 function renderOutboxFull(){
@@ -844,7 +881,7 @@ function renderOutboxFull(){
   if(outboxLoading&&!outboxData.items?.length){el.innerHTML='<div class="ctxload">Loading Outbox…</div>';return;}
   if(!outboxData.ok){el.innerHTML=`<div class="outboxempty">${esc(outboxData.error||'Outbox unavailable')}</div>`;return;}
   const items=visibleOutboxItems();
-  el.innerHTML=`<div class="outboxlayout"><div class="outboxtools">${[['current','Current'],['pending','Pending'],['attention','Needs review'],['sent','Sent'],['all','All']].map(([value,label])=>
+  el.innerHTML=`<div class="outboxlayout"><div class="outboxtools">${[['current','Current'],['pending','Pending'],['attention','Needs review'],['sent','Sent'],['cancelled','Cancelled'],['all','All']].map(([value,label])=>
     `<button class="${outboxFilter===value?'on':''}" onclick="setOutboxFilter('${value}')">${label}</button>`).join('')}</div>
     <div class="outboxlist">${items.length?items.map(outboxRow).join(''):'<div class="outboxempty">No messages in this view.</div>'}</div></div>`;
 }
@@ -865,6 +902,7 @@ async function outboxAction(id,type,payload={}){
       body:JSON.stringify({type,outbox_id:id,...payload})});
     const result=await response.json();
     if(!response.ok||!result.ok)throw new Error(result.error||'Outbox action failed');
+    if(type==='outbox_delete')resolveOutboxReceipt(id);
     mergeOutboxResult(result);
     await loadOutbox(true);
     outboxActions.delete(id);renderOutboxFull();return result;
@@ -874,8 +912,13 @@ async function outboxAction(id,type,payload={}){
     return{ok:false,error:message};
   }
 }
-function confirmCancelOutbox(id){askConfirm('Cancel this scheduled message?',
-  'It will remain in the Outbox audit trail and will never be sent.','cancel message',()=>outboxAction(id,'outbox_cancel'));}
+function confirmDeleteOutbox(id){
+  const item=(outboxData.items||[]).find(row=>row.id===id),pending=item&&outboxPending.has(item.state);
+  askConfirm('Delete this Outbox message?',pending?
+    'It will be cancelled, moved to Cancelled, and never sent.':
+    'It will move to Cancelled. Its original delivery outcome remains in the audit record.',
+    'delete message',()=>outboxAction(id,'outbox_delete'));
+}
 function localInputAt(epoch,zone){
   if(!epoch)return'';try{
     const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone||undefined,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(epoch*1000));
@@ -1358,7 +1401,7 @@ const notificationSeverityOptions=[
   ['critical','Critical only']];
 let notificationData={ok:true,events:[],delivery_problems:[],unread:0,active:0,event_cursor:0,next_cursor:null};
 let notificationItems=[],notificationSection='needs',notificationLoading=false;
-let notificationPollingEnabled=document.cookie.split(';').some(item=>item.trim().startsWith('act_token='));
+let notificationPollingEnabled=false;
 let notificationError='',notificationLoadedAt=0,notificationAbort=null,notificationSequence=0;
 let notificationDetail=null,notificationDetailLoading=false,notificationDetailError='';
 const notificationActionStates=new Map();let notificationActionGeneration=0;
@@ -1813,8 +1856,8 @@ function modeSelect(s,pre='msg'){
 const enc=v=>encodeURIComponent(v||'').replace(/'/g,'%27');  // onclick-attr-safe
 const cpb=v=>`<b class="copyable" title="tap to copy" data-copy="${esc(v)}" onclick="copyTxt(event,this)">${esc(v)}</b>`;
 function fchip(sid,f,cap){
-  return`<button class="fchip" ${f.missing?'disabled':''} title="${esc(cap||f.path)}"
-    onclick="event.stopPropagation();viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(cap)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
+  return`<button class="fchip" ${f.missing||!f.file_id?'disabled':''} title="${esc(cap||f.name||'file')}"
+    onclick="event.stopPropagation();viewFile('${enc(sid)}','${enc(f.file_id)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`;
 }
 const EVT_ICON={compact:'⧉',model:'⇄',api_error:'⚠',command:'›',qa:'☑'};
 function eventRow(m,provider='claude'){
@@ -1848,9 +1891,13 @@ function nativePromptLabel(s,fallback='waiting on you'){
 }
 async function withNativeRequestLock(sid,nonce,work){
   const key=nativeRequestKey(sid,nonce);if(nativeRequestLocks.has(key))return{ok:false,duplicate:true};
-  nativeRequestLocks.add(key);uiRefresh();
+  nativeRequestLocks.add(key);
   try{return await work();}
   finally{nativeRequestLocks.delete(key);uiRefresh();}
+}
+function beginOptimisticAnswer(sid,nonce,text){
+  answered[sid]=nonce;
+  return addOptimistic(sid,text,'answer');
 }
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');
 function optimisticBucket(sid){
@@ -1918,7 +1965,10 @@ function addOptimistic(sid,text,kind='text',status='sending',queueId=null,baseCo
     imageIds:[...(imageIds||[])],imageCount:(imageIds||[]).length,
     baseCount:baseCount==null?canonicalCount(messages,{kind,text}):baseCount,created:Date.now()};
   optimisticBucket(sid).push(item);
-  if(status==='sending')armOptimisticTimeout(item);
+  // Native answers have their own request result and may legitimately need more
+  // than 15 seconds of TUI key sequencing. Keep their spinner until that result
+  // fails or the canonical QA event replaces the receipt.
+  if(status==='sending'&&kind!=='answer')armOptimisticTimeout(item);
   const openConvo=sessionView?.sid===sid&&!sessionView.closed&&$('#sbody .aconvo');
   if(openConvo){
     openConvo.insertAdjacentHTML('beforeend',optimisticItemHtml(item));
@@ -1970,7 +2020,6 @@ function observeSessionTail(){
 }
 function activeReadingBody(){
   if($('#sview')?.style.display==='flex')return $('#sbody');
-  if($('#viewer')?.style.display==='flex')return $('#vbody');
   return null;
 }
 function readingBlocks(body){
@@ -2046,7 +2095,7 @@ function updateOptimistic(sid,id,ok,error,providerConfirmed=false){
   if(!ok){clearTimeout(item.confirmTimer);item.confirmTimer=null;
     item.status='failed';item.error=error||'Send failed';painted=paintOptimisticItem(item);}
   else if(providerConfirmed){clearTimeout(item.confirmTimer);item.confirmTimer=null;
-    item.status='confirmed';}
+    delete item.confirmDeadline;item.providerConfirmed=true;}
   if(!painted)uiRefresh();
 }
 function markOptimisticUncertain(sid,id,error){
@@ -2096,6 +2145,7 @@ function dismissOptimistic(sid,id){
   if(item.queueId)removeOfflineMessage(item.queueId);
   if(item.outboxId)resolveOutboxReceipt(item.outboxId);
   if(item.imageIds?.length)void deleteImages(item.imageIds);
+  if(item.kind==='answer'&&item.status==='failed')delete answered[sid];
   uiRefresh();
 }
 function optimisticItemHtml(item){
@@ -2155,7 +2205,8 @@ function cardResponseFeedback(s){
   const item=[answer,queued,action].filter(Boolean).sort((a,b)=>a.created-b.created).at(-1);
   if(!item)return'';
   const status=item.status==='confirmed'||item.status==='sent'?'sent':item.status;
-  const verb=status==='queued'?(item.queueLabel||'Queued'):status==='sending'?(item.kind==='text'?'Sending':'Submitting'):
+  const verb=status==='queued'?(item.queueLabel||'Queued'):status==='sending'?
+    (item.kind==='text'?'Sending':item.providerConfirmed?'Submitted':'Submitting'):
     status==='failed'?'Failed':'Submitted';
   const icon=status==='queued'?`<span class="delivery queued" aria-label="message queued">↥</span>`:
     status==='sending'?`<span class="delivery sending" aria-label="sending quick response">◌</span>`:
@@ -2194,14 +2245,11 @@ function convoBox(s,short){
 let viewerSid=null;
 // one persisted reading theme shared by chat, Markdown, and subagent views
 function setTheme(light){
-  $('#vbody').classList.toggle('light',light);
-  $('#sbody').classList.toggle('light',light);
-  $('#sevidence').classList.toggle('light',light);
-  $('#abody').classList.toggle('light',light);
-  $('#searchviewbody').classList.toggle('light',light);
+  ['#sview','#vbody','#sbody','#abody','#searchviewbody'].forEach(selector=>
+    $(selector)?.classList.toggle('light',light));
   try{localStorage.setItem('viewer_light',light?'1':'0');}catch(e){}
 }
-function toggleTheme(){setTheme(!$('#vbody').classList.contains('light'));}
+function toggleTheme(){setTheme(!$('#sview')?.classList.contains('light'));}
 (()=>{try{setTheme(localStorage.getItem('viewer_light')==='1');}catch(e){}})();
 
 let overflowOpen=null;
@@ -2479,7 +2527,7 @@ function singleQBlock(s,p,pre){
       <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
     <div class="qtext">${esc(q.question)}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${ms&&sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
+    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
         onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
         ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
     ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${q.secret?'':`data-draft-key="${esc(otherKey)}"`} ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
@@ -2493,9 +2541,10 @@ function singleQBlock(s,p,pre){
 // `cur` marks the file the viewer currently shows.
 function fileStrip(sid,files){
   if(!files||!files.length)return'';
-  return`<div class="stripbox"><div class="fstrip">${files.map(f=>`<button class="fchip ${f.path===viewerPath?'cur':''}"
-    ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
-    onclick="viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} ${esc(f.name)}${f.missing?' (gone)':''}</button>`).join('')}</div></div>`;
+  const stripName=name=>{const chars=Array.from(String(name||''));return esc(chars.length>40?`${chars.slice(0,40).join('')}…`:chars.join(''));};
+  return`<div class="stripbox"><div class="fstrip">${files.map(f=>`<button class="fchip ${f.file_id===sessionView?.fileId?'cur':''}"
+    ${f.missing||!f.file_id?'disabled':''} title="${esc(f.caption||f.name)}" aria-label="${esc(f.name)}${f.missing?' (gone)':''}"
+    onclick="viewFile('${enc(sid)}','${enc(f.file_id)}')">${f.kind==='image'?'🖼':'📄'} ${stripName(f.name)}${f.missing?' (gone)':''}</button>`).join('')}</div></div>`;
 }
 function viewerSurfaceBar(sid,files){
   return`<div class="surfacebar viewer-surfacebar"><div class="surfacebar-main">${fileStrip(sid,files)||'<span class="surfacebar-empty">Current file</span>'}</div>
@@ -2504,7 +2553,7 @@ function viewerSurfaceBar(sid,files){
 function latestFileButton(sid,files){
   const f=(files||[])[0];if(!f)return'';
   return`<button class="pbtn surfacebar-action latestfile" ${f.missing?'disabled':''} title="${esc(f.caption||f.path)}"
-    onclick="viewFile('${sid}','${enc(f.path)}','${enc(f.name)}','${f.kind}','${enc(f.caption)}')">${f.kind==='image'?'🖼':'📄'} <span>${esc(f.name)}</span></button>`;
+    onclick="viewFile('${enc(sid)}','${enc(f.file_id)}')">${f.kind==='image'?'🖼':'📄'} <span>${esc(f.name)}</span></button>`;
 }
 function sessionSurfaceBar(s,files){
   const status=statusLineHtml(s.status_line,'session:'+s.session_id),latest=latestFileButton(s.session_id,files);
@@ -2532,34 +2581,7 @@ function keepSessionActionScroll(root,fn){
     questionScrollPositions.get(nextQuestion.dataset.scrollKey)||0;
 }
 function renderViewerBar(force){
-  if(!viewerSid)return;
-  const bar=$('#vact');
-  const s=((last||{}).sessions||[]).find(x=>x.session_id===viewerSid);
-  $('#vctrl').innerHTML=overflowMenu('viewer',s,'viewer');
-  const ae=document.activeElement;
-  if(ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&bar.contains(ae))return; // don't clobber typing
-  if(!force&&touching())return;                           // or a swipe/tap in flight
-  if(s)ensureCtx(viewerSid,ctxVersion(s));
-  const c=ctxCache[viewerSid];
-  let h='<div class="session-context">';
-  const p=s&&s.pending;
-  if(p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[viewerSid]!==p.nonce){
-    h+=`<div class="togbox waiting">
-      <button class="vchat-toggle" onclick="viewerQOpen=!viewerQOpen;renderViewerBar(true)">${viewerQOpen?'▾ hide question':'▸ show question — waiting on you'}</button>
-      ${viewerQOpen?`<div class="togbody">${p.questions.length>1?mqBlock(s,p,'vmsg'):singleQBlock(s,p,'vmsg')}</div>`:''}
-    </div>`;
-  }else if(p&&answered[viewerSid]!==p.nonce){
-    h+=pendingBox(s,'vmsg');
-  }
-  h+=`${handoffLinksHtml(s)}
-    ${s&&s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-    ${s?viewerSurfaceBar(viewerSid,(c&&c.files)||[]):''}</div>
-    ${s?renderComposer(s,'viewer'):''}`;
-  bar.classList.toggle('session-composer',canCompose(s));
-  if(!canCompose(s))bar.classList.remove('composer-active','tools-open');
-  const readingAnchor=captureReadingAnchor($('#vbody'));
-  keepStripScroll(bar,()=>{bar.innerHTML=h;});restoreReadingAnchor(readingAnchor);
-  if(canCompose(s)){resizeComposer(document.getElementById('vft-'+viewerSid));void renderImageDrafts(viewerSid);}
+  if(sessionView?.section==='files')renderWorkspaceFiles(force);
 }
 // Full chat headers identify the conversation. Operational metadata lives in
 // the status strip above the composer, where it can update independently.
@@ -2567,29 +2589,65 @@ function sessTitleBlock(s){
   if(!s)return '<b>session</b>';
   return `<b>${esc(s.title||s.project||'session')}</b>`;
 }
-function viewFile(sid,ep,en,kind,ecap){
-  closeSession();          // the two full-screen surfaces are mutually exclusive
-  const path=decodeURIComponent(ep),name=decodeURIComponent(en),cap=decodeURIComponent(ecap||'');
-  const url='/api/file?sid='+encodeURIComponent(sid)+'&p='+encodeURIComponent(path);
-  // The file viewer is a reading surface: filename and file actions only.
-  $('#vtitle').innerHTML=`<span class="vfname">${kind==='image'?'🖼':'📄'} ${esc(name)}${cap?` — ${esc(cap)}`:''}</span>`;
-  $('#viewer').style.display='flex';
-  viewerSid=sid;viewerPath=path;syncOverlayHistory();
-  const vb=$('#vbody');
-  requestAnimationFrame(()=>{if(viewerSid===sid&&viewerPath===path)renderViewerBar(true);});
-  if(kind==='image'){vb.innerHTML=`<div class="ctxload">loading image…</div><img hidden src="${url}" alt="${esc(name)}"
-    onload="this.hidden=false;this.previousElementSibling?.remove()"
-    onerror="this.previousElementSibling.textContent='✗ image unavailable';this.remove()">`;return;}
-  vb.textContent='loading…';
-  fetch(url,{cache:'no-store'}).then(async r=>{
-    if(!r.ok){vb.textContent=(r.status===403?'read-only device — open the ?token= URL once to view files. ':'')+await r.text();return;}
-    const t=await r.text();
-    vb.innerHTML=/\.(md|markdown)$/i.test(name)?'<div class="mdoc">'+md(t)+'</div>':'<pre class="raw">'+esc(t)+'</pre>';
-  }).catch(e=>{vb.textContent='✗ '+e;});
+function viewerFormat(name,kind){
+  if(kind==='image')return'image';
+  const ext=(String(name||'').match(/\.([^.]+)$/)||[])[1]?.toLowerCase()||'';
+  if(['md','markdown'].includes(ext))return'markdown';
+  if(['html','htm'].includes(ext))return'html';
+  if(ext==='pdf')return'pdf';
+  if(ext==='json')return'json';
+  return'text';
 }
-function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbody').innerHTML='';$('#vact').innerHTML='';
-  $('#vact').classList.remove('session-composer','composer-active','tools-open');$('#vctrl').innerHTML='';
-  viewerSid=null;viewerPath=null;}
+function sandboxedHtmlDocument(source){
+  const parsed=new DOMParser().parseFromString(String(source||''),'text/html');
+  parsed.querySelectorAll('script[src],iframe,frame,object,embed,meta,base,link').forEach(node=>node.remove());
+  parsed.querySelectorAll('*').forEach(element=>{
+    for(const attr of [...element.attributes]){
+      const key=attr.name.toLowerCase(),value=attr.value.trim().toLowerCase();
+      if(['srcdoc','action','formaction','target','ping'].includes(key))
+        element.removeAttribute(attr.name);
+      else if(['href','xlink:href','srcset'].includes(key))element.removeAttribute(attr.name);
+      else if(['src','poster','data'].includes(key)&&!value.startsWith('data:'))
+        element.removeAttribute(attr.name);
+    }
+  });
+  const styles=[...parsed.querySelectorAll('style')].map(node=>node.outerHTML).join('');
+  parsed.querySelectorAll('style').forEach(node=>node.remove());
+  const headScripts=[...parsed.head.querySelectorAll('script:not([src])')].map(node=>node.outerHTML).join('');
+  parsed.head.querySelectorAll('script:not([src])').forEach(node=>node.remove());
+  return`<!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+    ${styles}${headScripts}</head><body>${parsed.body.innerHTML}</body></html>`;
+}
+function showViewerFrame(body,className,title,{src='',srcdoc='',sandbox=true}={}){
+  body.classList.add('frameview');
+  const frame=document.createElement('iframe');frame.className=`fileframe ${className}`;
+  frame.title=title;if(sandbox!==false)frame.setAttribute('sandbox',sandbox===true?'':sandbox);frame.referrerPolicy='no-referrer';
+  if(srcdoc)frame.srcdoc=srcdoc;else frame.src=src;
+  body.replaceChildren(frame);
+}
+function showJsonDocument(body,text){
+  body.replaceChildren();
+  const pre=document.createElement('pre');pre.className='raw jsondoc';
+  try{pre.textContent=JSON.stringify(JSON.parse(text),null,2);}
+  catch(error){
+    const message=document.createElement('div');message.className='fileerror';
+    message.textContent=`Invalid JSON — ${error.message}`;body.append(message);pre.textContent=text;
+  }
+  body.append(pre);
+}
+function viewFile(encodedSid,encodedFileId){
+  const sid=decodeURIComponent(encodedSid),fileId=decodeURIComponent(encodedFileId||'');
+  if(!/^[0-9a-f]{24}$/.test(fileId))return;
+  seedTargetedWorkspaceHistory(sid,'files');
+  openSessionWorkspace(sid,'files',fileId,true);
+}
+function seedTargetedWorkspaceHistory(sid,section){
+  if(!sessionView||sessionView.sid!==sid)openSessionWorkspace(sid,'chat',null,true);
+  if(sessionView?.section!==section)openSessionWorkspace(sid,section,null,true);
+}
+function closeViewer(){viewerSid=null;viewerPath=null;}
 // ---- back-gesture / Esc closes the open full-screen overlay ----------------
 // The fullscreen surfaces are mutually exclusive, so we model
 // "an overlay is open" as ONE logical state: push a single history entry when we
@@ -2597,7 +2655,7 @@ function closeViewer(){closeOverflow();$('#viewer').style.display='none';$('#vbo
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
 let histPushed=false,schedulePushed=false,settingsPushed=false,settingsSectionDepth=0;
-const fullscreenOverlaySelectors=['#viewer','#sview','#aview','#settingsview','#searchview','#handoffview','#outboxview','#scheduleview'];
+const fullscreenOverlaySelectors=['#sview','#settingsview','#searchview','#handoffview','#outboxview','#scheduleview'];
 const anyOverlay=()=>fullscreenOverlaySelectors.some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
@@ -2617,11 +2675,14 @@ window.addEventListener('popstate',()=>{
     if(destination)primarySessionAction(destination);
     return;
   }
+  const workspace=parseSessionHash();
+  if(workspace){applyWorkspaceRoute(workspace);return;}
   if(histPushed){
     histPushed=false;
     closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
     return;
   }
+  if(sessionView)closeSession();
   notificationDetailId=destination.route==='notifications'?destination.detail:'';
   if(!notificationDetailId){notificationDetail=null;notificationDetailError='';}
   navigateTo(destination.route,false,Boolean(notificationDetailId));
@@ -2635,6 +2696,7 @@ function dismissOverlay(){
   if(settingsPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
+  if(sessionView)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
   else{closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();}
 }
@@ -2649,8 +2711,7 @@ document.addEventListener('click',e=>{
 // Full-screen surfaces are real, stack-aware dialogs. Their markup predates the
 // modal controller, so semantics and focus ownership are applied centrally.
 const modalDefinitions=[
-  ['viewer','vtitle','File viewer'],['sview','stitle2','Session conversation'],
-  ['aview','atitle','Subagent conversation'],['settingsview','settitle','Settings'],
+  ['sview','stitle2','Session workspace'],['settingsview','settitle','Settings'],
   ['searchview','searchviewtitle','Search result'],['handoffview','handofftitle','Continue in another session'],
   ['outboxview',null,'Message Outbox'],['scheduleview','scheduletitle','Schedule message'],
   ['confirm',null,'Confirmation']];
@@ -2881,7 +2942,17 @@ function refreshStatusStrip(hostSelector,status,key){
   if(current){const anchor=captureReadingAnchor();current.outerHTML=statusLineHtml(status,key);
     restoreReadingAnchor(anchor);}
 }
-let sessionView=null;            // {sid, closed} of the open overlay
+let sessionView=null;            // one session workspace: section + optional file/agent selection
+const workspaceScrolls=new Map();
+const LAST_FILE_STORE_KEY='fleet.lastSessionFile.v1';
+let lastSessionFiles=(()=>{try{const value=JSON.parse(localStorage.getItem(LAST_FILE_STORE_KEY)||'{}');
+  return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch(_){return{};}})();
+function rememberSessionFile(sid,fileId){
+  if(!sid||!/^[0-9a-f]{24}$/.test(String(fileId||'')))return;
+  lastSessionFiles[sid]=fileId;
+  const rows=Object.entries(lastSessionFiles).slice(-200);lastSessionFiles=Object.fromEntries(rows);
+  try{localStorage.setItem(LAST_FILE_STORE_KEY,JSON.stringify(lastSessionFiles));}catch(_){}
+}
 let sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
 let questionResizeActive=null;
 const questionScrollPositions=new Map();
@@ -3008,12 +3079,6 @@ const reopenedSessions=new Set();// successful reopen feedback survives poll rer
 let sessionEvidenceOpen=false;
 const evidenceCache={};          // sid -> {events,next_cursor,loaded,loading,error}
 function confidenceText(value){return({confirmed:'confirmed',inferred:'inferred',stale:'stale',unknown:'unknown'})[value]||'unknown';}
-function evidenceButton(s){
-  if(!s||!s.session_id)return'';
-  return`<button class="evidencebtn${sessionEvidenceOpen?' on':''}" aria-label="Why here?" aria-pressed="${sessionEvidenceOpen}"
-    title="Explain why this session is ${esc(s.reason_label||s.ui_group||'here')}"
-    onclick="toggleSessionEvidence('${enc(s.session_id)}')">◎ <span>Why here?</span></button>`;
-}
 function evidenceFactsHtml(s){
   const facts=(s&&s.state_evidence)||[];
   if(!facts.length)return'<div class="evidenceempty">No state evidence recorded yet.</div>';
@@ -3061,7 +3126,7 @@ async function loadSessionEvidence(encodedSid,more=false){
   cache.loading=true;cache.error=null;
   const current=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
     closedSession(sid)||{};
-  renderEvidenceRail(current);
+  if(sessionView?.sid===sid&&sessionView.section==='details')renderWorkspaceDetails(workspaceSessionModel(),workspaceContext());
   try{
     const cursor=more&&cache.next_cursor?'&cursor='+encodeURIComponent(cache.next_cursor):'';
     const response=await fetch('/api/evidence?sid='+encodeURIComponent(sid)+'&limit=30'+cursor,{cache:'no-store'});
@@ -3071,11 +3136,8 @@ async function loadSessionEvidence(encodedSid,more=false){
     cache.next_cursor=data.next_cursor||null;cache.loaded=true;
   }catch(error){cache.error=String(error.message||error);}
   finally{cache.loading=false;}
-  if(sessionView&&sessionView.sid===sid&&sessionEvidenceOpen){
-    const fresh=((last&&last.sessions)||[]).find(item=>item.session_id===sid)||
-      closedSession(sid)||current;
-    renderEvidenceRail(fresh);
-  }
+  if(sessionView&&sessionView.sid===sid&&sessionView.section==='details')
+    renderWorkspaceDetails(workspaceSessionModel(),workspaceContext());
 }
 function toggleSessionEvidence(encodedSid){
   const sid=decodeURIComponent(encodedSid);
@@ -3121,35 +3183,177 @@ async function markAvailable(sid,encodedRevision){
   try{await markSessionRevision({mark_available_session:sid,revision});}
   catch(e){alert('mark available failed: '+e);tick();}
 }
-function openSession(sid){
-  closeViewer();           // never stack the file viewer and the chat view
-  const session=((last&&last.sessions)||[]).find(x=>x.session_id===sid)||
+function workspaceHash(sid,section='chat',item=null){
+  return`#session/${encodeURIComponent(sid)}/${section}${item?'/'+encodeURIComponent(item):''}`;
+}
+function saveWorkspaceScroll(){
+  if(!sessionView)return;
+  const selector={chat:'#sbody',files:'#vbody',subagents:'#abody',details:'#spanel-details'}[sessionView.section];
+  const node=$(selector);if(node)workspaceScrolls.set(`${sessionView.sid}:${sessionView.section}:${sessionView.fileId||sessionView.agentId||''}`,node.scrollTop);
+}
+function restoreWorkspaceScroll(){
+  if(!sessionView)return;
+  const selector={chat:'#sbody',files:'#vbody',subagents:'#abody',details:'#spanel-details'}[sessionView.section];
+  const node=$(selector),key=`${sessionView.sid}:${sessionView.section}:${sessionView.fileId||sessionView.agentId||''}`;
+  if(node&&workspaceScrolls.has(key))requestAnimationFrame(()=>{node.scrollTop=workspaceScrolls.get(key)||0;});
+}
+function workspaceSplitBounds(browser){
+  const width=Math.max(0,browser?.getBoundingClientRect().width||$('#sworkspace')?.clientWidth||innerWidth);
+  return{min:220,max:Math.max(220,Math.min(520,width-320))};
+}
+function setWorkspaceSplit(kind,width,persist=false){
+  if(!['files','subagents'].includes(kind))return;
+  const browser=$(`#s${kind==='files'?'file':'agent'}browser`);if(!browser)return;
+  const bounds=workspaceSplitBounds(browser),value=Math.round(Math.max(bounds.min,Math.min(bounds.max,Number(width)||300)));
+  workspaceSplitWidths[kind]=value;browser.style.setProperty('--workspace-list-width',`${value}px`);
+  const divider=browser.querySelector('.workspacedivider');
+  if(divider){divider.setAttribute('aria-valuemin',String(bounds.min));divider.setAttribute('aria-valuemax',String(bounds.max));divider.setAttribute('aria-valuenow',String(value));}
+  if(persist)persistWorkspaceSplits();
+}
+function applyWorkspaceSplit(kind){setWorkspaceSplit(kind,workspaceSplitWidths[kind]||300,false);}
+function startWorkspaceSplit(event,kind){
+  if(matchMedia('(max-width:720px)').matches||(event.pointerType==='mouse'&&event.button!==0))return;
+  const divider=event.currentTarget,browser=divider.closest('.workspacebrowser');if(!browser)return;
+  event.preventDefault();const startX=event.clientX,startWidth=browser.querySelector('aside')?.getBoundingClientRect().width||300;
+  divider.classList.add('resizing');divider.setPointerCapture?.(event.pointerId);
+  const move=moveEvent=>{if(moveEvent.pointerId!==event.pointerId)return;moveEvent.preventDefault();setWorkspaceSplit(kind,startWidth+moveEvent.clientX-startX);};
+  const end=endEvent=>{if(endEvent.pointerId!==event.pointerId)return;divider.classList.remove('resizing');
+    divider.removeEventListener('pointermove',move);divider.removeEventListener('pointerup',end);divider.removeEventListener('pointercancel',end);persistWorkspaceSplits();};
+  divider.addEventListener('pointermove',move);divider.addEventListener('pointerup',end);divider.addEventListener('pointercancel',end);
+}
+function workspaceSplitKey(event,kind){
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  const browser=event.currentTarget.closest('.workspacebrowser'),bounds=workspaceSplitBounds(browser),current=workspaceSplitWidths[kind]||300;
+  event.preventDefault();const next=event.key==='Home'?bounds.min:event.key==='End'?bounds.max:current+(event.key==='ArrowRight'?16:-16);
+  setWorkspaceSplit(kind,next,true);
+}
+function activateWorkspaceSection(){
+  if(!sessionView)return;
+  for(const section of workspaceSections){
+    const active=section===sessionView.section,tab=$(`#stab-${section}`),panel=$(`#spanel-${section}`);
+    if(tab){tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;}
+    if(panel)panel.hidden=!active;
+  }
+  $('#sview').dataset.section=sessionView.section;
+  if(['files','subagents'].includes(sessionView.section))applyWorkspaceSplit(sessionView.section);
+}
+function openSessionWorkspace(sid,section='chat',item=null,push=true){
+  if(!sid)return;
+  section=workspaceSections.has(section)?section:'chat';
+  const liveSession=((last&&last.sessions)||[]).find(x=>x.session_id===sid)||
     (spawnProvisional&&spawnProvisional.id===sid?provisionalSessionObject():null);
-  if(session?.new_response)markRead(session);
-  sessionView={sid,closed:false,lastGood:session||null,missingSince:null};sessionOpened=true;
-  sessionFollowTail=true;sessionReadingIntentRevision++;sessionEvidenceOpen=false;
-  $('#sview').style.display='flex';
-  syncVisualViewport();
-  $('#stitle2').innerHTML=sessTitleBlock(session);
-  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
-  $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
-  delete body.dataset.renderKey;delete body.dataset.canonicalKey;
-  syncOverlayHistory();
-  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&!sessionView.closed)renderSession(true);});
+  const closed=!liveSession&&(isClosedSession(sid)||closedMeta.has(sid)||String(sid).startsWith('codex:'));
+  if(liveSession?.new_response)markRead(liveSession);
+  const same=sessionView?.sid===sid,target=workspaceHash(sid,section,item);
+  let returnHash=same?sessionView.returnHash:
+    (parseSessionHash()?'#now':(location.hash||'#now'));
+  let historyDepth=same?Number(sessionView.historyDepth||0):0;
+  if(!push&&history.state?.fdWorkspace){
+    returnHash=history.state.returnHash||returnHash;
+    historyDepth=Math.max(0,Number(history.state.depth)||0);
+  }else if(push&&location.hash!==target)historyDepth++;
+  if(same)saveWorkspaceScroll();
+  const previousSection=same?sessionView.section:null;
+  sessionView={...(same?sessionView:{}),sid,closed,lastGood:liveSession||(same?sessionView.lastGood:null),
+    missingSince:null,section,fileId:section==='files'?item:null,agentId:section==='subagents'?item:null,
+    fileExplicit:section==='files'?Boolean(item):false,agentExplicit:section==='subagents'?Boolean(item):false,
+    agentFilter:section==='subagents'&&previousSection!=='subagents'?'active':(same?sessionView.agentFilter:'active'),
+    returnHash,historyDepth};
+  agentView=sessionView.agentId?{sid,aid:sessionView.agentId}:null;
+  viewerSid=section==='files'?sid:null;viewerPath=sessionView.fileId;
+  if(!same){sessionOpened=true;sessionFollowTail=true;sessionReadingIntentRevision++;
+    sessionEvidenceOpen=false;$('#sbody').innerHTML='<div class="ctxload">loading conversation…</div>';
+    $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
+    delete $('#sbody').dataset.renderKey;delete $('#sbody').dataset.canonicalKey;}
+  $('#sview').style.display='flex';activateWorkspaceSection();syncVisualViewport();
+  const routeState={fdWorkspace:1,sid,section,item,returnHash,depth:historyDepth};
+  if(push&&location.hash!==target)history.pushState(routeState,'',target);
+  else if(!push&&location.hash!==target)history.replaceState(routeState,'',target);
+  if(closed&&!closedSession(sid))loadClosedMeta(sid);
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid){renderSession(true);restoreWorkspaceScroll();}});
 }
-// a closed session has no process: read its transcript, offer no controls
-function openClosed(sid){
-  closeViewer();
-  sessionView={sid,closed:true};sessionOpened=true;sessionEvidenceOpen=false;
-  $('#sview').style.display='flex';
-  syncVisualViewport();
-  const body=$('#sbody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
-  $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
-  delete body.dataset.renderKey;
-  syncOverlayHistory();
-  requestAnimationFrame(()=>{if(sessionView?.sid===sid&&sessionView.closed)renderClosed(true);});
-  if(!closedSession(sid))loadClosedMeta(sid);
+function applyWorkspaceRoute(route){
+  pendingWorkspaceRoute=null;openSessionWorkspace(route.sid,route.section,route.item,false);
 }
+function openSession(sid){openSessionWorkspace(sid,'chat',null,true);}
+function openClosed(sid){openSessionWorkspace(sid,'chat',null,true);}
+function exitSessionWorkspace(){
+  if(!sessionView)return;
+  const depth=Math.max(0,Number(sessionView.historyDepth)||0),returnHash=sessionView.returnHash||'#now';
+  closeSession();
+  if(depth){history.go(-depth);return;}
+  const route=returnHash.replace(/^#/,'').split('/')[0];
+  history.replaceState({fdRoute:validRoutes.has(route)?route:'now'},'',returnHash);
+  navigateTo(validRoutes.has(route)?route:'now',false);
+}
+function setSessionSection(section){
+  if(!sessionView||!workspaceSections.has(section))return;
+  openSessionWorkspace(sessionView.sid,section,null,true);
+}
+function clearWorkspaceSelection(){
+  if(!sessionView||!['files','subagents'].includes(sessionView.section))return;
+  saveWorkspaceScroll();sessionView.fileId=null;sessionView.agentId=null;agentView=null;viewerPath=null;
+  sessionView.fileExplicit=false;sessionView.agentExplicit=false;
+  history.replaceState({fdWorkspace:1,sid:sessionView.sid,section:sessionView.section,
+    returnHash:sessionView.returnHash,depth:sessionView.historyDepth},'',
+    workspaceHash(sessionView.sid,sessionView.section));
+  renderSession(true);
+}
+$('#stabs')?.addEventListener('keydown',event=>{
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  const sections=[...workspaceSections],current=Math.max(0,sections.indexOf(sessionView?.section||'chat'));
+  const index=event.key==='Home'?0:event.key==='End'?sections.length-1:
+    (current+(event.key==='ArrowRight'?1:-1)+sections.length)%sections.length;
+  event.preventDefault();setSessionSection(sections[index]);requestAnimationFrame(()=>$(`#stab-${sections[index]}`)?.focus());
+});
+const WORKSPACE_SWIPE_MIN_PX=56,WORKSPACE_EDGE_SWIPE_PX=24;
+let workspaceTouch=null;
+function mobileWorkspaceSwipeEnabled(){
+  return Boolean(sessionView&&$('#sview')?.style.display!=='none'&&matchMedia('(max-width:720px)').matches);
+}
+function workspaceHorizontalTarget(target){
+  if(!(target instanceof Element))return false;
+  if(target.closest('input,textarea,select,[contenteditable="true"],iframe,embed,object'))return true;
+  for(let node=target;node&&node!==$('#sview');node=node.parentElement){
+    const style=getComputedStyle(node),overflow=style.overflowX;
+    if(['auto','scroll'].includes(overflow)&&node.scrollWidth>node.clientWidth+1)return true;
+  }
+  return false;
+}
+function workspaceTouchPoint(event){return event.touches?.[0]||event.changedTouches?.[0]||null;}
+$('#sview')?.addEventListener('touchstart',event=>{
+  if(!mobileWorkspaceSwipeEnabled()||event.touches?.length!==1)return workspaceTouch=null;
+  const point=workspaceTouchPoint(event);if(!point)return workspaceTouch=null;
+  workspaceTouch={x:point.clientX,y:point.clientY,lastX:point.clientX,lastY:point.clientY,
+    edge:point.clientX<=WORKSPACE_EDGE_SWIPE_PX,ignored:workspaceHorizontalTarget(event.target),axis:null};
+},{passive:true,capture:true});
+$('#sview')?.addEventListener('touchmove',event=>{
+  if(!workspaceTouch||event.touches?.length!==1)return;
+  const point=workspaceTouchPoint(event);if(!point)return;
+  workspaceTouch.lastX=point.clientX;workspaceTouch.lastY=point.clientY;
+  const dx=point.clientX-workspaceTouch.x,dy=point.clientY-workspaceTouch.y;
+  if(!workspaceTouch.axis&&Math.max(Math.abs(dx),Math.abs(dy))>=10){
+    if(Math.abs(dx)>Math.abs(dy)*1.2)workspaceTouch.axis='x';
+    else if(Math.abs(dy)>Math.abs(dx)*1.2)workspaceTouch.axis='y';
+  }
+  if(workspaceTouch.axis!=='x')return;
+  const edgeExit=workspaceTouch.edge&&dx>0;
+  if(edgeExit||!workspaceTouch.ignored)event.preventDefault();
+},{passive:false,capture:true});
+function finishWorkspaceTouch(event){
+  if(!workspaceTouch)return;
+  const gesture=workspaceTouch;workspaceTouch=null;
+  const point=workspaceTouchPoint(event),endX=point?.clientX??gesture.lastX,endY=point?.clientY??gesture.lastY;
+  const dx=endX-gesture.x,dy=endY-gesture.y;
+  if(gesture.axis!=='x'||Math.abs(dx)<WORKSPACE_SWIPE_MIN_PX||Math.abs(dx)<=Math.abs(dy)*1.2)return;
+  if(gesture.edge&&dx>0){exitSessionWorkspace();return;}
+  if(gesture.ignored||!sessionView)return;
+  const sections=[...workspaceSections],current=sections.indexOf(sessionView.section);
+  const next=current+(dx<0?1:-1);
+  if(next>=0&&next<sections.length)setSessionSection(sections[next]);
+}
+$('#sview')?.addEventListener('touchend',finishWorkspaceTouch,{passive:true,capture:true});
+$('#sview')?.addEventListener('touchcancel',()=>{workspaceTouch=null;},{passive:true,capture:true});
 async function loadClosedMeta(sid){
   try{
     const response=await fetch('/api/history?sid='+encodeURIComponent(sid),{cache:'no-store'});
@@ -3159,51 +3363,217 @@ async function loadClosedMeta(sid){
   if(sessionView&&sessionView.closed&&sessionView.sid===sid)renderClosed(true);
 }
 function closeSession(){
-  closeOverflow();sessionView=null;sessionEvidenceOpen=false;slashClose();
+  saveWorkspaceScroll();closeOverflow();sessionView=null;agentView=null;viewerSid=null;viewerPath=null;
+  sessionEvidenceOpen=false;slashClose();
   sessionTailObserver?.disconnect();sessionTailObserver=null;
   closeComposerMenus();
   $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
-  $('#sctrl').innerHTML='';$('#sevidence').innerHTML='';$('#sevidence').classList.remove('open');
+  $('#sctrl').innerHTML='';$('#sdetails').innerHTML='';$('#sfilelist').innerHTML='';
+  $('#sagentlist').innerHTML='';$('#vbody').innerHTML='';$('#abody').innerHTML='';
   syncModalStack();
 }
 function sessionActivityHtml(s){
   const mainWorking=['running','stalled'].includes(s.state);
-  const agents=(s.agents||[]).filter(agent=>!['done','ended'].includes(agent.state));
-  if(!mainWorking&&!agents.length)return'';
+  if(!mainWorking)return'';
   const mainSlow=s.state==='stalled';
-  const signals=[mainWorking?`<span class="worksignal"><i class="workpulse${mainSlow?' slow':''}" aria-hidden="true"></i>${mainSlow?'Main session is slow':'Main session working'}</span>`:'',
-    agents.length?`<span class="worksignal"><i class="worksubicon" aria-hidden="true">⇶</i>${agents.length} active subagent${agents.length===1?'':'s'}</span>`:''].filter(Boolean);
-  const rows=[];
-  if(mainWorking)rows.push(`<span><b>Main session</b><small>${mainSlow?'Slow — may still be working':'Working'}</small></span>`);
-  for(const agent of agents)rows.push(`<span><b>${esc(agent.description||agent.agent_type||agent.agent_id||'Subagent')}</b><small>${agent.state==='stalled'?'Slow — may still be working':'Working'}</small></span>`);
-  return`<div class="workactivity" role="status" aria-live="polite"><details><summary>${signals.join('<em>│</em>')}</summary>
-    <div class="workdetails">${rows.join('')}</div></details></div>`;
+  return`<div class="mainworkingrow${mainSlow?' slow':''}" role="status" aria-live="polite">
+    <span class="crole">${esc(s.provider||'agent')}</span><span class="cbody"><i class="workpulse${mainSlow?' slow':''}" aria-hidden="true"></i>
+      <span>Main agent working</span></span></div>`;
 }
 function renderSessionActivity(s){
   const host=$('#sactivity');if(!host)return;
-  const html=sessionActivityHtml(s),key=[s.state,...(s.agents||[]).map(agent=>
-    `${agent.agent_id||''}:${agent.state||''}:${agent.description||agent.agent_type||''}`)].join('|');
+  const html=sessionActivityHtml(s),key=s.state;
   if(host.dataset.renderKey===key&&Boolean(host.innerHTML)===Boolean(html))return;
   host.innerHTML=html;host.dataset.renderKey=key;
+}
+function workspaceContext(){
+  if(!sessionView)return null;
+  return sessionView.closed?closedCtx[sessionView.sid]:ctxCache[sessionView.sid];
+}
+function workspaceAgents(s,c){return[...((s&&s.agents)||(c&&c.agents)||[])];}
+function renderWorkspaceChrome(s,c){
+  if(!sessionView)return;
+  const files=(c&&c.files)||[],agents=workspaceAgents(s,c);
+  $('#stitle2').innerHTML=`${sessTitleBlock(s)}${sessionView.closed?'<small class="closedbadge">Closed · saved workspace</small>':''}`;
+  $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,sessionView.closed?'closed':'session');
+  $('#sfilecount').textContent=files.length?String(files.length):'';
+  const activeAgents=agents.filter(agent=>!terminalAgentStates.has(agent.state));
+  $('#sagentcount').textContent=activeAgents.length?String(activeAgents.length):'';
+  activateWorkspaceSection();
+}
+function renderParentWorkspaceAction(s,c,{pending=true,showFiles=false,note=''}={}){
+  const act=$('#sact');if(!act)return;
+  const focused=document.activeElement;
+  if(focused&&['INPUT','TEXTAREA'].includes(focused.tagName)&&act.contains(focused)){
+    refreshStatusStrip('#sact',s.status_line,'session:'+s.session_id);return;
+  }
+  const p=pending?s.pending:null;
+  const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
+  const qHtml=hasQ?questionDrawerHtml(s,p,'smsg'):(p?pendingBox(s,'smsg'):'');
+  act.classList.remove('tools-open');act.classList.toggle('session-composer',canCompose(s));
+  act.classList.toggle('question-present',Boolean(hasQ));
+  if(!canCompose(s))act.classList.remove('composer-active');
+  keepSessionActionScroll(act,()=>{act.innerHTML=`<div class="session-context">${qHtml}
+      ${note?`<div class="relaynote">${note}</div>`:''}
+      <div class="session-extras">${handoffLinksHtml(s)}
+        ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
+      ${sessionSurfaceBar(s,showFiles?(c&&c.files)||[]:[])}</div></div>
+    ${renderComposer(s,'session')}`;});
+  if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
+}
+function chosenWorkspaceFile(files){
+  if(!files.length)return null;
+  return files.find(file=>file.file_id===sessionView.fileId)||
+    files.find(file=>file.file_id===lastSessionFiles[sessionView.sid])||files[0];
+}
+function renderWorkspaceFileDocument(file){
+  const body=$('#vbody');if(!body||!file)return;
+  const key=`${sessionView.sid}:${file.file_id}:${file.missing?'missing':'available'}`;
+  if(body.dataset.renderKey===key)return;
+  body.dataset.renderKey=key;body.classList.remove('frameview');body.replaceChildren();
+  const format=viewerFormat(file.name,file.kind),url='/api/file?sid='+encodeURIComponent(sessionView.sid)+'&fid='+encodeURIComponent(file.file_id);
+  $('#vtitle').innerHTML=`<span class="vfname">${format==='image'?'🖼':'📄'} ${esc(file.name)}${file.caption?` <small>${esc(file.caption)}</small>`:''}</span>`;
+  if(file.missing){body.innerHTML='<div class="workspaceempty"><b>File unavailable</b><p>The retained transcript names this file, but neither the file nor its saved delivery copy remains.</p></div>';return;}
+  if(format==='image'){body.innerHTML=`<div class="ctxload">loading image…</div><img hidden src="${url}" alt="${esc(file.name)}"
+    onload="this.hidden=false;this.previousElementSibling?.remove()" onerror="this.previousElementSibling.textContent='✗ image unavailable';this.remove()">`;return;}
+  if(format==='pdf'){showViewerFrame(body,'pdfpreview',`PDF preview: ${file.name}`,{src:url,sandbox:false});return;}
+  body.textContent='loading…';
+  fetch(url,{cache:'no-store'}).then(async response=>{
+    if(!response.ok){body.textContent=(response.status===403?'read-only device — open the token URL once. ':'')+await response.text();return;}
+    const text=await response.text();
+    if(!sessionView||sessionView.sid!==file.session_id||sessionView.fileId!==file.file_id)return;
+    if(sessionView.fileId!==file.file_id)return;
+    if(format==='html')showViewerFrame(body,'htmlpreview',`HTML preview: ${file.name}`,{srcdoc:sandboxedHtmlDocument(text),sandbox:'allow-scripts'});
+    else if(format==='json')showJsonDocument(body,text);
+    else body.innerHTML=format==='markdown'?'<div class="mdoc">'+md(text)+'</div>':'<pre class="raw">'+esc(text)+'</pre>';
+  }).catch(error=>{if(sessionView?.fileId===file.file_id)body.textContent='✗ '+error;});
+}
+function renderWorkspaceFiles(force=false){
+  if(!sessionView||sessionView.section!=='files')return;
+  const c=workspaceContext(),files=(c&&c.files)||[],list=$('#sfilelist');
+  if(!c||c.fetching&&!c.messages){list.innerHTML='<div class="ctxload">loading file inventory…</div>';return;}
+  if(!files.length){list.innerHTML='<div class="workspaceempty"><b>No retained files</b><p>This session has no validated file records.</p></div>';
+    $('#vtitle').textContent='Files';$('#vbody').innerHTML='<div class="workspaceempty"><b>Nothing to preview</b></div>';
+    $('#sfilebrowser').classList.remove('has-selection');return;}
+  const selected=chosenWorkspaceFile(files);sessionView.fileId=selected?.file_id||null;viewerPath=sessionView.fileId;
+  if(selected)rememberSessionFile(sessionView.sid,selected.file_id);
+  const keepListTop=list.scrollTop;  // #sfilelist is itself the scroll container; innerHTML swap resets it every poll
+  list.innerHTML=`<header class="workspaceasidehead"><b>${files.length} file${files.length===1?'':'s'}</b><small>session-owned inventory</small></header>
+    <div class="workspacelist">${files.map(file=>`<button class="workspaceitem ${file.file_id===selected?.file_id?'selected':''}" ${file.missing||!file.file_id?'disabled':''}
+      onclick="viewFile('${enc(sessionView.sid)}','${enc(file.file_id)}')"><span>${file.kind==='image'?'🖼':'📄'}</span><b>${esc(file.name)}</b><small>${esc(file.caption||'')}</small></button>`).join('')}</div>`;
+  list.scrollTop=keepListTop;
+  $('#sfilebrowser').classList.toggle('has-selection',Boolean(sessionView.fileExplicit));
+  if(selected)renderWorkspaceFileDocument({...selected,session_id:sessionView.sid});
+  renderParentWorkspaceAction(workspaceSessionModel(),c,{pending:true});
+}
+const terminalAgentStates=new Set(['done','ended','cancelled','failed','error']);
+function filteredWorkspaceAgents(agents,filter){
+  if(filter==='all')return agents.map(agent=>({agent,ancestor:false}));
+  const keep=new Set(),stack=[];
+  agents.forEach((agent,index)=>{const depth=Math.max(0,Number(agent.depth)||0);stack.length=depth;
+    if(!terminalAgentStates.has(agent.state)){keep.add(index);stack.forEach(parent=>keep.add(parent));}
+    stack[depth]=index;});
+  return agents.map((agent,index)=>({agent,ancestor:keep.has(index)&&terminalAgentStates.has(agent.state)}))
+    .filter((_,index)=>keep.has(index));
+}
+function setSubagentFilter(filter){
+  if(!sessionView||sessionView.section!=='subagents')return;
+  sessionView.agentFilter=filter==='all'?'all':'active';renderWorkspaceSubagents(true);
+}
+function selectWorkspaceAgent(encodedSid,encodedAid){
+  const sid=decodeURIComponent(encodedSid),aid=decodeURIComponent(encodedAid);
+  if(!/^agent-[A-Za-z0-9_-]{1,64}$/.test(aid))return;
+  seedTargetedWorkspaceHistory(sid,'subagents');
+  openSessionWorkspace(sid,'subagents',aid,true);
+}
+function renderWorkspaceSubagents(force=false){
+  if(!sessionView||sessionView.section!=='subagents')return;
+  const s=workspaceSessionModel(),c=workspaceContext(),agents=workspaceAgents(s,c),filter=sessionView.agentFilter||'active';
+  const visible=filteredWorkspaceAgents(agents,filter);
+  $('#sagentfilters').innerHTML=`<button class="${filter==='active'?'active':''}" aria-pressed="${filter==='active'}" onclick="setSubagentFilter('active')">Active</button>
+    <button class="${filter==='all'?'active':''}" aria-pressed="${filter==='all'}" onclick="setSubagentFilter('all')">All</button>`;
+  $('#sagentlist').innerHTML=agents.length?`<div class="workspacelist">${visible.length?visible.map(({agent,ancestor})=>{
+    const terminal=terminalAgentStates.has(agent.state),latest=agent.last_msg?.text||(!terminal?`quiet ${fmtAge(Math.max(0,Number(agent.quiet_s)||0))}`:'');
+    return`<button class="workspaceitem agentworkspaceitem ${agent.agent_id===sessionView.agentId?'selected':''} ${ancestor?'ancestor':''}" style="--agent-depth:${Math.max(0,Number(agent.depth)||0)}"
+      onclick="selectWorkspaceAgent('${enc(sessionView.sid)}','${enc(agent.agent_id)}')"><span class="dot ${esc(agent.state||'running')}"></span><b>${esc(agent.description||agent.agent_type||agent.agent_id)}</b>
+      <small>${ancestor?'parent of active subagent':esc(latest)}</small></button>`;}).join(''):'<div class="workspaceempty"><b>No active subagents</b><p>Choose All to read completed or cancelled work.</p></div>'}</div>`:
+    '<div class="workspaceempty"><b>No retained subagents</b><p>No validated subagent records are available for this session.</p></div>';
+  const selected=agents.find(agent=>agent.agent_id===sessionView.agentId)||null;
+  if(!selected){sessionView.agentId=null;agentView=null;$('#sagentbrowser').classList.remove('has-selection');
+    $('#atitle').textContent='Subagents';$('#abody').innerHTML='<div class="workspaceempty"><b>Select a subagent to read its conversation</b><p>The composer still targets the parent session.</p></div>';
+    if(sessionView.closed)renderClosedComposer(s,c);else renderParentWorkspaceAction(s,c,{pending:false});return;}
+  agentView={sid:sessionView.sid,aid:selected.agent_id};$('#sagentbrowser').classList.add('has-selection');renderAgent(force);
+}
+function workspaceSessionModel(){
+  if(!sessionView)return{};
+  const live=((last&&last.sessions)||[]).find(item=>item.session_id===sessionView.sid);
+  if(live)return live;
+  const c=closedCtx[sessionView.sid]||{},info=c.info||{},meta=closedSession(sessionView.sid)||{};
+  return{...meta,...info,session_id:sessionView.sid,provider:meta.provider||(sessionView.sid.startsWith('codex:')?'codex':'claude'),
+    title:meta.title||info.title||info.project||'closed session',state:'closed',closed:true,agents:c.agents||[],capabilities:{}};
+}
+function renderWorkspaceDetails(s,c){
+  if(!sessionView||sessionView.section!=='details')return;
+  const cache=evidenceCache[s.session_id]||{},status=s.status_line||c?.info?.status_line;
+  $('#sdetailindex').innerHTML=['overview','placement','notifications','continuation'].map(id=>`<a href="#detail-${id}" onclick="event.preventDefault();document.getElementById('detail-${id}').scrollIntoView({behavior:'smooth',block:'start'})">${id[0].toUpperCase()+id.slice(1)}</a>`).join('');
+  $('#sdetails').innerHTML=`<section class="detailsection" id="detail-overview"><h2>Overview</h2><div class="kv">
+      <span>provider</span><b>${esc(s.provider||'claude')}</b><span>session ID</span>${cpb(s.session_id)}
+      <span>status</span><b>${esc(s.state||'closed')}</b><span>model</span><b>${esc(s.model||'?')}</b>
+      <span>effort</span><b>${esc(s.effort||'—')}</b><span>mode</span><b>${esc(s.collaboration_mode||'—')}</b>
+      <span>permission</span><b>${esc(s.permission_mode?claudePermissionLabel(s.permission_mode):'—')}</b>
+      <span>started</span><b>${s.started_ms?fmtAge(Math.max(0,Math.round(Date.now()/1000-s.started_ms/1000)))+' ago':'unavailable'}</b>
+      <span>context</span><b>${s.ctx_tokens==null?'unavailable':fmtTok(s.ctx_tokens)}</b>
+      <span>spend</span><b>${s.cost==null?'unavailable':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost||0)} agents`}</b>
+      ${s.error?`<span>errors</span><b>${esc(s.error)}</b>`:''}</div>${statusLineHtml(status,'details:'+s.session_id)}</section>
+    <section class="detailsection" id="detail-placement"><h2>Placement</h2><div class="evidencerule"><span>Current placement</span><b>${esc(s.reason_label||s.ui_group||'History')}</b><code>${esc(s.winning_rule||'placement.unknown')}</code></div>
+      ${evidenceFactsHtml(s)}<div class="evidencehistory">${cache.error?`<div class="evidenceerror">${esc(cache.error)}</div>`:''}${(cache.events||[]).map(evidenceEventHtml).join('')}
+      ${cache.loading?'<div class="ctxload">loading placement history…</div>':''}${cache.loaded&&!(cache.events||[]).length?'<div class="evidenceempty">No earlier transitions recorded.</div>':''}
+      ${cache.next_cursor&&!cache.loading?`<button class="historyaction" onclick="loadSessionEvidence('${enc(s.session_id)}',true)">Load older</button>`:''}</div></section>
+    <section class="detailsection" id="detail-notifications"><h2>Notifications</h2><div class="mutebox"><button class="bell ${s.muted?'muted':''}" ${sessionView.closed?'disabled':''}
+      onclick="toggleMute('${s.session_id}',${s.muted?'false':'true'},'dmsg-${s.session_id}')">${s.muted?'🔕':'🔔'}</button><span>${sessionView.closed?'Notification controls are unavailable for a closed session.':s.muted?'Push notifications muted for this session.':'Notifications follow your session policy.'}</span></div><div class="actmsg" id="dmsg-${s.session_id}"></div></section>
+    <section class="detailsection" id="detail-continuation"><h2>Continuation</h2>${handoffLinksHtml(s)}
+      ${sessionView.closed?`<p>${s.can_resume_and_send?'The first text send resumes this exact saved session.':esc(s.resume_disabled_reason||'This saved session cannot be resumed.')}</p>`:''}
+      ${s.bridge_url?`<a class="jump" href="${esc(s.bridge_url)}" target="_blank" rel="noreferrer">open external session ↗</a>`:''}
+      ${s.can_reopen?`<button class="pbtn" onclick="reopenClosed('${s.session_id}',this)">reopen in terminal</button>`:''}</section>`;
+  if(!cache.loaded&&!cache.loading)loadSessionEvidence(enc(s.session_id));
+  if(sessionView.closed)renderClosedComposer(s,c);else renderParentWorkspaceAction(s,c,{pending:true});
+}
+const closedResumeRequests=new Map(),closedResumeWarned=new Set();
+function renderClosedComposer(s,c){
+  const act=$('#sact'),can=Boolean(s.can_resume_and_send),reason=s.resume_disabled_reason||'This saved session cannot be resumed.';
+  const draft=draftValue(composerDraftKey(s.session_id));
+  act.classList.toggle('session-composer',can);act.classList.remove('question-present','tools-open');
+  act.innerHTML=`<div class="session-context"><div class="relaynote"><b>closed session</b> — ${can?'Your first text send resumes this exact session. Images and scheduling stay disabled until it is live.':esc(reason)}</div>
+    ${handoffLinksHtml(s)}${statusLineHtml(s.status_line||c?.info?.status_line,'closed:'+s.session_id)}</div><div class="freetext composer"><textarea id="closedft-${esc(s.session_id)}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="2" ${can?'':'disabled'}
+      placeholder="${can?'resume and send to this exact session':esc(reason)}" oninput="setDraft('${esc(composerDraftKey(s.session_id))}',this.value)" onkeydown="composerKey(event,()=>requestResumeAndSend('${enc(s.session_id)}'))">${esc(draft)}</textarea>
+      <button class="pbtn send" ${can?'':'disabled'} onclick="requestResumeAndSend('${enc(s.session_id)}')">Resume & send</button></div><div class="actmsg" id="smsg"></div>`;
+}
+function requestResumeAndSend(encodedSid){
+  const sid=decodeURIComponent(encodedSid),input=document.getElementById('closedft-'+sid),text=(input?.value||'').trim();if(!text)return;
+  let request=closedResumeRequests.get(sid);
+  if(!request||request.text!==text)request={id:'resume-'+offlineMessageId(),text};closedResumeRequests.set(sid,request);
+  if(!closedResumeWarned.has(request.id)){
+    closedResumeWarned.add(request.id);askConfirm('Resume this exact session?',
+      'Fleet will reopen the saved session, wait until it accepts input, and deliver this text exactly once. Images and scheduling remain off until the session is live.',
+      'resume and send',()=>sendClosedResume(sid,request));return;
+  }
+  sendClosedResume(sid,request);
+}
+async function sendClosedResume(sid,request){
+  const input=document.getElementById('closedft-'+sid),button=input?.parentElement?.querySelector('button');
+  if(button){button.disabled=true;button.textContent='Resuming…';}
+  const result=await act(sid,{type:'resume_and_send',text:request.text,client_request_id:request.id},'smsg');
+  if(result.ok){clearDraft(composerDraftKey(sid));if(input)input.value='';
+    rememberOutboxReceipt({outboxId:result.outbox_id,sid,text:request.text,status:'queued',queueLabel:'Resuming session',queueReason:'Waiting for the exact saved session to accept input',created:Date.now()});
+    closedResumeRequests.delete(sid);renderClosed(true);setTimeout(()=>tick(true),500);
+  }else{closedResumeRequests.delete(sid);if(button){button.disabled=false;button.textContent='Resume & send';}}
 }
 async function renderClosed(){
   if(!sessionView||!sessionView.closed)return;
   const sid=sessionView.sid;
-  const body=$('#sbody');
-  const meta=closedSession(sid)||{};
-  $('#sctrl').innerHTML=evidenceButton(meta)+overflowMenu('session',meta,'closed');
-  renderEvidenceRail(meta);
-  const closedActions=status=>`<div class="relaynote">this session is <b>closed</b> — its terminal is gone,
-      so there is nothing to send to. The conversation is read-only.</div>
-      ${statusLineHtml(status,'closed:'+sid)}
-      ${handoffLinksHtml(meta)}
-      ${meta.can_reopen?`<div class="freetext"><button class="pbtn send" ${reopenedSessions.has(sid)?'disabled':''}
-        onclick="reopenClosed('${sid}',this)">${reopenedSessions.has(sid)?'opened ✓':'reopen in terminal'}</button></div>
-        <div class="actmsg" id="reopenmsg-${sid}"></div>`:''}`;
-  $('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
-  $('#sact').innerHTML=closedActions(meta.status_line);
+  const body=$('#sbody'),meta=closedSession(sid)||{};
   if(!closedCtx[sid]){
     const saved=savedConversation('closed',sid);
     closedCtx[sid]={...(saved||{messages:[],info:{}}),fetching:true};
@@ -3212,16 +3582,21 @@ async function renderClosed(){
       const r=await fetch(conversationEndpoint('closed',sid),{cache:'no-store'});
       const d=await r.json();
       if(!r.ok||!d.ok)throw new Error(d.error||'unavailable');
-      closedCtx[sid]=mergeFreshConversation(saved,{messages:d.messages||[],info:d.info||{},
-        next_cursor:d.next_cursor,message_total:d.message_total});
+      closedCtx[sid]=mergeFreshConversation(saved,{messages:d.messages||[],files:d.files||[],agents:d.agents||[],
+        closed:true,info:d.info||{},next_cursor:d.next_cursor,message_total:d.message_total});
       persistConversation('closed',sid,'',closedCtx[sid]);
     }catch(e){closedCtx[sid]={...(saved||{messages:[],info:{}}),fetching:false,
       stale:Boolean(saved),error:String(e.message||e)};}
     if(!sessionView||sessionView.sid!==sid)return;      // closed while fetching
   }
   const c=closedCtx[sid],info=c.info||{};
-  $('#sact').innerHTML=closedActions(info.status_line||meta.status_line);
-  $('#stitle2').innerHTML=`<b>${esc(meta.title||info.project||'closed session')}</b>`;
+  const s={...meta,...info,session_id:sid,closed:true,state:'closed',agents:c.agents||[],
+    provider:meta.provider||(sid.startsWith('codex:')?'codex':'claude'),capabilities:{}};
+  renderWorkspaceChrome(s,c);
+  if(sessionView.section==='files')return renderWorkspaceFiles(true);
+  if(sessionView.section==='subagents')return renderWorkspaceSubagents(true);
+  if(sessionView.section==='details')return renderWorkspaceDetails(s,c);
+  renderClosedComposer(s,c);
   if(c.fetching){body.innerHTML='<div class="ctxload">loading conversation…</div>';return;}
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   const wantBottom=sessionOpened||old.atBottom;sessionOpened=false;
@@ -3257,7 +3632,7 @@ function renderSession(force){
     (spawnProvisional&&spawnProvisional.id===sessionView.sid?provisionalSessionObject():null);
   if(current){sessionView.lastGood=current;sessionView.missingSince=null;}
   else if(closedIds.has(sessionView.sid)){
-    sessionView={sid:sessionView.sid,closed:true};sessionOpened=true;renderClosed(force);return;
+    sessionView={...sessionView,closed:true};sessionOpened=true;renderClosed(force);return;
   }else if(!sessionView.lastGood){closeSession();return;}
   else if(!sessionView.missingSince)sessionView.missingSince=Date.now();
   const missing=!current;
@@ -3272,12 +3647,13 @@ function renderSession(force){
   }else renderSessionActivity(s);
   ensureCtx(s.session_id,ctxVersion(s));
   const c=ctxCache[s.session_id];
+  renderWorkspaceChrome(s,c);
+  if(sessionView.section==='files')return renderWorkspaceFiles(force);
+  if(sessionView.section==='subagents')return renderWorkspaceSubagents(force);
+  if(sessionView.section==='details')return renderWorkspaceDetails(s,c);
   const ae=document.activeElement;
   const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#sview').contains(ae);
   const done=['done','ended'];
-  $('#stitle2').innerHTML=sessTitleBlock(s);
-  $('#sctrl').innerHTML=evidenceButton(s)+terminalButton(s)+overflowMenu('session',s,'session');
-  renderEvidenceRail(s);
   // A focused composer must not freeze transcript confirmation. The composer
   // itself is preserved below; only defer the body repaint during an active
   // touch gesture so mobile scrolling is not interrupted.
@@ -3307,23 +3683,8 @@ function renderSession(force){
     refreshStatusStrip('#sact',s.status_line,'session:'+s.session_id);
     return;                                // never replace the input being typed into
   }
-  const p=s.pending;
-  const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
-  const qHtml=hasQ?questionDrawerHtml(s,p,'smsg')
-    :pendingBox(s,'smsg');   // permission prompts render whole
-  const act=$('#sact');
-  act.classList.remove('tools-open');
-  act.classList.toggle('session-composer',canCompose(s));
-  act.classList.toggle('question-present',Boolean(hasQ));
-  if(!canCompose(s))act.classList.remove('composer-active');
   const layoutAnchor=captureReadingAnchor(body);
-  keepSessionActionScroll(act,()=>{act.innerHTML=`
-    <div class="session-context">${qHtml}
-      <div class="session-extras">${handoffLinksHtml(s)}
-        ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
-        ${sessionSurfaceBar(s,(c&&c.files)||[])}</div></div>
-    ${renderComposer(s,'session')}`;});restoreReadingAnchor(layoutAnchor);
-  if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
+  renderParentWorkspaceAction(s,c,{pending:true,showFiles:true});restoreReadingAnchor(layoutAnchor);
   // #sact just shrank #sbody — re-pin to the true bottom after layout settles
   if(wantBottom){sessionFollowTail=true;scheduleSessionTailPin();}
 }
@@ -3336,24 +3697,15 @@ const agentCache={};             // parent session + aid -> {v, messages, info}
 const agentCacheKey=(sid,aid)=>String(sid||'')+'\0'+String(aid||'');
 let agentInfoOpen2=false;        // the info dropdown INSIDE the overlay
 function openAgent(sid,aid){
-  agentView={sid,aid};
-  agentInfoOpen2=false;
-  $('#aview').style.display='flex';
-  $('#atitle').innerHTML='<b>subagent</b>';
-  const body=$('#abody');body.innerHTML='<div class="ctxload">loading conversation…</div>';
-  delete body.dataset.renderKey;
-  syncOverlayHistory();
-  requestAnimationFrame(()=>{if(agentView?.sid===sid&&agentView?.aid===aid)renderAgent(true);});
+  seedTargetedWorkspaceHistory(sid,'subagents');
+  openSessionWorkspace(sid,'subagents',aid,true);
 }
 function closeAgent(){
   closeOverflow();agentView=null;agentInfoOpen2=false;
-  $('#aview').style.display='none';$('#abody').innerHTML='';delete $('#abody').dataset.renderKey;
-  $('#aact').innerHTML='';$('#actrl').innerHTML='';
 }
 function agentMeta(){
-  if(!agentView||!last)return null;
-  const s=(last.sessions||[]).find(x=>x.session_id===agentView.sid);
-  return s?(s.agents||[]).find(a=>a.agent_id===agentView.aid):null;
+  if(!agentView)return null;
+  return workspaceAgents(workspaceSessionModel(),workspaceContext()).find(a=>a.agent_id===agentView.aid)||null;
 }
 async function ensureAgentCtx(){
   if(!agentView)return;
@@ -3377,17 +3729,16 @@ async function ensureAgentCtx(){
   renderAgent(true);
 }
 function renderAgent(force){
-  if(!agentView)return;
+  if(!agentView||sessionView?.section!=='subagents')return;
   ensureAgentCtx();
   const a=agentMeta(),c=agentCache[agentCacheKey(agentView.sid,agentView.aid)];
   const info=(c&&c.info)||{};
-  const done=a?['done','ended'].includes(a.state):true;
+  const done=a?terminalAgentStates.has(a.state):true;
   $('#atitle').innerHTML=`<b>${esc(info.agent_type||(a&&a.agent_type)||'subagent')}</b>
     <small>${esc(info.description||(a&&a.description)||'')}</small>`;
-  const par=((last&&last.sessions)||[]).find(x=>x.session_id===agentView.sid);
-  $('#actrl').innerHTML=overflowMenu('subagent',par,'subagent',done);
+  const par=workspaceSessionModel();
   const ae=document.activeElement;
-  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#aview').contains(ae);
+  const typing=ae&&['INPUT','TEXTAREA'].includes(ae.tagName)&&$('#sact').contains(ae);
   if(!force&&touching())return;
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
@@ -3401,35 +3752,21 @@ function renderAgent(force){
     body.scrollTop=old.atBottom?body.scrollHeight:old.top;
   }
   if(!typing){
-    const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
-    const tk=info.tokens||{};
-    const codex=par&&par.provider==='codex';
-    $('#aact').innerHTML=`
-      <div class="relaynote">${done?'this agent has finished — ':''}${codex
-        ?'App Server does not accept direct input to v2 subagents. This message goes to the <b>parent thread</b> with an explicit relay instruction.'
-        :'subagents have no terminal of their own: your message is typed into the <b>parent session</b>, tagged for it to forward with SendMessage'}</div>
-      ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}
-      ${!done&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" data-draft-key="${esc(relayDraftKey(agentView.sid,agentView.aid))}" rows="2" placeholder="relay via parent  ·  Return newline  ·  ⌘/Ctrl+Return relay" autocomplete="off"
-        onkeydown="composerKey(event,sendRelay)">${esc(draftValue(relayDraftKey(agentView.sid,agentView.aid)))}</textarea>
-        <span class="sendpair"><button class="pbtn send" onclick="sendRelay()">relay</button>${scheduleButton(agentView.sid,'aft',agentView.aid)}</span></div>`:''}
-      ${agentRelayHtml(agentView.sid,agentView.aid)}
-      <div class="actmsg" id="amsg"></div>
-      <details class="dfold" ${agentInfoOpen2?'open':''} ontoggle="agentInfoOpen2=this.open">
-        <summary>agent info</summary>
-        <div class="kv">
-          <span>agent</span>${cpb(info.agent_id||agentView.aid)}
-          <span>type</span><b>${esc(info.agent_type||'?')}</b>
-          <span>description</span><b>${esc(info.description||'—')}</b>
-          <span>model</span><b>${esc(info.model||'?')}${info.effort?` · ${esc(info.effort)}`:''}</b>
-          <span>state</span><b>${a?a.state:'closed'}${a&&!done?` · quiet ${fmtAge(a.quiet_s)}`:''}</b>
-          <span>parent</span>${cpb(agentView.sid)}
-          <span>started</span><b>${ago(info.started)}</b>
-          <span>last activity</span><b>${ago(info.last)}</b>
-          <span>tokens</span><b>${info.total_tokens==null&&tk.in==null?'unavailable':`${fmtTok(tk.in||0)} in · ${fmtTok(tk.cache_write||0)} cache write · ${fmtTok(tk.cache_read||0)} cache read · ${fmtTok(tk.out||0)} out`}</b>
-          <span>cost</span><b>${info.cost==null?'unavailable':fmt$(info.cost)}</b>
-        </div>
-      </details>`;
-  }else refreshStatusStrip('#aact',info.status_line,'agent:'+agentView.sid+':'+agentView.aid);
+    const parentWaiting=par?.state==='needs_you'||Boolean(par?.pending);
+    const codex=par?.provider==='codex';
+    const reason=sessionView.closed?'This saved parent session is closed.':done?
+      `This agent is ${esc(a?.state||'finished')} and remains readable, but cannot receive relays.`:
+      parentWaiting?'The parent is waiting for your input. Relaying now could answer the parent request instead.':
+      codex?'The message is sent to the parent thread with an explicit relay instruction.':'The message is typed into the parent session and tagged for SendMessage.';
+    $('#sact').classList.remove('session-composer','question-present','tools-open');
+    $('#sact').innerHTML=`<div class="session-context"><div class="relaynote">${reason}</div>
+      ${parentWaiting?`<button class="pbtn" onclick="setSessionSection('chat')">Jump to parent request</button>`:''}
+      ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}</div>
+      ${!sessionView.closed&&!done&&!parentWaiting&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" data-draft-key="${esc(relayDraftKey(agentView.sid,agentView.aid))}" rows="2" placeholder="relay via parent  ·  ⌘/Ctrl+Return relay" autocomplete="off"
+        oninput="setDraft('${esc(relayDraftKey(agentView.sid,agentView.aid))}',this.value)" onkeydown="composerKey(event,sendRelay)">${esc(draftValue(relayDraftKey(agentView.sid,agentView.aid)))}</textarea>
+        <button class="pbtn send" onclick="sendRelay()">Relay</button></div>`:''}
+      ${agentRelayHtml(agentView.sid,agentView.aid)}<div class="actmsg" id="amsg"></div>`;
+  }else refreshStatusStrip('#sact',info.status_line,'agent:'+agentView.sid+':'+agentView.aid);
 }
 const agentRelays=new Map();
 function agentRelayKey(sid,aid){return agentCacheKey(sid,aid);}
@@ -3570,6 +3907,10 @@ function sessionTap(e,sid){
   if(sessionLongFired){sessionLongFired=false;e.stopPropagation();return;}
   openSession(sid);
 }
+function sessionHeaderKey(event,sid){
+  if(event.target!==event.currentTarget||!['Enter',' '].includes(event.key))return;
+  event.preventDefault();openSession(sid);
+}
 function agentTap(e,sid,aid){
   e.stopPropagation();
   openAgent(sid,aid);
@@ -3618,7 +3959,7 @@ function cardCls(s){
 // session-peek line preference. Anything that adds an actionable/volatile row
 // stays content-sized so a fixed frame can never hide a control.
 function cardUsesFixedPeekHeight(s){
-  if(s.provisional||open.has(s.session_id)||expandedPeeks.has(s.session_id))return false;
+  if(s.provisional||expandedPeeks.has(s.session_id))return false;
   const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
   const running=s.ui_group==='working'&&(s.agents||[]).some(a=>!['done','ended'].includes(a.state));
   const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.status==='queued');
@@ -3633,15 +3974,13 @@ function cardFrame(s){
 // each tick doesn't flash.
 function cardTop(s){
   if(s.provisional)return provisionalCardTop(s);
-  const isOpen=open.has(s.session_id);
-  const running=s.agents.filter(a=>!['done','ended'].includes(a.state));
-  const activeSession=s.ui_group==='working';
   const showPrimary=!(s.provider==='claude'&&(!s.primary_action||['open','continue','view'].includes(s.primary_action)));
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
-  if(isOpen||(previewSessions()&&s.last_msg))ensureCtx(s.session_id,ctxVersion(s));
+  if(previewSessions()&&s.last_msg)ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
-  return`<div class="shead${sessionPressSid===s.session_id?' pinpress':''}" title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')"
+  return`<div class="shead${sessionPressSid===s.session_id?' pinpress':''}" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
+      title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')" onkeydown="sessionHeaderKey(event,'${s.session_id}')"
       ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
@@ -3649,32 +3988,45 @@ function cardTop(s){
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
       ${s.new_response?`<span class="newbadge">new</span>`:''}
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
-      ${showPrimary?'':`<button class="primarybtn sessionopen" aria-label="Open chat: ${esc(s.title||s.project||'session')}" onclick="event.stopPropagation();openSession('${s.session_id}')">Chat</button>`}
       ${terminalButton(s,true)}
       <button class="spin${pinned?' on':''}" ${pinActions.get(s.session_id)?.busy?'disabled':''} title="${pinned?'unpin session':'pin session'}"
         aria-label="${pinned?'unpin session':'pin session'}"
         onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
     </div>
-    <div class="smeta">
+    <div class="smeta" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
+      title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')" onkeydown="sessionHeaderKey(event,'${s.session_id}')">
       <div class="smeta-l">
         ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''}</b></span>`:''}
         ${s.running?`<span class="m runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
         ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
-        <span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>
+        ${!['available','needs_you'].includes(s.ui_group)?`<span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>`:''}
       </div>
       <div class="smeta-r">
         ${s.ctx_pct==null?`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`:`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
         <span class="m amodel">${modelLabel(s)}</span>
       </div>
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="open the full conversation" onclick="openSession('${s.session_id}')"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
     ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
-    ${activeSession&&running.length?`<div class="agents">${agentListHtml(running)}</div>`:''}
-    <button class="morebtn" onclick="toggle('${s.session_id}')">${isOpen?'▾ less':'▸ more'}</button>`;
+    ${cardAgentPreview(s)}`;
+}
+function cardAgentPreview(s){
+  const active=(s.agents||[]).map((agent,index)=>({agent,index}))
+    .filter(({agent})=>!terminalAgentStates.has(agent.state));
+  if(!active.length)return'';
+  active.sort((a,b)=>((a.agent.state==='stalled'?0:1)-(b.agent.state==='stalled'?0:1))||a.index-b.index);
+  const rows=active.slice(0,2).map(({agent})=>{
+    const state=agent.state==='stalled'?'Slow':'Working';
+    const latest=agent.last_msg?.text||`quiet ${fmtAge(Math.max(0,Number(agent.quiet_s)||0))}`;
+    return`<button class="agentminirow" onclick="event.stopPropagation();openAgent(decodeURIComponent('${enc(s.session_id)}'),decodeURIComponent('${enc(agent.agent_id)}'))">
+      <span class="dot ${esc(agent.state||'running')}" aria-label="${agent.state==='stalled'?'quiet — may still be working':'working'}"></span><b>${esc(state)}</b>
+      <span>${esc(agent.description||agent.agent_type||agent.agent_id)}</span><small>${esc(latest)}</small></button>`;
+  });
+  return`<div class="agentminipreview" aria-label="Active subagents">${rows.join('')}</div>`;
 }
 // The card tail ("more"): reference material with native <details> folds. It is
 // rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns
@@ -3745,11 +4097,10 @@ function detailSig(s){
 }
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
-  const isOpen=open.has(s.session_id);
   const frame=cardFrame(s);
-  return`<div class="card ${cardCls(s)}${isOpen?' open':''}${frame.fixed?' fixedpeek':''}" data-sid="${s.session_id}"
+  return`<div class="card ${cardCls(s)}${frame.fixed?' fixedpeek':''}" data-sid="${s.session_id}"
     style="--session-card-lines:${frame.lines}">
-    <div class="ctop">${cardTop(s)}</div>${isOpen?cardDetail(s):''}</div>`;
+    <div class="ctop">${cardTop(s)}</div></div>`;
 }
 function cardTopFocusAnchor(top){
   const focused=document.activeElement;
@@ -3784,7 +4135,6 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
   const seen=new Set();
   list.forEach(s=>{
     seen.add(s.session_id);
-    const isOpen=open.has(s.session_id);
     let card=container.querySelector('.card[data-sid="'+s.session_id+'"]');
     if(!card){
       card=document.createElement('div');card.dataset.sid=s.session_id;
@@ -3792,20 +4142,12 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
       container.appendChild(card);
     }
     const frame=cardFrame(s);
-    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+(isOpen?' open':'')+
+    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+
       (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'');
     card.style.setProperty('--session-card-lines',String(frame.lines));
     const top=card.querySelector('.ctop'),focusAnchor=cardTopFocusAnchor(top);
     top.innerHTML=cardTop(s);restoreCardTopFocus(top,focusAnchor);
-    let detail=card.querySelector(':scope > .detail');
-    if(isOpen){
-      const sig=detailSig(s);
-      if(!detail||card.dataset.dsig!==sig){
-        if(detail)detail.remove();
-        card.insertAdjacentHTML('beforeend',cardDetail(s));
-        card.dataset.dsig=sig;
-      }
-    }else if(detail){detail.remove();delete card.dataset.dsig;}
+    const detail=card.querySelector(':scope > .detail');if(detail)detail.remove();delete card.dataset.dsig;
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
   list.forEach((s,i)=>{
@@ -4084,11 +4426,11 @@ async function testLegacyNtfy(){
   }catch(error){legacyNtfyMessage=String(error.message||error);legacyNtfyError=true;}
   finally{legacyNtfyBusy=false;renderSettings();}
 }
-async function toggleMute(sid,mute){
+async function toggleMute(sid,mute,msgId){
   const s=((last||{}).sessions||[]).find(x=>x.session_id===sid);if(!s)return;
   const previous=s.muted;s.muted=mute;uiRefresh();
   return queueSetting('mute:'+sid,{mute_session:sid,muted:mute},()=>{},()=>{s.muted=previous;},
-    'msg-'+sid);
+    msgId||'msg-'+sid);
 }
 // multi-question asks: ONE question on screen at a time, ‹ › to move between them
 // (keeps a 3-question ask from swallowing the whole screen)
@@ -4151,7 +4493,7 @@ function mqSend(sid,nonce,pre){
     answers.push(a);
   }
   return withNativeRequestLock(sid,nonce,()=>{
-    const optimisticId=addOptimistic(sid,answerPreview(sid,answers),'answer');
+    const optimisticId=beginOptimisticAnswer(sid,nonce,answerPreview(sid,answers));
     return act(sid,{type:'multiq',nonce,answers},pre,optimisticId);
   });
 }
@@ -4426,9 +4768,10 @@ async function act(sid,payload,pre='msg',optimisticId=null){
         rememberOutboxReceipt(item);uiRefresh();}}
     if(quickId!=null)finishQuickResponse(sid,quickId,d.ok,d.error);
     const el=setMessage(d.ok?(d.queued?(d.message||'queued'):'sent ✓'):'✗ '+(d.error||'failed'));
-    if(!d.ok&&!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert(d.error||'failed');
+    if(!d.ok&&!el&&quickId==null&&optimisticId==null&&payload.type!=='focus'&&pre!==false)
+      alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','dismiss_then_send','elicitation'].includes(payload.type)){
-      answered[sid]=payload.nonce;      // hide the selector NOW, don't wait for the poll
+      answered[sid]=payload.nonce;      // retain immediate nonce suppression through canonical QA
       clearDraftPrefix(questionDraftPrefix(sid,payload.nonce));
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
       uiRefresh();
@@ -4437,12 +4780,19 @@ async function act(sid,payload,pre='msg',optimisticId=null){
   }catch(e){
     if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
       performance.now()-requestStarted);
-    const error=['send_message','dismiss_then_send'].includes(payload.type)?
+    const nativeAnswer=['option','multiq'].includes(payload.type);
+    const error=nativeAnswer?
+      'Delivery uncertain — the connection dropped before Fleet received a result. Check the terminal before answering again.':
+      ['send_message','dismiss_then_send'].includes(payload.type)?
       'Delivery unconfirmed — the connection dropped before Fleet received a result. Restore to send again only if it did not arrive.':String(e);
-    if(optimisticId!=null)updateOptimistic(sid,optimisticId,false,error);
+    if(optimisticId!=null){
+      if(nativeAnswer)markOptimisticUncertain(sid,optimisticId,error);
+      else updateOptimistic(sid,optimisticId,false,error);
+    }
     if(quickId!=null)finishQuickResponse(sid,quickId,false,String(e));
     const el=setMessage('✗ '+error);
-    if(!el&&quickId==null&&payload.type!=='focus'&&pre!==false)alert('request failed: '+e);
+    if(!el&&quickId==null&&optimisticId==null&&payload.type!=='focus'&&pre!==false)
+      alert('request failed: '+e);
     setFleetOffline(true);
     return {ok:false,error,network_error:true};
   }
@@ -4465,7 +4815,8 @@ function answerPreview(sid,answers){
 }
 function sendOption(sid,nonce,digits,pre){
   return withNativeRequestLock(sid,nonce,()=>{
-    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits}]),'answer');
+    multiSel[sid]=new Set(digits);
+    const optimisticId=beginOptimisticAnswer(sid,nonce,answerPreview(sid,[{digits}]));
     return act(sid,{type:'option',nonce,digits},pre,optimisticId);
   });
 }
@@ -4477,7 +4828,7 @@ function sendMulti(sid,nonce,n,pre){
   const other=(otherDraft[sid]||'').trim();
   if(!digits.length&&!other)return alert('pick at least one option');
   return withNativeRequestLock(sid,nonce,()=>{
-    const optimisticId=addOptimistic(sid,answerPreview(sid,[{digits,other}]),'answer');
+    const optimisticId=beginOptimisticAnswer(sid,nonce,answerPreview(sid,[{digits,other}]));
     return act(sid,{type:'option',nonce,digits,multi:true,n_options:n,other:other||undefined},pre,optimisticId);
   });
 }
@@ -4485,7 +4836,7 @@ function sendOther(sid,nonce,n,pre){
   const other=(otherDraft[sid]||'').trim();
   if(!other)return alert('type your answer first');
   return withNativeRequestLock(sid,nonce,()=>{
-    const optimisticId=addOptimistic(sid,answerPreview(sid,[{other}]),'answer');
+    const optimisticId=beginOptimisticAnswer(sid,nonce,answerPreview(sid,[{other}]));
     return act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
   });
 }
@@ -5266,7 +5617,7 @@ function renderProvisionalSession(s){
   const p=spawnProvisional;if(!p)return;
   const failed=p.status==='failed';
   $('#stitle2').innerHTML=`<b>New coding session</b><small>${esc(s.project)} · ${esc(s.provider)}${s.model?` · ${esc(s.model)}`:''}</small>`;
-  $('#sctrl').innerHTML='';renderEvidenceRail({});
+  $('#sctrl').innerHTML='';
   const message=p.spec.message?`<div class="cmsg user optimistic"><span class="crole">you</span>
       <span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span>
       <div class="cbody"><p>${esc(p.spec.message).replace(/\n/g,'<br>')}</p></div></div>`:'';
@@ -5530,6 +5881,11 @@ function toggle(sid){open.has(sid)?open.delete(sid):open.add(sid);render(last,tr
 function togglePeek(sid,expanded){
   expanded?expandedPeeks.add(sid):expandedPeeks.delete(sid);
   render(last,true);
+}
+function togglePeekFromTap(event,sid,expanded){
+  if(expanded||!event.currentTarget.classList.contains('truncated'))return;
+  event.preventDefault();
+  togglePeek(sid,true);
 }
 let peekMeasurePending=false;
 function schedulePeekOverflow(){
@@ -5812,9 +6168,8 @@ function render(f,force){
     $('#rollup').innerHTML=insightsSection();
   }
   checkSpawn(f);
-  renderViewerBar();
-  renderAgent();
   renderSession();
+  if(pendingWorkspaceRoute){const route=pendingWorkspaceRoute;pendingWorkspaceRoute=null;applyWorkspaceRoute(route);}
   schedulePeekOverflow();
   applyRouteNav(settingsOpen?'settings':currentRoute);
   const titleCount=Math.max(Number(t.needs_me)||0,Number(notificationData.active)||0,Number(notificationData.unread)||0);
@@ -5838,6 +6193,7 @@ async function tick(force=false){
     if(!r.ok)throw new Error(next.error||`Fleet returned ${r.status}`);
     if(sequence<pollApplied||sequence!==pollSequence)return;
     pollApplied=sequence;last=next;
+    notificationPollingEnabled=applyInstanceAuth(last.instance);
     if(last.page_v){if(window.__pv&&window.__pv!==last.page_v)return location.reload();window.__pv=last.page_v;}
     setFleetOffline(r.headers.get('X-Fleet-Offline')==='1');
     if(!fleetOffline)$('#stale').style.display='none';
@@ -5874,6 +6230,9 @@ syncSearchControls();
 $('#workfilter').value=workFilter;
 navigateTo(currentRoute,false,Boolean(notificationDetailId));
 tick().finally(()=>{
+  fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
+    .then(r=>{notificationPollingEnabled=r.status!==403;$('#notoken').style.display=r.status===403?'block':'none';
+      if(notificationPollingEnabled)loadNotifications(true);}).catch(()=>{});
   const start=()=>initFleetPwa();
   if('requestIdleCallback' in window)requestIdleCallback(start,{timeout:2000});
   else setTimeout(start,250);
@@ -5882,6 +6241,3 @@ tick().finally(()=>{
 window.addEventListener('online',()=>tick(true));
 setInterval(()=>{if(currentRoute==='search')loadSearchStatus();},5000);
 setInterval(()=>{if(currentRoute==='workstreams')loadWorkstreams();},8000);
-fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"type":"ping"}'})
-  .then(r=>{notificationPollingEnabled=r.status!==403;$('#notoken').style.display=r.status===403?'block':'none';
-    if(notificationPollingEnabled)loadNotifications(true);}).catch(()=>{});

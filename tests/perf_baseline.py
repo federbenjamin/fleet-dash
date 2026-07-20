@@ -153,7 +153,7 @@ def main():
         except (OSError, ValueError, TypeError):
             token = None
         if token:
-            headers["Cookie"] = "act_token=" + str(token)
+            headers["X-Act-Token"] = str(token)
     if args.search_samples:
         search_url = base + "/api/search?" + urllib.parse.urlencode(
             {"q": args.search_query, "limit": 30})

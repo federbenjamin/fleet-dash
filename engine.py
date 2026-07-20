@@ -670,6 +670,10 @@ class Tail:
         self.convo = deque(maxlen=120)  # recent turns + key-tool calls
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
+        # Claude snapshots files it writes beneath ~/.claude/file-history/<sid>.
+        # Keep only transcript-declared path -> opaque backup-name mappings so a
+        # delivered scratch file remains readable after Claude removes its temp dir.
+        self.file_backups = {}
         self._tool_refs = {}            # tool_use_id -> convo entry (for result attach)
         # usage stats, CUMULATIVE since file start (drained via INSERT OR REPLACE —
         # a daemon restart re-reads the whole file, so cumulative+replace is
@@ -754,6 +758,15 @@ class Tail:
             return
         if o.get("type") == "queue-operation":
             self._agent_terminal_event(o.get("content"), ts)
+            return
+        if o.get("type") == "file-history-snapshot":
+            tracked = ((o.get("snapshot") or {}).get("trackedFileBackups") or {})
+            if isinstance(tracked, dict):
+                for fpath, meta in list(tracked.items())[:2048]:
+                    backup = meta.get("backupFileName") if isinstance(meta, dict) else None
+                    if isinstance(fpath, str) and isinstance(backup, str) and re.fullmatch(
+                            r"[0-9a-f]{8,64}@v[0-9]{1,8}", backup):
+                        self.file_backups[fpath] = backup
             return
         if o.get("type") == "attachment":
             # mid-turn user messages never become user rows — they arrive as
@@ -1050,15 +1063,13 @@ class Tail:
         self.convo_rev += 1
 
     def _convo_add(self, role, text, ts):
-        if len(text) > 4000:
-            text = text[:4000] + "\n…"
+        text = str(text)
         self.convo_rev += 1
         # merge assistant rows within one work stretch into one logical reply
         # (a key-tool entry in between intentionally breaks the merge)
         if self.convo and role == "assistant" and self.convo[-1]["role"] == "assistant":
             prev = self.convo[-1]
-            if len(prev["text"]) < 8000:
-                prev["text"] = (prev["text"] + "\n\n" + text)[:8000]
+            prev["text"] = prev["text"] + "\n\n" + text
             prev["ts"] = ts or prev["ts"]
             return
         self.convo.append({"role": role, "text": text, "ts": ts})
@@ -2552,6 +2563,7 @@ class Engine:
                 "revision": mt.convo_rev,
                 "messages": copy.deepcopy(list(mt.convo)),
                 "files": copy.deepcopy(list(mt.files)),
+                "file_backups": copy.deepcopy(mt.file_backups),
             }
             self.drain_stats(mt)
             mtime = os.path.getmtime(main_path)
@@ -2679,9 +2691,9 @@ class Engine:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
-                # Collapsed height is CSS-controlled. Keep up to 500 characters so
+                # Collapsed height is CSS-controlled. Keep up to 800 characters so
                 # the explicit expansion reveals a useful bounded preview.
-                "last_msg": (mt.last_message(500)
+                "last_msg": (mt.last_message(800)
                              if cfg.get("preview_sessions", True) else None),
                 "_latest_prose": mt.latest_prose(),
                 "repo_outcome": observed_test_outcome(
@@ -4375,6 +4387,87 @@ Treat this as an independent session. Verify the repository state before changin
                 "preview": redact_handoff_text(preview), "artifacts": artifacts,
                 "defaults": defaults, "independent_session": True}
 
+    @staticmethod
+    def file_id(sid, path):
+        """Stable opaque selector for one session-owned file path."""
+        material = f"{sid}\0{os.path.realpath(str(path or ''))}".encode("utf-8", "surrogatepass")
+        return hashlib.sha256(material).hexdigest()[:24]
+
+    def _project_file_ids(self, sid, context):
+        """Project internal file records to opaque, client-safe selectors."""
+        if not isinstance(context, dict):
+            return context
+        for item in context.get("files") or []:
+            if isinstance(item, dict) and item.get("path"):
+                item["file_id"] = self.file_id(sid, item["path"])
+                item.pop("path", None)
+        for message in context.get("messages") or []:
+            for item in message.get("files") or [] if isinstance(message, dict) else []:
+                if isinstance(item, dict) and item.get("path"):
+                    item["file_id"] = self.file_id(sid, item["path"])
+                    item.pop("path", None)
+        return context
+
+    def closed_resume_capability(self, row_or_sid):
+        row = row_or_sid if isinstance(row_or_sid, dict) else None
+        sid = str((row or {}).get("session_id") or row_or_sid or "")
+        if sid.startswith("codex:"):
+            return self.codex.resume_capability(sid)
+        if row is None:
+            row = next((item for item in self.closed_sessions()
+                        if item.get("session_id") == sid), None)
+        if not row or row.get("provider") not in (None, "claude"):
+            return False, "the saved session is unavailable"
+        if not self._safe_claude_transcript(sid, row.get("transcript_path")):
+            return False, "the saved Claude transcript is unavailable"
+        if not self._safe_reopen_cwd(row.get("cwd")):
+            return False, "the saved working directory is unavailable"
+        return True, None
+
+    def _closed_claude_agents(self, sid, transcript_path, lock_held=False):
+        root = os.path.realpath(os.path.join(os.path.dirname(transcript_path), str(sid),
+                                             "subagents"))
+        expected_parent = os.path.realpath(os.path.dirname(transcript_path))
+        if os.path.dirname(os.path.dirname(root)) != expected_parent or not os.path.isdir(root):
+            return []
+        out = []
+        for meta_path in sorted(glob.glob(os.path.join(root, "agent-*.meta.json"))):
+            aid = os.path.basename(meta_path)[:-len(".meta.json")]
+            if not re.fullmatch(r"agent-[A-Za-z0-9_-]{1,64}", aid):
+                continue
+            transcript = os.path.realpath(os.path.join(root, aid + ".jsonl"))
+            if os.path.dirname(transcript) != root or not os.path.isfile(transcript):
+                continue
+            try:
+                with open(meta_path) as handle:
+                    meta = json.load(handle)
+            except Exception:
+                meta = {}
+            tail = self.tail_for(transcript)
+            if lock_held:
+                tail.poll()
+            else:
+                with self.scan_lock:
+                    tail.poll()
+            role, _stop, ctypes = (tail.last_shape or (None, None, []))[:3]
+            settled = role == "assistant" and "tool_use" not in (ctypes or [])
+            out.append({
+                "agent_id": aid, "session_id": sid,
+                "agent_type": meta.get("agentType", "?"),
+                "description": meta.get("description", ""),
+                "depth": meta.get("spawnDepth", 0), "model": tail.model,
+                "family": model_family(tail.model), "effort": None,
+                "state": "done" if settled else "ended", "quiet_s": None,
+                "tokens": {"in": tail.ti, "cache_write": tail.tw,
+                           "cache_read": tail.tr, "out": tail.to},
+                "total_tokens": tail.total_tokens, "cost": round(tail.cost(self.cfg), 4),
+                "tok_per_s": 0, "spark": [], "started": tail.first_ts,
+                "last": tail.last_ts, "convo_v": tail.convo_rev,
+                "last_msg": tail.last_message(800), "closed": True,
+            })
+        out.sort(key=lambda item: (item.get("started") or "", item["agent_id"]))
+        return out
+
     def closed_sessions(self):
         cols = ("session_id", "name", "project", "cwd", "branch", "model", "cost",
                 "agent_cost", "agents_total", "bridge_url", "first_seen", "last_seen",
@@ -4405,6 +4498,9 @@ Treat this as an independent session. Verify the repository state before changin
                     self._safe_claude_transcript(row.get("session_id"),
                                                  row.get("transcript_path")) and
                     self._safe_reopen_cwd(row.get("cwd")))
+                can_resume, reason = self.closed_resume_capability(row)
+                row["can_resume_and_send"] = can_resume
+                row["resume_disabled_reason"] = reason
             self._closed_sessions_cache = (signature, now_mono + 60, copy.deepcopy(out))
             return out
         except Exception:
@@ -4443,7 +4539,13 @@ Treat this as an independent session. Verify the repository state before changin
         if str(sid).startswith("codex:"):
             result = self.codex.context(sid)
             if result.get("ok"):
-                result.setdefault("info", {})["status_line"] = status_line
+                result["closed"] = True
+                info = result.setdefault("info", {})
+                info["status_line"] = status_line
+                allowed, reason = self.codex.resume_capability(sid)
+                info.update(can_resume_and_send=allowed,
+                            resume_disabled_reason=reason)
+                self._project_file_ids(sid, result)
             return result
         fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
         path = self._safe_claude_transcript(sid, row[6] or fallback)
@@ -4453,17 +4555,31 @@ Treat this as an independent session. Verify the repository state before changin
             t = self.tail_for(path)
             t.poll()
             msgs = [dict(m) for m in t.convo]
+            files = [dict(item) for item in t.files]
+            backups = dict(t.file_backups)
+            agents = self._closed_claude_agents(sid, path, lock_held=True)
+        def fmeta(raw_path):
+            backup = self._claude_file_backup(sid, backups.get(raw_path))
+            return {"name": os.path.basename(raw_path),
+                    "file_id": self.file_id(sid, raw_path),
+                    "kind": "image" if os.path.splitext(raw_path)[1].lower() in IMG_EXTS
+                    else "text", "missing": not os.path.isfile(raw_path) and backup is None}
         for m in msgs:              # file chips need the same metadata the live view builds
             if m.get("role") == "tool" and m.get("files"):
-                m["files"] = [{"name": os.path.basename(p), "path": p,
-                               "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
-                               "missing": not os.path.isfile(p)} for p in m["files"]]
-        return {"ok": True, "messages": msgs, "closed": True,
+                m["files"] = [fmeta(p) for p in m["files"]]
+        out_files = [{**fmeta(item["path"]), "caption": item.get("caption", ""),
+                      "ts": item.get("ts")} for item in reversed(files)]
+        can_resume = bool(self._safe_reopen_cwd(row[0]))
+        reason = None if can_resume else "the saved working directory is unavailable"
+        return {"ok": True, "messages": msgs, "files": out_files,
+                "agents": agents, "closed": True,
                 "info": {"session_id": sid, "cwd": row[0], "model": row[1],
                          "cost": row[2], "title": row[3], "project": row[4],
                          "branch": row[5],
                          "status_line": status_line,
-                         "can_reopen": bool(self._safe_reopen_cwd(row[0]))}}
+                         "can_reopen": can_resume,
+                         "can_resume_and_send": can_resume,
+                         "resume_disabled_reason": reason}}
 
     @staticmethod
     def trusted_dirs():
@@ -4828,6 +4944,25 @@ Treat this as an independent session. Verify the repository state before changin
             return {"ok": False, "error": "Codex session is unavailable"}
         return self.codex.commands(sid, session.get("cwd", ""))
 
+    @staticmethod
+    def _claude_file_backup(sid, backup_name):
+        """Resolve only Claude's transcript-declared backup for this exact UUID.
+
+        The client never supplies backup_name. Path confinement here is still
+        load-bearing because transcript rows are untrusted input.
+        """
+        if not re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", str(sid or "")):
+            return None
+        if not re.fullmatch(r"[0-9a-f]{8,64}@v[0-9]{1,8}", str(backup_name or "")):
+            return None
+        root = os.path.realpath(os.path.join(HOME, ".claude", "file-history", str(sid)))
+        candidate = os.path.realpath(os.path.join(root, str(backup_name)))
+        if os.path.dirname(candidate) != root or not os.path.isfile(candidate):
+            return None
+        return candidate
+
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
         if str(sid).startswith("codex:"):
@@ -4837,7 +4972,7 @@ Treat this as an independent session. Verify the repository state before changin
                             for item in self.snapshot_cache.get("sessions") or [])
             if not known:
                 return {"ok": False, "error": "unknown session"}
-            return self.codex.context(sid)
+            return self._project_file_ids(sid, self.codex.context(sid))
         reg, path = self._reg_main_path(sid)
         if not reg:
             return {"ok": False, "error": "session not live"}
@@ -4847,6 +4982,7 @@ Treat this as an independent session. Verify the repository state before changin
         if snapshot is not None:
             msgs = copy.deepcopy(snapshot.get("messages") or [])
             files = copy.deepcopy(snapshot.get("files") or [])
+            file_backups = dict(snapshot.get("file_backups") or {})
         else:
             # Startup/test fallback before the first completed scan publishes
             # this session. Stateful folding remains serialized.
@@ -4855,10 +4991,13 @@ Treat this as an independent session. Verify the repository state before changin
                 mt.poll()
                 msgs = [dict(m) for m in mt.convo]
                 files = [dict(f) for f in mt.files]
+                file_backups = dict(mt.file_backups)
         def fmeta(p):
-            return {"name": os.path.basename(p), "path": p,
+            backup = self._claude_file_backup(sid, file_backups.get(p))
+            return {"name": os.path.basename(p),
+                    "file_id": self.file_id(sid, p),
                     "kind": "image" if os.path.splitext(p)[1].lower() in IMG_EXTS else "text",
-                    "missing": not os.path.isfile(p)}
+                    "missing": not os.path.isfile(p) and backup is None}
         for m in msgs:                  # enrich inline delivery entries for the client
             if m.get("role") == "tool" and m.get("files"):
                 m["files"] = [fmeta(p) for p in m["files"]]
@@ -4889,7 +5028,30 @@ Treat this as an independent session. Verify the repository state before changin
                            if item.get("session_id") == sid), None)
         agent = next((dict(item) for item in (parent or {}).get("agents") or []
                       if item.get("agent_id") == aid), None)
-        if not parent or not agent:
+        if not parent and str(sid).startswith("codex:"):
+            if not any(item.get("session_id") == sid for item in self.closed_sessions()):
+                return {"ok": False, "error": "no such subagent"}
+            return self.codex.agent_context(sid, aid)
+        if not parent:
+            row = next((item for item in self.closed_sessions()
+                        if item.get("session_id") == sid), None)
+            path = self._safe_claude_transcript(
+                sid, (row or {}).get("transcript_path")) if row else None
+            catalog = self._closed_claude_agents(sid, path) if path else []
+            agent = next((item for item in catalog if item.get("agent_id") == aid), None)
+            if not agent:
+                return {"ok": False, "error": "no such saved subagent"}
+            root = os.path.realpath(os.path.join(os.path.dirname(path), str(sid), "subagents"))
+            transcript = os.path.realpath(os.path.join(root, str(aid) + ".jsonl"))
+            if os.path.dirname(transcript) != root or not os.path.isfile(transcript):
+                return {"ok": False, "error": "saved subagent transcript is gone"}
+            with self.scan_lock:
+                tail = self.tail_for(transcript)
+                tail.poll()
+                messages = [dict(message) for message in tail.convo]
+            return {"ok": True, "messages": messages,
+                    "info": {**agent, "status_line": None}, "closed": True}
+        if not agent:
             return {"ok": False, "error": "no such subagent"}
         if str(sid).startswith("codex:"):
             result = self.codex.agent_context(sid, aid)
@@ -4947,9 +5109,64 @@ Treat this as an independent session. Verify the repository state before changin
                 info["status_line"] = self.agent_status_line(parent, info, t)
         return {"ok": True, "messages": msgs, "info": info}
 
-    def file_content(self, sid, fpath):
-        """Serve a delivered file. WHITELIST: only paths recorded from this session's
-        own SendUserFile tool_use rows — never a free-form client path."""
+    def file_selector_for_path(self, sid, raw_path):
+        """Return an opaque selector only when ``raw_path`` belongs to ``sid``."""
+        selector = self.file_id(sid, raw_path)
+        if str(sid).startswith("codex:"):
+            with self.lock:
+                known = any(item.get("session_id") == sid and
+                            item.get("provider") == "codex"
+                            for item in self.snapshot_cache.get("sessions") or [])
+            if not known:
+                db = None
+                try:
+                    db = self.ledger_reader()
+                    known = db.execute("""SELECT 1 FROM session_runs
+                        WHERE session_id=? AND provider='codex'
+                        AND closed_at IS NOT NULL""", (sid,)).fetchone() is not None
+                except Exception:
+                    known = False
+                finally:
+                    if db is not None:
+                        db.close()
+            if not known:
+                return None
+            context = self.codex.context(sid)
+            return selector if any(item.get("path") and
+                self.file_id(sid, item["path"]) == selector
+                for item in context.get("files") or []) else None
+        reg, path = self._reg_main_path(sid)
+        closed = False
+        if not reg:
+            row = next((item for item in self.closed_sessions()
+                        if item.get("session_id") == sid and item.get("provider") == "claude"), None)
+            path = self._safe_claude_transcript(sid, (row or {}).get("transcript_path"))
+            if not path:
+                return None
+            closed = True
+        snapshot = None if closed else self._claude_context_snapshots.get(sid)
+        if snapshot is not None:
+            files = snapshot.get("files") or []
+            messages = snapshot.get("messages") or []
+            file_backups = snapshot.get("file_backups") or {}
+        else:
+            with self.scan_lock:
+                mt = self.tail_for(path)
+                mt.poll()
+                files = list(mt.files)
+                messages = list(mt.convo)
+                file_backups = dict(mt.file_backups)
+        allowed = {f["path"] for f in files}
+        for m in messages:              # inline chips can outlive the files deque
+            if m.get("role") == "tool":
+                allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
+        return selector if any(self.file_id(sid, path) == selector for path in allowed) else None
+
+    def file_content(self, sid, file_id):
+        """Serve a session-owned file selected only by an opaque projected ID."""
+        selector = str(file_id or "")
+        if not re.fullmatch(r"[0-9a-f]{24}", selector):
+            return None, None, "invalid file selector"
         if str(sid).startswith("codex:"):
             with self.lock:
                 known = any(item.get("session_id") == sid and
@@ -4969,37 +5186,61 @@ Treat this as an independent session. Verify the repository state before changin
                         db.close()
             if not known:
                 return None, None, "unknown session"
+            context = self.codex.context(sid)
+            fpath = next((item.get("path") for item in context.get("files") or []
+                          if item.get("path") and self.file_id(sid, item["path"]) == selector),
+                         None)
+            if not fpath:
+                return None, None, "not a file this Codex thread changed or generated"
             return self.codex.file_content(sid, fpath)
         reg, path = self._reg_main_path(sid)
+        closed = False
         if not reg:
-            return None, None, "session not live"
-        snapshot = self._claude_context_snapshots.get(sid)
+            row = next((item for item in self.closed_sessions()
+                        if item.get("session_id") == sid and item.get("provider") == "claude"), None)
+            path = self._safe_claude_transcript(sid, (row or {}).get("transcript_path"))
+            if not path:
+                return None, None, "session is unavailable"
+            closed = True
+        snapshot = None if closed else self._claude_context_snapshots.get(sid)
         if snapshot is not None:
             files = snapshot.get("files") or []
             messages = snapshot.get("messages") or []
+            file_backups = snapshot.get("file_backups") or {}
         else:
             with self.scan_lock:
                 mt = self.tail_for(path)
                 mt.poll()
                 files = list(mt.files)
                 messages = list(mt.convo)
+                file_backups = dict(mt.file_backups)
         allowed = {f["path"] for f in files}
         for m in messages:              # inline chips can outlive the files deque
             if m.get("role") == "tool":
                 allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
-        if fpath not in allowed:
+        fpath = next((path for path in allowed if self.file_id(sid, path) == selector), None)
+        if not fpath:
             return None, None, "not a file this session delivered"
+        source_path = fpath if os.path.isfile(fpath) else self._claude_file_backup(
+            sid, file_backups.get(fpath))
+        if not source_path:
+            return None, None, "unreadable: delivered file and Claude backup are gone"
         try:
-            if os.path.getsize(fpath) > 8_000_000:
+            if os.path.getsize(source_path) > 8_000_000:
                 return None, None, "file too large to preview (>8MB)"
-            with open(fpath, "rb") as f:
+            with open(source_path, "rb") as f:
                 data = f.read()
         except OSError as e:
             return None, None, f"unreadable: {e}"
         ext = os.path.splitext(fpath)[1].lower()
         ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp",
-                 ".svg": "image/svg+xml"}.get(ext, "text/plain; charset=utf-8")
+                 ".svg": "image/svg+xml", ".pdf": "application/pdf",
+                 ".json": "application/json; charset=utf-8"}.get(
+                     ext, "text/plain; charset=utf-8")
+        # HTML deliberately stays text/plain. The client fetches and places it
+        # into a sandboxed, CSP-locked srcdoc; navigating /api/file directly
+        # must never execute a delivered document in Fleet's authenticated origin.
         return ctype, data, None
 
     # ------------------------------------------------------------ injection
@@ -6168,6 +6409,8 @@ Treat this as an independent session. Verify the repository state before changin
                     self._prepare_outbox_payload(action.get("patch") or {}))
             elif typ == "outbox_cancel":
                 item = self.outbox.cancel(outbox_id)
+            elif typ == "outbox_delete":
+                item = self.outbox.dismiss(outbox_id)
             elif typ == "outbox_send_now":
                 item = self.outbox.send_now(outbox_id)
             elif typ == "outbox_retry":
@@ -6437,6 +6680,19 @@ Treat this as an independent session. Verify the repository state before changin
         return result
 
     def _outbox_spawn(self, record):
+        if record.get("kind") == "resume_session":
+            sid = str(record.get("target_session_id") or "")
+            provider = str(record.get("target_provider") or "")
+            if provider == "codex":
+                result = self.codex.resume_owned_thread(sid)
+            elif provider == "claude":
+                result = self.reopen_claude_session(sid)
+            else:
+                result = {"ok": False, "error": "unknown session provider"}
+            return {"ok": bool(result.get("ok")), "provider": provider,
+                    "session_id": result.get("session_id") or sid,
+                    "message_delivered": False, "accepted": bool(result.get("ok")),
+                    "error": result.get("error")}
         spec = dict(record.get("spawn_spec") or {})
         provider = spec.get("provider")
         if provider == "codex":
@@ -6456,6 +6712,46 @@ Treat this as an independent session. Verify the repository state before changin
             snapshot = copy.deepcopy(self.snapshot_cache)
         usage = copy.deepcopy(snapshot.get("provider_usage") or {})
         self.outbox.tick(snapshot, usage, self._outbox_dispatch, self._outbox_spawn)
+
+    def resume_and_send(self, action):
+        """Durably resume one exact closed session and deliver one text message.
+
+        The browser-provided request ID is the idempotency key. Repeating the HTTP
+        request therefore returns the same queue item instead of creating a second
+        provider turn.
+        """
+        sid = str(action.get("session_id") or "")
+        message = str(action.get("text") or "").strip()
+        request_id = str(action.get("client_request_id") or "").strip()
+        if not sid:
+            return {"ok": False, "error": "missing session ID"}
+        if not message or len(message) > 2000:
+            return {"ok": False, "error": "message must be 1–2,000 characters"}
+        if not 8 <= len(request_id) <= 160:
+            return {"ok": False, "error": "missing or invalid request ID"}
+        allowed, reason = self.closed_resume_capability(sid)
+        if not allowed:
+            return {"ok": False, "error": reason or "session cannot be resumed"}
+        provider = "codex" if sid.startswith("codex:") else "claude"
+        try:
+            item = self.outbox.create_closed_resume(
+                message=message, target_provider=provider,
+                target_session_id=sid, idempotency_key=request_id)
+            self.run_outbox()
+            item = self.outbox.get(item["id"]) or item
+            if item.get("state") in ("failed", "blocked", "cancelled"):
+                return {"ok": False, "error": item.get("error") or
+                        item.get("reason") or "session resume failed",
+                        "outbox_id": item.get("id"), "queue_state": item.get("state")}
+            return {"ok": True, "queued": item.get("state") != "sent",
+                    "outbox_id": item.get("id"), "queue_state": item.get("state"),
+                    "session_id": sid, "accepted": True}
+        except OutboxError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code}
+        except Exception as exc:
+            print(f"closed resume queue failed for {sid}: {exc}", file=sys.stderr,
+                  flush=True)
+            return {"ok": False, "error": "session resume could not be queued"}
 
     def act(self, action, _claude_locked=False):
         """Inject an answer into the owning iTerm session. action:
@@ -6477,6 +6773,7 @@ Treat this as an independent session. Verify the repository state before changin
         {type:'text', session_id, text:'...'} |
         {type:'image_text', session_id, text:'...', upload_ids:['opaque-id']} |
         {type:'send_message', session_id, text:'...', upload_ids:['opaque-id']} |
+        {type:'resume_and_send', session_id, text:'...', client_request_id:'...'} |
         {type:'dismiss_then_send', session_id, nonce, text:'...',
          upload_ids:['opaque-id']}"""
         if not isinstance(action, dict):
@@ -6522,6 +6819,8 @@ Treat this as an independent session. Verify the repository state before changin
             action = {**action,
                       "type": "image_text" if action.get("image_paths") else "text"}
             return self._send_now_or_queue(action)
+        if requested_type == "resume_and_send":
+            return self.resume_and_send(action)
         if action.get("type") == "briefing_review":
             return self.briefing_action(action)
         if str(action.get("type") or "").startswith("outbox_"):

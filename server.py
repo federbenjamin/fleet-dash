@@ -120,11 +120,39 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-Act-Token") or ""
         try:
             cookies = SimpleCookie(self.headers.get("Cookie", ""))
-            if not supplied and cookies.get("act_token"):
-                supplied = cookies["act_token"].value
+            mode = ("staging" if self.eng.cfg.get("instance_mode") == "staging"
+                    else "production")
+            cookie_name = f"act_token_{mode}"
+            if not supplied and cookies.get(cookie_name):
+                supplied = cookies[cookie_name].value
         except CookieError:
             return False
         return secrets.compare_digest(str(want), str(supplied))
+
+    def project_search_file_ids(self, out):
+        """Remove indexed local paths and expose only validated session file IDs."""
+        if not isinstance(out, dict):
+            return out
+
+        def project(item, fallback_sid=""):
+            if not isinstance(item, dict):
+                return
+            raw_path = item.pop("artifact_path", None)
+            if not raw_path:
+                return
+            sid = str(item.get("session_id") or fallback_sid or "")
+            selector = self.eng.file_selector_for_path(sid, raw_path) if sid else None
+            if selector:
+                item["file_id"] = selector
+
+        for item in out.get("results") or []:
+            project(item)
+        source = out.get("source") or {}
+        source_sid = str(source.get("session_id") or "") if isinstance(source, dict) else ""
+        project(source)
+        for item in out.get("messages") or []:
+            project(item, source_sid)
+        return out
 
     def do_POST(self):
         self.begin_request()
@@ -367,12 +395,14 @@ class Handler(BaseHTTPRequestHandler):
                 if route == "/api/search/status":
                     out = search.status()
                 elif route == "/api/search/context":
-                    out = search.context(self.query("id"), self.query("radius") or 12)
+                    out = self.project_search_file_ids(
+                        search.context(self.query("id"), self.query("radius") or 12))
                 else:
-                    out = search.search(query=self.query("q"), provider=self.query("provider"),
-                                        kind=self.query("kind"), project=self.query("project"),
-                                        cursor=self.query("cursor") or 0,
-                                        limit=self.query("limit") or 30)
+                    out = self.project_search_file_ids(search.search(
+                        query=self.query("q"), provider=self.query("provider"),
+                        kind=self.query("kind"), project=self.query("project"),
+                        cursor=self.query("cursor") or 0,
+                        limit=self.query("limit") or 30))
             except Exception as exc:
                 print(f"search request failed: {exc}", file=sys.stderr, flush=True)
                 out = {"ok": False, "error": "search index is temporarily unavailable"}
@@ -392,10 +422,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self.token_ok():
                 return self.reply(403, "text/plain",
                                   b"missing act token (open the ?token= URL once on this device)")
-            ctype, data, err = self.eng.file_content(self.query("sid"), self.query("p"))
+            ctype, data, err = self.eng.file_content(self.query("sid"), self.query("fid"))
             if err:
                 return self.reply(404, "text/plain", err.encode())
-            self.reply(200, ctype, data)
+            self.reply(200, ctype, data,
+                       extra_headers={"X-Content-Type-Options": "nosniff"})
         elif route == "/api/commands":
             # reads command/skill names + descriptions off disk -> token-gated
             if not self.token_ok():

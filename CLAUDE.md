@@ -122,6 +122,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
     SendUserFile tool_use rows, and it's token-gated. Never accept a free-form client path:
     that would turn the act token into an arbitrary-disk-read credential over the tailnet.
+    A missing Claude delivery may resolve through the transcript's `file-history-snapshot` mapping,
+    but only beneath `~/.claude/file-history/<exact UUID>/` with a regex-bounded opaque backup
+    basename. The mapping is server-observed; the client still supplies only the delivered path.
+    Delivered HTML stays `text/plain` at this authenticated endpoint so direct navigation cannot
+    execute it in Fleet's origin. `sandboxedHtmlDocument` keeps inline scripts for self-contained
+    generated artifacts, removes external scripts/frames/navigation and remote-asset URL attributes,
+    then renders with `sandbox="allow-scripts"` (never `allow-same-origin`) and a deny-by-default CSP.
+    Every successful file response carries `X-Content-Type-Options: nosniff`; PDF uses the browser's
+    native unsandboxed document frame because Chromium's isolated PDF viewer requires its own scripts.
 11. **Convo capture filters user-row noise in `Tail._fold`** — isMeta rows, `<command-`/
     `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
     "This session is being continued from" blob. Consecutive assistant text rows merge into one
@@ -271,7 +280,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `outputTokens` across models. Show that aggregate once, not once per profile. It represents
     retained main-session and saved-subagent transcripts on this Mac; it excludes deleted history,
     other computers, and claude.ai. Keep the word `local` in the UI.
-27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (md
+27. **One light theme, two surfaces.** `setTheme(light)` toggles `.light` on BOTH `#vbody` (file
     viewer) and `#sbody` (full chat view) and swaps both ☀︎/☾ buttons; `toggleTheme` flips it;
     persisted as `viewer_light`. Light CSS is keyed off a bare `.light` ancestor (not `#vbody.light`)
     so it applies in either container. `#stheme` is fixed 40×32 so the glyph swap can't resize the
@@ -386,32 +395,43 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 34. **Optimistic chat rows remain until canonical confirmation.** Ordinary text and structured-
     question answers render immediately in the owning session conversation. Direct text keeps its
     spinner until an equal normalized user row appears in refreshed context; an unrelated revision
-    is not confirmation. Structured answers render their actual labels (never secret free text) and
-    may drop the spinner once the provider accepts the native answer response, but remain until the
-    canonical QA event arrives. HTTP failure or 15 seconds without direct-text confirmation produces
-    a red restore button; restore refills the composer and never retries. A focused composer must not
+    is not confirmation. A structured-answer click nonce-suppresses its selector and inserts the
+    labeled receipt before any full render or native request wait. Structured answers render their
+    actual labels (never secret free text) and keep the spinner after provider acceptance until the
+    canonical QA event arrives. A definite answer failure gets a red Restore button that removes the
+    receipt and reopens the preserved selector without retrying; an uncertain answer has no Restore.
+    A direct-text HTTP failure or 15 seconds without its confirmation produces a red restore button;
+    restore refills the composer and never retries. A focused composer must not
     block `#sbody` transcript repaints—preserve the composer below the body update instead. The main
     fleet card mirrors the newest question-answer placeholder as a compact delivery receipt. Inline
     permission/dismiss/elicitation actions create the same receipt even when the card's More panel
     is closed; failures remain visible beside the still-actionable request.
-35. **Session card peeks are capped at exactly 500 characters including the ellipsis.** The server
+35. **Session card peeks are capped at exactly 800 characters including the ellipsis.** The server
     caps both providers; CSS controls the collapsed line count. When measured content overflows, the
-    final collapsed row is a clickable `...`; expanded state removes the height clamp but does not
-    fetch or imply more than the bounded 500-character payload.
-36. **Now counts and subagent filtering are presentation-only.** The standalone totals line is gone;
-    Needs you/Working/Available counts live in their matching command-bar chips. Needs you counts
-    distinct sessions. `Subagents` flattens every child not in `done`/`ended`, including `stalled`,
-    with its parent breadcrumb; selecting it hides the session queues without changing
-    `Engine.organize_session` or turning subagents into session cards.
-37. **Nested Settings preserves chat state.** When Settings opens over full chat it gets a separate
-    history entry and remains above `#sevidence`. Back closes Settings alone, restores the exact
-    `#sbody.scrollTop`, and preserves whether `Why Fleet put this here` was open. A pending sticky-
-    bottom animation must not overwrite that saved position.
-38. **Desktop rail side is per browser; file viewer identity is file-only.** `fleet.navSide.v1`
-    toggles `html[data-nav-side]` between left/right and never affects mobile bottom navigation.
-    `#vtitle` contains only the escaped file name/caption; session metadata and `.vfsep` do not belong
-    in the Markdown viewer. Ordinary Claude cards open chat through `.shead` and keep only the
-    distinct **Terminal** native-focus button; Respond/Review actions remain explicit.
+    final collapsed row is a clickable `...`; tapping anywhere in a truncated collapsed peek expands
+    it. A fully visible collapsed peek does nothing, and exposed expanded content does nothing—only
+    the explicit **Less** button collapses it. Expansion removes the height clamp but does not fetch or imply more than the
+    bounded 800-character payload. Full-chat conversation text is never clipped: `_convo_add`
+    retains complete rows and complete consecutive-assistant merges.
+36. **Session workspace state is unified and route-owned.** Chat, Files, Subagents, and Details are
+    panels of one `#sview` shell with one contextual composer and one pending-request drawer. Stable
+    routes use `#session/<sid>/<section>` plus opaque file IDs or hard-validated agent IDs; neither
+    routes nor context payloads expose local paths. Browser Back clears a selected file or agent,
+    then returns to the prior section, then exits the workspace. Preserve per-section scroll,
+    composer drafts, attachments, and the selected section across polling renders. On mobile,
+    horizontal swipes move one section at a time and stop at Chat/Details. A right swipe beginning
+    within the left-edge gutter exits the entire workspace; horizontally scrollable content and
+    editable controls retain their gesture instead of changing sections.
+37. **Subagent filtering never changes hierarchy order.** Every initial Subagents open selects
+    `Active`; `All` exposes terminal agents. Filtering only changes visibility, retaining otherwise
+    filtered ancestors needed to place an active descendant. No agent is selected by default. Relay
+    still travels through the parent (invariant 19), and is disabled for terminal agents or while
+    the parent is waiting.
+38. **Closed-session send is exact, text-only, and idempotent.** Only resumable Claude sessions and
+    Fleet-owned Codex shared-runtime threads may expose resume-and-send. The request contains only
+    session ID, text, and request ID; persisted delivery state makes retries harmless. Wait for the
+    exact session to become writable before delivering once. Failure preserves the draft and closed
+    state. Never infer Codex ownership from transcript access, source, or thread visibility.
 39. **New-session identity is optimistic but exact.** `spawnProvisional` immediately owns one
     client-generated card/full-chat identity and the initial user message while `/api/act spawn` is
     pending. Only the exact server-returned `session_id` may replace it; never reconcile by cwd.
@@ -479,8 +499,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     `SHELL_CACHE` for structural shell changes. All other `/api/*` responses—including actions,
     conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
 45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
-    card uses the measured fixed frame `117px + preview_session_lines × 17.4px` (or zero preview
-    rows when session peeks are disabled), with its More control anchored at the bottom. Never put
+    card uses the measured fixed frame `97px + preview_session_lines × 17.4px` (or zero preview
+    rows when session peeks are disabled); its collapsed More button is hidden because the card
+    header itself opens Chat (invariant 63). Never put
     `.fixedpeek` on an open card, an explicitly expanded peek, or a card showing a pending request,
     error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
     to keep every action visible. Keep the height inputs synchronized with the header/meta/peek/
@@ -634,6 +655,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Double-underscore request keys are stripped before policy checks, so a client cannot claim the
     internal prepared-worktree marker. Notification projection in staging receives staging-owned
     sessions only; production requests/provider failures must never leak into staging pushes.
+    Browser credentials use the instance-scoped `act_token_production` and `act_token_staging`
+    cookie names. Cookies do not distinguish ports, so a shared `act_token` name makes opening one
+    instance silently break authenticated reads and actions in the other.
 57. **Every collapsed session peek owns its configured line area.** On `.fixedpeek` cards,
     `.sessionpeek` grows from the metadata row to the More button and its `.peekbody` stretches with
     it. A non-fixed card that grows for running subagents or another visible control still gives a
@@ -648,10 +672,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     a vertical drag starting in `#sbody` blurs the composer, while a tap does not. Textareas use 16px
     type on coarse pointers to prevent iOS focus zoom, auto-grow only to a bounded height, and keep
     Return as newline-only. `renderComposer` is the sole main-session composer for both full chat and
-    Markdown: it owns one exact `＋ | textarea | Send` row, draft/image state, menu, send path, and
+    the file viewer: it owns one exact `＋ | textarea | Send` row, draft/image state, menu, send path, and
     feedback. All three resting controls share the 44px token; newline input grows upward through four
-    lines. Chat's separate upper strip is `status | latest received file`; Markdown's is
-    `file browser | Chat`, with equal 42px controls. Chat's collapsed status and fixed latest-file
+    lines. Chat's separate upper strip is `status | latest received file`; the file viewer's is
+    `file browser | Chat`, with equal 42px controls. The file browser's outer height stays 42px;
+    its chips fit inside the border and render at most 40 filename characters plus an ellipsis,
+    preserving the full filename in `aria-label` and `title`. Chat's collapsed status and fixed latest-file
     button are 44px; the expansion chevron lives inside the compact status rather than adding a third
     row. The file button bottom-aligns when status expands and must never stretch. The upward **＋**
     menu is the only entry point
@@ -712,8 +738,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Outbox/Schedule/Confirm surfaces have dialog semantics, an accessible name, focus entry/trap,
     inert lower layers, and opener restoration. The highest visible z-index owns focus. Every one of
     those surfaces uses the shared visual viewport on phones; focused fields scroll into the
-    remaining viewport instead of exposing the screen beneath the keyboard. Every session card
-    exposes a real labelled Chat button for keyboard and screen-reader entry.
+    remaining viewport instead of exposing the screen beneath the keyboard. The labelled, focusable
+    card header opens Chat by pointer or keyboard; do not restore a redundant Chat button. Pin and
+    other explicit controls stop propagation and retain their own action.
 
 64. **Outbox identity and retries are concurrency-safe.** Scheduled creation persists the browser's
     stable `client_request_id` as the unique idempotency key. Editable updates/retargets require the
@@ -721,7 +748,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     storage and refuses missing bytes; one source may have only one active direct retry. A proven
     successful descendant marks failed ancestors `superseded`, preserving audit text while clearing
     attention. Fair selection orders by `next_attempt_at` so unavailable rows cannot starve ready
-    work; unchanged usage-reset rows always move their next check forward.
+    work; unchanged usage-reset rows always move their next check forward. Per-row **Delete** is a
+    durable cancellation/archive action: an unclaimed pending row becomes `cancelled`; a terminal
+    row retains its true state while `cancelled_at` and `cancelled_from_state` move it into the
+    **Cancelled** UI category. Never delete an active `sending`/`spawning` claim, and remove only
+    queue-owned attachments after the cancellation transaction succeeds.
 
 65. **Existing-chat model/effort changes are provider-native and compare-and-set.** The full-chat
     overflow renders controls only from `models_by_provider` plus explicit session capabilities.
@@ -783,7 +814,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Restore and Dismiss; uncertain rows expose Dismiss only. Resolving a server Outbox receipt writes
     a bounded tombstone so reconciliation and reload cannot recreate it. Repeated Claude or Codex
     file deliveries move the existing path to newest without duplication; chat exposes only that
-    newest file beside status, while Markdown retains the full file browser.
+    newest file beside status, while the file viewer retains the full file browser.
 
 68. **Composer text cannot answer a native question.** When `pendingQuestion(sid)` is visible,
     `sendText` submits one `dismiss_then_send` action containing that exact nonce and the captured
@@ -803,6 +834,15 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     never reuse the already-spent parent deadline. Child ids are immutable, so terminal state is
     monotonic across refreshes and terminal children are not re-read. A stale parent projection or a
     later timeout must never resurrect one into the active-subagent count.
+
+70. **Workspace activity and sizing describe only what is actionable now.** The Subagents tab count
+    and card preview use nonterminal agents only; previews render one or two populated rows and never
+    synthesize an empty second slot. Chat renders main-session work as one non-interactive newest-row
+    indicator and never repeats active child details there. The parent composer/status bar uses the
+    same wrapper in Chat, Files, unselected Subagents, and Details. Desktop Files/Subagents splits
+    persist separate browser-local widths, clamp the list to 220–520px while preserving at least
+    320px for the reader, and expose a labelled keyboard-operable separator. Mobile remains list-first
+    and has no divider.
 
 ## Dev workflow
 
@@ -879,7 +919,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
   motion/mobile rules.
 - `static/app.js` — render loop, pendingBox/sessionCard/convoBox/
-  renderQueue/historySection/insightsSection, built-in markdown renderer (`md()` — no CDN), file viewer overlay
+  renderQueue/historySection/insightsSection, built-in Markdown/static-HTML/JSON/PDF render routing, file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals
   (`open`/`infoOpen`/`doneOpen`/`filesOpen` plus route/filter globals) re-applied at render —

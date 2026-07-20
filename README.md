@@ -22,8 +22,7 @@ the provider's native control path. Built 2026-07-13; still evolving.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
   distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
-  totals line. Its **Subagents** filter opens a flat active-child view with each parent breadcrumb,
-  model, state, and latest activity. The Now header carries a compact active-account summary such as
+  totals line. The Now header carries a compact active-account summary such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
   pins to the top of the screen while you scroll the card body (collapse from anywhere), and
@@ -88,6 +87,19 @@ the provider's native control path. Built 2026-07-13; still evolving.
   initial indexing and transcript updates do not block the provider poll or `/api/fleet`. Progress,
   parser/file warnings, and a confirmed rebuild control are visible on the page. Search is action-
   token protected because it exposes unmanaged local transcripts.
+- **One session workspace:** every live or historical session opens at a stable
+  `#session/<sid>/chat` route with persistent **Chat**, **Files**, **Subagents**, and **Details**
+  sections. Files and agents have opaque, directly reloadable selection routes; local paths never
+  appear in the URL or context response. The Subagents section starts with **Active** enabled on
+  every initial open, preserves spawn order and required ancestors, and offers **All** for terminal
+  agents; its tab count includes active agents only. On desktop the Files and Subagents list dividers
+  are draggable or keyboard-resizable and their separate widths persist in that browser. One
+  contextual composer and one pending-request drawer serve the whole workspace at a stable height.
+  On mobile, horizontal swipes move between adjacent sections without wrapping; a right swipe that
+  starts at the left edge exits the workspace. Horizontally scrollable readers keep their own gesture.
+  Main-agent activity appears as the newest non-interactive Chat row. Closed
+  sessions show explicit retained/unavailable states; eligible exact-session resumes use a
+  text-only, idempotent first send, while external Codex threads remain view-only.
 - **⚙ settings** (desktop rail or mobile More): an install-and-delivery rail distinguishes browser
   install, notification permission, and registered-device health. It can enable/repair a Web Push
   subscription, rename or pause this device, disconnect it, and queue a real test push without
@@ -103,7 +115,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   across daemon restarts until manually unmuted.
 - Card headers stay lean: the $ total appears only on an open card; done-agent count and
   agent spend live in the detail panel ("completed agents", "session info"), not the header.
-  The running-agent count stays visible everywhere.
+  The running-agent count stays visible everywhere. The whole header opens Chat (and is keyboard
+  accessible); the pin remains an independent control. Active-subagent previews contain only real
+  agent rows—there is no placeholder row when only one agent is active.
 - **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
   effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
@@ -238,16 +252,20 @@ the provider without affecting Claude sessions.
   Headings, emphasis, lists, links, and inline code render as compact Markdown; document-scale
   code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
-  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 500
+  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 800
   characters of the latest session message. That line setting also fixes the height of ordinary
   collapsed session cards, so short/missing messages and poll updates do not move the list.
   Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
   running subagents grow to fit those controls; their collapsed message peek still reserves the
   configured number of lines, so a short message does not leave a different-sized hole. Overflow
-  replaces the final collapsed row with a clickable `...`; expanding reveals the full bounded
-  500-character preview. Tapping a
+  replaces the final collapsed row with a clickable `...`. Only a truncated peek responds to a
+  whole-row tap; a fully visible collapsed peek is inert. Once expanded, the exposed content is
+  inert too—use **Less** to collapse it. Expansion reveals the full bounded 800-character preview. Tapping a
   subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
   is the context.
+- **Complete messages in full chat:** session card peeks stay bounded, but the full-screen
+  conversation keeps the entire user or assistant message. Long consecutive Claude response rows
+  merge without dropping their tails.
 - **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
   `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
   included** — so it is a liveness signal (is it moving?), not output speed; a big context makes
@@ -375,7 +393,9 @@ the provider without affecting Claude sessions.
     Its controls stay disabled until the live registry confirms the same prompt is actually waiting.
     If Fleet loses acknowledgement after sending any answer key, that nonce stays blocked across
     reload/restart; check the terminal instead of retrying it blindly.
-  - The selector disappears the moment an answer sends — no waiting on the next poll.
+  - The selector disappears and the selected answer appears in chat immediately on click, before
+    Fleet waits for Claude's terminal submission. Its spinner remains through provider acceptance
+    until the canonical **You answered…** event replaces it.
   - If a file was delivered shortly before the question (the deliver-then-ask pattern), the box
     leads with a **"read first" chip** — visible even on a collapsed card. Window:
     `question_file_pair_seconds`.
@@ -400,7 +420,9 @@ the provider without affecting Claude sessions.
   picker) through the native file input that receives the original iOS tap. Cancel changes nothing;
   selection closes the menu and persists one shared draft. Selected images are shown beside the composer and delivered to
   either Claude or Codex with the message. Structured-question answers use the selected option labels and the
-  same placeholder behavior (secret free text is shown only as “private answer”). The owning card
+  same placeholder behavior (secret free text is shown only as “private answer”). A definite
+  failure exposes **Restore**, which reopens the original selector with its selection preserved but
+  never resubmits; uncertain delivery exposes no retry. The owning card
   on the main fleet page also shows a compact **Submitting / Submitted / Failed** receipt for
   question answers and inline quick responses such as permissions, dismissals, and MCP forms.
   If Fleet itself is online but temporarily loses control of a Fleet-owned active Codex turn, the
@@ -410,16 +432,27 @@ the provider without affecting Claude sessions.
   steer because that recorded turn no longer exists, Fleet clears the stale **working** state and
   starts the exact payload once as the next turn. A different active-turn id remains queued instead
   of creating concurrent work.
+  Every Outbox row has **Delete** once it is not actively sending or spawning. Deleting pending work
+  cancels it before it can send; deleting a settled row preserves its original delivery outcome.
+  Both move out of the active filters and into the dedicated **Cancelled** category.
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.
 - **Delivered files**: anything the session sent you via SendUserFile appears as a tappable chip
-  (📄 md/text, 🖼 images) **inline in the conversation at the point it was delivered**, with its
+  (📄 documents, 🖼 images) **inline in the conversation at the point it was delivered**, with its
   caption — so the message explaining the file sits right with it. The detail panel also has a
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
-  markdown rendered and images inline; viewing contents requires the act token (same `?token=`
-  opt-in); files since deleted show "(gone)". Re-delivering or updating a previously listed path
+  Markdown, sandboxed HTML, PDF, formatted JSON, raw text, and images; viewing contents requires the act token (same `?token=`
+  opt-in). If Claude removes an original scratch file, Fleet uses Claude's confined per-session
+  file-history backup when one exists; a file with neither source nor backup shows "(gone)".
+  Re-delivering or updating a previously listed path
   moves it back to newest without duplicating it, so chat's latest-file button is accurate.
+  The file viewer keeps its selector at a fixed height; selector buttons show up to 40
+  filename characters, then an ellipsis, while the full filename remains available to assistive
+  technology and in the button tooltip.
+  HTML previews can run inline JavaScript for generated charts and other self-contained artifacts.
+  They run in an opaque sandbox with no Fleet-origin access; external scripts, embedded frames,
+  links, remote assets, network requests, and form destinations are removed or blocked.
 - **File viewer** extras: its slim toolbar shows only close, filename, and file/session actions—no
   duplicate session title/project/model header or separator. The same **⋮ menu** exposes light/dark mode, Codex mode, stop, and close
   actions that apply to the owning session. Light mode gives the document a paper theme; the choice
@@ -536,6 +569,9 @@ reads the shared Claude/Codex registries and transcripts so real production sess
 but the server removes their mutation capabilities and rejects forged action requests. Only exact
 session IDs created by staging are controllable. Every staging-created session is forced into a new
 `fleet-staging/*` branch and managed worktree under `~/.claude/fleet-dash-staging/workspaces`.
+Production and staging store browser credentials in separate `act_token_production` and
+`act_token_staging` cookies. This matters on localhost and the shared tailnet hostname because
+browser cookies do not distinguish ports.
 
 The staging launch agent is `com.benjaminfeder.fleet-dash.staging`; its mobile-installable HTTPS
 origin is `https://macbook-pro.tail24da27.ts.net:8443`. The purple **STAGING** banner must always be
@@ -703,8 +739,9 @@ same request/result files. The staging applet receives its own one-time iTerm au
 - Codex Plan/Default mutation currently uses an experimental App Server method. It is verified
   against the installed CLI and isolated in the adapter, but may require an adapter update if Codex
   changes that experimental protocol.
-- The markdown viewer is a minimal built-in renderer (headings, lists, tables, code, quotes,
-  links) — exotic markdown falls back to plain paragraphs. Non-md text files show raw.
+- The generic file viewer supports images, browser-native PDF, formatted JSON, sandboxed interactive
+  HTML, and a minimal built-in Markdown renderer (headings, lists, tables, code, quotes, links).
+  Exotic Markdown falls back to plain paragraphs; other text files show raw.
 - A closed conversation is read-only until it is reopened. Every surviving Claude main transcript
   can be viewed; Reopen is offered only when the exact UUID transcript and original working
   directory pass Fleet's local safety checks. Deleted transcripts and missing working directories

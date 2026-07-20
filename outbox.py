@@ -25,7 +25,7 @@ TERMINAL_STATES = {"sent", "confirmation_unknown", "blocked", "failed", "cancell
 TARGET_RECONNECT_GRACE_SECONDS = 120
 ALL_STATES = PENDING_STATES | TERMINAL_STATES | {"spawning", "sending"}
 KINDS = {"at_time", "when_available", "usage_reset", "new_session",
-         "provider_reconnect"}
+         "provider_reconnect", "resume_session"}
 RECOVERY_ASSET_RETENTION_SECONDS = 24 * 60 * 60
 STATE_LABELS = {
     "scheduled": "Scheduled",
@@ -187,12 +187,15 @@ class OutboxManager:
                 provider_receipt TEXT, sent_at REAL, error TEXT, blocked_reason TEXT,
                 retry_of TEXT, origin TEXT NOT NULL DEFAULT 'scheduled',
                 idempotency_key TEXT, image_paths_json TEXT,
+                cancelled_at REAL, cancelled_from_state TEXT,
                 version INTEGER NOT NULL DEFAULT 1)""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(outbox_messages)")}
             for name, definition in (
                     ("origin", "TEXT NOT NULL DEFAULT 'scheduled'"),
                     ("idempotency_key", "TEXT"),
-                    ("image_paths_json", "TEXT")):
+                    ("image_paths_json", "TEXT"),
+                    ("cancelled_at", "REAL"),
+                    ("cancelled_from_state", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE outbox_messages ADD COLUMN {name} {definition}")
             db.execute("""CREATE INDEX IF NOT EXISTS outbox_pending
@@ -221,9 +224,18 @@ class OutboxManager:
             image_paths = []
         item["image_count"] = len(image_paths) if isinstance(image_paths, list) else 0
         item["state_label"] = STATE_LABELS.get(item.get("state"), "Unknown")
-        item["editable"] = item.get("state") in PENDING_STATES and not item.get("claimed_at")
+        item["cancelled"] = (item.get("state") == "cancelled" or
+                             item.get("cancelled_at") is not None)
+        item["cancelled_from_label"] = STATE_LABELS.get(
+            item.get("cancelled_from_state"))
+        item["deletable"] = (not item["cancelled"] and
+                             item.get("state") not in {"spawning", "sending"})
+        item["editable"] = (not item["cancelled"] and
+                            item.get("state") in PENDING_STATES and
+                            not item.get("claimed_at"))
         item["cancellable"] = item["editable"]
-        item["retryable"] = (item.get("origin") != "direct_send_recovery" and
+        item["retryable"] = (not item["cancelled"] and
+                             item.get("origin") != "direct_send_recovery" and
                              item.get("state") in {
                                  "blocked", "failed", "confirmation_unknown"})
         return item
@@ -385,12 +397,15 @@ class OutboxManager:
         """
         if target_provider not in ("claude", "codex"):
             raise OutboxError("unknown delivery provider")
-        if kind not in ("when_available", "provider_reconnect"):
+        if kind not in ("when_available", "provider_reconnect", "resume_session"):
             raise OutboxError("unsupported delivery queue")
         if kind == "provider_reconnect" and target_provider != "codex":
             raise OutboxError("provider recovery queue is unavailable for this provider")
-        if origin not in ("automatic_fallback", "direct_send_recovery"):
+        if origin not in ("automatic_fallback", "direct_send_recovery",
+                          "closed_resume"):
             raise OutboxError("invalid delivery origin")
+        if kind == "resume_session" and origin != "closed_resume":
+            raise OutboxError("invalid resume delivery")
         key = self._idempotency_key(idempotency_key, required=True)
         with self._connect() as db:
             existing = db.execute(
@@ -467,6 +482,14 @@ class OutboxManager:
             target_session_id=target_session_id, idempotency_key=idempotency_key,
             image_paths=image_paths, kind="provider_reconnect",
             origin="direct_send_recovery")
+
+    def create_closed_resume(self, *, message, target_provider, target_session_id,
+                             idempotency_key):
+        """Persist one exact-session resume followed by one text delivery."""
+        return self.create_delivery(
+            message=message, target_provider=target_provider,
+            target_session_id=target_session_id, idempotency_key=idempotency_key,
+            kind="resume_session", origin="closed_resume")
 
     def _remove_asset_paths(self, paths):
         """Delete only queue-owned image paths and their now-empty directory."""
@@ -584,22 +607,34 @@ class OutboxManager:
             if not requested or any(part not in ALL_STATES for part in requested):
                 raise OutboxError("unknown outbox state")
             states = requested
-        where = " WHERE state IN (%s)" % ",".join("?" for _ in states) if states else ""
+        params = []
+        predicates = []
+        if states:
+            ordinary = [value for value in states if value != "cancelled"]
+            if ordinary:
+                predicates.append("(state IN (%s) AND cancelled_at IS NULL)" %
+                                  ",".join("?" for _ in ordinary))
+                params.extend(ordinary)
+            if "cancelled" in states:
+                predicates.append("(state='cancelled' OR cancelled_at IS NOT NULL)")
+        where = " WHERE " + " OR ".join(predicates) if predicates else ""
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM outbox_messages" + where +
                 " ORDER BY CASE WHEN state IN ('blocked','failed','confirmation_unknown') "
                 "THEN 0 WHEN state IN ('sent','superseded') THEN 2 ELSE 1 END, "
                 "COALESCE(trigger_at, created_at), created_at, id LIMIT ? OFFSET ?",
-                (*states, limit + 1, cursor)).fetchall()
+                (*params, limit + 1, cursor)).fetchall()
         more = len(rows) > limit
         return {"ok": True, "items": [self._public(row) for row in rows[:limit]],
                 "next_cursor": cursor + limit if more else None}
 
     def counts(self):
         with self._connect() as db:
-            rows = db.execute("SELECT state, COUNT(*) n FROM outbox_messages "
-                              "GROUP BY state").fetchall()
+            rows = db.execute("SELECT CASE WHEN cancelled_at IS NOT NULL THEN 'cancelled' "
+                              "ELSE state END state, COUNT(*) n FROM outbox_messages "
+                              "GROUP BY CASE WHEN cancelled_at IS NOT NULL THEN 'cancelled' "
+                              "ELSE state END").fetchall()
         values = {row["state"]: row["n"] for row in rows}
         pending = sum(values.get(state, 0) for state in PENDING_STATES | {"spawning", "sending"})
         attention = sum(values.get(state, 0) for state in
@@ -644,12 +679,45 @@ class OutboxManager:
         now = self.clock()
         with self._transaction(immediate=True) as db:
             result = db.execute(
-                "UPDATE outbox_messages SET state='cancelled',updated_at=?,version=version+1 "
+                "UPDATE outbox_messages SET state='cancelled',cancelled_at=?,"
+                "cancelled_from_state=state,updated_at=?,version=version+1 "
                 "WHERE id=? AND state IN ('scheduled','waiting_availability',"
-                "'waiting_usage_reset','waiting_provider') AND claimed_at IS NULL", (now, outbox_id))
+                "'waiting_usage_reset','waiting_provider') AND claimed_at IS NULL",
+                (now, now, outbox_id))
             if result.rowcount != 1:
                 raise OutboxError("only an unclaimed pending message can be cancelled",
                                   code="immutable")
+        self._clear_assets_for(outbox_id)
+        self._missing_targets.pop(str(outbox_id), None)
+        return self.get(outbox_id)
+
+    def dismiss(self, outbox_id):
+        """Move a settled or unclaimed message into the Cancelled category.
+
+        Terminal delivery truth remains in ``state`` and ``cancelled_from_state``;
+        pending work becomes the real cancelled state so the scheduler cannot send it.
+        """
+        now = self.clock()
+        with self._transaction(immediate=True) as db:
+            row = db.execute(
+                "SELECT state,claimed_at,cancelled_at FROM outbox_messages WHERE id=?",
+                (outbox_id,)).fetchone()
+            if not row:
+                raise OutboxError("outbox message not found", code="stale")
+            if row["state"] in {"spawning", "sending"} or row["claimed_at"] is not None:
+                raise OutboxError(
+                    "a message being delivered cannot be deleted; try again when it settles",
+                    code="immutable")
+            if row["state"] == "cancelled" or row["cancelled_at"] is not None:
+                return self.get(outbox_id)
+            next_state = "cancelled" if row["state"] in PENDING_STATES else row["state"]
+            result = db.execute(
+                "UPDATE outbox_messages SET state=?,cancelled_at=?,"
+                "cancelled_from_state=?,updated_at=?,version=version+1 "
+                "WHERE id=? AND claimed_at IS NULL AND cancelled_at IS NULL",
+                (next_state, now, row["state"], now, outbox_id))
+            if result.rowcount != 1:
+                raise OutboxError("outbox message changed; refresh", code="stale")
         self._clear_assets_for(outbox_id)
         self._missing_targets.pop(str(outbox_id), None)
         return self.get(outbox_id)
@@ -941,8 +1009,14 @@ class OutboxManager:
                                   "Fresh post-reset usage evidence received",
                                   observed_reset=reset_at)
                 record = self.get_internal(record["id"])
-            if record["kind"] == "new_session" and not record.get("destination_session_id"):
-                if record.get("target_provider") == "claude":
+            spawn_pending = (
+                record["kind"] == "new_session" and
+                not record.get("destination_session_id")) or (
+                record["kind"] == "resume_session" and
+                record.get("state") == "scheduled")
+            if spawn_pending:
+                if record["kind"] == "new_session" and \
+                        record.get("target_provider") == "claude":
                     destination = str(uuid.uuid4())
                     with self._transaction(immediate=True) as db:
                         db.execute("UPDATE outbox_messages SET destination_session_id=?,"
@@ -959,7 +1033,9 @@ class OutboxManager:
                     continue
                 if not result.get("ok"):
                     self._terminal(record["id"], "failed",
-                                   error=result.get("error") or "session spawn failed")
+                                   error=result.get("error") or
+                                   ("session resume failed" if record["kind"] ==
+                                    "resume_session" else "session spawn failed"))
                 elif result.get("message_delivered"):
                     self._terminal(record["id"], "sent", receipt=result,
                                    destination=result.get("session_id"))
