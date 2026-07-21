@@ -2667,6 +2667,25 @@ class EngineProviderTest(unittest.TestCase):
         self.assertFalse(requests_reply(
             "I will check whether the provider recovered, then rerun the test."))
 
+    def test_comprehension_tags_and_greetings_are_not_attention_work(self):
+        for tag in ("The migration is applied. Does that make sense?",
+                    "I rewrote the loader. How does that look?",
+                    "Reindexed both providers. What do you think?",
+                    "Bumped the cache name. Sound good?",
+                    "That is the last one. Right?",
+                    "The branch is clean. What's next?",
+                    "Both tests pass. Anything else?",
+                    "The daemon is restarted. What would you like me to do?"):
+            self.assertFalse(requests_reply(tag), tag)
+
+    def test_choices_and_permission_asks_remain_attention_work(self):
+        for ask in ("The tests pass. Want me to open the PR?",
+                    "I staged the rename. Should I proceed?",
+                    "Two paths remain. Do you want option A or option B?",
+                    "Both loaders changed. Which file should I edit first?",
+                    "The worktree is dirty. How do you want to proceed?"):
+            self.assertTrue(requests_reply(ask), ask)
+
     def test_pure_classifier_explains_priority_without_mutating_input(self):
         session = codex_session()
         session.update(state="running", quiet_s=12, agents_running=1,

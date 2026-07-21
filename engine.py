@@ -358,13 +358,47 @@ IMAGE_UPLOAD_MIMES = {
 DANGER_COMMANDS = {"clear", "compact", "quit", "exit", "logout", "rewind"}
 
 
+# A trailing question that only checks comprehension ("does that make sense?",
+# "how does that look?", "clear?") reads as a question but requests no decision —
+# it must not manufacture attention work.
+_RHETORICAL_TAIL = re.compile(
+    r"(?i)^(?:so\s+)?(?:does|do|is|are|did|was|were)?\s*(?:that|this|it|they|the\s+\w+)?\s*"
+    r"(?:make[s]?\s+sense|sound[s]?\s+(?:good|right|ok(?:ay)?)|"
+    r"look[s]?\s+(?:good|right|ok(?:ay)?)|work\s+for\s+you|help|clear|correct)\s*\??$")
+_TAG_TAIL = re.compile(
+    r"(?i)^(?:right|correct|okay|ok|cool|clear|got it|make sense|sound good|"
+    r"fair enough|you follow|you with me)\s*\??$")
+# Interrogative-led comprehension checks: "how does that look?", "what do you
+# think?", "how's that?" — distinct from a genuine "how do you want to proceed?".
+_RHETORICAL_HOW = re.compile(
+    r"(?i)^(?:how\s+(?:does|do|is|'?s)\s+(?:that|this|it|the\b[^?]*?)?\s*"
+    r"(?:look|sound|read|seem|feel)|how'?s\s+(?:that|this|it)|"
+    r"what\s+do\s+you\s+(?:think|reckon)|how\s+do\s+you\s+like)\b")
+# Idle/greeting prompts and open "what would you like" solicitations are not a
+# blocked turn — the assistant is inviting a new task, not waiting on a decision.
+_GREETING_TAIL = re.compile(
+    r"(?i)(what are we (working on|doing)|what'?s next|what'?s on your mind|"
+    r"what can i help|what would you like|how can i help|what are you (after|actually)|"
+    r"what did you want|how'?s it going|anything else|what'?s the (plan|goal))")
+# A genuine ask: offers the user a choice, or asks the assistant's OWN next
+# action (permission/direction to act). Caught in addition to bare interrogatives
+# so routine "Want me to X?" / "A or B?" endings register as attention.
+_ACTION_QUESTION = re.compile(
+    r"(?i)\b(?:should i|shall i|should we|shall we|can i|may i|want me to|"
+    r"do you want|would you like|would you prefer|do you prefer|which|whether|"
+    r"either|\bor\b)\b")
+
+
 def requests_reply(text):
     """Conservative plain-prose signal that an assistant explicitly wants input.
 
     Provider-native questions remain authoritative. This covers ordinary completed
     assistant messages, whose protocols do not carry a requires-reply field.
     Code, Markdown quotations, and quoted strings are removed before detection so
-    examples such as `value?` do not manufacture attention work.
+    examples such as `value?` do not manufacture attention work. Comprehension
+    tags ("does that make sense?", "how does that look?") and idle greeting
+    prompts are excluded; every remaining genuine ask — a forced choice, a
+    "should I proceed" decision, or a routine "want me to X?" — registers.
     """
     prose = str(text or "")
     if not prose.strip():
@@ -379,14 +413,22 @@ def requests_reply(text):
         prose))
     if explicit:
         return True
-    # A question is actionable only when it is the final prose request. This
-    # excludes rhetorical/status questions that the assistant immediately
-    # answers itself, while retaining ordinary "Should I continue?" endings.
+    # Only the FINAL prose question can be actionable — a mid-message question the
+    # assistant then answers itself is not attention work.
     stripped = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", prose).strip()
     match = re.search(r"([^.!?\n]*(?:\n[^.!?\n]*)*)\?\s*$", stripped)
     if not match:
         return False
     question = re.sub(r"\s+", " ", match.group(1)).strip(" -*0123456789.)\t")
+    # Drop comprehension tags and idle greetings — validated as the dominant
+    # false-positive classes against the local transcript corpus.
+    if (_RHETORICAL_TAIL.match(question) or _TAG_TAIL.match(question)
+            or _RHETORICAL_HOW.match(question) or _GREETING_TAIL.search(question)):
+        return False
+    # Genuine ask: a forced choice or a request for the assistant's next action.
+    if _ACTION_QUESTION.search(question):
+        return True
+    # Or any bare interrogative-led final question ("Should I proceed?").
     return bool(re.match(
         r"(?i)^(?:what|which|who|when|where|why|how|do|does|did|is|are|was|were|"
         r"can|could|would|will|should|may|must|have|has|had)\b", question))
