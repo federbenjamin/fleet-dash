@@ -595,13 +595,17 @@ function rebuildSearch(){
 }
 // input guard, two windows: a scroll gesture (touchmove OR desktop wheel/trackpad)
 // holds POLL re-renders 1500ms so the scrollbox isn't replaced mid-gesture (a
-// replaced node kills wheel momentum: "scroll stops after a second"); a tap
-// (touchstart) holds them 800ms so the 2s tick can't detach a button between
-// touch and its click event (detached node = swallowed click). User-action
-// renders pass force=true and bypass the guard — tap feedback must paint
-// immediately.
+// replaced node kills wheel momentum: "scroll stops after a second"); a press
+// holds them 800ms so the 2s tick can't detach a button between the press and
+// its click event (detached node = swallowed click). User-action renders pass
+// force=true and bypass the guard — tap feedback must paint immediately.
+// `pointerdown` covers mouse and pen as well as touch, and it is load-bearing
+// for the composer specifically: mousedown moves focus off the textarea, which
+// drops the `typing` guard that was the only thing keeping #sact alive, so a
+// tick landing between press and click silently swallowed the send.
 let lastMove=0,lastTap=0;
 document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
+document.addEventListener('pointerdown',()=>{lastTap=Date.now()},{passive:true});
 document.addEventListener('touchmove',()=>{lastMove=Date.now()},{passive:true});
 document.addEventListener('wheel',()=>{lastMove=Date.now()},{passive:true});
 const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;

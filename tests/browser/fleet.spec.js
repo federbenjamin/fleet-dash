@@ -1616,6 +1616,26 @@ test('composer follow-ups dismiss questions instead of selecting an option', asy
   }
 });
 
+test('a poll render during a mouse press cannot swallow the composer send', async ({ page }) => {
+  await reset(page, 'base');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const composer = page.locator('#sact').getByPlaceholder('send message');
+  await composer.fill('Press-guard message');
+  const send = page.locator('#sact .pbtn.send');
+  const box = await send.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // mousedown moves focus off the textarea, dropping the `typing` guard; an
+  // unforced poll render landing here used to replace the button, so mouseup
+  // fired click on the container instead and the send was silently lost.
+  await page.mouse.down();
+  await page.evaluate(() => render(last));
+  await page.mouse.up();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type)
+    .toBe('send_message');
+  expect((await fixtureState(page)).actions.at(-1)).toMatchObject(
+    { session_id: 'codex:thread-one', text: 'Press-guard message' });
+});
+
 test('composer follow-up keeps its draft when question dismissal is rejected', async ({ page }) => {
   await reset(page, 'single-question');
   await openAction(page, 'codex:thread-one');
