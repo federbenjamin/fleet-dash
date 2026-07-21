@@ -755,10 +755,10 @@ td.r,th.r{text-align:right}
   .detail .stripbox{margin-top:14px}
   .detail .dsep{margin:28px 0 14px}
   .detail .ctxbox{margin-bottom:12px}
-  /* phone: trim the dense bits — "quiet …" and the subagent row's numbers after
-     the model (throughput, sparkline, tokens, cost). The agent view has it all. */
+  /* phone: trim the dense bits — "quiet …" and the subagent row's chevron. The
+     row is now just graph + model, so the sparkline fits and stays. */
   .squiet{display:none}
-  .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
+  .arow .aopen{display:none}
 }
 @media (max-width:600px){
   .shead>.m[title="session provider"]{display:none}

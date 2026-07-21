@@ -843,7 +843,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     and the session card's agent list use nonterminal agents only. That card list (`cardAgentList`)
     renders EVERY running/stalled agent — never capped, never re-sorted, so `agentRow`'s depth
     indentation still describes the spawn hierarchy — and it appears on any card with live agents,
-    not only Working ones (user decision 2026-07-21, reverting the two-row preview). A card showing
+    not only Working ones (user decision 2026-07-21, reverting the two-row preview). The row carries
+    type, description, sparkline, then model/effort — throughput, total tokens, and cost were dropped
+    from it (same decision); per-agent spend stays in the workspace status line. A card showing
     it must never take the `.fixedpeek` frame or the list is clipped (invariant 45). Tapping any row
     routes to `#session/<sid>/subagents` with that agent selected via `selectWorkspaceAgent`; the
     standalone `#aview` overlay (`agentTap`) remains the destination for the completed-agents fold,

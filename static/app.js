@@ -3813,11 +3813,8 @@ function agentRow(a,buildTap){
     <span class="dot ${a.state}" role="img" aria-label="${esc(signal)}" title="${esc(signal)}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>
-    <span class="amodel">${modelLabel(a)}</span>
-    ${!done&&a.tok_per_s>0?`<span class="anum" title="throughput: tokens per second this agent is processing, cache reads included — a liveness signal, not output speed">${fmtTok(Math.round(a.tok_per_s))} tok/s</span>`:''}
     ${!done?spark(a.spark):''}
-    <span class="anum">${fmtTok(a.total_tokens)}</span>
-    <span class="acost">${fmt$(a.cost)}</span>
+    <span class="amodel">${modelLabel(a)}</span>
     <span class="aopen">›</span>
   </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px" onclick="${tap}">
     <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext peekmd" style="--peek-lines:${clampA()}">${peekMd(a.last_msg.text)}</span></div>`:''}`;
