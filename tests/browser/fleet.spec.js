@@ -456,6 +456,15 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('94%');
+  // the panel hangs off the button: top-left pinned to its bottom-left, small gap
+  const anchored = await page.evaluate(() => {
+    const button = document.querySelector('#usagechip').getBoundingClientRect();
+    const panel = document.querySelector('#usagepanel').getBoundingClientRect();
+    return { gap: Math.round(panel.top - button.bottom), leftDelta: Math.round(panel.left - button.left),
+      rightOverflow: Math.round(Math.max(0, panel.right - innerWidth)),
+      bottomOverflow: Math.round(Math.max(0, panel.bottom - innerHeight)) };
+  });
+  expect(anchored).toEqual({ gap: 8, leftDelta: 0, rightOverflow: 0, bottomOverflow: 0 });
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
 
   await reset(page, 'usage-amber');
