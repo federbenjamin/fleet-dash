@@ -3496,9 +3496,10 @@ function renderWorkspaceSubagents(force=false){
     <button class="${filter==='all'?'active':''}" aria-pressed="${filter==='all'}" onclick="setSubagentFilter('all')">All</button>`;
   $('#sagentlist').innerHTML=agents.length?`<div class="workspacelist">${visible.length?visible.map(({agent,ancestor})=>{
     const terminal=terminalAgentStates.has(agent.state),latest=agent.last_msg?.text||(!terminal?`quiet ${fmtAge(Math.max(0,Number(agent.quiet_s)||0))}`:'');
+    const desc=esc(ancestor?'parent of active subagent':latest);
     return`<button class="workspaceitem agentworkspaceitem ${agent.agent_id===sessionView.agentId?'selected':''} ${ancestor?'ancestor':''}" style="--agent-depth:${Math.max(0,Number(agent.depth)||0)}"
       onclick="selectWorkspaceAgent('${enc(sessionView.sid)}','${enc(agent.agent_id)}')"><span class="dot ${esc(agent.state||'running')}"></span><b>${esc(agent.description||agent.agent_type||agent.agent_id)}</b>
-      <small>${ancestor?'parent of active subagent':esc(latest)}</small></button>`;}).join(''):'<div class="workspaceempty"><b>No active subagents</b><p>Choose All to read completed or cancelled work.</p></div>'}</div>`:
+      <small><span class="amodel">${modelLabel(agent)}</span>${desc?` · ${desc}`:''}</small></button>`;}).join(''):'<div class="workspaceempty"><b>No active subagents</b><p>Choose All to read completed or cancelled work.</p></div>'}</div>`:
     '<div class="workspaceempty"><b>No retained subagents</b><p>No validated subagent records are available for this session.</p></div>';
   const selected=agents.find(agent=>agent.agent_id===sessionView.agentId)||null;
   if(!selected){sessionView.agentId=null;agentView=null;$('#sagentbrowser').classList.remove('has-selection');
@@ -4024,7 +4025,7 @@ function cardAgentPreview(s){
     const latest=agent.last_msg?.text||`quiet ${fmtAge(Math.max(0,Number(agent.quiet_s)||0))}`;
     return`<button class="agentminirow" onclick="event.stopPropagation();openAgent(decodeURIComponent('${enc(s.session_id)}'),decodeURIComponent('${enc(agent.agent_id)}'))">
       <span class="dot ${esc(agent.state||'running')}" aria-label="${agent.state==='stalled'?'quiet — may still be working':'working'}"></span><b>${esc(state)}</b>
-      <span>${esc(agent.description||agent.agent_type||agent.agent_id)}</span><small>${esc(latest)}</small></button>`;
+      <span>${esc(agent.description||agent.agent_type||agent.agent_id)}</span><span class="amodel" title="subagent model">${modelLabel(agent)}</span><small>${esc(latest)}</small></button>`;
   });
   return`<div class="agentminipreview" aria-label="Active subagents">${rows.join('')}</div>`;
 }

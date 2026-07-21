@@ -376,7 +376,11 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Pinned → Needs you → Working → Available.
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
     with one chronological list and access/provider filters. `requests_reply` examines the newest
-    complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
+    complete assistant prose outside code/quotes, and only its FINAL question. Comprehension tags
+    ("does that make sense?", "how does that look?", "right?") and idle solicitations ("what's
+    next?", "anything else?") are excluded because they request no decision; a forced choice, a
+    permission ask ("want me to X?"), or any other bare interrogative ending still counts.
+    Its revision remains Needs you until a user reply
     or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
     response badge. Provider-wide stale state preserves the last placement and renders one banner.
     Keep [`docs/session-organization.md`](docs/session-organization.md) synchronized with any mapping.
