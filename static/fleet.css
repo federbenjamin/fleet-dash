@@ -249,8 +249,12 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .bell{background:none;border:none;font:inherit;font-size:14px;cursor:pointer;padding:0 2px;opacity:.9}
 .bell.muted{opacity:.4}
 /* Provider account usage lives on demand in a popover/sheet instead of occupying Now. */
-#usagepanel{display:none;position:fixed;top:96px;right:28px;z-index:68;width:min(520px,calc(100vw - 40px));
-  max-height:min(72vh,680px);overflow:auto;background:#11161d;border:1px solid var(--line);border-radius:12px;
+/* anchored under the Usage button: JS pins its top-left to the button's
+   bottom-left (positionUsagePanel) and clamps it inside the viewport. The
+   custom-property fallbacks only apply if it opens before measuring. */
+#usagepanel{display:none;position:fixed;top:var(--usage-top,96px);left:var(--usage-left,auto);z-index:68;
+  width:var(--usage-width,min(520px,calc(100vw - 24px)));
+  max-height:var(--usage-maxh,min(72vh,680px));overflow:auto;background:#11161d;border:1px solid var(--line);border-radius:12px;
   box-shadow:0 24px 70px rgba(0,0,0,.62);padding:12px;font-size:12px;color:var(--dim)}
 #usagepanel.open{display:block}
 .usagepanelhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 10px;
@@ -1419,8 +1423,8 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .workhead{grid-template-columns:32px minmax(0,1fr) 18px}.workcounts{grid-column:2;justify-content:flex-start;margin-top:4px}
   .workhead .chev{grid-column:3;grid-row:1/3}.worksummary{padding-left:12px;gap:7px}
   .workoutcome{grid-template-columns:44px}.worksignals{gap:8px}.worksignals span{flex:1 1 42%}
-  #usagepanel{inset:auto 0 0;z-index:68;width:100%;max-height:72dvh;border-width:1px 0 0;border-radius:14px 14px 0 0;
-    padding:13px 13px calc(18px + env(safe-area-inset-bottom))}
+  /* phones anchor under the button too — no bottom sheet */
+  #usagepanel{width:min(520px,calc(100vw - 16px));padding:12px}
   #sview,#aview,#viewer{inset:auto 0;top:var(--fleet-visual-top,0px);height:var(--fleet-visual-height,100dvh)}
   #sact.session-composer,#vact.session-composer{max-height:58%}
   #sact.session-composer.question-present{max-height:calc(var(--fleet-visual-height,100dvh) - 52px)}

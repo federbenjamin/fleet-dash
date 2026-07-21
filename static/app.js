@@ -635,6 +635,27 @@ const stateLabel={running:'Working',needs_you:'Response needed',turn_done:'Avail
 
 // ---- on-demand provider plan usage ----------------------------------------
 let usageOpen=false;
+const USAGE_GAP=8;      // the small gap between the button and the panel
+const USAGE_EDGE=8;     // keep this much clear of every viewport edge
+// The panel's top-left pins to the Usage button's bottom-left on desktop AND
+// mobile. It is position:fixed, so the coordinates are remeasured whenever the
+// button can move under it (scroll, resize, keyboard-driven viewport changes).
+function positionUsagePanel(){
+  const panel=$('#usagepanel'),chip=$('#usagechip');
+  if(!panel||!chip||!usageOpen)return;
+  const button=chip.getBoundingClientRect();
+  const vw=window.innerWidth,vh=window.innerHeight;
+  // shrink to whatever fits to the button's right, so the left edges can line
+  // up; only a panel narrower than the floor gets nudged left of the button
+  const floor=Math.min(300,vw-2*USAGE_EDGE);
+  const width=Math.max(floor,Math.min(520,vw-button.left-USAGE_EDGE));
+  panel.style.setProperty('--usage-width',`${Math.round(width)}px`);
+  const left=Math.max(USAGE_EDGE,Math.min(button.left,vw-width-USAGE_EDGE));
+  const top=Math.max(USAGE_EDGE,button.bottom+USAGE_GAP);
+  panel.style.setProperty('--usage-left',`${Math.round(left)}px`);
+  panel.style.setProperty('--usage-top',`${Math.round(top)}px`);
+  panel.style.setProperty('--usage-maxh',`${Math.max(120,Math.round(vh-top-USAGE_EDGE))}px`);
+}
 function closeUsage(){
   usageOpen=false;
   $('#usagepanel')?.classList.remove('open');
@@ -644,7 +665,13 @@ function toggleUsage(){
   usageOpen=!usageOpen;
   $('#usagepanel')?.classList.toggle('open',usageOpen);
   $('#usagechip')?.setAttribute('aria-expanded',String(usageOpen));
+  // measure only once it is displayed, or offsetWidth is 0
+  if(usageOpen)positionUsagePanel();
 }
+addEventListener('scroll',()=>positionUsagePanel(),true);
+addEventListener('resize',()=>positionUsagePanel());
+window.visualViewport?.addEventListener('resize',()=>positionUsagePanel());
+window.visualViewport?.addEventListener('scroll',()=>positionUsagePanel());
 function usageReset(iso){
   if(!iso)return'';
   const t=Date.parse(iso);if(isNaN(t))return'';
