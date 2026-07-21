@@ -1133,7 +1133,7 @@ test('loaded conversation pages survive tail refresh and an offline reload', asy
   }finally{await context.setOffline(false);}
 });
 
-test('session cards remove More and show only populated active-agent preview rows', async ({ page }, testInfo) => {
+test('session cards remove More and list every running subagent', async ({ page }, testInfo) => {
   const themeSurfaces = () => page.evaluate(() => {
     const probe = document.createElement('span');
     document.body.appendChild(probe);
@@ -1163,7 +1163,7 @@ test('session cards remove More and show only populated active-agent preview row
   });
   expect(peekFrame.peekHeight).toBeGreaterThan(40);
   expect(peekFrame.bodyBottomGap).toBeLessThan(8);
-  await expect(idle.locator('.morebtn,.detail,.agentminipreview')).toHaveCount(0);
+  await expect(idle.locator('.morebtn,.detail,.agents')).toHaveCount(0);
 
   await reset(page, 'subagent');
   surfaces = await themeSurfaces();
@@ -1171,12 +1171,11 @@ test('session cards remove More and show only populated active-agent preview row
   await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
   expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
     .toBe(surfaces.card2);
-  const preview=running.locator('.agentminipreview');
+  const preview=running.locator('.agents');
   await expect(preview).toBeVisible();
-  await expect(preview.locator('.agentminirow')).toHaveCount(1);
-  await expect(preview.locator('.agentminirow.empty')).toHaveCount(0);
+  await expect(preview.locator('.arow')).toHaveCount(1);
+  await expect(preview.locator('.arow.done-row')).toHaveCount(0);
   await expect(preview).toContainText('Review protocol mapping');
-  await expect(preview).not.toContainText(/tokens|cost|GPT-5\.4/);
   await expect(running.locator('.morebtn,.detail')).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('active-card-contrast.png'), fullPage: true });
 
@@ -1203,6 +1202,22 @@ test('quiet in-flight subagents use an uncertain amber signal, not stopped red',
     return { actual: getComputedStyle(el).backgroundColor, expected };
   });
   expect(colors.actual).toBe(colors.expected);
+});
+
+test('tapping a card subagent row opens the workspace Subagents section with it selected', async ({ page }) => {
+  await reset(page, 'subagent');
+  const row = page.locator('[data-sid="codex:thread-one"] .agents .arow').first();
+  await expect(row).toBeVisible();
+  await row.click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#spanel-subagents')).toBeVisible();
+  await expect(page.locator('.agentworkspaceitem.selected')).toHaveCount(1);
+  await expect(page.locator('.agentworkspaceitem.selected')).toContainText('Review protocol mapping');
+  expect(page.url()).toContain('#session/codex%3Athread-one/subagents/agent-child-one');
+  // Back clears the selected agent before leaving the section (invariant 36)
+  await page.goBack();
+  await expect(page.locator('#spanel-subagents')).toBeVisible();
+  await expect(page.locator('.agentworkspaceitem.selected')).toHaveCount(0);
 });
 
 test('full chat renders main work as the newest non-interactive conversation row', async ({ page }) => {

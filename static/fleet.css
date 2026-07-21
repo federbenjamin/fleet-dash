@@ -759,10 +759,10 @@ td.r,th.r{text-align:right}
   .detail .stripbox{margin-top:14px}
   .detail .dsep{margin:28px 0 14px}
   .detail .ctxbox{margin-bottom:12px}
-  /* phone: trim the dense bits — "quiet …" and the subagent row's numbers after
-     the model (throughput, sparkline, tokens, cost). The agent view has it all. */
+  /* phone: trim the dense bits — "quiet …" and the subagent row's chevron. The
+     row is now just graph + model, so the sparkline fits and stays. */
   .squiet{display:none}
-  .arow .anum,.arow .spark,.arow .acost,.arow .aopen{display:none}
+  .arow .aopen{display:none}
 }
 @media (max-width:600px){
   .shead>.m[title="session provider"]{display:none}
@@ -1519,13 +1519,6 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
 .detailsection .evidencerule{grid-template-columns:110px minmax(0,1fr)}
 .closedbadge{flex:0 0 auto;margin-left:8px;border:1px solid rgba(210,153,34,.45);border-radius:999px;
   color:var(--amber)!important;font:600 9px/1 "SF Mono",Menlo,monospace!important;padding:4px 7px;text-transform:uppercase}
-.agentminipreview{display:grid;grid-auto-rows:42px;border-top:1px solid var(--line);background:#0b0f14}
-.agentminirow{display:grid;grid-template-columns:10px 58px minmax(90px,.8fr) auto minmax(120px,1.1fr);gap:7px;align-items:center;
-  min-width:0;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--dim);font:inherit;
-  text-align:left;padding:0 12px;cursor:pointer}
-.agentminirow:last-child{border-bottom:0}.agentminirow:hover{background:var(--card)}
-.agentminirow b{color:var(--green);font-size:10px;text-transform:uppercase}.agentminirow span:nth-of-type(2),.agentminirow small{
-  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.agentminirow small{color:var(--faint)}
 .card.fixedpeek>.ctop>.morebtn{display:none}
 #sview.light :is(#stabs,#sfilelist,#sagentlistpane,#sfilepreview,#sagentdetail){background:#f7f8fa;color:#1c2128;border-color:#d0d7de}
 #sview.light #stabs button.active,#sview.light .workspaceitem.selected{background:#ddf0ff;border-color:#54aeff}
@@ -1542,5 +1535,4 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
     background:rgba(10,14,20,.96);scrollbar-width:none}
   #sdetailindex a{flex:0 0 auto;border:1px solid var(--line);background:var(--card);padding:7px 11px}
   #sdetails{padding:10px}.detailsection{padding:12px}.detailsection .kv{grid-template-columns:1fr}
-  .agentminirow{grid-template-columns:10px 52px minmax(0,1fr) auto;padding:0 9px}.agentminirow small{display:none}
 }

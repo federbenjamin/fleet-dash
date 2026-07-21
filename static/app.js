@@ -3828,25 +3828,24 @@ async function sendRelay(){
   current.error=result.error||'';renderAgent(true);
   if(result.ok)setTimeout(()=>{if(agentRelays.get(key)===current){agentRelays.delete(key);renderAgent(true);}},5000);
 }
-function agentRow(a){
+function agentRow(a,buildTap){
   const done=['done','ended'].includes(a.state);
   const signal={running:'working',stalled:'quiet — may still be working',done:'finished',
     ended:'stopped'}[a.state]||String(a.state||'unknown');
   const ago=ts=>ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(ts))/1000)))+' ago':'?';
   const tk=a.tokens||{};
-  // tapping opens the subagent conversation
-  const tap=`agentTap(event,'${a.session_id}','${a.agent_id}')`;
+  // tapping opens the subagent conversation — the caller chooses the destination
+  // (the completed fold keeps the standalone overlay; the card list routes into
+  // the session workspace's Subagents section)
+  const tap=buildTap?buildTap(a):`agentTap(event,'${a.session_id}','${a.agent_id}')`;
   return`<div class="arow ${done?'done-row':''}" style="padding-left:${12+a.depth*16}px;cursor:pointer"
     title="open this subagent's conversation" onclick="${tap}">
     <span class="tree">⎿</span>
     <span class="dot ${a.state}" role="img" aria-label="${esc(signal)}" title="${esc(signal)}"></span>
     <span class="atype">${esc(a.agent_type)}</span>
     <span class="adesc">${esc(a.description)}</span>
-    <span class="amodel">${modelLabel(a)}</span>
-    ${!done&&a.tok_per_s>0?`<span class="anum" title="throughput: tokens per second this agent is processing, cache reads included — a liveness signal, not output speed">${fmtTok(Math.round(a.tok_per_s))} tok/s</span>`:''}
     ${!done?spark(a.spark):''}
-    <span class="anum">${fmtTok(a.total_tokens)}</span>
-    <span class="acost">${fmt$(a.cost)}</span>
+    <span class="amodel">${modelLabel(a)}</span>
     <span class="aopen">›</span>
   </div>${previewAgents()&&a.last_msg?`<div class="lastmsg amsgprev" style="padding-left:${28+a.depth*16}px" onclick="${tap}">
     <span class="lmwho ${a.last_msg.role}">${a.last_msg.role==='user'?'task':'agent'}</span><span class="lmtext peekmd" style="--peek-lines:${clampA()}">${peekMd(a.last_msg.text)}</span></div>`:''}`;
@@ -3859,8 +3858,8 @@ function syncPinnedSessions(f){
   pinnedSessions.clear();
   (((f||{}).settings||{}).pinned_sessions||[]).forEach(sid=>pinnedSessions.add(sid));
 }
-function agentListHtml(agents){
-  return agents.map(agentRow).join('');
+function agentListHtml(agents,buildTap){
+  return agents.map(agent=>agentRow(agent,buildTap)).join('');
 }
 function activeSubagents(f,applyQuery=false){
   const query=applyQuery?nowFilter.trim().toLowerCase():'';
@@ -3947,6 +3946,15 @@ function agentTap(e,sid,aid){
   e.stopPropagation();
   openAgent(sid,aid);
 }
+// The session card's running-agent list routes into the session workspace's
+// Subagents section with that agent selected, rather than the standalone
+// overlay. Every row in that list is non-terminal, so the section's default
+// Active filter (invariant 37) always has it visible.
+function cardAgentTap(e,encodedSid,encodedAid){
+  e.stopPropagation();
+  selectWorkspaceAgent(encodedSid,encodedAid);
+}
+const cardAgentTapAttr=a=>`cardAgentTap(event,'${enc(a.session_id)}','${enc(a.agent_id)}')`;
 function renderPinned(f,predicate=()=>true){
   const el=$('#pinned');
   const sessions=(f&&f.sessions)||[],closed=(f&&f.closed)||[];
@@ -3993,7 +4001,9 @@ function cardCls(s){
 function cardUsesFixedPeekHeight(s){
   if(s.provisional||expandedPeeks.has(s.session_id))return false;
   const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
-  const running=s.ui_group==='working'&&(s.agents||[]).some(a=>!['done','ended'].includes(a.state));
+  // the running-agent list renders on any card with live agents, so the fixed
+  // frame must lift wherever it appears or the list is clipped (invariant 45)
+  const running=(s.agents||[]).some(a=>!terminalAgentStates.has(a.state));
   const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.status==='queued');
   return!pending&&!s.error&&!s.reply_requested&&!running&&!pinActions.has(s.session_id)&&
     !quickResponses.has(s.session_id)&&!answerFeedback;
@@ -4044,21 +4054,16 @@ function cardTop(s){
     ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
-    ${cardAgentPreview(s)}`;
+    ${cardAgentList(s)}`;
 }
-function cardAgentPreview(s){
-  const active=(s.agents||[]).map((agent,index)=>({agent,index}))
-    .filter(({agent})=>!terminalAgentStates.has(agent.state));
-  if(!active.length)return'';
-  active.sort((a,b)=>((a.agent.state==='stalled'?0:1)-(b.agent.state==='stalled'?0:1))||a.index-b.index);
-  const rows=active.slice(0,2).map(({agent})=>{
-    const state=agent.state==='stalled'?'Slow':'Working';
-    const latest=agent.last_msg?.text||`quiet ${fmtAge(Math.max(0,Number(agent.quiet_s)||0))}`;
-    return`<button class="agentminirow" onclick="event.stopPropagation();openAgent(decodeURIComponent('${enc(s.session_id)}'),decodeURIComponent('${enc(agent.agent_id)}'))">
-      <span class="dot ${esc(agent.state||'running')}" aria-label="${agent.state==='stalled'?'quiet — may still be working':'working'}"></span><b>${esc(state)}</b>
-      <span>${esc(agent.description||agent.agent_type||agent.agent_id)}</span><span class="amodel" title="subagent model">${modelLabel(agent)}</span><small>${esc(latest)}</small></button>`;
-  });
-  return`<div class="agentminipreview" aria-label="Active subagents">${rows.join('')}</div>`;
+// The card's running-subagent list: every non-terminal agent, in engine tree
+// order so agentRow's depth indentation still describes the hierarchy — never
+// sorted and never capped. It renders on any card with live agents, not just
+// Working ones, so background work stays visible while you triage.
+function cardAgentList(s){
+  const running=(s.agents||[]).filter(agent=>!terminalAgentStates.has(agent.state));
+  if(!running.length)return'';
+  return`<div class="agents" aria-label="Active subagents">${agentListHtml(running,cardAgentTapAttr)}</div>`;
 }
 // The card tail ("more"): reference material with native <details> folds. It is
 // rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns

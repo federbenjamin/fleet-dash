@@ -840,8 +840,17 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     later timeout must never resurrect one into the active-subagent count.
 
 70. **Workspace activity and sizing describe only what is actionable now.** The Subagents tab count
-    and card preview use nonterminal agents only; previews render one or two populated rows and never
-    synthesize an empty second slot. Chat renders main-session work as one non-interactive newest-row
+    and the session card's agent list use nonterminal agents only. That card list (`cardAgentList`)
+    renders EVERY running/stalled agent — never capped, never re-sorted, so `agentRow`'s depth
+    indentation still describes the spawn hierarchy — and it appears on any card with live agents,
+    not only Working ones (user decision 2026-07-21, reverting the two-row preview). The row carries
+    type, description, sparkline, then model/effort — throughput, total tokens, and cost were dropped
+    from it (same decision); per-agent spend stays in the workspace status line. A card showing
+    it must never take the `.fixedpeek` frame or the list is clipped (invariant 45). Tapping any row
+    routes to `#session/<sid>/subagents` with that agent selected via `selectWorkspaceAgent`; the
+    standalone `#aview` overlay (`agentTap`) remains the destination for the completed-agents fold,
+    whose terminal rows the section's default Active filter would otherwise hide. Chat renders
+    main-session work as one non-interactive newest-row
     indicator and never repeats active child details there. The parent composer/status bar uses the
     same wrapper in Chat, Files, unselected Subagents, and Details. Desktop Files/Subagents splits
     persist separate browser-local widths, clamp the list to 220–520px while preserving at least
