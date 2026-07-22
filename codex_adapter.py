@@ -22,6 +22,10 @@ from collections import deque
 from repo_center import observed_test_outcome
 
 
+EXTERNAL_OBSERVATION_SECONDS = 24 * 60 * 60
+MAX_RECENT_EXTERNAL_OBSERVATIONS = 32
+
+
 class CodexError(RuntimeError):
     def __init__(self, message, *, code="codex_error", queueable=False):
         super().__init__(message)
@@ -1370,6 +1374,23 @@ class CodexAdapter:
             if detail:
                 clean_threads.append({"id": tid, **detail})
 
+        # App Server exposes external threads as notLoaded and omits their live
+        # turns. Observe only the newest bounded slice of their local rollouts so
+        # active CLI/Desktop work can remain in Now without scanning the archive.
+        recent_external = []
+        for thread in clean_threads:
+            tid = thread.get("id")
+            if not tid or tid in managed:
+                continue
+            updated = _epoch(thread.get("updatedAt") or thread.get("createdAt"))
+            if updated is None or now - updated > EXTERNAL_OBSERVATION_SECONDS:
+                continue
+            recent_external.append((updated, tid))
+        recent_external = {
+            tid for _, tid in sorted(recent_external, reverse=True)[
+                :MAX_RECENT_EXTERNAL_OBSERVATIONS]
+        }
+
         for thread in clean_threads:
             tid = thread.get("id")
             if tid in listed and any(item.get("native_session_id") == tid for item in out):
@@ -1394,7 +1415,8 @@ class CodexAdapter:
                 managed.add(tid)
                 is_managed = True
             observation = None
-            if not is_managed and tid in tracked_external and self.external_observer:
+            if (not is_managed and self.external_observer and
+                    (tid in tracked_external or tid in recent_external)):
                 try:
                     observation = self.external_observer.observe(tid)
                 except Exception as exc:

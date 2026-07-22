@@ -476,6 +476,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
     capabilities = session.get("capabilities") or {}
     external = bool(session.get("headless") or session.get("read_only"))
     provider_stale = raw_state == "stale" or bool(session.get("stale"))
+    quiet = max(0, round(float(session.get("quiet_s") or 0)))
+    external_dormant = external and (
+        state == "dormant" or quiet > 24 * 60 * 60)
     dismissed = str(reply_available.get(sid, ""))
     read_revision = str(read_sessions.get(sid, ""))
     reply_requested = bool(
@@ -506,17 +509,15 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
         candidates.append(("placement.state.stalled", "working", "Slow",
                            "open", "inferred"))
     if state == "running":
-        candidates.append(("placement.state.running", "working",
-                           "Working elsewhere" if external else "Working",
+        candidates.append(("placement.state.running", "working", "Working",
                            "view" if external else "open", "confirmed"))
     if reply_requested:
         candidates.append(("placement.prose.reply_requested", "needs_you",
                            "Reply requested", "respond", "inferred"))
     if state == "turn_done":
-        candidates.append(("placement.state.turn_done", "available",
-                           "Completed elsewhere" if external else "Available",
+        candidates.append(("placement.state.turn_done", "available", "Available",
                            "view" if external else "continue", "confirmed"))
-    if external:
+    if external_dormant:
         candidates.append(("placement.access.external", "history", "External",
                            "view", "confirmed"))
     if state == "reopenable":
@@ -570,7 +571,6 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
         evidence.append({"kind": "active_work", "label": "Active work",
                          "value": f"Compaction active for {round(float(session.get('compacting') or 0))}s",
                          "confidence": "confirmed"})
-    quiet = max(0, round(float(session.get("quiet_s") or 0)))
     evidence.append({"kind": "age", "label": "Last activity",
                      "value": f"{quiet}s quiet", "confidence": "confirmed"})
     if external:
