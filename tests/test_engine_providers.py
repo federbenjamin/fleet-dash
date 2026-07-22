@@ -2709,11 +2709,12 @@ class EngineProviderTest(unittest.TestCase):
         current = self.engine.organize_session(session, 100)
         self.assertEqual((current["ui_group"], current["reason_label"],
                           current["access"], current["primary_action"]),
-                         ("available", "Completed elsewhere", "view_only", "view"))
+                         ("available", "Available", "view_only", "view"))
         self.assertTrue(current["new_response"])
 
         older = codex_session()
-        older.update(state="idle", headless=True, read_only=True, quiet_s=120,
+        older.update(state="idle", headless=True, read_only=True,
+                     quiet_s=24 * 60 * 60 + 1,
                      _latest_prose={"role": "assistant", "text": "Finished."})
         historical = self.engine.organize_session(older, 200)
         self.assertEqual((historical["ui_group"], historical["reason_label"]),
@@ -2849,7 +2850,7 @@ class EngineProviderTest(unittest.TestCase):
         external = organized(state="running", headless=True, read_only=True)
         self.assertEqual((external["ui_group"], external["reason_label"],
                           external["primary_action"], external["access"]),
-                         ("working", "Working elsewhere", "view", "view_only"))
+                         ("working", "Working", "view", "view_only"))
         slow = organized(state="stalled")
         self.assertEqual((slow["ui_group"], slow["reason_label"]),
                          ("working", "Slow"))
@@ -2863,7 +2864,13 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual((inactive["ui_group"], inactive["reason_label"],
                           inactive["primary_action"]),
                          ("history", "Inactive", "continue"))
-        historical = organized(state="idle", headless=True, read_only=True)
+        external_idle = organized(state="idle", headless=True, read_only=True,
+                                  quiet_s=24 * 60 * 60)
+        self.assertEqual((external_idle["ui_group"], external_idle["reason_label"],
+                          external_idle["access"], external_idle["primary_action"]),
+                         ("available", "Available", "view_only", "view"))
+        historical = organized(state="idle", headless=True, read_only=True,
+                               quiet_s=24 * 60 * 60 + 1)
         self.assertEqual((historical["ui_group"], historical["reason_label"]),
                          ("history", "External"))
         reopenable = organized(state="reopenable", capabilities={"reopen": True})

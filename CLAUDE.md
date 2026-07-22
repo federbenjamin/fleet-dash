@@ -345,9 +345,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     where ownership is proven. Reconnection is not evidence
     that a thread is unloaded: check `thread/loaded/list` before an exact on-demand resume and never
     resume every remembered thread, because `thread/resume` may abort an active turn.
-    `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: only
-    explicitly pinned external threads consume an allowlist of local lifecycle and visible-message
-    events so `notLoaded` does not hide active Desktop/VS Code work. The observer is read-only,
+    `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: the 32
+    most recently updated external threads within 24 hours, plus explicitly pinned external threads,
+    consume an allowlist of local lifecycle and visible-message events so `notLoaded` does not hide
+    active CLI/Desktop/VS Code work. The observer is read-only,
     incremental, path-confined, row-bounded, and tolerant of malformed/unknown additions. Its result
     may update state, preview, and context, but must never update ownership or enable submit,
     interrupt, archive, close, attach, compact, review, or relay capabilities.
@@ -373,7 +374,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 31. **Now placement is an action queue, not a provider-state dump.** `Engine.organize_session`
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
-    Pinned → Needs you → Working → Available.
+    Pinned → Needs you → Working → Available. Recent external/view-only sessions stay in
+    Working or Available; they move to History only after 24 hours without activity. Their lifecycle
+    reason labels remain `Working` / `Available`; the separate `View only` access label carries
+    ownership.
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
     with one chronological list and access/provider filters. `requests_reply` examines the newest
     complete assistant prose outside code/quotes, and only its FINAL question. Comprehension tags

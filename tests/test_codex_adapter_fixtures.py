@@ -163,7 +163,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(sessions["limited"]["capabilities"]["submit"])
         self.assertEqual(sessions["healthy"]["state"], "idle")
 
-    def test_pinned_external_rollout_is_live_but_remains_view_only(self):
+    def test_recent_external_rollout_is_live_but_remains_view_only(self):
         class Observer:
             def observe(self, thread_id):
                 self.seen = thread_id
@@ -185,7 +185,6 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                                external_observer=observer,
                                models_cache_path=os.path.join(
                                    self.tmp.name, "models-cache.json"))
-        adapter.track_external(["codex:external"])
         adapter._refresh()
 
         session = adapter.sessions()[0]
@@ -203,6 +202,38 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(context["ok"])
         self.assertTrue(context["read_only"])
         self.assertEqual(context["messages"][-1]["text"], "Working now")
+
+    def test_recent_external_observation_is_bounded_and_old_pin_is_preserved(self):
+        class Observer:
+            def __init__(self):
+                self.seen = []
+
+            def observe(self, thread_id):
+                self.seen.append(thread_id)
+                return None
+
+        threads = [
+            {**self.thread(f"recent-{index}", {"type": "notLoaded"},
+                           updated=999 - index), "source": "cli"}
+            for index in range(40)
+        ]
+        threads.append({**self.thread("old-pinned", {"type": "notLoaded"},
+                                     updated=1), "source": "cli"})
+        client = FixtureClient(threads)
+        observer = Observer()
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, stall_seconds=30,
+                               external_observer=observer,
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
+        adapter.track_external(["codex:old-pinned"])
+        adapter._refresh()
+
+        self.assertEqual(len(observer.seen), 33)
+        self.assertIn("old-pinned", observer.seen)
+        self.assertIn("recent-0", observer.seen)
+        self.assertIn("recent-31", observer.seen)
+        self.assertNotIn("recent-32", observer.seen)
 
     def test_cli_connected_to_shared_socket_is_adopted_without_claiming_turn_control(self):
         thread = {**self.thread("attached", {"type": "active"}), "source": "cli"}

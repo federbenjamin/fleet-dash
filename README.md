@@ -17,8 +17,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   triage is limited to review/available markers, mute, and dismissal of reviewable notices—never an
   unresolved provider request and never approval. The
   separate **History** destination owns dormant, external, reopenable, and closed sessions. Cards
-  use reasons such as **Reply requested**, **Command
-  approval**, **Working elsewhere**, and **Inactive** instead of raw provider lifecycle terms.
+  use reasons such as **Reply requested**, **Command approval**, **Working**, and **Inactive**
+  instead of raw provider lifecycle terms. A separate **View only** access label identifies sessions
+  owned by another runtime.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
   distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
@@ -141,9 +142,12 @@ survives a Fleet web daemon restart and is reused instead of duplicated. (`codex
 start` is not used: that manager requires Codex's standalone installer, while this machine uses the
 npm CLI.) Fleet never scrapes the Codex TUI. App Server remains the canonical runtime control
 surface; an exact TUI attached to that socket is also a bounded text/focus transport. For an
-explicitly pinned external thread, Fleet may defensively observe a small allowlist of lifecycle and
+recently updated external thread, Fleet may defensively observe a small allowlist of lifecycle and
 visible-message events in its local `~/.codex/sessions` rollout so the view-only card can track work
-that the separate Desktop/VS Code App Server reports only as `notLoaded`.
+that another runtime reports only as `notLoaded`. Observation is limited to the 32 newest external
+threads updated within 24 hours, plus explicitly pinned external threads.
+External sessions retain the ordinary **Working** and **Available** lifecycle labels; the separate
+**View only** access label communicates that Fleet cannot control their runtime.
 
 - Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
   ownership, mode, model, effort, and last normalized conversation, and resume after daemon
@@ -166,11 +170,13 @@ that the separate Desktop/VS Code App Server reports only as `notLoaded`.
   of landing in a stale terminal input. The card's **attach** button opens this TUI form only when no
   exact attached terminal already exists.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
-  transcripts through paginated `thread/list`, puts active work under **Working** and inactive work
-  in **Session history**, and exposes them as view-only. Pinned external threads also observe local
-  `task_started`, `task_complete`, `turn_aborted`, user-message, and agent-message rollout events, so
-  their state and preview stay current without claiming control. Unknown/malformed rollout additions
-  are ignored with a visible observation warning. There is deliberately no **take over** action: `thread/resume`
+  transcripts through paginated `thread/list`, puts active work under **Working**, recently inactive
+  work under **Available**, and sessions quiet for more than 24 hours in **Session history**. They
+  remain view-only. The 32 newest external threads updated within 24 hours, plus pinned external
+  threads, observe local `task_started`, `task_complete`, `turn_aborted`, user-message, and
+  agent-message rollout events, so their state and preview stay current without claiming control.
+  Unknown/malformed rollout additions are ignored with a visible observation warning. There is
+  deliberately no **take over** action: `thread/resume`
   on Fleet's server would create a second runtime copy, not attach to Desktop's active agent.
   Independently launched CLI threads that are not connected to Fleet's socket are likewise view-only.
   Child subagent threads never become duplicate top-level cards.
