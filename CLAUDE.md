@@ -11,8 +11,8 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
                                    filters stale files (they're deleted on clean exit only).
 ~/.claude/projects/<proj>/<sid>.jsonl            main transcript  ─┐ incremental byte-offset
 ~/.claude/projects/<proj>/<sid>/subagents/*.jsonl agent transcripts┘ tails (engine.Tail)
-~/.claude/fleet-dash/pending/<sid>.json          hook-captured pending prompt (the ONLY source)
-        ↓ engine.py (Engine.scan, poll thread, 2s)
+~/.claude/fleet-dash-capture/pending/<sid>.json  hook-captured pending prompt (the ONLY source)
+        ↓ fleetdash/ engine (Engine.scan, poll thread, 2s)
 snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.js (fetch poll 2s,
                                                self-reloads via page_v)
                           ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
@@ -21,7 +21,7 @@ snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.
                           ├ GET /api/file?sid=&p= (token) ─ Engine.file_content (whitelist)
                           └ POST /api/act (token) ─ Engine.act ─ inject-request.txt ─
                             open -g FleetDashInjector.app ─ iTerm write by tty ─ inject-result.txt
-Claude/Codex JSONL ─ search_index.py --worker (nice 10) ─ search.db WAL/FTS5
+Claude/Codex JSONL ─ fleetdash/search_index.py --worker (nice 10) ─ search.db WAL/FTS5
                                       └ server.py separate reader ─ authenticated
                                         /api/search, /api/search/status, /api/search/context
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
@@ -217,7 +217,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 22. **Claude's reported effort exists only in the statusline payload.** `"effort":{"level":…}` is piped to the
     statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
     cannot derive it. `~/.claude/statusline-command.sh` side-writes it to
-    `fleet-dash/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
+    `fleet-dash-capture/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
     `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
     alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
     (`.claude/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
@@ -273,7 +273,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     profile when the active marker is missing) and active Codex windows drive amber at 70% and red at
     90%. Inactive Claude profiles retain their own gauge colors in the full popover/sheet but never
     color the summary button. If the app is absent/unreadable, fall back to the Claude
-    Code statusline side-write at `~/.claude/fleet-dash/usage.json` plus the mtime-watched
+    Code statusline side-write at `~/.claude/fleet-dash-capture/usage.json` plus the mtime-watched
     `~/.claude.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.claude/stats-cache.json`
     `modelUsage` and sums `inputTokens` + `cacheCreationInputTokens` + `cacheReadInputTokens` +
@@ -303,7 +303,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 30. **One canonical Codex runtime; ownership is never inferred from transcript access.** Engine starts
     a detached `codex app-server --listen unix://…` process, then the adapter connects through the
     documented WebSocket-over-Unix protocol at
-    `~/.claude/fleet-dash/codex-app-server.sock`. Do not use Codex's default control-socket path;
+    `<state dir>/codex-app-server.sock` (production: `~/.claude/fleet-dash-state/`). Do not use
+    Codex's default control-socket path;
     that belongs to its standalone daemon manager. Do not replace this
     with `app-server daemon start` on the npm install: that manager requires the separate standalone
     Codex installer. Fleet-created threads and CLI threads
@@ -655,10 +656,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     these narrow commits: rebuilding whole surfaces produced 133–1026 ms first-feedback outliers even
     though their network work was asynchronous.
 56. **Production and staging are hard-separated instances.** Production code runs from the dedicated
-    `~/.claude/fleet-dash-prod` checkout on 8377; development/staging runs from
-    `~/.claude/fleet-dash` on 8378. `server.APP_ROOT` is always the directory containing `server.py`;
-    `engine.BASE` is instance runtime state selected by `FLEET_DASH_STATE_DIR`. Never collapse those
-    concepts again: production must not serve live-edited staging assets. Staging has its own config,
+    `~/.claude/fleet-dash-prod` checkout on 8377 with state in `~/.claude/fleet-dash-state`;
+    development/staging runs from the `~/.claude/fleet-dash` checkout on 8378 with state in
+    `~/.claude/fleet-dash-staging`. Shared hook/statusline captures (pending/, effort/, usage.json)
+    live in `~/.claude/fleet-dash-capture` (`FLEET_DASH_CAPTURE_DIR`, set by both plists).
+    `server.APP_ROOT` is always the directory containing `server.py`;
+    `paths.BASE` is instance runtime state selected by `FLEET_DASH_STATE_DIR`. Never collapse those
+    concepts again: production must not serve live-edited staging assets, and the repo root holds
+    source only — never runtime state. Staging has its own config,
     token, ledger/search DBs, uploads, log, Codex socket, injector request/result files, applet bundle
     ID, browser origin, service worker, drafts, outbox, and push registrations. It may READ the shared
     registries/transcripts and hook/statusline captures, but a server-side exact-ID allowlist
@@ -880,7 +885,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   only production, and verifies the API identity plus Web Push readiness.
   `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
   self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
-- Log: `~/.claude/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get
+- Log: `~/.claude/fleet-dash-state/fleet-dash.log` (production; staging logs in
+  `~/.claude/fleet-dash-staging/`) (stdout+stderr). Failures worth logging get
   `print(..., file=sys.stderr, flush=True)` — that's the debugging channel that cracked every
   bug so far. `act` failures and 403s are already logged.
 - **Synthetic pending probe** (server-side test without a real prompt): spawn a `sleep` child,
@@ -903,23 +909,52 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 ## File map (repo)
 
-- `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
-  counters), Engine (scan/state/ledger/manual legacy-ntfy test/act/hook_pending/session_context/file_content/
-  insights/commands/compacting_secs), spend CLI (`spend --cwd|--session`, used by the global
-  `/subagent-spend` command). GET `/api/insights?days=N` aggregates agent_runs + session_runs
-  + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
-  + `<cwd>/.claude` + `~/.claude` + every installed plugin's installPath (`commands/**/*.md`
-  namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
-- `web_push.py` + `web_push_worker.js` — private key store, asynchronous durable-lease supervisor,
-  bounded helper protocol, Web Push encryption/request construction, endpoint/DNS confinement, and
+Python library code lives in the `fleetdash/` package; the repo root keeps the
+runtime entrypoint (`server.py`), web assets, hooks, scripts, docs, and tests.
+`fleetdash/search_index.py` and `fleetdash/codex_launcher.py` stay stdlib-only
+because they are also spawned directly as scripts by absolute path.
+
+- `fleetdash/paths.py` — instance path resolution (BASE/CAPTURE/PROJECTS/…), the single
+  patch point for filesystem roots; all modules read them as `paths.X` attributes.
+- `fleetdash/config.py` — DEFAULT_CONFIG, load_config + validators, pricing (`usd`,
+  `model_family`), private-json/log-scrub helpers, shared constants
+  (KEY_TOOLS, IMAGE_UPLOAD_*, DANGER_COMMANDS, BUILTIN_COMMANDS, CLAUDE_MODELS/EFFORTS).
+- `fleetdash/placement.py` — Now-queue classification: `classify_placement`,
+  `requests_reply`, `completed_handoff`, closed placement, handoff redaction (invariant 31).
+- `fleetdash/tail.py` — Tail (incremental jsonl fold + convo/files ring buffers +
+  usage_stats counters).
+- `fleetdash/engine.py` — the Engine class (imports + `__init__` + class constants +
+  compat re-exports) composed from ten topical mixins, plus the spend CLI
+  (`PYTHONPATH=~/.claude/fleet-dash python3 -m fleetdash.engine spend --cwd|--session`,
+  used by the global `/subagent-spend` command). GET `/api/insights?days=N` aggregates
+  agent_runs + session_runs + usage_stats. `Engine.commands(sid)` builds the slash
+  catalog per session: BUILTIN_COMMANDS + `<cwd>/.claude` + `~/.claude` + every
+  installed plugin's installPath (`commands/**/*.md` namespaced with `:`,
+  `skills/*/SKILL.md`), description from frontmatter `description:`.
+- `fleetdash/engine_*.py` — Engine mixin modules, methods grouped by concern:
+  `engine_staging` (staging isolation), `engine_uploads` (phone images),
+  `engine_scan` (registry scan/organization/status/control state), `engine_ledger`
+  (spend ledger/closed sessions/history/handoffs), `engine_context`
+  (conversation/file/context projections, hook pending, effort, commands),
+  `engine_worktree` (cleanup tickets), `engine_transport` (tty/process resolution,
+  codex terminal routes, background attach), `engine_notify` (notifications/Web
+  Push/Outbox actions), `engine_act` (the act() injection dispatcher),
+  `engine_spawn` (spawn/handoff, iTerm applet exchange, settings).
+- `fleetdash/web_push.py` + `fleetdash/web_push_worker.js` — private key store, asynchronous
+  durable-lease supervisor, bounded helper protocol, Web Push encryption/request
+  construction, endpoint/DNS confinement, and
   retry/result mapping. No provider scan or HTTP handler performs remote delivery.
-- `claude_background.py` — fixed-argv official Claude background attach/stop client, bounded private
+- `fleetdash/claude_background.py` — fixed-argv official Claude background attach/stop client,
+  bounded private
   PTY readiness, allowlisted Engine key operations, per-job serialization, and secret-free errors.
-- `briefing.py` — canonical notification/briefing store, global kind policy, quiet-hours and cadence
+- `fleetdash/briefing.py` — canonical notification/briefing store, global kind policy,
+  quiet-hours and cadence
   scheduler, policy-revision suppression, delivery leases, device health, and budget records.
-- `outbox.py` — scheduled/waiting messages plus provider-neutral automatic send fallback and Codex
+- `fleetdash/outbox.py` — scheduled/waiting messages plus provider-neutral automatic send
+  fallback and Codex
   control-recovery queues; private queue-owned images are never projected as paths.
-- `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
+- `fleetdash/codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client,
+  shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
@@ -933,7 +968,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   (`stall_seconds` also drives the stalled STATE), `muted_sessions` (sid → ts, persists until manual unmute),
   `pinned_sessions`, `reply_available`, and `read_sessions` into config.json via
   `Engine.update_settings`. Muted sessions skip all per-session Web Push deliveries.
-- `search_index.py` — isolated incremental Claude/Codex transcript and saved-subagent parser,
+- `fleetdash/search_index.py` — isolated incremental Claude/Codex transcript and saved-subagent parser,
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
@@ -1006,14 +1041,20 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `scripts/deploy-production.sh` — fail-fast merged-release promotion and production-only relaunch.
 - `com.benjaminfeder.fleet-dash.plist` + `com.benjaminfeder.fleet-dash.staging.plist` — isolated
   production/staging launchd copies (live copies in `~/Library/LaunchAgents`).
-- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`,
-  `ledger.db`, `search.db*`, `pending/`,
-  `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
+- Runtime state lives OUTSIDE the repo since 2026-07-23: per-instance state dirs
+  (`~/.claude/fleet-dash-state` production, `~/.claude/fleet-dash-staging` staging) hold
+  `config.json` (secrets: act_token, ntfy topic), `push-secrets.json`, `ledger.db`,
+  `search.db*`, `codex_threads.json`, `uploads/`, `inject-request/result.txt`,
+  `fleet-dash.log`, and `FleetDashInjector.app`; the shared capture dir
+  (`~/.claude/fleet-dash-capture`) holds `pending/`, `effort/`, and `usage.json`.
 
 ## Outside-repo touchpoints (document changes to these here)
 
-`~/.claude/settings.json` (hook registrations) · `~/Library/LaunchAgents/…plist` (live daemon) ·
-`~/.claude/commands/subagent-spend.md` (slash command) · TCC Automation grant (injector→iTerm2).
+`~/.claude/settings.json` (hook registrations point at this repo's `hooks/pending-capture.py`) ·
+`~/Library/LaunchAgents/…plist` (live daemons; env vars select state/capture dirs) ·
+`~/.claude/commands/subagent-spend.md` (slash command; runs `python3 -m fleetdash.engine spend`) ·
+`~/.claude/fleet-dash-state` + `~/.claude/fleet-dash-capture` (production state / shared captures) ·
+TCC Automation grant (injector→iTerm2).
 
 ## Roadmap / known gaps
 
