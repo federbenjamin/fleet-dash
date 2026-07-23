@@ -224,7 +224,7 @@ class SpawnOps:
 
         Every value that reaches the shell is allowlisted or quoted: the model and
         effort and permission mode must be members of fixed sets above, the worktree
-        name is regex-bounded, and the directory must be an existing dir under $pathcfg.HOME. Nothing the
+        name is regex-bounded, and the directory must be an existing dir under $HOME. Nothing the
         client sends is interpolated raw — the act token opens a terminal here, so a
         free-form command string would be a remote shell."""
         if self.is_staging and not action.get("__staging_internal"):
