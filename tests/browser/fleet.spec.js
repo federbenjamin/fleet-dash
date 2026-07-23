@@ -72,7 +72,7 @@ async function openSettingsSection(page, section) {
 async function openAction(page, sid) {
   const row = page.locator(`[data-action-sid="${sid}"]`);
   await expect(row).toBeVisible();
-  await row.locator('.primarybtn').click();
+  await row.locator('.actionopen').click();
   await expect(page.locator('#sview')).toBeVisible();
   return row;
 }
@@ -493,12 +493,11 @@ test('Now hierarchy, Usage chip, active-subagent filter, and card actions are un
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
 
   await reset(page, 'usage-amber');
-  await expect(page.locator('#usagechip')).toHaveClass(/usagewarn/);
-  await expect(page.locator('#usagechip')).not.toHaveClass(/usagedanger/);
+  await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
 
   await reset(page, 'usage-warning');
   await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
-  await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
+  await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
   await page.locator('#usagechip').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('Fable weekly');
@@ -508,7 +507,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and card actions are un
   await expect(page.locator('#usagepanel')).toBeHidden();
 
   await reset(page, 'missing-active-warning');
-  await expect(page.locator('#usagechip')).toHaveClass(/usagedanger/);
+  await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
 
   await reset(page, 'subagent');
   await expect(page.locator('[data-sid="codex:thread-one"]')).not.toHaveClass(/fixedpeek/);
@@ -2724,10 +2723,12 @@ test('available stays visible while inactive lifecycles live in the History dest
 test('action inbox separates requests, work, availability, and unread responses', async ({ page }, testInfo) => {
   await reset(page, 'single-question');
   const question = page.locator('[data-action-sid="codex:thread-one"]');
-  await expect(page.locator('#actioninbox')).toContainText('Action inbox');
+  await expect(page.locator('#actioninbox .actionhead')).toContainText('Needs you · 1');
   await expect(question).toContainText('How broad should the change be?');
   await expect(question).toContainText('Question waiting');
-  await expect(question.getByRole('button', { name: 'Respond' })).toBeVisible();
+  await expect(question.locator('.actionopen')).toBeVisible();
+  await expect(question.getByRole('checkbox')).toHaveCount(0);
+  await expect(question.locator('.primarybtn')).toHaveCount(0);
   await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('action-inbox.png'), fullPage: true });
 
@@ -2744,20 +2745,21 @@ test('action inbox separates requests, work, availability, and unread responses'
 
   await reset(page, 'reply-requested');
   const reply = page.locator('[data-action-sid="codex:thread-one"]');
-  await expect(page.locator('#actioninbox')).toContainText('1 item needs review');
+  await expect(page.locator('#actioninbox .actionhead')).toContainText('Needs you · 1');
   await expect(reply).toContainText('Reply requested');
   await expect(reply).toContainText('Which organization should we use?');
-  await reply.getByRole('checkbox').check();
-  await page.getByRole('button', { name: 'Mark available 1' }).click();
-  await expect.poll(async () => (await fixtureState(page)).reply_available['codex:thread-one'])
-    .toBe('reply:1');
-  await refresh(page);
-  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .chip')).toHaveText('Available');
+  await reply.locator('.actionopen').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sclose').click();
 
   await reset(page, 'new-response');
-  const fresh = page.locator('[data-action-sid="codex:thread-one"]');
-  await expect(fresh).toContainText('Completed work is ready to review');
-  await fresh.getByRole('button', { name: 'Continue' }).click();
+  const fresh = page.locator('[data-sid="codex:thread-one"]');
+  const outcome = page.locator('[data-action-sid="codex:thread-one"]');
+  await expect(outcome).toContainText('Completed work is ready to review');
+  await expect(outcome).toContainText('Unreviewed');
+  await expect(fresh).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('action-inbox-unreviewed.png'), fullPage: true });
+  await outcome.locator('.actionopen').click();
   await expect.poll(async () => (await fixtureState(page)).read_sessions['codex:thread-one'])
     .toBe('response:1');
   await page.locator('#sclose').click();
@@ -2780,7 +2782,7 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
 
   const action = page.locator('[data-action-sid="claude-one"]');
   await expect(page.locator('#actioninbox .actionhead')).toContainText('Needs you');
-  await expect(page.locator('#actioninbox .actionhead')).toContainText('Action inbox');
+  await expect(page.locator('#actioninbox .actionhead')).toContainText('Needs you');
   await expect(action).toContainText('Get 429 into a mergable state');
   await expect(action).toContainText('hazy-hatching-curry');
   await expect(action.getByText('Question waiting', { exact: true })).toBeVisible();
@@ -2851,31 +2853,19 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   page.__failures.length = 0;
 });
 
-test('action inbox bulk triage is safe and never offers bulk approval', async ({ page }) => {
+test('action inbox opens from the row and has no bulk or duplicate actions', async ({ page }) => {
   await reset(page, 'approval');
-  let action = page.locator('[data-action-sid="codex:thread-one"]');
-  const actionId = await action.getAttribute('data-action-id');
-  const unsafe = await page.request.post('/api/settings', { data: { bulk_triage: {
-    operation: 'dismiss', items: [{ action_id: actionId, session_id: 'codex:thread-one' }] } } });
-  expect((await unsafe.json()).ok).toBe(false);
-  await action.getByRole('checkbox').check();
-  const bulk = page.locator('.bulkbar');
-  await expect(bulk).toContainText('Mute 1');
-  await expect(bulk).not.toContainText(/allow|approve|dismiss/i);
-  await bulk.getByRole('button', { name: 'Mute 1' }).click();
-  await expect.poll(async () => (await fixtureState(page)).sessions
-    .find(item => item.session_id === 'codex:thread-one').muted).toBe(true);
+  const action = page.locator('[data-action-sid="codex:thread-one"]');
+  await expect(action.getByRole('checkbox')).toHaveCount(0);
+  await expect(action.locator('.primarybtn,.actionpin')).toHaveCount(0);
   await expect(page.locator('.bulkbar')).toHaveCount(0);
+  await action.locator('.actionopen').click();
+  await expect(page.locator('#sview')).toBeVisible();
 
   await reset(page, 'new-response');
-  action = page.locator('[data-action-sid="codex:thread-one"]');
-  await action.getByRole('checkbox').check();
-  await page.locator('.bulkbar').getByRole('button', { name: 'Dismiss 1' }).click();
-  await expect(action).toHaveCount(0);
-  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .newbadge')).toBeVisible();
+  await expect(page.locator('[data-action-sid="codex:thread-one"]')).toContainText('Unreviewed');
   await page.reload();
-  await expect(page.locator('[data-action-sid="codex:thread-one"]')).toHaveCount(0);
-  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .newbadge')).toBeVisible();
+  await expect(page.locator('[data-action-sid="codex:thread-one"]')).toContainText('Unreviewed');
 });
 
 test('workstreams roll repositories, worktrees, providers, honest evidence, and saved views', async ({ page }, testInfo) => {

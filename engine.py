@@ -439,6 +439,31 @@ def requests_reply(text):
         r"can|could|would|will|should|may|must|have|has|had)\b", question))
 
 
+def completed_handoff(text):
+    """True only for an explicit completed-work report, not progress prose.
+
+    A completed turn alone is not enough: interrupted turns can end with a recent
+    assistant row, and routine prose can be substantial without being a handoff.
+    Require both an unambiguous completion claim and concrete handoff evidence.
+    """
+    prose = str(text or "")
+    if not prose.strip():
+        return False
+    prose = re.sub(r"```[\s\S]*?```", " ", prose)
+    prose = re.sub(r"(?m)^\s*>.*$", " ", prose)
+    completion = re.search(
+        r"(?im)^\s{0,3}(?:#{1,6}\s*)?(?:done|completed|finished|implemented|"
+        r"fixed|resolved|shipped)\b|\b(?:implementation|work|task|changes?)\s+"
+        r"(?:is|are|has been|have been)\s+(?:complete|completed|done|implemented|fixed)\b",
+        prose)
+    if not completion:
+        return False
+    evidence = prose[completion.end():]
+    return bool(re.search(
+        r"(?im)^\s*(?:[-*+]\s+|#{1,6}\s+)\S|\b(?:tests?|verified|validation|"
+        r"changed|updated|added|removed|files?|summary|details?)\b", evidence))
+
+
 PRIMARY_ACTION_LABELS = {"respond": "Respond", "review": "Review", "open": "Open",
                          "continue": "Continue", "view": "View", "reopen": "Reopen"}
 ACCESS_LABELS = {"interactive": "Interactive", "view_only": "View only",
@@ -490,8 +515,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
         state == "dormant" or quiet > dormant_seconds)
     dismissed = str(reply_available.get(sid, ""))
     read_revision = str(read_sessions.get(sid, ""))
+    interrupted = bool(session.get("interrupted"))
     reply_requested = bool(
-        latest_assistant and requests_reply(latest_assistant.get("text"))
+        not interrupted and latest_assistant and requests_reply(latest_assistant.get("text"))
         and dismissed != revision)
     external_reply_expired = bool(
         reply_requested and external and not pending
@@ -608,8 +634,8 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
                          "confidence": "stale"})
 
     new_response = bool(
-        group == "available" and state == "turn_done" and latest_assistant
-        and read_revision != revision)
+        not interrupted and group == "available" and state == "turn_done" and latest_assistant
+        and completed_handoff(latest_assistant.get("text")) and read_revision != revision)
     return {
         "state": state, "ui_group": group, "reason_label": reason,
         "primary_action": primary, "primary_action_label": PRIMARY_ACTION_LABELS[primary],
@@ -1352,6 +1378,7 @@ class Engine:
         self._claude_mutation_locks = {}
         self._claude_turn_fences_guard = threading.Lock()
         self._claude_turn_fences = {}
+        self._claude_interrupted = {}    # sid -> transcript revision at accepted Esc
         self._claude_delivery_uncertain_guard = threading.Lock()
         self._claude_delivery_uncertain = _validated_claude_delivery_uncertain(
             cfg.get("claude_delivery_uncertain"))
@@ -1594,9 +1621,13 @@ class Engine:
                     "change_permission_mode", "model_effort_settings",
                     "change_model_effort"):
             capabilities[key] = False
+        # Staging can observe production work but must never manufacture an
+        # actionable attention request for it. The session remains visible for
+        # verification; reply/unread affordances belong only to its owner.
         session.update(capabilities=capabilities, read_only=True, access="view_only",
                        access_label="View only", primary_action="view",
                        primary_action_label="View",
+                       reply_requested=False, new_response=False,
                        read_only_reason="Production session; staging can observe but not control it")
         if "can_reopen" in session:
             session["can_reopen"] = False
@@ -2134,15 +2165,14 @@ class Engine:
             elif session.get("reply_requested"):
                 kind, request, delivery = "reply", "Reply requested", "Awaiting response"
                 safe_bulk.append("mark_available")
+            elif session.get("new_response"):
+                kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
             elif session.get("ui_group") == "needs_you":
                 kind = "problem" if session.get("state") in \
                     ("blocked", "error", "stalled_or_prompt") \
                     else "attention"
                 request = session.get("error") or session.get("reason_label") or "Session needs attention"
                 delivery = "Intervention needed"
-            elif session.get("new_response"):
-                kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
-                safe_bulk.extend(("mark_read", "dismiss"))
             if not kind:
                 continue
             action_id = self._action_identity(session, kind, action_revision)
@@ -2755,6 +2785,15 @@ class Engine:
             if quiet > cfg["dormant_seconds"] and not agents_running:
                 state = "dormant"
 
+            # The CLI transcript has no explicit interrupted-turn event. A
+            # dashboard-delivered Esc is enough to suppress reply/new-response
+            # triage once that turn reaches its prompt; a later running turn
+            # clears the marker.
+            if state in ("running", "stalled", "stalled_or_prompt", "needs_you"):
+                self._claude_interrupted.pop(sid, None)
+            interrupted = bool(self._claude_interrupted.get(sid) is not None and
+                               state in ("idle", "turn_done"))
+
             # hook-written pending file is the authoritative source: the CLI only
             # flushes AskUserQuestion rows to the transcript AFTER they're answered
             if pending is None:
@@ -2842,6 +2881,7 @@ class Engine:
                     mt.convo, session_id=sid, provider="claude"),
                 "state": state,
                 "reg_status": reg_status,
+                "interrupted": interrupted,
                 "quiet_s": round(quiet),
                 "ctx_tokens": ctx, "ctx_window": cw,
                 "ctx_pct": round(100 * ctx / cw, 1) if cw else None,
@@ -7590,6 +7630,8 @@ Treat this as an independent session. Verify the repository state before changin
                     " Applied, but restart recovery state could not be saved.").strip()
         if result.get("ok") and turn_fence_baseline is not None:
             self._record_claude_turn_fence(sid, turn_fence_baseline)
+        if result.get("ok") and typ == "interrupt":
+            self._claude_interrupted[sid] = getattr(mt, "convo_rev", None)
         return result
 
     MODELS = ("opus", "sonnet", "haiku", "fable")

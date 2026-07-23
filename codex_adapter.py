@@ -132,7 +132,16 @@ def _local_model_catalog(path, max_bytes=4 * 1024 * 1024):
             continue
         if model_id not in by_id:
             order.append(model_id)
+            context_window = model.get("context_window", model.get("contextWindow"))
+            try:
+                context_window = int(context_window)
+            except (TypeError, ValueError, OverflowError):
+                context_window = None
+            if context_window is not None and not 1 <= context_window <= 2_000_000:
+                context_window = None
             by_id[model_id] = {"id": model_id, "name": display, "efforts": []}
+            if context_window is not None:
+                by_id[model_id]["context_window"] = context_window
         for value in efforts:
             if value not in by_id[model_id]["efforts"]:
                 by_id[model_id]["efforts"].append(value)
@@ -1513,6 +1522,17 @@ class CodexAdapter:
         self.runtime_migration = runtime_migration
         self._runtime_action_lock = threading.RLock()
 
+    def _context_window_for_model(self, model):
+        for entry in self.models:
+            if str(entry.get("id") or "") != str(model or ""):
+                continue
+            try:
+                window = int(entry.get("context_window") or 0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return window if window > 0 else None
+        return None
+
     def _owns_metadata(self, meta):
         return (meta or {}).get("runtime_owner") == self.runtime_owner
 
@@ -1793,6 +1813,11 @@ class CodexAdapter:
                 continue
             if candidate.get("parentThreadId"):
                 continue
+            # External threads remain in the archive listing after their owning
+            # Desktop/VS Code client closes them. They are not live Fleet work;
+            # never retain them as view-only Now cards.
+            if candidate.get("archived") and candidate.get("id") not in managed:
+                continue
             clean_threads.append(candidate)
             listed.add(candidate["id"])
 
@@ -1937,7 +1962,7 @@ class CodexAdapter:
             else:
                 state = "idle"
             cwd = thread.get("cwd") or ""
-            usage = live.get("token_usage") or {}
+            usage = live.get("token_usage") or (observation or {}).get("token_usage") or {}
             mode = live.get("collaboration_mode") or modes.get(tid) or "default"
             persisted_meta = thread_meta.get(tid) or {}
             # thread/start and thread/resume report the selected model/effort,
@@ -1946,14 +1971,16 @@ class CodexAdapter:
             # For owned live threads, App Server's state is newer than a
             # thread/read projection built before a settings update completed.
             model = ((live.get("model") or thread.get("model")) if is_managed else
-                     (thread.get("model") or live.get("model"))) or \
+                     ((observation or {}).get("model") or thread.get("model") or
+                      live.get("model"))) or \
                     persisted_meta.get("model") or ""
             if is_managed:
                 effort = (live.get("effort") if "effort" in live else
                           thread.get("effort") if "effort" in thread else
                           persisted_meta.get("effort"))
             else:
-                effort = (thread.get("effort") if "effort" in thread else
+                effort = ((observation or {}).get("effort") if observation else None) or \
+                         (thread.get("effort") if "effort" in thread else
                           live.get("effort") if "effort" in live else
                           persisted_meta.get("effort"))
             settings_revision = int(persisted_meta.get("settings_revision") or 0)
@@ -1980,12 +2007,18 @@ class CodexAdapter:
                             self._refresh_diagnostics.append({"ts": now, "thread_id": tid,
                                 "error": "settings metadata persistence failed: " + str(exc)[:500]})
             ctx_tokens = _usage_total(usage)
-            ctx_window = _usage_window(usage)
+            ctx_window = _usage_window(usage) or self._context_window_for_model(model)
+            interrupted = bool(
+                completed_epoch is not None and
+                str(turn_lifecycle.get("status") or live.get("turn_status") or "").lower()
+                == "interrupted")
             files = _files(thread, cwd)
             messages = _conversation(thread)
             if (observation or {}).get("messages"):
                 messages = observation["messages"]
             agents = _agents(thread, tid)
+            if (observation or {}).get("agents"):
+                agents = observation["agents"]
             previous_agents = {
                 item.get("agent_id"): item
                 for item in ((previous_by_tid.get(tid) or {}).get("agents") or [])
@@ -2040,7 +2073,7 @@ class CodexAdapter:
                 "_latest_prose": _latest_prose(messages),
                 "repo_outcome": observed_test_outcome(
                     messages, session_id=self.key(tid), provider="codex"),
-                "state": state, "reg_status": reg_status,
+                "state": state, "reg_status": reg_status, "interrupted": interrupted,
                 "headless": not is_managed, "read_only": not is_managed,
                 "read_only_reason": (
                     None if is_managed else
@@ -2655,13 +2688,25 @@ class CodexAdapter:
                            if str(item.get("agent_id") or "") == agent_id), None)
         if not member:
             return {"ok": False, "error": "no such subagent"}
-        out = self.context(self.key(agent_id))
+        native_agent_id = member.get("native_session_id") or agent_id
+        if parent and parent.get("read_only") and self.external_observer:
+            observed = self.external_observer.observe(native_agent_id)
+            if observed:
+                out = {"ok": True, "messages": observed.get("messages") or [], "files": [],
+                       "agents": observed.get("agents") or [], "revision": observed.get("revision"),
+                       "read_only": True, "observation_confidence": observed.get("confidence"),
+                       "warning": observed.get("warning") or observed.get("error")}
+            else:
+                out = {"ok": False, "error": "subagent rollout is unavailable"}
+        else:
+            out = self.context(self.key(native_agent_id))
         if out.get("ok"):
-            usage = self.client.thread_state.get(agent_id, {}).get("token_usage") or {}
+            usage = self.client.thread_state.get(native_agent_id, {}).get("token_usage") or {}
             ctx_tokens = _usage_total(usage) if usage else None
             ctx_window = _usage_window(usage) if usage else None
-            out["info"] = {"agent_id": agent_id, "agent_type": "codex",
-                           "description": "Codex subagent", "model": "",
+            out["info"] = {"agent_id": agent_id, "agent_type": member.get("agent_type") or "codex",
+                           "description": member.get("description") or "Codex subagent",
+                           "model": member.get("model") or "",
                            "family": "codex", "tokens": _token_breakdown(usage),
                            "total_tokens": _usage_cumulative(usage) if usage else None,
                            "ctx_tokens": ctx_tokens, "ctx_window": ctx_window,

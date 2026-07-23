@@ -64,8 +64,6 @@ html[data-nav-side="right"] #appmain{grid-column:1;grid-row:1}
   color:var(--faint);font:inherit;font-size:10.5px;padding:4px 9px;cursor:pointer}
 .commandchips button:hover{color:var(--fg);background:var(--card)}
 .commandchips button.active{border-color:#365d87;background:#101c2c;color:var(--blue)}
-#usagechip.usagewarn{border-color:rgba(210,153,34,.55);color:var(--amber);background:rgba(210,153,34,.08)}
-#usagechip.usagedanger{border-color:rgba(248,81,73,.58);color:var(--red);background:rgba(248,81,73,.08)}
 #usagechip b{font-variant-numeric:tabular-nums}
 .savedviews{display:contents}.savedchip{flex:0 0 auto;display:inline-flex;border:1px solid #365d87;
   border-radius:14px;overflow:hidden;background:#101c2c}
@@ -342,7 +340,7 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#sethead
 .provideralert b{color:var(--red)}
 /* Active/error cards use the raised surface. Available inventory stays on the
    quieter base surface; only dormant/headless cards recede in opacity. */
-.card{background:var(--card2);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;
+.card{background:var(--card2);border:1px solid var(--line);border-radius:10px;margin-bottom:18px;
   overflow:clip;opacity:1;transition:opacity .12s ease}
 .card>.ctop{background:inherit}
 /* Header (56.4px) + meta (27.4px) + peek padding/border (13px) + More
@@ -369,10 +367,10 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#sethead
 .chip.available{background:var(--card2);color:var(--dim)}
 .chip.history{background:var(--card2);color:var(--faint)}
 .chip.problem{background:#2d1214;color:var(--red)}
-.accessbadge,.newbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
+.accessbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.4px;
   color:var(--faint);white-space:nowrap}
 .accessbadge.view_only{color:var(--purple)}
-.newbadge{color:var(--blue);font-weight:700}
+.newdot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 2px rgba(63,185,80,.15);flex:0 0 auto}
 .primarybtn{background:transparent;border:1px solid var(--blue);border-radius:7px;color:var(--blue);
   font:inherit;font-size:11px;font-weight:700;padding:6px 10px;cursor:pointer;white-space:nowrap}
 .primarybtn:hover,.primarybtn:focus-visible{background:var(--blue);color:#07111d}
@@ -450,11 +448,11 @@ details.insfold>summary:hover{color:var(--fg)}
 .crow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line);font-size:12px}
 .crow .cname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .crow small{color:var(--faint)}
-.queue{margin-top:16px}
+.queue{margin-top:28px}
 .queue:first-child{margin-top:0}
-.queuehead{display:flex;align-items:baseline;gap:8px;padding:0 4px 6px;color:var(--fg)}
-.queuehead b{font-size:11px;text-transform:uppercase;letter-spacing:.65px}
-.queuehead span{font-size:10.5px;color:var(--faint)}
+.queue.needs,.queue.working,.queue.available,#newsess{border-top:1px solid var(--line);padding-top:16px}
+.queuehead{display:flex;align-items:baseline;padding:0 4px 12px;color:var(--fg)}
+.queuehead b{font-size:14px;text-transform:uppercase;letter-spacing:.65px}
 .queue.needs .queuehead b{color:var(--amber)}
 .queue.working .queuehead b{color:var(--green)}
 .queue.subagentqueue .queuehead b{color:var(--purple)}
@@ -474,20 +472,15 @@ details.insfold>summary:hover{color:var(--fg)}
 .actioninbox{margin:16px 0 18px;border:1px solid #4a3916;border-radius:11px;background:#13130f;overflow:hidden}
 .actionhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 11px;
   border-bottom:1px solid #3a2f16}
-.actionhead>label{display:flex;align-items:center;gap:9px;cursor:pointer}.actionhead input,.actioncheck input{accent-color:var(--amber)}
-.actionhead span{display:flex;flex-direction:column}.actionhead b{font-size:11px;text-transform:uppercase;
-  letter-spacing:.65px;color:var(--amber)}.actionhead small{font-size:10px;color:var(--faint)}
+.actionhead>div:first-child{display:flex;flex-direction:column}.actionhead b{font-size:14px;text-transform:uppercase;
+  letter-spacing:.65px;color:var(--amber)}
 .actionfilters{display:flex;align-items:center;gap:4px;overflow-x:auto}
 .actionfilters button{flex:0 0 auto;border:1px solid transparent;border-radius:14px;background:transparent;
   color:var(--faint);font:inherit;font-size:10px;padding:4px 8px;cursor:pointer}
 .actionfilters button.active{border-color:#5b461b;background:#211b0f;color:var(--amber)}
-.bulkbar{display:flex;align-items:center;gap:6px;min-height:38px;padding:6px 10px;border-bottom:1px solid #3a2f16;
-  background:#19170f;overflow-x:auto}.bulkbar b,.bulkbar span{font-size:10px;color:var(--dim);white-space:nowrap}
-.bulkbar button{flex:0 0 auto;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--fg);
-  font:inherit;font-size:10.5px;padding:5px 8px;cursor:pointer}.bulkbar button:hover{border-color:var(--blue);color:var(--blue)}
-.actionrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto auto auto;align-items:center;gap:6px;
+.actionrow{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;
   min-height:66px;padding:6px 9px;border-bottom:1px solid #302817}.actionrow:last-child{border-bottom:0}
-.actionrow:hover{background:#19170f}.actioncheck{display:flex;align-items:center;justify-content:center;align-self:stretch;cursor:pointer}
+.actionrow:hover{background:#19170f}
 .actionopen{min-width:0;display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:center;gap:9px;
   border:0;background:transparent;color:var(--fg);font:inherit;text-align:left;padding:3px;cursor:pointer}
 .actionglyph{width:24px;height:24px;display:flex;align-items:center;justify-content:center;border:1px solid #5b461b;
@@ -1242,11 +1235,11 @@ button.notificationrow:hover,button.notificationrow:focus-visible{background:var
 .relaynote b{color:var(--amber)}
 .arow .aopen{color:var(--faint);font-size:14px;padding-left:2px}
 /* visible session pin control; touch screens also keep long-press as a shortcut */
-.shead .spin,.historymain .spin,.actionrow .spin{background:var(--card);border:1px solid var(--line);border-radius:8px;
+.shead .spin,.historymain .spin{background:var(--card);border:1px solid var(--line);border-radius:8px;
   color:var(--fg);cursor:pointer;font-size:13px;line-height:1;padding:8px 10px;
   opacity:.55;filter:grayscale(1);flex:0 0 auto}
-.shead .spin:hover,.historymain .spin:hover,.actionrow .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
-.shead .spin.on,.historymain .spin.on,.actionrow .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
+.shead .spin:hover,.historymain .spin:hover{opacity:1;filter:none;border-color:var(--blue)}
+.shead .spin.on,.historymain .spin.on{opacity:1;filter:none;border-color:rgba(88,166,255,.55)}
 .shead.pinpress{box-shadow:inset 3px 0 0 var(--blue);background:rgba(88,166,255,.09)}
 .card.pinned{box-shadow:0 0 0 1px rgba(88,166,255,.35);opacity:1}
 /* global pinned-sessions block, directly below Fleet Briefing */
@@ -1284,7 +1277,7 @@ button.notificationrow:hover,button.notificationrow:focus-visible{background:var
 .togrow .expandbtn{float:none;flex:0 0 auto}
 /* new-session launcher */
 /* same gap the folds use between each other (details.foldbox margin-top) */
-#newsess{margin-top:14px}
+#newsess{margin-top:26px}
 .newbtn{display:block;width:100%;background:var(--card);border:1px dashed var(--line);
   border-radius:10px;color:var(--dim);font:inherit;font-size:13px;font-weight:600;
   padding:12px;cursor:pointer;margin:0}
@@ -1417,11 +1410,11 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .historyage{display:none}
   .commandchips .saveview{margin-left:0}
   .actionhead{align-items:flex-start;flex-direction:column}.actionfilters{width:100%}
-  .actionrow{grid-template-columns:22px minmax(0,1fr) auto auto;padding:7px 7px}
+  .actionrow{grid-template-columns:minmax(0,1fr) auto;padding:7px 7px}
   .actionopen{grid-template-columns:25px minmax(0,1fr)}
   .actiondelivery{grid-column:2;justify-self:start;margin-top:2px}
-  .actionrow>.primarybtn{grid-column:3;grid-row:1}.actionrow>.actionpin{grid-column:4;grid-row:1}.actionmuted{display:none}
-  .actionrow>.quickfeedback{grid-column:2/-1}
+  .actionmuted{display:none}
+  .actionrow>.quickfeedback{grid-column:1/-1}
   .actioncontext{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .workhead{grid-template-columns:32px minmax(0,1fr) 18px}.workcounts{grid-column:2;justify-content:flex-start;margin-top:4px}
   .workhead .chev{grid-column:3;grid-row:1/3}.worksummary{padding-left:12px;gap:7px}

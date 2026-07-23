@@ -358,12 +358,11 @@ def fixture_actions(sessions):
         elif session.get("reply_requested"):
             kind, request, delivery = "reply", "Reply requested", "Awaiting response"
             safe.append("mark_available")
+        elif session.get("new_response"):
+            kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
         elif session.get("ui_group") == "needs_you":
             kind = "problem" if session.get("state") in ("error", "stalled_or_prompt") else "attention"
             request, delivery = session.get("error") or session.get("reason_label"), "Intervention needed"
-        elif session.get("new_response"):
-            kind, request, delivery = "outcome", "Completed work is ready to review", "Unreviewed"
-            safe.extend(("mark_read", "dismiss"))
         if not kind:
             continue
         raw = "\0".join((session.get("provider") or "claude", session["session_id"], kind, revision))
@@ -896,7 +895,7 @@ def set_scenario(name):
     elif name == "new-response":
         session.update(state="turn_done", reg_status="idle", new_response=True,
                        convo_v="response:1", quiet_s=12,
-                       last_msg={"role": "assistant", "text": "The implementation is complete."})
+                       last_msg={"role": "assistant", "text": "Done.\n\n- Updated the dashboard\n- Tests passed"})
     elif name == "subagent":
         session.update(state="running", reg_status="running", agents_running=1)
         session["agents"][0]["state"] = "running"

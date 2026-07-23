@@ -151,6 +151,26 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(external["capabilities"]["takeover"])
         self.assertFalse(external["capabilities"]["submit"])
 
+    def test_archived_external_thread_is_not_retained_as_a_view_only_card(self):
+        archived = {**self.thread("closed-external", {"type": "notLoaded"}),
+                    "source": "vscode", "archived": True}
+        adapter, _ = self.adapter([archived])
+        adapter._refresh()
+        self.assertEqual(adapter.sessions(), [])
+
+    def test_catalog_window_fills_missing_live_usage_window(self):
+        adapter, client = self.adapter([self.thread("managed")])
+        with open(adapter._models_cache_path, "w") as handle:
+            json.dump({"models": [{"slug": "gpt-5.4", "display_name": "GPT-5.4",
+                                    "context_window": 272000}]}, handle)
+        adapter._remember("managed", "default")
+        client.thread_state["managed"] = {"token_usage": {
+            "last": {"inputTokens": 8000, "totalTokens": 8000}}}
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        self.assertEqual((session["ctx_tokens"], session["ctx_window"], session["ctx_pct"]),
+                         (8000, 272000, 2.9))
+
     def test_structured_limit_error_is_one_blocked_session_not_provider_failure(self):
         limited = self.thread("limited", {"type": "systemError"})
         limited["error"] = {"code": "rate_limit", "message": "Rate limit reached"}
@@ -197,11 +217,48 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(session["read_only"])
         self.assertFalse(session["capabilities"]["submit"])
         self.assertFalse(session["capabilities"]["interrupt"])
-
         context = adapter.context("codex:external")
         self.assertTrue(context["ok"])
         self.assertTrue(context["read_only"])
         self.assertEqual(context["messages"][-1]["text"], "Working now")
+
+    def test_completed_external_rollout_remains_available_until_dormant(self):
+        class Observer:
+            def observe(self, thread_id):
+                return {"active": False, "completed_at": 999,
+                        "last_activity_at": 999, "messages": [],
+                        "revision": "rollout:done", "confidence": "observed_local_rollout"}
+
+        thread = {**self.thread("closed", {"type": "notLoaded"}, updated=999),
+                  "source": "cli"}
+        client = FixtureClient([thread])
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, external_observer=Observer(),
+                               models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        adapter._refresh()
+        self.assertEqual(adapter.sessions()[0]["state"], "turn_done")
+
+    def test_external_rollout_supplies_model_effort_and_context(self):
+        class Observer:
+            def observe(self, thread_id):
+                return {"active": True, "started_at": 999, "last_activity_at": 999,
+                        "model": "gpt-5.6-sol", "effort": "xhigh",
+                        "token_usage": {"last": {"totalTokens": 20_240},
+                                        "modelContextWindow": 272_000},
+                        "messages": [], "revision": "rollout:live",
+                        "confidence": "observed_local_rollout"}
+
+        thread = {**self.thread("external-meta", {"type": "notLoaded"}, updated=999),
+                  "source": "cli"}
+        client = FixtureClient([thread])
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, external_observer=Observer(),
+                               models_cache_path=os.path.join(self.tmp.name, "models-cache.json"))
+        adapter._refresh()
+        session = adapter.sessions()[0]
+        self.assertEqual((session["model"], session["effort"]), ("gpt-5.6-sol", "xhigh"))
+        self.assertEqual((session["ctx_tokens"], session["ctx_window"], session["ctx_pct"]),
+                         (20_240, 272_000, 7.4))
 
     def test_recent_external_observation_is_bounded_and_old_pin_is_preserved(self):
         class Observer:

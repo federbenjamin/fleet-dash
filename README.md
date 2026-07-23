@@ -13,13 +13,13 @@ the provider's native control path. Built 2026-07-13; still evolving.
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
-  delivery state, then open the same full-chat response controls used everywhere else. Safe bulk
-  triage is limited to review/available markers, mute, and dismissal of reviewable notices—never an
-  unresolved provider request and never approval. The
+  delivery state, then open the same full-chat response controls used everywhere else; there are no
+  checkboxes, bulk actions, or duplicate right-side navigation buttons. The
   separate **History** destination owns dormant, external, reopenable, and closed sessions. Cards
   use reasons such as **Reply requested**, **Command approval**, **Working**, and **Inactive**
   instead of raw provider lifecycle terms. A separate **View only** access label identifies sessions
-  owned by another runtime.
+  owned by another runtime. An archived external thread is removed from Fleet inventory rather than
+  retained as view-only inventory.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
   distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
@@ -212,7 +212,11 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   block thread health or detach live chats.
 - Codex thread IDs are stored as `codex:<native-id>` so they cannot collide with Claude IDs.
 - Codex costs display as unavailable rather than being priced with Claude rates. App Server's
-  exact per-thread token total and model context-window size drive each card's context gauge.
+  exact per-thread token total and model context-window size drive each card's context gauge;
+  the read-only rollout observer supplies the same fields, model, and effort for external sessions;
+  when a live token update omits the window, Fleet uses the selected model's declared local
+  catalog window. Cards show only the context-fill gauge, while the detail view shows used and
+  total context tokens.
 - Every managed Codex chat and file view has Plan/Default controls in its top-right overflow menu.
   The main fleet cards stay mode-free. The selected mode is
   persisted and applied through App Server's experimental `thread/settings/update` API; the
@@ -244,7 +248,10 @@ the provider without affecting Claude sessions.
   for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
   An unloaded external view-only thread is the exception: Fleet clears a prose-only request after
   30 minutes because it cannot submit a reply to that runtime.
-  Completed non-question turns remain **Available** and show **new** until opened.
+  A completed-work handoff with a concrete summary or verification enters the Action Inbox as
+  **Completed work is ready to review / Unreviewed** until opened. Progress prose and interrupted
+  turns do not. Each Action Inbox row opens directly; it has no checkbox, bulk action, or duplicate
+  View/Respond control.
 - **History** is one flat chronological destination for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
   View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no

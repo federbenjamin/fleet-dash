@@ -700,13 +700,6 @@ function usageBar(legacy,providers){
     !/^gpt-5\.3-codex-spark\b/i.test(String(b.label||'')));
   const claudeProfiles=claude?.profiles?.length?claude.profiles:[claude];
   const activeClaude=claudeProfiles.find(profile=>profile?.active) || claudeProfiles.find(Boolean);
-  const visiblePercentages=[
-    ...(activeClaude?[activeClaude.five_hour_pct,
-      claude?.show_week===false?null:activeClaude.weekly_pct,
-      claude?.show_week===false?null:activeClaude.fable_weekly_pct]:[]),
-    ...codexBuckets.map(bucket=>bucket.used_pct),
-  ].filter(value=>Number.isFinite(Number(value))).map(Number);
-  const worst=visiblePercentages.length?Math.max(...visiblePercentages):null;
   const claudeWindows=activeClaude?[activeClaude.five_hour_pct,
     claude?.show_week===false?null:activeClaude.weekly_pct]
     .filter(value=>Number.isFinite(Number(value))).map(value=>Math.round(Number(value))):[];
@@ -715,8 +708,6 @@ function usageBar(legacy,providers){
   const summaries=[];
   if(claudeWindows.length)summaries.push(`Claude ${claudeWindows.join('/')}`);
   if(Number.isFinite(activeCodex))summaries.push(`Codex ${Math.round(activeCodex)}`);
-  chip.classList.remove('usagewarn','usagedanger');
-  if(worst>=90)chip.classList.add('usagedanger');else if(worst>=70)chip.classList.add('usagewarn');
   chip.textContent=`Usage${summaries.length?` · ${summaries.join(' · ')}`:''}`;
   chip.title='Claude active account: 5-hour/weekly · Codex: highest active non-Spark window';
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
@@ -3564,7 +3555,7 @@ function renderWorkspaceDetails(s,c){
       <span>effort</span><b>${esc(s.effort||'—')}</b><span>mode</span><b>${esc(s.collaboration_mode||'—')}</b>
       <span>permission</span><b>${esc(s.permission_mode?claudePermissionLabel(s.permission_mode):'—')}</b>
       <span>started</span><b>${s.started_ms?fmtAge(Math.max(0,Math.round(Date.now()/1000-s.started_ms/1000)))+' ago':'unavailable'}</b>
-      <span>context</span><b>${s.ctx_tokens==null?'unavailable':fmtTok(s.ctx_tokens)}</b>
+      <span>context</span><b>${s.ctx_tokens==null?'unavailable':s.ctx_window?`${fmtTok(s.ctx_tokens)} / ${fmtTok(s.ctx_window)} (${s.ctx_pct}%)`:fmtTok(s.ctx_tokens)}</b>
       <span>spend</span><b>${s.cost==null?'unavailable':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost||0)} agents`}</b>
       ${s.error?`<span>errors</span><b>${esc(s.error)}</b>`:''}</div>${statusLineHtml(status,'details:'+s.session_id)}</section>
     <section class="detailsection" id="detail-placement"><h2>Placement</h2><div class="evidencerule"><span>Current placement</span><b>${esc(s.reason_label||s.ui_group||'History')}</b><code>${esc(s.winning_rule||'placement.unknown')}</code></div>
@@ -4025,7 +4016,7 @@ function cardFrame(s){
 function cardTop(s){
   if(s.provisional)return provisionalCardTop(s);
   const navigationOnly=!s.primary_action||['open','continue','view'].includes(s.primary_action);
-  const showPrimary=!(navigationOnly&&['claude','codex'].includes(s.provider));
+  const showPrimary=s.ui_group!=='needs_you'&&!(navigationOnly&&['claude','codex'].includes(s.provider));
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(previewSessions()&&s.last_msg)ensureCtx(s.session_id,ctxVersion(s));
@@ -4033,11 +4024,11 @@ function cardTop(s){
   return`<div class="shead${sessionPressSid===s.session_id?' pinpress':''}" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
       title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')" onkeydown="sessionHeaderKey(event,'${s.session_id}')"
       ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
+      ${s.new_response?'<span class="newdot" role="img" aria-label="new response" title="new response"></span>':''}
       <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
       <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
-      <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
-      ${s.new_response?`<span class="newbadge">new</span>`:''}
+      <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
       ${terminalButton(s,true)}
       <button class="spin${pinned?' on':''}" ${pinActions.get(s.session_id)?.busy?'disabled':''} title="${pinned?'unpin session':'pin session'}"
@@ -4053,13 +4044,13 @@ function cardTop(s){
         ${!['available','needs_you'].includes(s.ui_group)?`<span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>`:''}
       </div>
       <div class="smeta-r">
-        ${s.ctx_pct==null?`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`:`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
+        ${s.ctx_pct==null?(s.provider==='codex'?'':`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`):`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
         <span class="m amodel">${modelLabel(s)}</span>
       </div>
     </div>
     ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
-    ${s.reply_requested?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
+    ${s.reply_requested&&!s.staging_observer?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
     ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
@@ -5340,8 +5331,8 @@ let historyLoading=false,historyLoadedAt=0,historyAbort=null,historyFilterTimer=
 let closedIds=new Set();
 const closedMeta=new Map();
 const historyInfoOpen=new Set();
-const actionSelected=new Set(),workstreamOpen=new Set();
-let actionKind='all',actionBulkBusy=false;
+const workstreamOpen=new Set();
+let actionKind='all';
 
 function actionSession(action){
   return ((last&&last.sessions)||[]).find(item=>item.session_id===action.session_id)||null;
@@ -5355,7 +5346,6 @@ function actionBaseMatches(action){
 function actionKindMatches(action){
   if(actionKind==='requests'&&!['question','form','reply'].includes(action.kind))return false;
   if(actionKind==='approvals'&&action.kind!=='approval')return false;
-  if(actionKind==='outcomes'&&action.kind!=='outcome')return false;
   if(actionKind==='problems'&&!['problem','attention'].includes(action.kind))return false;
   if(actionKind==='budgets'&&action.kind!=='budget')return false;
   return true;
@@ -5368,31 +5358,8 @@ function openInboxAction(actionId){
     primarySessionAction(action.session_id);
 }
 function setActionKind(value){
-  actionKind=['all','requests','approvals','outcomes','problems','budgets'].includes(value)?value:'all';
+  actionKind=['all','requests','approvals','problems','budgets'].includes(value)?value:'all';
   render(last,true);
-}
-function toggleActionSelection(actionId,checked){
-  checked?actionSelected.add(actionId):actionSelected.delete(actionId);renderActionInbox(last);
-}
-function toggleVisibleActions(checked){
-  const visible=((last&&last.actions)||[]).filter(action=>actionMatches(action)&&(action.safe_bulk||[]).length);
-  visible.forEach(item=>checked?actionSelected.add(item.action_id):actionSelected.delete(item.action_id));
-  renderActionInbox(last);
-}
-async function bulkTriage(operation){
-  if(actionBulkBusy)return;
-  const selected=((last&&last.actions)||[]).filter(item=>actionSelected.has(item.action_id));
-  const eligible=selected.filter(item=>(item.safe_bulk||[]).includes(operation));
-  if(!eligible.length)return;
-  actionBulkBusy=true;renderActionInbox(last);
-  try{
-    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({bulk_triage:{operation,items:eligible.map(item=>({
-        action_id:item.action_id,session_id:item.session_id,revision:String(item.revision||'')}))}})});
-    const data=await r.json();if(!data.ok)throw new Error(data.error||'bulk update failed');
-    eligible.forEach(item=>actionSelected.delete(item.action_id));await tick();
-  }catch(error){alert('bulk action failed: '+error);}
-  finally{actionBulkBusy=false;renderActionInbox(last);}
 }
 function actionIcon(kind){return {question:'?',form:'≡',approval:'!',reply:'↩',problem:'×',
   attention:'!',outcome:'✓',budget:'$'}[kind]||'•';}
@@ -5401,25 +5368,12 @@ function renderActionInbox(f){
   const candidates=((f&&f.actions)||[]).filter(actionBaseMatches);
   const actions=candidates.filter(actionKindMatches);
   const visibleSessionIds=new Set(actions.map(action=>action.session_id).filter(Boolean));
-  const activeIds=new Set(((f&&f.actions)||[]).map(item=>item.action_id));
-  [...actionSelected].forEach(id=>{if(!activeIds.has(id))actionSelected.delete(id);});
   if(!candidates.length){el.className='';el.innerHTML='';return visibleSessionIds;}
-  const selected=actions.filter(item=>actionSelected.has(item.action_id));
-  const eligible=operation=>selected.filter(item=>(item.safe_bulk||[]).includes(operation)).length;
-  const selectable=actions.filter(item=>(item.safe_bulk||[]).length);
-  const allSelected=selectable.length>0&&selectable.every(item=>actionSelected.has(item.action_id));
   el.className='actioninbox';
-  el.innerHTML=`<div class="actionhead"><label><input type="checkbox" aria-label="select visible actions"
-      ${allSelected?'checked':''} ${selectable.length?'':'disabled'} onchange="toggleVisibleActions(this.checked)"><span><b>Needs you</b><small>Action inbox · ${actions.length} item${actions.length===1?' needs':'s need'} review</small></span></label>
+  el.innerHTML=`<div class="actionhead"><div><b>Needs you · ${actions.length}</b></div>
     <div class="actionfilters">${[['all','All'],['requests','Requests'],['approvals','Approvals'],
-      ['outcomes','Outcomes'],['problems','Problems'],['budgets','Budgets']].map(([value,label])=>
+      ['problems','Problems'],['budgets','Budgets']].map(([value,label])=>
       `<button class="${actionKind===value?'active':''}" onclick="setActionKind('${value}')">${label}</button>`).join('')}</div></div>
-    ${selected.length?`<div class="bulkbar"><b>${selected.length} selected</b>
-      ${eligible('mark_read')?`<button onclick="bulkTriage('mark_read')">Review ${eligible('mark_read')}</button>`:''}
-      ${eligible('mark_available')?`<button onclick="bulkTriage('mark_available')">Mark available ${eligible('mark_available')}</button>`:''}
-      ${eligible('mute')?`<button onclick="bulkTriage('mute')">Mute ${eligible('mute')}</button>`:''}
-      ${eligible('dismiss')?`<button onclick="bulkTriage('dismiss')">Dismiss ${eligible('dismiss')}</button>`:''}
-      ${actionBulkBusy?'<span>updating…</span>':''}</div>`:''}
     <div class="actionrows">${actions.length?actions.map(action=>{
       const session=actionSession(action),encoded=enc(action.action_id);
       const identityTitle=session?.title||action.title||'',identityProject=session?.project||action.project||'';
@@ -5427,19 +5381,12 @@ function renderActionInbox(f){
       const contextSignal=action.kind==='reply'?action.context:action.request;
       const displayContext=identityTitle?[identityProject,contextSignal].filter(Boolean).join(' · '):action.context;
       const age=Math.max(0,Math.round(((f&&f.t)||Date.now()/1000)-(action.created_at||0)));
-      const selectable=(action.safe_bulk||[]).length;
       return`<div class="actionrow ${esc(action.kind)} ${esc(action.status||'')}" data-action-id="${esc(action.action_id)}" data-action-sid="${esc(action.session_id||'')}">
-        <label class="actioncheck" onclick="event.stopPropagation()">${selectable?`<input type="checkbox" aria-label="select ${esc(action.request)}"
-          ${actionSelected.has(action.action_id)?'checked':''} onchange="toggleActionSelection(decodeURIComponent('${encoded}'),this.checked)">`:''}</label>
         <button class="actionopen" onclick="openInboxAction(decodeURIComponent('${encoded}'))">
           <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(displayRequest)}</span>
           ${displayContext?`<span class="actioncontext">${esc(displayContext)}</span>`:''}
           <span class="actionmeta"><strong>${esc(action.reason||'Needs review')}</strong> · ${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${fmtAge(age)} ago</span></span>
           <span class="actiondelivery">${esc(action.delivery_state||'Review')}</span></button>
-        <button class="primarybtn" onclick="openInboxAction(decodeURIComponent('${encoded}'))">${esc(action.primary_action_label||'Review')}</button>
-        ${session?`<button class="spin actionpin" ${pinActions.get(session.session_id)?.busy?'disabled':''}
-          title="pin session" aria-label="pin session"
-          onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${enc(session.session_id)}'))">📌</button>`:''}
         ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
         ${session?cardResponseFeedback(session):''}
         ${session?pinFeedbackHtml(session.session_id):''}
@@ -5508,9 +5455,8 @@ function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
     return;
   }
   el.className=`queue ${kind}`;
-  if(!el.querySelector('.queuehead'))el.innerHTML='<div class="queuehead"><b></b><span></span></div><div class="queuelist"></div>';
+  if(!el.querySelector('.queuehead'))el.innerHTML='<div class="queuehead"><b></b></div><div class="queuelist"></div>';
   el.querySelector('.queuehead b').textContent=`${title} · ${list.length}`;
-  el.querySelector('.queuehead span').textContent=subtitle;
   reconcileCards(el.querySelector('.queuelist'),list,
     keepEmpty?'No sessions are ready for another message.':'');
 }
