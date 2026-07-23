@@ -40,7 +40,7 @@ fleetdash/                everything server.py imports
 static/                   the whole browser app (js/*.js ES modules, fleet.css, sw.js — no build step)
 dashboard.html            application shell
 hooks/pending-capture.py  Claude hook: pending-question capture → fleet-dash-capture
-scripts/                  build-injector.sh, deploy-production.sh
+scripts/                  build-injector.sh, deploy-production.sh, coverage.sh
 tests/                    unittest suite (test_*.py) + live smokes + browser specs
 ```
 
@@ -956,6 +956,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 
 ## Dev workflow
 
+- Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
+  coverage.py — 98% lines overall, floor 95%/module (2026-07-23). Keep new code at that bar.
+  Coverage-focused tests live in `tests/test_cov_*.py`; shared fixtures are
+  `tests/test_cov_common.py` (`EngineCovBase`) and `tests/test_cov_common_ops.py`
+  (`EngineFixture`/`FakeCodex`). `# pragma: no cover` is reserved for `__main__` guards and
+  provably unreachable defensive branches, each justified in its PR.
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,
   then `curl -s http://127.0.0.1:8377/api/fleet | python3 -m json.tool | head`.
 - Staging changes are restarted independently with

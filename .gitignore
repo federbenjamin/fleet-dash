@@ -26,3 +26,6 @@ redesign-brief/
 uploads/
 outbox-images/
 workspaces/
+.coverage
+.coverage.*
+node_modules

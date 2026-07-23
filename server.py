@@ -691,5 +691,5 @@ def main():
     srv.serve_forever()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - process entrypoint guard
     main()

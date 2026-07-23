@@ -309,5 +309,5 @@ def main():
         print(__doc__); sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - module entrypoint, exercised via main()
     main()

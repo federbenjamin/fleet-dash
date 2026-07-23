@@ -1056,7 +1056,7 @@ class FleetOperations(StoreOps, SchedulerOps):
             changed = db.execute(
                 "UPDATE notification_devices SET " + ",".join(fields) + " WHERE id=?",
                 values).rowcount
-            if not changed:
+            if not changed:  # pragma: no cover - defensive: the SELECT above proves the row exists, so the id-keyed UPDATE always matches (SQLite counts matched rows)
                 raise OperationsError("notification device settings were not changed")
             row = db.execute("""SELECT id,display_name,platform,enabled,permission_state,
                 created_at,last_registered_at,last_success_at,test_success_at,last_failure_at,read_cursor,

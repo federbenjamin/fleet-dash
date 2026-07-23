@@ -706,6 +706,7 @@ Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benja
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py'
+scripts/coverage.sh --show-missing   # same suite under coverage.py (pip install coverage)
 python3 tests/search_benchmark.py
 npm install
 npm run test:push

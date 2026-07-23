@@ -487,7 +487,7 @@ class NotifyOps:
         text += "\n\nImages attached through Fleet:\n" + "\n".join(
             f"- {path}" for path in paths)
         if text.startswith("/") and " " not in text:
-            text += " "
+            text += " "  # pragma: no cover - line 487 always appends whitespace, so unreachable here
         steps = [(text, True)]
         try:
             transcript_size = os.path.getsize(path)

@@ -40,7 +40,7 @@ class SchedulerOps:
                     epochs.append(epoch)
             if epochs:
                 return max(set(epochs))
-        return naive.replace(tzinfo=zone).timestamp()
+        return naive.replace(tzinfo=zone).timestamp()  # pragma: no cover - defensive: a real zone always resolves at least one minute within the 181-minute search window
 
     @staticmethod
     def _quiet_state(policy, now):
@@ -142,7 +142,7 @@ class SchedulerOps:
                     1 if values["quiet_hours_enabled"] else 0,
                     int(values["quiet_start_minute"]), int(values["quiet_end_minute"]),
                     str(values["timezone"]), revision, now, expected)).rowcount
-                if not changed:
+                if not changed:  # pragma: no cover - defensive: revision was checked equal in this immediate transaction, so the compare-and-set UPDATE always matches
                     raise OperationsError("notification policy changed; refresh and try again")
                 db.execute("""UPDATE notification_deliveries SET status='suppressed',
                     error='global policy changed',updated_at=?
@@ -208,7 +208,7 @@ class SchedulerOps:
                     int(values["repeat_interval_seconds"]), int(values["max_deliveries"]),
                     1 if values["allow_during_quiet_hours"] else 0,
                     effective_after, revision, push_revision, now, kind, expected)).rowcount
-                if not changed:
+                if not changed:  # pragma: no cover - defensive: revision was checked equal in this immediate transaction, so the compare-and-set UPDATE always matches
                     raise OperationsError("notification rule changed; refresh and try again")
                 if push_changed:
                     db.execute("""UPDATE notification_deliveries SET status='suppressed',
@@ -561,7 +561,7 @@ class SchedulerOps:
                     attempt=attempt+1,claimed_at=?,lease_until=?,updated_at=?
                     WHERE id=? AND status IN ('queued','retrying')""", (
                     now, now + self.delivery_lease_seconds, now, row["id"])).rowcount
-                if not claimed:
+                if not claimed:  # pragma: no cover - defensive: the row was just SELECTed as queued/retrying in this immediate transaction, so the status-guarded claim always matches
                     continue
                 unread = int(db.execute("""SELECT COUNT(*) FROM notification_events
                     WHERE sequence>(SELECT read_cursor FROM notification_devices WHERE id=?)""",
