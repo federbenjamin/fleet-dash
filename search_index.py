@@ -458,8 +458,6 @@ class SearchIndex:
                 CREATE TABLE IF NOT EXISTS search_stats(
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                     documents INTEGER NOT NULL DEFAULT 0);
-                INSERT OR IGNORE INTO search_stats(singleton,documents)
-                    SELECT 1,COUNT(*) FROM documents WHERE kind!='metadata';
                 CREATE TRIGGER IF NOT EXISTS documents_stats_ai
                     AFTER INSERT ON documents WHEN new.kind!='metadata' BEGIN
                     UPDATE search_stats SET documents=documents+1 WHERE singleton=1;
@@ -476,6 +474,19 @@ class SearchIndex:
                         WHERE singleton=1;
                 END;
             """)
+            # Do not put the COUNT behind INSERT OR IGNORE. SQLite evaluates
+            # the SELECT before discovering that singleton=1 already exists,
+            # which scanned the full search corpus on every Fleet restart.
+            # Existing installations already maintain this row by trigger;
+            # only an upgrade from a schema without search_stats needs the
+            # one-time backfill.
+            if db.execute(
+                    "SELECT 1 FROM search_stats WHERE singleton=1").fetchone() is None:
+                documents = db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE kind!='metadata'").fetchone()[0]
+                db.execute(
+                    "INSERT INTO search_stats(singleton,documents) VALUES(1,?)",
+                    (documents,))
             db.execute("INSERT OR REPLACE INTO search_meta(key,value) VALUES('parser_version',?)",
                        (str(PARSER_VERSION),))
             db.commit()
