@@ -30,9 +30,17 @@ from fleetdash.search_index import SearchIndex  # noqa: E402
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+APP_MODULES = [
+    "main.js", "state-store.js", "nav.js", "search.js", "ui-utils.js",
+    "outbox.js", "push.js", "notifications.js", "context.js",
+    "viewer-handoff.js", "overlays.js", "workspace.js", "cards.js",
+    "settings-actions.js", "history-spawn.js", "insights.js",
+]
+
 STATIC_FILES = {
     "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8", "no-cache", {}),
-    "/static/app.js": ("static/app.js", "text/javascript; charset=utf-8", "no-cache", {}),
+    **{f"/static/js/{name}": (f"static/js/{name}",
+        "text/javascript; charset=utf-8", "no-cache", {}) for name in APP_MODULES},
     "/static/manifest.webmanifest": ("static/manifest.webmanifest",
         "application/manifest+json; charset=utf-8", "no-cache", {}),
     "/static/offline.html": ("static/offline.html", "text/html; charset=utf-8", "no-cache", {}),

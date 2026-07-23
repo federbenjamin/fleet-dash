@@ -37,7 +37,7 @@ fleetdash/                everything server.py imports
   repo_center.py            repository/git observation
   search_index.py           search worker (stdlib-only, spawned as a script)
   web_push.py + web_push_worker.js   Web Push supervisor + Node helper
-static/                   the whole browser app (app.js, fleet.css, sw.js — no build step)
+static/                   the whole browser app (js/*.js ES modules, fleet.css, sw.js — no build step)
 dashboard.html            application shell
 hooks/pending-capture.py  Claude hook: pending-question capture → fleet-dash-capture
 scripts/                  build-injector.sh, deploy-production.sh
@@ -59,7 +59,7 @@ per-instance runtime state (DBs, config, uploads, injector mailbox + applet, log
 ~/.claude/projects/<proj>/<sid>/subagents/*.jsonl agent transcripts┘ tails (engine.Tail)
 ~/.claude/fleet-dash-capture/pending/<sid>.json  hook-captured pending prompt (the ONLY source)
         ↓ fleetdash/ engine (Engine.scan, poll thread, 2s)
-snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.js (fetch poll 2s,
+snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/js/*.js (fetch poll 2s,
                                                self-reloads via page_v)
                           ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
                           │   (SendUserFile deliveries); page refetches only when the session's
@@ -96,7 +96,7 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
   10, 19–21, 23, 41, 54, 56
 - Notifications & Web Push: 2, 8, 44, 46–48
 - Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68
-- Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45,
+- Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45, 71,
   51, 53, 55, 57–60, 62, 63, 67, 70
 - HTTP routing gotcha: 6
 
@@ -944,6 +944,16 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     320px for the reader, and expose a labelled keyboard-operable separator. Mobile remains list-first
     and has no divider.
 
+71. **The browser app's ES modules share one global namespace on `globalThis`.** Shared mutable
+    state is declared `globalThis.<name>=…` in its owning module — never a module-level `let`,
+    whose published copy would go stale on reassignment. Top-level functions and consts publish
+    via `Object.assign(globalThis,{…})` (functions in the module-top block, consts at module
+    end) because inline `onclick=` handlers in generated HTML and cross-module bare-name
+    references resolve through the global object. Never name a global after an existing `window`
+    property. A new module joins four lists: `dashboard.html` modulepreload, `sw.js`
+    `SHELL_ASSETS` (+ cache bump), `server.py` `APP_MODULES`, and the browser fixture server.
+    Full contract and module roster: the `static/js/` file-map bullet.
+
 ## Dev workflow
 
 - Engine/server change: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`,
@@ -1073,7 +1083,28 @@ because they are also spawned directly as scripts by absolute path.
   routed, participate in browser/native back, and keep History/Insights out of Now.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
   motion/mobile rules.
-- `static/app.js` — render loop, pendingBox/sessionCard/convoBox/
+- `static/js/` — the browser app as 16 raw ES modules (no bundler), split from
+  the former single `static/app.js` as contiguous verbatim slices:
+  `main.js` (entry: side-effect imports in order + poll loop/init),
+  `state-store.js`, `nav.js`, `search.js`, `ui-utils.js`, `outbox.js`,
+  `push.js`, `notifications.js`, `context.js`, `viewer-handoff.js`,
+  `overlays.js`, `workspace.js`, `cards.js`, `settings-actions.js`,
+  `history-spawn.js`, `insights.js`. **Module contract (invariant 71):**
+  shared mutable state is declared as `globalThis.<name>=…` in its owning
+  module (never module-level `let` — an exported/copied binding goes stale on
+  reassignment); every top-level function/const publishes via
+  `Object.assign(globalThis,{…})` (functions in the module-top block so
+  hoisting makes them callable from any later module's init; consts at module
+  end), because the generated HTML's inline `onclick=` handlers and
+  cross-module bare-name references resolve through the global object. Never
+  name a global after an existing `window` property (the old `open` Set is
+  `openCards` for exactly that reason). `dashboard.html` lists every module as
+  `<link rel="modulepreload">` so the network-first shell loads in one
+  parallel burst; a new module must be added to that list, `sw.js`
+  `SHELL_ASSETS` (+ cache bump), `server.py` `APP_MODULES`, and the browser
+  fixture server. Legacy notes below refer to this code as "app.js" — the
+  subsystem descriptions still apply, now spread across the modules:
+  render loop, pendingBox/sessionCard/convoBox/
   renderQueue/historySection/insightsSection, built-in Markdown/static-HTML/JSON/PDF render routing, file viewer overlay
   (`#viewer`, survives re-renders by living outside `#sessions`), act client, token-cookie
   bootstrap (`?token=`), typing-focus render guard. UI open/closed state must live in JS globals

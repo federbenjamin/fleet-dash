@@ -1,9 +1,24 @@
-const SHELL_CACHE = 'fleet-shell-n6-v2';
+const SHELL_CACHE = 'fleet-shell-n7-v1';
 const RUNTIME_CACHE = 'fleet-runtime-n6-v1';
 const SHELL_ASSETS = [
   '/',
   '/static/fleet.css',
-  '/static/app.js',
+  '/static/js/main.js',
+  '/static/js/state-store.js',
+  '/static/js/nav.js',
+  '/static/js/search.js',
+  '/static/js/ui-utils.js',
+  '/static/js/outbox.js',
+  '/static/js/push.js',
+  '/static/js/notifications.js',
+  '/static/js/context.js',
+  '/static/js/viewer-handoff.js',
+  '/static/js/overlays.js',
+  '/static/js/workspace.js',
+  '/static/js/cards.js',
+  '/static/js/settings-actions.js',
+  '/static/js/history-spawn.js',
+  '/static/js/insights.js',
   '/static/manifest.webmanifest',
   '/static/offline.html',
   '/static/icons/fleet.svg',

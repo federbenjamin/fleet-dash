@@ -1570,7 +1570,7 @@ test('secondary-worktree close preserves by default and force removal lists Git-
   const modal = page.locator('#confirm');
   await expect(modal).toContainText('Secondary worktree');
   await expect(modal).toContainText('engine.py');
-  await expect(modal).toContainText('static/app.js');
+  await expect(modal).toContainText('static/js/cards.js');
   await expect(modal).toContainText('notes.txt');
   await expect(modal).not.toContainText('build/cache.bin');
   await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();

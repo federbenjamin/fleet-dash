@@ -28,7 +28,7 @@ def main():
     assert b'id="route-notifications"' in html
     assert b'data-notification-section="briefing"' in html
     assert b'<div id="budgets">' in html
-    assert b'<script src="/static/app.js"></script>' in html
+    assert b'<script type="module" src="/static/js/main.js"></script>' in html
 
     fleet = None
     for _ in range(30):
