@@ -115,10 +115,10 @@ def main():
 
     changed = request("/api/act", {"type": "mode", "session_id": sid,
                                     "mode": "default"}, token)
-    assert changed == {"ok": True, "mode": "default"}, changed
+    assert changed == {"ok": True, "mode": "default", "durable": True}, changed
     changed = request("/api/act", {"type": "mode", "session_id": sid,
                                     "mode": "plan"}, token)
-    assert changed == {"ok": True, "mode": "plan"}, changed
+    assert changed == {"ok": True, "mode": "plan", "durable": True}, changed
 
     query = urllib.parse.urlencode({"sid": sid})
     context = request("/api/context?" + query)
