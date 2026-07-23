@@ -2,7 +2,7 @@
 set -eu
 
 production_checkout=${FLEET_DASH_PROD_CHECKOUT:-"$HOME/.claude/fleet-dash-prod"}
-production_state=${FLEET_DASH_PROD_STATE:-"$HOME/.claude/fleet-dash-state"}
+production_state=${FLEET_DASH_PROD_STATE:-"$HOME/.claude/fleet-dash-prod-state"}
 service=com.benjaminfeder.fleet-dash
 fleet_url=http://127.0.0.1:8377
 scratch=${TMPDIR:-/private/tmp}/codex

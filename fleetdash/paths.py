@@ -7,15 +7,15 @@ every consumer sees the override.
 import os
 
 HOME = os.path.expanduser("~")
-PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-state")
+PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-prod-state")
 BASE = os.path.abspath(os.path.expanduser(
     os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
 INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()
 if INSTANCE_MODE not in ("production", "staging"):
     INSTANCE_MODE = "production"
-_CAPTURE_BASE_OVERRIDE = os.environ.get("FLEET_DASH_CAPTURE_DIR")
+DEFAULT_CAPTURE_BASE = os.path.join(HOME, ".claude", "fleet-dash-capture")
 CAPTURE_BASE = os.path.abspath(os.path.expanduser(
-    _CAPTURE_BASE_OVERRIDE or PRODUCTION_BASE))
+    os.environ.get("FLEET_DASH_CAPTURE_DIR") or DEFAULT_CAPTURE_BASE))
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 SESSIONS = os.path.join(HOME, ".claude", "sessions")
 CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
@@ -28,5 +28,9 @@ CLAUDE_USAGE_PREFS = os.path.join(
 
 
 def capture_base():
-    """Shared hook/statusline artifacts; tests that patch BASE keep working."""
-    return CAPTURE_BASE if _CAPTURE_BASE_OVERRIDE else BASE
+    """Shared hook/statusline artifacts (pending/, effort/, usage.json).
+
+    Always the shared capture dir — matching where the hooks actually write —
+    so a bare `python3 server.py` run sees captures too. Read at call time so
+    tests patching fleetdash.paths.CAPTURE_BASE take effect."""
+    return CAPTURE_BASE

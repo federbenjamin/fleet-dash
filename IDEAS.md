@@ -44,23 +44,16 @@ pass; revisit individually.
   `Tail.delivered_paths`, a bounded durable delivery whitelist that outlives
   the files/convo ring buffers; backups stay resolution-only (they track every
   checkpointed file and must never widen the whitelist).
-- **Subagent effort could use the child transcript directly.** Child rows now
-  carry `effort` too; `agent_effort` still uses the frontmatter pin → parent
-  fallback. Folding the child's own rows would catch a runtime discrepancy
-  with the pin. Low value while the fallback matches runtime behavior.
-- **Instance naming asymmetry.** Production state lives in
-  `~/.claude/fleet-dash-state`, staging state in `~/.claude/fleet-dash-staging`,
-  production code in `~/.claude/fleet-dash-prod`, dev/staging code in
-  `~/.claude/fleet-dash`, shared captures in `~/.claude/fleet-dash-capture`.
-  Consistent (`-prod-state`/`-staging-state`?) naming would help, but every
-  rename touches plists, the applet, and the hook — batch it if ever done.
-- **`capture_base()` fallback.** With captures moved to
-  `fleet-dash-capture`, a bare `python3 server.py` run (no
-  `FLEET_DASH_CAPTURE_DIR`) still reads captures from BASE and misses hook
-  files. Both plists set the env var so the daemons are correct; changing the
-  code default requires reworking the tests that patch `paths.BASE` and
-  expect captures to follow it.
-- **Stale runtime leftovers in `~/.claude/fleet-dash-state`:**
+- ~~Subagent effort from the child transcript~~ — **resolved 2026-07-23**:
+  `scan_agents` and `agent_context` prefer the child tail's own effort rows;
+  the frontmatter pin → parent fallback remains for older transcripts.
+- ~~Instance naming asymmetry~~ — **resolved 2026-07-23**: state dirs renamed
+  to `fleet-dash-prod-state` / `fleet-dash-staging-state` (plists, both
+  applets, deploy script, and docs updated; both daemons verified after).
+- ~~`capture_base()` fallback~~ — **resolved 2026-07-23**: the no-env default
+  is now `~/.claude/fleet-dash-capture` (where hooks actually write); the test
+  fixture patches `paths.CAPTURE_BASE` alongside `BASE`.
+- **Stale runtime leftovers in `~/.claude/fleet-dash-prod-state`:**
   `codex_threads.json.pre-managed-daemon.bak` (2026-07-22) and the empty
   `.migration.lock` — delete once the managed-daemon migration is confirmed
   good. A full pre-reorg runtime backup lives at
@@ -68,10 +61,10 @@ pass; revisit individually.
 
 ## Docs
 
-- `CLAUDE.md` (92 KB) duplicates much of `AGENTS.md` (40 KB); the invariants
-  list has outgrown flat prose. Consider one canonical invariants file with
-  numbered anchors and slimmer per-agent front doors. (Instruction-surface
-  edit: load `skill-editor` first per user rules.)
+- ~~CLAUDE.md/AGENTS.md duplication~~ — **resolved 2026-07-23**: AGENTS.md is
+  the single canonical guide (with a code-structure section); CLAUDE.md is
+  just `@AGENTS.md`. Still open: the 70-invariant list has outgrown flat
+  prose — numbered anchors / grouping would help discoverability.
 - `docs/` mixes roadmaps, postmortems, and one live reference
   (`session-organization.md`); subfolders (`roadmaps/`, `postmortems/`) would
   keep the live reference findable.
