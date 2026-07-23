@@ -2532,7 +2532,8 @@ test('fleet cards show submitting, submitted, and failed quick-response feedback
   await expect(restore).toBeVisible();
   await restore.click();
   await expect(fleetFeedback('claude-one')).toHaveCount(0);
-  await expect(card.locator('.primarybtn')).toBeVisible();
+  await expect(card.locator('.actionopen')).toBeVisible();
+  await expect(card.locator('.primarybtn')).toHaveCount(0);
 
 });
 
@@ -2786,22 +2787,8 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   await expect(action).toContainText('Get 429 into a mergable state');
   await expect(action).toContainText('hazy-hatching-curry');
   await expect(action.getByText('Question waiting', { exact: true })).toBeVisible();
-  await expect(action.getByRole('button', { name: 'Respond' })).toBeVisible();
-  const actionPin = action.getByRole('button', { name: 'pin session' });
-  await expect(actionPin).toBeVisible();
-  await actionPin.click();
-  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
-    .toEqual(['claude-one']);
-  const pinnedPin = page.locator('#pinned [data-sid="claude-one"]')
-    .getByRole('button', { name: 'unpin session' });
-  await expect(pinnedPin).toBeVisible();
-  await pinnedPin.click();
-  await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
-    .toEqual([]);
-  await expect(page.locator('#needsyou [data-sid="claude-one"]')).toHaveCount(0);
-  await expect(page.locator('[data-action-sid="claude-one"], #needsyou [data-sid="claude-one"]')).toHaveCount(1);
-
-  await action.getByRole('button', { name: 'Respond' }).click();
+  await expect(action.locator('.primarybtn,.actionpin')).toHaveCount(0);
+  await action.locator('.actionopen').click();
   await expect(page.locator('#sview')).toContainText('How should I bring PR #429 up to date with main');
   await page.locator('#sclose').click();
 
@@ -2820,7 +2807,8 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   await expect(fallback).toContainText('Get 429 into a mergable state');
   await expect(fallback).toContainText('hazy-hatching-curry');
   await expect(fallback.locator('.chip')).toHaveText('Question waiting');
-  await fallback.getByRole('button', { name: 'Respond' }).click();
+  await expect(fallback.locator('.primarybtn')).toHaveCount(0);
+  await fallback.locator('.shead').click();
   await expect(page.locator('#sview')).toContainText('How should I bring PR #429 up to date with main');
   await page.locator('#sclose').click();
 
@@ -3451,7 +3439,8 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
   await expect(budgetAction).toContainText('Fleet tokens budget exceeded');
   await expect(budgetAction).toContainText('Future spawns blocked');
   await expect(budgetAction.getByRole('checkbox')).toHaveCount(0);
-  await budgetAction.getByRole('button', { name: 'Review budget' }).click();
+  await expect(budgetAction.locator('.primarybtn')).toHaveCount(0);
+  await budgetAction.locator('.actionopen').click();
   await expect(page.locator('#budgets')).toContainText('Fleet tokens budget');
   await expect(page.locator('#budgets')).toContainText('Provider tokens budget');
   await expect(page.locator('#budgets')).toContainText('token only');

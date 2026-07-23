@@ -61,7 +61,8 @@ and command/file approvals are never bulk actions.
 Fleet incrementally observes at most the 32 most recently updated external Codex rollouts from the
 last 24 hours, plus explicitly pinned external sessions. An active external session is Working and
 an idle one is Available, both with View-only access. After the configured inactivity threshold
-(2 hours by default) it becomes dormant and moves to Session history. If its final assistant prose asks a direct question, it moves
+(2 hours by default) it becomes dormant and moves to Session history. If its final assistant prose
+asks a direct question, it moves
 to Needs you with View-only access instead. The exception is an unloaded external/view-only thread:
 after 30 minutes of quiet, Fleet clears that prose-only request and moves it to Session history.
 

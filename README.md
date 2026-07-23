@@ -251,7 +251,8 @@ the provider without affecting Claude sessions.
   A completed-work handoff with a concrete summary or verification enters the Action Inbox as
   **Completed work is ready to review / Unreviewed** until opened. Progress prose and interrupted
   turns do not. Each Action Inbox row opens directly; it has no checkbox, bulk action, or duplicate
-  View/Respond control.
+  View/Respond control. Other completed non-question turns remain **Available** without entering
+  the Action Inbox.
 - **History** is one flat chronological destination for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
   View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no
