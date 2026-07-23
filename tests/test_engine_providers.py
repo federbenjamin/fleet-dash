@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import plistlib
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -13,11 +14,14 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from fleetdash import engine as engine_module
 from fleetdash import paths as engine_paths
 from fleetdash import engine_uploads as engine_uploads_module
-from fleetdash.engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
-                    load_config, classify_placement, redact_handoff_text, requests_reply)
+from fleetdash.config import (DEFAULT_CONFIG, IMAGE_UPLOAD_SESSION_COUNT,
+                    WAITING_CONFIRM_SECONDS, load_config)
+from fleetdash.engine import Engine
+from fleetdash.placement import (classify_placement, completed_handoff,
+                    redact_handoff_text, requests_reply)
+from fleetdash.tail import Tail
 from server import Handler
 
 
@@ -732,7 +736,7 @@ class EngineProviderTest(unittest.TestCase):
         self.engine.scan()
         root = os.path.join(self.base, "uploads")
         os.makedirs(root, exist_ok=True)
-        for index in range(engine_module.IMAGE_UPLOAD_SESSION_COUNT):
+        for index in range(IMAGE_UPLOAD_SESSION_COUNT):
             upload_id = f"quota-{index}"
             _, image_path, meta_path = self.engine._image_upload_paths(upload_id)
             with open(image_path, "wb") as image:
@@ -744,7 +748,7 @@ class EngineProviderTest(unittest.TestCase):
                                   "fleet-192.png")
         with open(image_path, "rb") as handle:
             data = handle.read()
-        with mock.patch.object(engine_module.subprocess, "run") as convert:
+        with mock.patch.object(subprocess, "run") as convert:
             rejected = self.engine.store_image_upload(
                 "codex:same", "quota-overflow", "phone.png", "image/png", data)
         self.assertFalse(rejected["ok"])
@@ -768,7 +772,7 @@ class EngineProviderTest(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with mock.patch.object(engine_uploads_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
-             mock.patch.object(engine_module.subprocess, "run", side_effect=convert), \
+             mock.patch.object(subprocess, "run", side_effect=convert), \
              mock.patch.object(self.engine, "_strip_jpeg_metadata", return_value=b"j" * 20):
             rejected = self.engine.store_image_upload(
                 "codex:same", "quota-normalized", "phone.png", "image/png",
@@ -1221,7 +1225,7 @@ class EngineProviderTest(unittest.TestCase):
                     f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
         with mock.patch("fleetdash.codex_runtime.codex_control_socket", return_value=socket_path), \
-             mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
+             mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=exact + duplicate_child + wrong_socket + headless)):
             routes = self.engine._codex_terminal_routes(force=True)
         self.assertEqual(routes, {thread_id: {"tty": "/dev/ttys001", "pid": 102}})
@@ -1230,7 +1234,7 @@ class EngineProviderTest(unittest.TestCase):
                              f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
         with mock.patch("fleetdash.codex_runtime.codex_control_socket", return_value=socket_path), \
-             mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
+             mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=ambiguous)):
             self.assertEqual(self.engine._codex_terminal_routes(force=True), {})
 
@@ -1657,7 +1661,7 @@ class EngineProviderTest(unittest.TestCase):
         ps_result = SimpleNamespace(stdout="??\n", returncode=0)
         lsof_result = SimpleNamespace(stdout=f"p{pid}\nf0\nn/private/tmp/input\n",
                                       returncode=0)
-        with mock.patch.object(engine_module.subprocess, "run",
+        with mock.patch.object(subprocess, "run",
                                side_effect=[ps_result, lsof_result]):
             self.assertEqual(self.engine._tty_for_pid(pid), "")
         self.assertNotIn(pid, self.engine._tty_cache)
@@ -1685,8 +1689,8 @@ class EngineProviderTest(unittest.TestCase):
             "/usr/local/bin/claude attach 1a2b3c4d", False)])
 
         process = SimpleNamespace(stdout="/usr/local/bin/claude --bg-pty-host")
-        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
-             mock.patch.object(engine_module.os, "kill") as kill:
+        with mock.patch.object(subprocess, "run", return_value=process), \
+             mock.patch.object(os, "kill") as kill:
             closed = self.engine.act({"type": "close", "session_id": "same"})
         self.assertTrue(closed["ok"])
         transport.stop.assert_called_once_with("1a2b3c4d")
@@ -1807,7 +1811,7 @@ class EngineProviderTest(unittest.TestCase):
         results = iter(({"ok": True}, {"ok": False, "code": "injector_not_launched",
                                         "error": "second command did not launch"}))
         self.engine._iterm_write = lambda tty, steps, step_delay=None: next(results)
-        with mock.patch.object(engine_module.time, "sleep"):
+        with mock.patch.object(time, "sleep"):
             settings = self.engine.act({"type": "session_settings", "session_id": "same",
                 "model": "opus", "effort": "high",
                 "expected_model": "claude-sonnet", "expected_effort": ""})
@@ -1820,7 +1824,7 @@ class EngineProviderTest(unittest.TestCase):
         results = iter(({"ok": True}, {"ok": False, "code": "injector_not_launched",
                                         "error": "second key did not launch"}))
         self.engine._iterm_write = lambda tty, steps, step_delay=None: next(results)
-        with mock.patch.object(engine_module.time, "sleep"):
+        with mock.patch.object(time, "sleep"):
             permission = self.engine.act({"type": "permission_mode",
                 "session_id": "same", "mode": "plan"})
         self.assertTrue(permission["ok"], permission)
@@ -1882,7 +1886,7 @@ class EngineProviderTest(unittest.TestCase):
             results = iter(({"ok": True}, {"ok": False,
                 "code": "injector_not_launched", "error": "second key failed"}))
             restarted._iterm_write = lambda tty, steps, step_delay=None: next(results)
-            with mock.patch.object(engine_module.time, "sleep"):
+            with mock.patch.object(time, "sleep"):
                 partial = restarted.act({"type": "permission_mode",
                     "session_id": "same", "mode": "plan"})
             self.assertTrue(partial["partial"], partial)
@@ -2444,14 +2448,14 @@ class EngineProviderTest(unittest.TestCase):
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps, step_delay)) or {"ok": True})
         process = SimpleNamespace(stdout="/usr/local/bin/claude --model sonnet")
-        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
-             mock.patch.object(engine_module.os, "kill") as kill, \
-             mock.patch.object(engine_module.time, "sleep"):
+        with mock.patch.object(subprocess, "run", return_value=process), \
+             mock.patch.object(os, "kill") as kill, \
+             mock.patch.object(time, "sleep"):
             result = self.engine.act({"type": "close", "session_id": "same"})
         self.assertTrue(result["ok"])
         self.assertTrue(result["interrupted"])
         self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.05)])
-        kill.assert_called_once_with(pid, engine_module.signal.SIGTERM)
+        kill.assert_called_once_with(pid, signal.SIGTERM)
 
     def test_claude_close_interrupts_an_active_shell_before_termination(self):
         pid = 424244
@@ -2463,22 +2467,22 @@ class EngineProviderTest(unittest.TestCase):
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps, step_delay)) or {"ok": True})
         process = SimpleNamespace(stdout="/usr/local/bin/claude --model sonnet")
-        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
-             mock.patch.object(engine_module.os, "kill") as kill, \
-             mock.patch.object(engine_module.time, "sleep"):
+        with mock.patch.object(subprocess, "run", return_value=process), \
+             mock.patch.object(os, "kill") as kill, \
+             mock.patch.object(time, "sleep"):
             result = self.engine.act({"type": "close", "session_id": "same"})
         self.assertTrue(result["ok"])
         self.assertTrue(result["interrupted"])
         self.assertEqual(writes, [("/dev/ttys-test", [("\x1b", False)], 0.05)])
-        kill.assert_called_once_with(pid, engine_module.signal.SIGTERM)
+        kill.assert_called_once_with(pid, signal.SIGTERM)
 
     def test_claude_close_refuses_reused_non_claude_pid(self):
         pid = 424243
         self.engine.live_sessions = lambda: [{"sessionId": "same", "pid": pid,
             "cwd": self.cwd, "status": "idle", "name": "Claude"}]
         process = SimpleNamespace(stdout="/usr/bin/python /work/.claude/fleet-dash/server.py")
-        with mock.patch.object(engine_module.subprocess, "run", return_value=process), \
-             mock.patch.object(engine_module.os, "kill") as kill:
+        with mock.patch.object(subprocess, "run", return_value=process), \
+             mock.patch.object(os, "kill") as kill:
             result = self.engine.act({"type": "close", "session_id": "same"})
         self.assertFalse(result["ok"])
         self.assertIn("non-Claude", result["error"])
@@ -2691,7 +2695,7 @@ class EngineProviderTest(unittest.TestCase):
         self.engine.is_trusted = lambda cwd, trusted=None: True
         self.engine._iterm_write = lambda tty, steps, step_delay=None: {"ok": True}
         self.engine.live_sessions = lambda: []
-        with mock.patch.object(engine_module.time, "monotonic", side_effect=[0, 31]):
+        with mock.patch.object(time, "monotonic", side_effect=[0, 31]):
             result = self.engine.execute_handoff({"type": "handoff",
                 "session_id": "same", "provider": "claude", "cwd": self.cwd,
                 "preview": "Wait for exact identity"})
@@ -2733,7 +2737,7 @@ class EngineProviderTest(unittest.TestCase):
     def test_codex_worktree_creation_uses_argv_and_validates_name(self):
         os.makedirs(os.path.join(self.cwd, ".git"), exist_ok=True)
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(engine_module.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(subprocess, "run", return_value=completed) as run:
             made = self.engine._create_codex_worktree(self.cwd, "handoff-ui")
         self.assertTrue(made["ok"])
         argv = run.call_args.args[0]
@@ -2890,7 +2894,7 @@ class EngineProviderTest(unittest.TestCase):
                        "status": "waiting", "name": "Claude"}, handle)
         self.engine.codex = FakeCodex()
         now = os.path.getmtime(self.transcript) + 1
-        with mock.patch.object(engine_module.time, "time", return_value=now):
+        with mock.patch.object(time, "time", return_value=now):
             session = self.engine.scan()["sessions"][0]
         self.assertEqual((session["state"], session["ui_group"],
                           session["reason_label"]),
@@ -3302,7 +3306,7 @@ class EngineProviderTest(unittest.TestCase):
             if argv[:2] == ["ps", "-p"]:
                 return SimpleNamespace(stdout="")
             return real_run(argv, *args, **kwargs)
-        with mock.patch.object(engine_module.subprocess, "run", side_effect=closed_process):
+        with mock.patch.object(subprocess, "run", side_effect=closed_process):
             locked_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
                 "cleanup_ticket": locked_preview["cleanup_ticket"], "force": False})
         self.assertTrue(locked_removed["ok"], locked_removed)
@@ -3741,7 +3745,7 @@ class EngineProviderTest(unittest.TestCase):
 
         threads = [threading.Thread(target=write, args=(tty,))
                    for tty in ("/dev/ttys101", "/dev/ttys202")]
-        with mock.patch.object(engine_module.subprocess, "run", side_effect=injector):
+        with mock.patch.object(subprocess, "run", side_effect=injector):
             for thread in threads:
                 thread.start()
             barrier.wait()
@@ -3771,7 +3775,7 @@ class EngineProviderTest(unittest.TestCase):
         preview = {"inspect_ok": True, "revision": "same-revision",
                    "root": self.cwd, "worktree": worktree, "remove_allowed": True,
                    "force_remove_allowed": False, "owned_lock": False}
-        with mock.patch.object(engine_module.subprocess, "run", side_effect=process), \
+        with mock.patch.object(subprocess, "run", side_effect=process), \
              mock.patch.object(self.engine, "close_worktree_preview", return_value=preview), \
              mock.patch.object(self.engine, "_bounded_process",
                                return_value={"ok": True, "stdout": "", "stderr": ""}):

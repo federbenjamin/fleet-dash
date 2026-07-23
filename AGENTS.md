@@ -13,7 +13,7 @@ fleetdash/                everything server.py imports
   config.py                 DEFAULT_CONFIG, load_config, pricing, shared constants
   placement.py              Now-queue classification + reply-request detection
   tail.py                   Tail: incremental transcript fold (offsets, convo/files, usage)
-  engine.py                 Engine = __init__ + constants + compat re-exports + spend CLI
+  engine.py                 Engine = __init__ + constants + spend CLI
   engine_scan.py            registry scan, session organization, status, control state
   engine_act.py             act(): the injection dispatcher
   engine_context.py         conversation/file projections, hook pending, effort, commands
@@ -978,8 +978,8 @@ because they are also spawned directly as scripts by absolute path.
   `requests_reply`, `completed_handoff`, closed placement, handoff redaction (invariant 31).
 - `fleetdash/tail.py` — Tail (incremental jsonl fold + convo/files ring buffers +
   usage_stats counters).
-- `fleetdash/engine.py` — the Engine class (imports + `__init__` + class constants +
-  compat re-exports) composed from ten topical mixins, plus the spend CLI
+- `fleetdash/engine.py` — the Engine class (imports + `__init__` + class
+  constants) composed from ten topical mixins, plus the spend CLI
   (`PYTHONPATH=~/.claude/fleet-dash python3 -m fleetdash.engine spend --cwd|--session`,
   used by the global `/subagent-spend` command). GET `/api/insights?days=N` aggregates
   agent_runs + session_runs + usage_stats. `Engine.commands(sid)` builds the slash
@@ -1033,7 +1033,10 @@ because they are also spawned directly as scripts by absolute path.
   threads/turns/items/questions/approvals/artifacts/subagents, shared-runtime ownership, and
   provider capability mapping. Imports the transport from `codex_protocol` and the runtime
   lifecycle from `codex_runtime`.
-- `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
+- `server.py` — ThreadingHTTPServer; `Handler.GET_ROUTES`/`POST_ROUTES` map each
+  route to `(auth, handler)` so the token-auth surface is auditable in one place —
+  new routes are added to those tables, never as new `if` branches.
+  GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,

@@ -12,13 +12,11 @@ pass; revisit individually.
   `InjectionTransport` owning the applet mailbox + locks, a `LedgerStore`
   owning the sqlite handles) injected into `Engine.__init__`, letting each
   piece be constructed and tested alone.
-- **Retire `fleetdash/engine.py`'s compat re-export block.** Tests and
-  server.py still import `DEFAULT_CONFIG`, `Tail`, `classify_placement`, etc.
-  from `fleetdash.engine`. Update importers to the real modules
-  (`fleetdash.config`, `fleetdash.tail`, `fleetdash.placement`) and delete the
-  `# noqa` block; also drop the `time/subprocess/signal` re-imports once
-  `test_engine_providers.py` patches those on the owning mixin modules
-  instead of `engine_module`.
+- ~~Retire `fleetdash/engine.py`'s compat re-export block~~ — **resolved
+  2026-07-23**: server.py and `test_engine_providers.py` now import from the
+  owning modules (`fleetdash.config`/`tail`/`placement`), the test patches
+  `subprocess`/`time`/`os`/`signal` on the modules themselves, and engine.py
+  keeps only the imports it uses.
 - **`codex_adapter.py` (3.5k lines) and `briefing.py` (2.7k lines) are the
   next split candidates.** Codex: protocol client (`UnixWebSocketProcess` /
   `CodexAppServer`) vs. adapter/state vs. runtime migration. Briefing:
@@ -28,9 +26,10 @@ pass; revisit individually.
   `page_v` mtime logic must cover every file) vs. introducing a bundling step
   (repo currently has no build). Either way the render/act/overlay/draft
   subsystems are separable.
-- **`server.py` route table.** The Handler's do_GET/do_POST dispatch is a long
-  if/elif chain; a table of `(path, token_required, handler)` would make the
-  auth surface auditable at a glance.
+- ~~`server.py` route table~~ — **resolved 2026-07-23**: `Handler.GET_ROUTES` /
+  `POST_ROUTES` map route → `(auth, handler method)`; the auth kinds are
+  `open`, `token`, `token-text` (`/api/file`'s plain-text 403), and `self`
+  (capability-action/upload own their request cycle).
 
 ## Drift / latent gaps noticed while auditing (verify before fixing)
 
