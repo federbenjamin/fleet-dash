@@ -63,6 +63,34 @@ class CodexRolloutObserverTests(unittest.TestCase):
         self.assertEqual(final["completed_at"], 1784160004)
         self.assertNotEqual(first["revision"], final["revision"])
 
+    def test_turn_context_and_current_context_usage_are_observed(self):
+        self.append(
+            {"timestamp": "2026-07-16T00:00:00Z", "type": "turn_context",
+             "payload": {"model": "gpt-5.6-sol", "effort": "xhigh"}},
+            self.event("2026-07-16T00:00:01Z", "token_count", info={
+                "last_token_usage": {"input_tokens": 20_000,
+                                     "cached_input_tokens": 16_000,
+                                     "output_tokens": 200,
+                                     "reasoning_output_tokens": 40,
+                                     "total_tokens": 20_240},
+                "total_token_usage": {"input_tokens": 40_000,
+                                      "cached_input_tokens": 32_000,
+                                      "output_tokens": 300,
+                                      "reasoning_output_tokens": 60,
+                                      "total_tokens": 40_360},
+                "model_context_window": 272_000}))
+        observed = self.observer.observe(self.THREAD)
+        self.assertEqual((observed["model"], observed["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        self.assertEqual(observed["token_usage"], {
+            "last": {"inputTokens": 20_000, "cachedInputTokens": 16_000,
+                     "outputTokens": 200, "reasoningOutputTokens": 40,
+                     "totalTokens": 20_240},
+            "total": {"inputTokens": 40_000, "cachedInputTokens": 32_000,
+                      "outputTokens": 300, "reasoningOutputTokens": 60,
+                      "totalTokens": 40_360},
+            "modelContextWindow": 272_000})
+
     def test_truncate_rebuild_malformed_unknown_and_adjacent_duplicate(self):
         self.append(
             b'{"type":"event_msg","payload":',

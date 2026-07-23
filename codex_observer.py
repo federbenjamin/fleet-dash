@@ -20,10 +20,13 @@ import time
 
 
 THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,79}")
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
 MAX_ROW_BYTES = 2 * 1024 * 1024
 READ_CHUNK_BYTES = 64 * 1024
 MAX_READ_BYTES_PER_OBSERVE = 4 * 1024 * 1024
 MAX_READ_SECONDS_PER_OBSERVE = 0.05
+MAX_CHILDREN_PER_PARENT = 32
 
 
 def _epoch(value):
@@ -72,8 +75,57 @@ class CodexRolloutObserver:
                 "messages": deque(maxlen=self.max_messages),
                 "active": False, "turn_id": None, "started_at": None,
                 "completed_at": None, "last_activity_at": None,
+                "model": None, "effort": None, "token_usage": {},
                 "revision": 0, "malformed_rows": 0, "oversized_rows": 0,
                 "unknown_events": 0, "error": None}
+
+    @staticmethod
+    def _setting(value, pattern):
+        value = str(value or "").strip()
+        return value if pattern.fullmatch(value) else None
+
+    def _turn_context(self, entry, payload):
+        """Keep only the display settings emitted by the local rollout."""
+        model = self._setting(payload.get("model"), MODEL_ID)
+        effort = self._setting(payload.get("effort"), EFFORT)
+        if model:
+            entry["model"] = model
+        if effort:
+            entry["effort"] = effort
+
+    @staticmethod
+    def _token_usage(payload):
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None
+
+        def normalize(value):
+            if not isinstance(value, dict):
+                return None
+            out = {}
+            for source, target in (("input_tokens", "inputTokens"),
+                                   ("cached_input_tokens", "cachedInputTokens"),
+                                   ("cache_write_input_tokens", "cacheWriteInputTokens"),
+                                   ("output_tokens", "outputTokens"),
+                                   ("reasoning_output_tokens", "reasoningOutputTokens"),
+                                   ("total_tokens", "totalTokens")):
+                try:
+                    number = int(value.get(source))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if 0 <= number <= 10 ** 12:
+                    out[target] = number
+            return out or None
+
+        usage = {"last": normalize(info.get("last_token_usage")),
+                 "total": normalize(info.get("total_token_usage"))}
+        try:
+            window = int(info.get("model_context_window"))
+        except (TypeError, ValueError, OverflowError):
+            window = 0
+        if 1 <= window <= 2_000_000:
+            usage["modelContextWindow"] = window
+        return {key: value for key, value in usage.items() if value}
 
     @staticmethod
     def _message(entry, role, text, timestamp, phase=None):
@@ -110,6 +162,10 @@ class CodexRolloutObserver:
         elif typ == "agent_message":
             self._message(entry, "assistant", payload.get("message"), timestamp,
                           payload.get("phase"))
+        elif typ == "token_count":
+            usage = self._token_usage(payload)
+            if usage:
+                entry["token_usage"] = usage
         elif typ not in {"token_count", "context_compacted", "patch_apply_end",
                          "mcp_tool_call_end", "web_search_end", "item_completed",
                          "thread_settings_applied"}:
@@ -119,10 +175,6 @@ class CodexRolloutObserver:
         if len(raw) > MAX_ROW_BYTES:
             entry["oversized_rows"] += 1
             return
-        # Visible messages and lifecycle are event_msg rows. session_meta is
-        # intentionally ignored for now; its path/config payload is not needed.
-        if b'"type":"event_msg"' not in raw:
-            return
         try:
             row = json.loads(raw)
         except (UnicodeDecodeError, ValueError):
@@ -131,7 +183,10 @@ class CodexRolloutObserver:
         if not isinstance(row, dict) or not isinstance(row.get("payload"), dict):
             entry["malformed_rows"] += 1
             return
-        self._event(entry, row)
+        if row.get("type") == "event_msg":
+            self._event(entry, row)
+        elif row.get("type") == "turn_context":
+            self._turn_context(entry, row["payload"])
 
     def observe(self, thread_id):
         """Fold new complete rows and return a bounded serializable snapshot."""
@@ -186,7 +241,9 @@ class CodexRolloutObserver:
                 if rows_seen:
                     entry["revision"] += rows_seen
                 entry["error"] = None
-                return self._snapshot(thread_id, entry)
+                snapshot = self._snapshot(thread_id, entry)
+                snapshot["agents"] = self._child_agents(thread_id, path)
+                return snapshot
         except (OSError, ValueError) as exc:
             with self._lock:
                 entry = self._entries.get(thread_id)
@@ -194,6 +251,46 @@ class CodexRolloutObserver:
                     entry["error"] = str(exc)
                     return self._snapshot(thread_id, entry)
             return {"thread_id": thread_id, "error": str(exc), "messages": []}
+
+    def _child_agents(self, parent_id, parent_path):
+        """Discover sibling rollout files that declare this parent, bounded by day."""
+        prefix = f'"parent_thread_id":"{parent_id}"'.encode()
+        candidates = sorted(glob.glob(os.path.join(os.path.dirname(parent_path), "rollout-*.jsonl")),
+                            key=lambda item: os.path.getmtime(item), reverse=True)
+        agents = []
+        for path in candidates[:MAX_CHILDREN_PER_PARENT]:
+            if os.path.realpath(path) == os.path.realpath(parent_path):
+                continue
+            try:
+                with open(path, "rb") as handle:
+                    first = handle.read(16 * 1024)
+                if prefix not in first:
+                    continue
+                match = re.search(br'"id":"([A-Za-z0-9-]{8,80})"', first)
+                child_id = match.group(1).decode() if match else None
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not THREAD_ID.fullmatch(str(child_id or "")):
+                continue
+            child = self.observe(child_id)
+            if not child:
+                continue
+            active = bool(child.get("active"))
+            messages = child.get("messages") or []
+            last = next((item for item in reversed(messages)
+                         if item.get("role") == "assistant" and item.get("text")), None)
+            agents.append({"agent_id": "agent-" + child_id, "native_session_id": child_id,
+                           "session_id": "codex:" + parent_id, "agent_type": "codex",
+                           "description": "Codex subagent", "depth": 0,
+                           "model": child.get("model") or "", "family": "codex",
+                           "effort": child.get("effort"),
+                           "state": "running" if active else "done",
+                           "total_tokens": None, "cost": None,
+                           "cost_source": "unavailable", "tokens": {}, "spark": [],
+                           "tok_per_s": None, "started": child.get("started_at"),
+                           "last": child.get("last_activity_at"), "last_msg": last,
+                           "convo_v": child.get("revision")})
+        return agents
 
     def _snapshot(self, thread_id, entry):
         warnings = []
@@ -205,6 +302,8 @@ class CodexRolloutObserver:
                 "turn_id": entry.get("turn_id"), "started_at": entry.get("started_at"),
                 "completed_at": entry.get("completed_at"),
                 "last_activity_at": entry.get("last_activity_at"),
+                "model": entry.get("model"), "effort": entry.get("effort"),
+                "token_usage": dict(entry.get("token_usage") or {}),
                 "messages": [dict(item) for item in entry["messages"]],
                 "revision": f"rollout:{entry.get('inode')}:{entry.get('offset')}:{entry.get('revision')}",
                 "warning": "; ".join(warnings) or None, "error": entry.get("error"),

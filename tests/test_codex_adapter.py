@@ -253,6 +253,15 @@ class CodexAdapterTest(unittest.TestCase):
                           "reasoningOutputTokens": 50, "totalTokens": 1050}
         self.assertEqual(_usage_cumulative(usage), 1050)
 
+    def test_local_model_catalog_retains_context_window(self):
+        path = os.path.join(self.tmp.name, "models-cache.json")
+        with open(path, "w") as handle:
+            json.dump({"models": [{"slug": "gpt-local", "display_name": "GPT Local",
+                                    "context_window": 272000}]}, handle)
+        self.assertEqual(_local_model_catalog(path), [{"id": "gpt-local",
+                          "name": "GPT Local", "efforts": [],
+                          "context_window": 272000}])
+
     def test_account_usage_flattens_quota_windows(self):
         normalized = _account_usage({"rateLimitsByLimitId": {"codex": {
             "planType": "pro", "primary": {"usedPercent": 25,

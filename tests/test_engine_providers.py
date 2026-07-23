@@ -14,8 +14,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 import engine as engine_module
-from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, load_config,
-                    classify_placement, redact_handoff_text, requests_reply)
+from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
+                    load_config, classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
 
@@ -186,6 +186,11 @@ class EngineProviderTest(unittest.TestCase):
         self.assertFalse(claude["capabilities"]["model_effort_settings"])
         self.assertFalse(claude["capabilities"]["change_model_effort"])
         self.assertFalse(claude["capabilities"]["change_permission_mode"])
+        masked_attention = self.engine._staging_mask_session({
+            "session_id": "same", "reply_requested": True, "new_response": True,
+            "capabilities": {"submit": True}})
+        self.assertFalse(masked_attention["reply_requested"])
+        self.assertFalse(masked_attention["new_response"])
         self.assertTrue(codex["staging_owned"])
         self.assertTrue(codex["capabilities"]["submit"])
         denied = self.engine.act({"type": "text", "session_id": "same",
@@ -2710,11 +2715,23 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual([fact["kind"] for fact in result["state_evidence"]][:3],
                          ["provider_signal", "pending_request", "transcript_event"])
 
+    def test_interrupted_turn_never_creates_reply_or_unreviewed_work(self):
+        session = codex_session()
+        session.update(state="turn_done", interrupted=True,
+                       _latest_prose={"role": "assistant",
+                                      "text": "Which layout should I use?"})
+        result = self.engine.organize_session(session, 100)
+        self.assertEqual((result["ui_group"], result["reason_label"]),
+                         ("available", "Available"))
+        self.assertFalse(result["reply_requested"])
+        self.assertFalse(result["new_response"])
+
     def test_external_completion_is_available_before_it_ages_into_history(self):
         session = codex_session()
         session.update(state="turn_done", headless=True, read_only=True,
                        read_only_reason="Desktop-owned thread", quiet_s=15,
-                       _latest_prose={"role": "assistant", "text": "Finished."})
+                       _latest_prose={"role": "assistant", "text":
+                           "Finished.\n\n- Updated the deployment files\n- Verified the build"})
         current = self.engine.organize_session(session, 100)
         self.assertEqual((current["ui_group"], current["reason_label"],
                           current["access"], current["primary_action"]),
@@ -3074,7 +3091,7 @@ class EngineProviderTest(unittest.TestCase):
         self.assertFalse(dismissed["ok"])
         self.assertEqual(len(self.engine.action_records([organized])), 1)
 
-    def test_completed_and_reply_actions_expose_only_valid_bulk_operations(self):
+    def test_completed_handoffs_are_unreviewed_actions_and_progress_is_not(self):
         reply = codex_session()
         reply.update(ui_group="needs_you", reason_label="Reply requested",
                      primary_action="respond", primary_action_label="Respond",
@@ -3087,20 +3104,15 @@ class EngineProviderTest(unittest.TestCase):
                        primary_action="continue", primary_action_label="Continue",
                        access="interactive", access_label="Interactive",
                        activity_at=95, reply_requested=False, new_response=True,
-                       last_msg={"role": "assistant", "text": "Done."})
+                       last_msg={"role": "assistant", "text": "Done.\n\n- Updated the dashboard\n- Tests passed"})
         records = {item["kind"]: item for item in self.engine.action_records([reply, outcome])}
         self.assertIn("mark_available", records["reply"]["safe_bulk"])
         self.assertNotIn("mark_read", records["reply"]["safe_bulk"])
-        self.assertIn("mark_read", records["outcome"]["safe_bulk"])
-        self.assertIn("dismiss", records["outcome"]["safe_bulk"])
-        self.engine.snapshot_cache = {"actions": list(records.values())}
-        dismissed = self.engine.update_settings({"bulk_triage": {
-            "operation": "dismiss", "items": [{"session_id": "codex:other",
-                "action_id": records["outcome"]["action_id"],
-                "revision": records["outcome"]["revision"]}]}})
-        self.assertTrue(dismissed["ok"])
-        self.assertNotIn("outcome", {item["kind"] for item in
-                                     self.engine.action_records([reply, outcome])})
+        self.assertEqual((records["outcome"]["request"], records["outcome"]["delivery_state"]),
+                         ("Completed work is ready to review", "Unreviewed"))
+        self.assertTrue(completed_handoff("Done.\n\n- Updated the dashboard\n- Tests passed"))
+        self.assertFalse(completed_handoff("The likely fault is in the fallback calculation. I’m checking it now."))
+        self.assertFalse(completed_handoff("Done."))
 
     def test_workstream_identity_rolls_linked_worktrees_into_main_repository(self):
         main = os.path.join(self.tmp.name, "main-repo")
