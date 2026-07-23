@@ -3,9 +3,10 @@ import unittest
 import os
 import tempfile
 
-from fleetdash.codex_adapter import (CodexAdapter, CodexAppServer, _account_usage, _agents,
+from fleetdash.codex_adapter import (CodexAdapter, _account_usage, _agents,
                            _conversation, _files, _local_model_catalog,
                            _usage_cumulative, _usage_total, _usage_window)
+from fleetdash.codex_protocol import CodexAppServer
 
 
 class ResponseClient(CodexAppServer):

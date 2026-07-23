@@ -117,7 +117,7 @@ class TransportOps:
         if now - cached_at < 2 and (cached or not force):
             return dict(cached)
         try:
-            from .codex_adapter import codex_control_socket
+            from .codex_runtime import codex_control_socket
             expected_socket = os.path.realpath(codex_control_socket(
                 managed=not self.is_staging, state_dir=pathcfg.BASE))
             result = subprocess.run(
