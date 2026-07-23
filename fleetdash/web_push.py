@@ -19,7 +19,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from briefing import OperationsError
+from .briefing import OperationsError
 
 
 MAX_JOB_BYTES = 16_384

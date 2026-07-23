@@ -13,8 +13,16 @@ __pycache__/
 effort/
 usage.json
 codex_threads.json
+codex_threads.json.*
 codex-app-server.sock
 node_modules/
 test-results/
 playwright-report/
 .handoffs/
+.DS_Store
+.pnpm-store/
+.claude/
+redesign-brief/
+uploads/
+outbox-images/
+workspaces/

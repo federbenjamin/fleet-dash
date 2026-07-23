@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 
-from codex_adapter import (CodexAdapter, CodexError, _elicitation_pending,
+from fleetdash.codex_adapter import (CodexAdapter, CodexError, _elicitation_pending,
                            _last_message, _revision)
 
 

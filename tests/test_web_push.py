@@ -9,8 +9,8 @@ import threading
 import time
 import unittest
 
-from briefing import FleetOperations
-from web_push import (ActionCapabilityCodec, PushSecretStore, WebPushError, WebPushHelper,
+from fleetdash.briefing import FleetOperations
+from fleetdash.web_push import (ActionCapabilityCodec, PushSecretStore, WebPushError, WebPushHelper,
                       WebPushService, generate_vapid_keys, resolve_node)
 
 
@@ -187,7 +187,7 @@ class WebPushTests(unittest.TestCase):
         except WebPushError as exc:
             self.skipTest(str(exc))
         worker = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                              "web_push_worker.js")
+                              "fleetdash", "web_push_worker.js")
         vapid = generate_vapid_keys(node, worker)
         helper = WebPushHelper(node, worker, vapid={
             "vapid_public_key": vapid["public_key"],

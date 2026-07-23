@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from claude_background import (ClaudeBackgroundError, ClaudeBackgroundTransport,
+from fleetdash.claude_background import (ClaudeBackgroundError, ClaudeBackgroundTransport,
                                resolve_claude_command)
 
 
@@ -73,13 +73,13 @@ class ClaudeBackgroundTransportTest(unittest.TestCase):
         process = _FakeAttachProcess()
         transport = ClaudeBackgroundTransport(
             sys.executable, popen=lambda *args, **kwargs: process)
-        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+        with mock.patch("fleetdash.claude_background.pty.openpty", return_value=(101, 102)), \
                 mock.patch.object(transport, "_set_window"), \
                 mock.patch.object(transport, "_nonblocking"), \
                 mock.patch.object(transport, "_read_ready",
                                   side_effect=ClaudeBackgroundError("not ready")), \
-                mock.patch("claude_background.os.close"), \
-                mock.patch("claude_background.os.write") as write:
+                mock.patch("fleetdash.claude_background.os.close"), \
+                mock.patch("fleetdash.claude_background.os.write") as write:
             result = transport.write("A1B2C3D4", [("hello", False)])
 
         self.assertFalse(result["ok"])
@@ -99,12 +99,12 @@ class ClaudeBackgroundTransportTest(unittest.TestCase):
                 return 1
             raise OSError("fixture write failure")
 
-        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+        with mock.patch("fleetdash.claude_background.pty.openpty", return_value=(101, 102)), \
                 mock.patch.object(transport, "_set_window"), \
                 mock.patch.object(transport, "_nonblocking"), \
                 mock.patch.object(transport, "_read_ready"), \
-                mock.patch("claude_background.os.close"), \
-                mock.patch("claude_background.os.write", side_effect=write):
+                mock.patch("fleetdash.claude_background.os.close"), \
+                mock.patch("fleetdash.claude_background.os.write", side_effect=write):
             result = transport.write("A1B2C3D4", [("hello", False)], step_delay=0)
 
         self.assertFalse(result["ok"])
@@ -122,12 +122,12 @@ class ClaudeBackgroundTransportTest(unittest.TestCase):
             writes.append(bytes(data))
             return len(data)
 
-        with mock.patch("claude_background.pty.openpty", return_value=(101, 102)), \
+        with mock.patch("fleetdash.claude_background.pty.openpty", return_value=(101, 102)), \
                 mock.patch.object(transport, "_set_window"), \
                 mock.patch.object(transport, "_nonblocking"), \
                 mock.patch.object(transport, "_read_ready"), \
-                mock.patch("claude_background.os.close"), \
-                mock.patch("claude_background.os.write", side_effect=write):
+                mock.patch("fleetdash.claude_background.os.close"), \
+                mock.patch("fleetdash.claude_background.os.write", side_effect=write):
             result = transport.write("A1B2C3D4", [("hello", False)], step_delay=0)
 
         self.assertFalse(result["ok"])

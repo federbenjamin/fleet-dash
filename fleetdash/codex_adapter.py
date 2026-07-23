@@ -23,7 +23,7 @@ import shlex
 import platform
 from concurrent.futures import ThreadPoolExecutor, wait
 from collections import deque
-from repo_center import observed_test_outcome
+from .repo_center import observed_test_outcome
 
 
 EXTERNAL_OBSERVATION_SECONDS = 24 * 60 * 60

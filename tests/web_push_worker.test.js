@@ -6,7 +6,7 @@ const {EventEmitter} = require('node:events');
 const test = require('node:test');
 const webPush = require('web-push');
 
-const worker = require('../web_push_worker.js');
+const worker = require('../fleetdash/web_push_worker.js');
 
 function subscription(endpoint = 'https://fcm.googleapis.com/fcm/send/fixture') {
   const recipient = createECDH('prime256v1');

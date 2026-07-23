@@ -541,11 +541,12 @@ the provider without affecting Claude sessions.
 ## Companion command
 
 `/subagent-spend` inside any Claude Code session prints the per-agent token/cost table for that
-session (wraps `engine.py spend --cwd "$PWD"`; needs sandbox-off because the engine probes PIDs).
+session (wraps `python3 -m fleetdash.engine spend --cwd "$PWD"`; needs sandbox-off because the
+engine probes PIDs).
 
 ## How it works (one paragraph)
 
-A launchd daemon (`server.py` + `engine.py`) polls `~/.claude/sessions/*.json` (the CLI's live
+A launchd daemon (`server.py` + the `fleetdash/` package) polls `~/.claude/sessions/*.json` (the CLI's live
 registry — pid, status busy/shell/idle/waiting, claude.ai bridge id) and incrementally tails each
 session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompts come from
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
@@ -599,8 +600,12 @@ Fleet runs two deliberately separate app instances:
 
 | Instance | Code | Local URL | Runtime state | Purpose |
 |---|---|---|---|---|
-| Production | `~/.claude/fleet-dash-prod` | `http://127.0.0.1:8377` | `~/.claude/fleet-dash` | Stable app tracking `main` |
+| Production | `~/.claude/fleet-dash-prod` | `http://127.0.0.1:8377` | `~/.claude/fleet-dash-state` | Stable app tracking `main` |
 | Staging | `~/.claude/fleet-dash` | `http://127.0.0.1:8378` | `~/.claude/fleet-dash-staging` | Development branches and live verification |
+
+Shared hook/statusline captures (`pending/`, `effort/`, `usage.json`) live in
+`~/.claude/fleet-dash-capture`, selected by `FLEET_DASH_CAPTURE_DIR` in both launchd plists. The
+repo checkouts hold source only — no runtime state.
 
 Staging has its own config/token, ledger, search index, uploads, logs, Codex App Server socket,
 injector applet, browser origin, service worker, drafts, offline queue, and push subscriptions. It
@@ -635,7 +640,7 @@ with staging.
 2. On the Mac: `tailscale serve --bg 8377` → gives an HTTPS URL like
    `https://<mac-name>.<tailnet>.ts.net`.
 3. On the phone, open that URL once with `?token=<act_token>` appended (get it via:
-   `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash/config.json'))['act_token'])"`).
+   `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash-state/config.json'))['act_token'])"`).
 4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
    **Devices & delivery**. Notification permission is requested only from the explicit Enable
    button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
@@ -720,12 +725,9 @@ The applet is **stay-open** (`OSAAppletStayOpen`), so it stays resident and `ope
 `on reopen` handler instead of paying a process launch on every click.
 
 ```
-osacompile -o FleetDashInjector.app injector.applescript
-plutil -replace OSAAppletStayOpen -bool true FleetDashInjector.app/Contents/Info.plist
-plutil -insert CFBundleIdentifier -string com.benjaminfeder.fleet-dash.injector \
-  FleetDashInjector.app/Contents/Info.plist   # only if recreated from scratch
-codesign --force --sign - FleetDashInjector.app
+scripts/build-injector.sh production ~/.claude/fleet-dash-state/FleetDashInjector.app
 ```
+(compiles `injector.applescript`, sets `OSAAppletStayOpen` + the bundle ID, and ad-hoc signs).
 A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 
 `scripts/build-injector.sh staging ~/.claude/fleet-dash-staging/FleetDashInjector.app` compiles the

@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from codex_adapter import (
+from fleetdash.codex_adapter import (
     CodexError,
     CodexRuntimeMigration,
     LEGACY_RUNTIME_OWNER,
@@ -17,7 +17,7 @@ from codex_adapter import (
     ensure_managed_codex_runtime,
     migrate_codex_runtime_metadata,
 )
-from codex_launcher import (
+from fleetdash.codex_launcher import (
     BEGIN,
     END,
     find_real_codex,
@@ -359,8 +359,8 @@ class RuntimeMigrationTest(unittest.TestCase):
                                 f"unix://{self.legacy_socket}\n"), stderr="")
                 raise AssertionError(command)
 
-            with mock.patch("codex_adapter.platform.system", return_value="Darwin"), \
-                    mock.patch("codex_adapter.platform.machine", return_value="arm64"):
+            with mock.patch("fleetdash.codex_adapter.platform.system", return_value="Darwin"), \
+                    mock.patch("fleetdash.codex_adapter.platform.machine", return_value="arm64"):
                 migration = CodexRuntimeMigration(
                     wrapper, self.state_path, self.legacy_socket,
                     self.managed_socket, mock.Mock(), runner=runner,
@@ -448,7 +448,7 @@ class ManagedDaemonAndLauncherTest(unittest.TestCase):
 
     def test_launcher_install_is_idempotent_backs_up_zshrc_and_tracks_nvm_path(self):
         with tempfile.TemporaryDirectory() as home:
-            source = os.path.abspath(__import__("codex_launcher").__file__)
+            source = os.path.abspath(__import__("fleetdash.codex_launcher", fromlist=["__file__"]).__file__)
             zshrc = os.path.join(home, ".zshrc")
             with open(zshrc, "w") as handle:
                 handle.write("export EXISTING=1\n")
@@ -483,7 +483,7 @@ class ManagedDaemonAndLauncherTest(unittest.TestCase):
                 handle.write(original)
             with self.assertRaisesRegex(RuntimeError, "incomplete"):
                 install_launcher(source=os.path.abspath(
-                    __import__("codex_launcher").__file__), home=home)
+                    __import__("fleetdash.codex_launcher", fromlist=["__file__"]).__file__), home=home)
             with open(zshrc) as handle:
                 self.assertEqual(handle.read(), original)
 

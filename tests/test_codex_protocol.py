@@ -11,7 +11,7 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from codex_adapter import (CodexAppServer, CodexError, UnixWebSocketProcess,
+from fleetdash.codex_adapter import (CodexAppServer, CodexError, UnixWebSocketProcess,
                            ensure_shared_codex_runtime)
 
 

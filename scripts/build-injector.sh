@@ -19,7 +19,7 @@ source_file=$script_dir/injector.applescript
 compiled_source=$scratch/injector-$mode.applescript
 bundle_id=com.benjaminfeder.fleet-dash.injector
 if [ "$mode" = "staging" ]; then
-  sed 's#\.claude/fleet-dash/#.claude/fleet-dash-staging/#g' "$source_file" > "$compiled_source"
+  sed 's#\.claude/fleet-dash-state/#.claude/fleet-dash-staging/#g' "$source_file" > "$compiled_source"
   bundle_id=com.benjaminfeder.fleet-dash.staging.injector
 else
   cp "$source_file" "$compiled_source"

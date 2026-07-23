@@ -13,8 +13,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import engine as engine_module
-from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
+from fleetdash import engine as engine_module
+from fleetdash import paths as engine_paths
+from fleetdash import engine_uploads as engine_uploads_module
+from fleetdash.engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
                     load_config, classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
@@ -100,16 +102,16 @@ class EngineProviderTest(unittest.TestCase):
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
         self.patchers = [
-            mock.patch.object(engine_module, "HOME", self.tmp.name),
-            mock.patch.object(engine_module, "BASE", self.base),
-            mock.patch.object(engine_module, "SESSIONS", self.sessions),
-            mock.patch.object(engine_module, "PROJECTS", self.projects),
-            mock.patch.object(engine_module, "CLAUDE_ACCOUNT", self.claude_account),
-            mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
-            mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
-            mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
-            mock.patch.object(engine_module, "CLAUDE_SETTINGS", self.claude_settings),
-            mock.patch.object(engine_module, "CLAUDE_USAGE_PREFS",
+            mock.patch.object(engine_paths, "HOME", self.tmp.name),
+            mock.patch.object(engine_paths, "BASE", self.base),
+            mock.patch.object(engine_paths, "SESSIONS", self.sessions),
+            mock.patch.object(engine_paths, "PROJECTS", self.projects),
+            mock.patch.object(engine_paths, "CLAUDE_ACCOUNT", self.claude_account),
+            mock.patch.object(engine_paths, "CLAUDE_USAGE", self.claude_usage),
+            mock.patch.object(engine_paths, "CLAUDE_STATS", self.claude_stats),
+            mock.patch.object(engine_paths, "CLAUDE_HISTORY", self.claude_history),
+            mock.patch.object(engine_paths, "CLAUDE_SETTINGS", self.claude_settings),
+            mock.patch.object(engine_paths, "CLAUDE_USAGE_PREFS",
                               self.claude_usage_prefs),
         ]
         for patcher in self.patchers:
@@ -461,14 +463,14 @@ class EngineProviderTest(unittest.TestCase):
         path = os.path.join(migration_base, "config.json")
         with open(path, "w") as handle:
             json.dump({"stall_seconds": 240, "act_token": "existing"}, handle)
-        with mock.patch.object(engine_module, "BASE", migration_base):
+        with mock.patch.object(engine_paths, "BASE", migration_base):
             migrated = load_config()
         self.assertEqual(migrated["stall_seconds"], 600)
         self.assertTrue(migrated["_stall_default_v2"])
 
         with open(path, "w") as handle:
             json.dump({"stall_seconds": 900, "act_token": "existing"}, handle)
-        with mock.patch.object(engine_module, "BASE", migration_base):
+        with mock.patch.object(engine_paths, "BASE", migration_base):
             custom = load_config()
         self.assertEqual(custom["stall_seconds"], 900)
 
@@ -653,6 +655,78 @@ class EngineProviderTest(unittest.TestCase):
         self.assertNotIn("/untrusted", self.engine.tail_for(transcript).file_backups)
         self.assertIsNone(self.engine._claude_file_backup(sid, "../../config.json"))
 
+    def test_delivery_whitelist_outlives_ring_buffers(self):
+        delivered = os.path.join(self.cwd, "old-delivery.md")
+        with open(delivered, "w") as handle:
+            handle.write("old delivery body")
+        self.engine.scan()
+        # The files deque and convo chips are ring buffers; simulate a delivery
+        # that aged out of both — only the durable whitelist remembers it.
+        self.engine._claude_context_snapshots["same"] = {
+            "revision": 1, "messages": [], "files": [],
+            "file_backups": {}, "delivered_paths": {delivered: 5.0}}
+        fid = self.engine.file_id("same", delivered)
+        self.assertEqual(self.engine.file_selector_for_path("same", delivered), fid)
+        ctype, data, error = self.engine.file_content("same", fid)
+        self.assertIsNone(error)
+        self.assertEqual(data, b"old delivery body")
+        # Tail keeps every delivered path (bounded), while files stays a ring.
+        tail = self.engine.tail_for(self.transcript)
+        for index in range(12):
+            tail._file_add(f"/tmp/burst-{index}", "", index)
+        self.assertEqual(len(tail.files), 10)
+        for index in range(12):
+            self.assertIn(f"/tmp/burst-{index}", tail.delivered_paths)
+        # The backup mapping alone must never widen the whitelist.
+        self.engine._claude_context_snapshots["same"] = {
+            "revision": 2, "messages": [], "files": [],
+            "file_backups": {delivered: "abcdef1234567890@v1"},
+            "delivered_paths": {}}
+        self.assertIsNone(self.engine.file_selector_for_path("same", delivered))
+        _, _, error = self.engine.file_content("same", fid)
+        self.assertIsNotNone(error)
+
+    def test_transcript_effort_is_primary_and_retires_overrides(self):
+        def effort_row(level):
+            return json.dumps({"type": "assistant",
+                "timestamp": "2026-07-15T00:00:05Z", "effort": level,
+                "message": {"role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 1},
+                    "content": [{"type": "text", "text": "row"}]}}) + "\n"
+        with open(self.transcript, "a") as handle:
+            handle.write(effort_row("high"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "high")
+
+        with open(self.transcript, "a") as handle:   # junk values never surface
+            handle.write(effort_row("turbo"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "high")
+
+        pid = os.getpid()
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+        accepted = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "sonnet", "effort": "low", "expected_model": "claude-sonnet",
+            "expected_effort": "high"})
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(self.engine.effort_for("same"), "low")
+        fleet = self.engine.scan()   # older transcript rows must not retire it
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "low")
+
+        with open(self.transcript, "a") as handle:   # newer native evidence wins
+            handle.write(effort_row("medium"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "medium")
+        self.assertNotIn(
+            "effort", self.engine._claude_control_overrides.get("same") or {})
+
     def test_image_upload_quota_rejects_before_conversion(self):
         self.engine.scan()
         root = os.path.join(self.base, "uploads")
@@ -692,7 +766,7 @@ class EngineProviderTest(unittest.TestCase):
                 output.write(b"placeholder")
             return SimpleNamespace(returncode=0)
 
-        with mock.patch.object(engine_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
+        with mock.patch.object(engine_uploads_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
              mock.patch.object(engine_module.subprocess, "run", side_effect=convert), \
              mock.patch.object(self.engine, "_strip_jpeg_metadata", return_value=b"j" * 20):
             rejected = self.engine.store_image_upload(
@@ -953,7 +1027,7 @@ class EngineProviderTest(unittest.TestCase):
             handle.write(b"not a sqlite database")
         cfg = dict(DEFAULT_CONFIG)
         cfg.update({"codex_enabled": False, "ntfy_topic": ""})
-        with mock.patch.object(engine_module, "BASE", recovery_base):
+        with mock.patch.object(engine_paths, "BASE", recovery_base):
             recovered = Engine(cfg)
             try:
                 fleet = recovered.scan()
@@ -1145,7 +1219,7 @@ class EngineProviderTest(unittest.TestCase):
         headless = (f" 104 ?? /opt/codex resume --remote "
                     f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=exact + duplicate_child + wrong_socket + headless)):
             routes = self.engine._codex_terminal_routes(force=True)
@@ -1154,7 +1228,7 @@ class EngineProviderTest(unittest.TestCase):
         ambiguous = exact + (f" 105 ttys003 /opt/codex resume --remote "
                              f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=ambiguous)):
             self.assertEqual(self.engine._codex_terminal_routes(force=True), {})
@@ -1268,7 +1342,7 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes, [])
 
     def test_codex_spawn_starts_visible_initial_hi(self):
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({
                 "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
                 "effort": "high", "mode": "plan"})
@@ -1281,7 +1355,7 @@ class EngineProviderTest(unittest.TestCase):
             "mode": "plan", "initial_text": "hi"})
 
     def test_codex_spawn_uses_explicit_initial_message_when_supplied(self):
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({
                 "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
                 "effort": "high", "mode": "default", "initial_text": "Start exact work"})
@@ -1324,7 +1398,7 @@ class EngineProviderTest(unittest.TestCase):
                 "cwd": self.cwd, "model": "gpt-5.4", "effort": "high",
                 "mode": "plan", "worktree": False, "worktree_name": ""}})
         self.assertTrue(created["ok"])
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             self.engine.run_outbox()
         row = self.engine.outbox.get(created["item"]["id"])
         self.assertEqual(row["state"], "sent")
@@ -2415,7 +2489,7 @@ class EngineProviderTest(unittest.TestCase):
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps)) or {"ok": True})
         self.engine.is_trusted = lambda cwd, trusted=None: True
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             spawned = self.engine.spawn_session({"cwd": self.cwd, "model": "sonnet",
                 "effort": "high", "permission_mode": "acceptEdits",
                 "worktree": True, "worktree_name": "live-e2e"})

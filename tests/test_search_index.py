@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from search_index import SearchIndex
+from fleetdash.search_index import SearchIndex
 
 
 CLAUDE_SID = "11111111-2222-3333-4444-555555555555"
@@ -285,7 +285,7 @@ class SearchIndexTest(unittest.TestCase):
 
         restarted = SearchIndex(self.db_path, self.claude, self.codex)
         try:
-            with mock.patch("search_index.sqlite3.connect", side_effect=traced_connect):
+            with mock.patch("fleetdash.search_index.sqlite3.connect", side_effect=traced_connect):
                 self.assertEqual(restarted.status()["documents"], 37)
         finally:
             restarted.close()

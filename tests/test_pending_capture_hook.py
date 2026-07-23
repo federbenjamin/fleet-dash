@@ -23,7 +23,7 @@ class PendingCaptureHookTest(unittest.TestCase):
 
     @staticmethod
     def capture_path(home, session_id):
-        return Path(home) / ".claude" / "fleet-dash" / "pending" / f"{session_id}.json"
+        return Path(home) / ".claude" / "fleet-dash-capture" / "pending" / f"{session_id}.json"
 
     def test_question_and_notification_captures_are_complete_atomic_0600_json(self):
         cases = [

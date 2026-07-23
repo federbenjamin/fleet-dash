@@ -11,17 +11,17 @@ feature: README for what/how-to-use, this file for invariants + dev workflow.
                                    filters stale files (they're deleted on clean exit only).
 ~/.Codex/projects/<proj>/<sid>.jsonl            main transcript  ─┐ incremental byte-offset
 ~/.Codex/projects/<proj>/<sid>/subagents/*.jsonl agent transcripts┘ tails (engine.Tail)
-~/.Codex/fleet-dash/pending/<sid>.json          hook-captured pending prompt (the ONLY source)
-        ↓ engine.py (Engine.scan, poll thread, 2s)
+~/.Codex/fleet-dash-capture/pending/<sid>.json          hook-captured pending prompt (the ONLY source)
+        ↓ fleetdash/ engine (Engine.scan, poll thread, 2s)
 snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.js (fetch poll 2s,
                                                self-reloads via page_v)
                           ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
                           │   (SendUserFile deliveries); page refetches only when the session's
                           │   convo_v/files_n fields in /api/fleet move
-                          ├ GET /api/file?sid=&p= (token) ─ Engine.file_content (whitelist)
+                          ├ GET /api/file?sid=&fid= (token) ─ Engine.file_content (whitelist)
                           └ POST /api/act (token) ─ Engine.act ─ inject-request.txt ─
                             open -g FleetDashInjector.app ─ iTerm write by tty ─ inject-result.txt
-Codex/Codex JSONL ─ search_index.py --worker (nice 10) ─ search.db WAL/FTS5
+Codex/Codex JSONL ─ fleetdash/search_index.py --worker (nice 10) ─ search.db WAL/FTS5
                                       └ server.py separate reader ─ authenticated
                                         /api/search, /api/search/status, /api/search/context
 ledger.db: agent_runs (finalized agent spend), session_runs (live + closed sessions)
@@ -111,6 +111,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
     SendUserFile tool_use rows, and it's token-gated. Never accept a free-form client path:
     that would turn the act token into an arbitrary-disk-read credential over the tailnet.
+    The whitelist is the files deque + convo chips + `Tail.delivered_paths` (bounded durable map
+    fed only by `_file_add`); the `file_backups` mapping tracks every checkpointed file and must
+    never widen the whitelist.
 11. **Convo capture filters user-row noise in `Tail._fold`** — isMeta rows, `<command-`/
     `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
     "This session is being continued from" blob. Consecutive assistant text rows merge into one
@@ -194,12 +197,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
     labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
     ourselves would defeat a security gate from a remote device — don't.
-22. **Effort exists ONLY in the statusline payload.** `"effort":{"level":…}` is piped to the
-    statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
-    cannot derive it. `~/.Codex/statusline-command.sh` side-writes it to
-    `fleet-dash/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
-    `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
-    alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
+22. **Live effort comes from the transcript (≥2.1.217); the statusline side-write is a legacy
+    fallback.** Every assistant transcript row (main AND subagent) carries a top-level `effort`;
+    `Tail.effort` + `Tail.effort_evidence_offset` fold it with byte-offset evidence order and
+    `Engine.effort_for` prefers it. The statusline side-write at
+    `fleet-dash-capture/effort/<session_id>` remains a wall-clock fallback for older builds.
+    A Fleet-issued accepted `/effort` override persists until newer native evidence (transcript
+    row past the recorded baseline, or newer side-write mtime); zero/absent baselines retire only
+    via the wall-clock path. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
     (`.Codex/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
     the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
     types (`plugin:agent`) have no local file: fall back to the parent.
@@ -232,7 +237,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     resets, and last-update time. The same profile objects also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
     selected account and its active marker. If the app is absent/unreadable, fall back to the Codex
-    Code statusline side-write at `~/.Codex/fleet-dash/usage.json` plus the mtime-watched
+    Code statusline side-write at `~/.Codex/fleet-dash-capture/usage.json` plus the mtime-watched
     `~/.Codex.json` login email. The adjacent **local lifetime-token** figure is a different,
     machine-wide scope: `Engine.claude_lifetime_tokens` reads `~/.Codex/stats-cache.json`
     `modelUsage` and sums `inputTokens` + `cacheCreationInputTokens` + `cacheReadInputTokens` +
@@ -341,7 +346,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   then `curl -s http://127.0.0.1:8377/api/fleet | python3 -m json.tool | head`.
   `dashboard.html` and allowlisted `static/` assets need NO restart — served per-request; open tabs
   self-reload via `page_v` (the newest page/asset mtime in `/api/fleet`).
-- Log: `~/.Codex/fleet-dash/fleet-dash.log` (stdout+stderr). Failures worth logging get
+- Log: `~/.Codex/fleet-dash-state/fleet-dash.log` (stdout+stderr). Failures worth logging get
   `print(..., file=sys.stderr, flush=True)` — that's the debugging channel that cracked every
   bug so far. `act` failures and 403s are already logged.
 - **Synthetic pending probe** (server-side test without a real prompt): spawn a `sleep` child,
@@ -363,7 +368,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 ## File map (repo)
 
-- `engine.py` — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
+- `fleetdash/engine.py` (+ `fleetdash/engine_*.py` mixins, `paths/config/placement/tail`) — Tail (incremental jsonl fold + convo/files ring buffers + usage_stats
   counters), Engine (scan/state/ledger/ntfy/act/hook_pending/session_context/file_content/
   insights/commands/compacting_secs), spend CLI (`spend --cwd|--session`, used by the global
   `/subagent-spend` command). GET `/api/insights?days=N` aggregates agent_runs + session_runs
@@ -373,7 +378,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   `close_worktree_preview` defines dirty strictly with `git status`; ignored generated output
   neither appears as dirty nor requires force removal. `exitSessionWorkspace` returns directly
   to its dashboard destination rather than traversing a replaced chat route.
-- `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
+- `fleetdash/codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
@@ -386,7 +391,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   `Engine.update_settings`. Muted sessions skip all per-session pushes.
   Fleet-quiet fires once per quiet episode, `fleet_quiet_minutes` after the busy→idle
   transition (`Engine.quiet_since`), not on a time-bucket dedupe).
-- `search_index.py` — isolated incremental Codex/Codex transcript and saved-subagent parser,
+- `fleetdash/search_index.py` — isolated incremental Codex/Codex transcript and saved-subagent parser,
   provider-referenced artifact indexer, per-source offset/generation/error state, WAL/FTS5 query and
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
@@ -454,8 +459,7 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 - `hooks/pending-capture.py` — hook entry (PreToolUse/PostToolUse AskUserQuestion, Notification).
 - `injector.applescript` — applet source; request-file flags: 0=raw text, 1=text+LF, 2=raw CR.
 - `com.benjaminfeder.fleet-dash.plist` — launchd copy (live one in ~/Library/LaunchAgents).
-- Untracked runtime: `config.json` (secrets: act_token, ntfy topic), `ledger.db`, `search.db*`, `pending/`,
-  `inject-request/result.txt`, `fleet-dash.log`, `FleetDashInjector.app`.
+- Runtime state lives OUTSIDE the repo (2026-07-23): per-instance state dirs (`~/.claude/fleet-dash-state` production, `~/.claude/fleet-dash-staging` staging) hold `config.json`, `push-secrets.json`, `ledger.db`, `search.db*`, `codex_threads.json`, `uploads/`, the injector mailbox + applet, and the log; shared captures (`pending/`, `effort/`, `usage.json`) live in `~/.claude/fleet-dash-capture`.
 
 ## Outside-repo touchpoints (document changes to these here)
 

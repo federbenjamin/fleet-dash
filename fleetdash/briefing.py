@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import deque
 from urllib.parse import urlsplit
-from datetime import datetime, time as datetime_time, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
