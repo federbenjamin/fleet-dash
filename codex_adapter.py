@@ -20,6 +20,7 @@ import re
 import fcntl
 import signal
 import shlex
+import platform
 from concurrent.futures import ThreadPoolExecutor, wait
 from collections import deque
 from repo_center import observed_test_outcome
@@ -51,6 +52,34 @@ def codex_command(configured=None):
     if candidates:
         return candidates[0]
     raise CodexError("codex executable not found; set codex_command in config.json")
+
+
+def _codex_executable_identities(executable):
+    """Resolve the exact native binary an official npm Codex shim launches."""
+    resolved = os.path.realpath(executable)
+    identities = {resolved}
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    target = {
+        ("darwin", "arm64"): ("codex-darwin-arm64", "aarch64-apple-darwin"),
+        ("darwin", "aarch64"): ("codex-darwin-arm64", "aarch64-apple-darwin"),
+        ("darwin", "x86_64"): ("codex-darwin-x64", "x86_64-apple-darwin"),
+    }.get((system, machine))
+    package_root = os.path.dirname(os.path.dirname(resolved))
+    if (target and os.path.basename(resolved) == "codex.js" and
+            os.path.basename(os.path.dirname(resolved)) == "bin" and
+            os.path.basename(package_root) == "codex" and
+            os.path.basename(os.path.dirname(package_root)) == "@openai"):
+        package, triple = target
+        candidates = (
+            os.path.join(package_root, "node_modules", "@openai", package,
+                         "vendor", triple, "bin", "codex"),
+            os.path.join(package_root, "vendor", triple, "bin", "codex"),
+        )
+        for candidate in candidates:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                identities.add(os.path.realpath(candidate))
+    return identities
 
 
 def _local_model_catalog(path, max_bytes=4 * 1024 * 1024):
@@ -1182,6 +1211,7 @@ class CodexRuntimeMigration:
     def __init__(self, executable, state_path, legacy_socket, managed_socket,
                  target_factory, clock=None, runner=None, killer=None, probe=None):
         self.executable = os.path.realpath(executable)
+        self.executable_identities = _codex_executable_identities(executable)
         self.state_path = state_path
         self.legacy_socket = os.path.realpath(legacy_socket)
         self.managed_socket = os.path.realpath(managed_socket)
@@ -1324,7 +1354,7 @@ class CodexRuntimeMigration:
             raise CodexError("legacy Codex listener identity is malformed") from exc
         expected = ["app-server", "--listen", "unix://" + self.legacy_socket]
         if uid != os.getuid() or len(argv) < 4 or argv[-3:] != expected or \
-                os.path.realpath(argv[0]) != self.executable:
+                os.path.realpath(argv[0]) not in self.executable_identities:
             raise CodexError("refusing to stop a process that is not the exact legacy listener")
         return pid
 
