@@ -517,14 +517,12 @@ class ContextOps:
         if snapshot is not None:
             files = snapshot.get("files") or []
             messages = snapshot.get("messages") or []
-            file_backups = snapshot.get("file_backups") or {}
         else:
             with self.scan_lock:
                 mt = self.tail_for(path)
                 mt.poll()
                 files = list(mt.files)
                 messages = list(mt.convo)
-                file_backups = dict(mt.file_backups)
         allowed = {f["path"] for f in files}
         for m in messages:              # inline chips can outlive the files deque
             if m.get("role") == "tool":
