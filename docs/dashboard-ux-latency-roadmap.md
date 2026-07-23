@@ -63,8 +63,8 @@ scope, 5-hour/general-weekly/Fable-weekly gauges, and local lifetime-token quali
 
 - An ordinary Claude card has one chat affordance: tapping its header. The redundant chat primary
   button is removed. The native iTerm focus action remains and is renamed `Terminal`.
-- Contextual primary actions such as `Respond`, `View response`, and `Attach` remain; this change does
-  not remove an action required by the session state.
+- Contextual primary actions such as `Respond` and `View response` remain; this change does not remove
+  an action required by the session state.
 - Desktop Settings can place the main navigation rail on the left or right. The choice is stored per
   browser/device. Mobile keeps the bottom navigation.
 - The Markdown viewer retains a slim toolbar with close, filename, theme, and file actions. It drops
@@ -240,7 +240,7 @@ filter and overlay feedback meet the 100 ms p95 gate.
 
 Implemented `NOW-001`–`NOW-003`, `USE-001`, `SHELL-001`–`SHELL-002`, `VIEW-001`, and
 `CARD-001`. The full deterministic browser pass reached 84/90 before stopping only on six stale
-expectations for the intentional `Attach` capitalization and removed redundant Claude primary
+expectations for the then-current Codex terminal control and removed redundant Claude primary
 button. Those three affected flows were corrected and rerun on both viewports; all six passed. The
 new M1-focused paths passed on desktop and mobile, including a real scroll-restoration race caught
 and fixed by the test. The unchanged Python suite remains 173/173.

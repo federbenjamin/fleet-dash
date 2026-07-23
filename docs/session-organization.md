@@ -172,5 +172,7 @@ Card faces use the labels in this document. Raw provider state, CLI status, owne
 and error details remain in expanded session information. The raw labels `idle`,
 `turn_done`, `dormant`, `headless`, and `reopenable` are not main-page sections.
 
-Terminal/Attach remains a secondary control. The primary action describes the
-conversation action and must remain truthful when the terminal is unavailable.
+Claude Terminal remains a secondary control and may use the official background-job attach path.
+Codex shows **Open** only for an exact already-running terminal; it never offers Attach or a disabled
+terminal-state placeholder. The primary action describes the conversation action and must remain
+truthful when no terminal exists.

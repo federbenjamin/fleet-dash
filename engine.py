@@ -6964,7 +6964,7 @@ Treat this as an independent session. Verify the repository state before changin
             return self.cleanup_closed_worktree(action)
         if str(action.get("session_id") or "").startswith("codex:") \
            and action.get("type") == "focus":
-            return self.attach_codex_terminal(action)
+            return self.focus_codex_terminal(action)
         if str(action.get("session_id") or "").startswith("codex:"):
             sid = action.get("session_id")
             with self.lock:
@@ -7743,9 +7743,8 @@ Treat this as an independent session. Verify the repository state before changin
                 "provider": target, "cwd": cwd, "created": True,
                 "retryable": not delivered.get("ok") and not uncertain}
 
-    def attach_codex_terminal(self, action):
-        """Open a TUI client on the same App Server; never resume a copy."""
-        from codex_adapter import codex_command, codex_control_socket
+    def focus_codex_terminal(self, action):
+        """Focus one exact existing TUI; never create or resume a terminal."""
         sid = str(action.get("session_id") or "")
         tid = self.codex.native(sid)
         session = next((item for item in self.codex.sessions()
@@ -7753,26 +7752,13 @@ Treat this as an independent session. Verify the repository state before changin
         if not session or session.get("read_only"):
             return {"ok": False, "error": "this Codex thread is view only"}
         route = self._codex_terminal_route(tid, force=True)
-        if route:
-            result = self._iterm_write(
-                route["tty"], [("__FOCUS__", False)], step_delay=0.05)
-            if result.get("ok"):
-                result.update(session_id=sid, shared_runtime=True,
-                              transport="codex_terminal", focused=True)
-            return result
-        if not session.get("capabilities", {}).get("focus_terminal"):
-            return {"ok": False, "error": "this Codex thread is view only"}
-        cwd = os.path.realpath(os.path.expanduser(session.get("cwd") or HOME))
-        if not os.path.isdir(cwd):
-            return {"ok": False, "error": "session working directory no longer exists"}
-        executable = codex_command(self.cfg.get("codex_command") or None)
-        endpoint = "unix://" + codex_control_socket(
-            managed=not self.is_staging, state_dir=BASE)
-        command = (f"cd {shlex.quote(cwd)} && {shlex.quote(executable)} resume "
-                   f"--remote {shlex.quote(endpoint)} {shlex.quote(tid)}")
-        result = self._iterm_write("SPAWN", [(command, False)])
+        if not route:
+            return {"ok": False, "error": "no attached Codex terminal is available"}
+        result = self._iterm_write(
+            route["tty"], [("__FOCUS__", False)], step_delay=0.05)
         if result.get("ok"):
-            result.update(command=command, session_id=sid, shared_runtime=True)
+            result.update(session_id=sid, shared_runtime=True,
+                          transport="codex_terminal", focused=True)
         return result
 
     def spawn_codex_session(self, action):

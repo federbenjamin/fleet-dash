@@ -115,7 +115,7 @@ def base_session(provider, sid, title):
                 {"kind": "age", "label": "Last activity", "value": "3s quiet",
                  "confidence": "confirmed"}],
             "capabilities": capabilities(exact_cost=not codex,
-                focus_terminal=True, focus_terminal_mode="attach" if codex else None,
+                focus_terminal=not codex,
                 measured_throughput=not codex, change_permission_mode=not codex,
                 model_effort_settings=True, change_model_effort=True)}
     session["status_line"] = fixture_status_line(provider)
@@ -853,6 +853,12 @@ def set_scenario(name):
         session["capabilities"] = capabilities(
             submit=False, interrupt=False, close=False, compact=False, review=False,
             focus_terminal=False, model_effort_settings=False, change_model_effort=False)
+    elif name == "codex-terminal":
+        session.update(terminal_attached=True, control_state="terminal_idle")
+        session["capabilities"].update(
+            focus_terminal=True, focus_terminal_mode="focus",
+            focus_terminal_label="open",
+            focus_terminal_reason="Bring the attached Codex terminal to the front")
     elif name == "markdown-peek":
         preview = (
             "### Default width\n\nUse **Fit the screen** with `compact code` and "
@@ -1976,17 +1982,13 @@ class Handler(BaseHTTPRequestHandler):
                         interrupt=True, focus_terminal=False,
                         change_model_effort=False,
                         change_model_effort_reason="Available when the turn is idle",
-                        focus_terminal_mode=None, focus_terminal_label="turn active",
-                        focus_terminal_reason=
-                        "Wait for the current Codex turn to finish before attaching")
+                        focus_terminal_mode=None)
                 elif typ == "interrupt":
                     session.update(state="turn_done", reg_status="idle")
                     session["capabilities"].update(
-                        interrupt=False, focus_terminal=True,
+                        interrupt=False, focus_terminal=False,
                         change_model_effort=True, change_model_effort_reason="",
-                        focus_terminal_mode="attach", focus_terminal_label="attach",
-                        focus_terminal_reason=
-                        "Open a Codex TUI attached to Fleet's shared App Server")
+                        focus_terminal_mode=None)
                 elif typ == "mode":
                     session["collaboration_mode"] = payload.get("mode")
                     return self.json_reply({"ok": True, "mode": payload.get("mode")})
