@@ -315,10 +315,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     **starting**, never **attach**. Preserve that empty shell only while `thread/loaded/list` still
     contains it; otherwise it has no runtime or rollout and must be discarded as a ghost. Keep the full-chat
     open/attach/view-only button directly left of its overflow menu. `source=vscode` is not ownership
-    evidence: App Server uses it for Fleet's rich-client threads too. Only a thread persisted with
-    `runtime_owner=fleet_shared` is controllable; an unowned Desktop/VS Code transcript stays
-    headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
-    server creates a second runtime agent.
+    evidence: App Server uses it for Fleet's rich-client and remote-CLI threads too. A thread present
+    in the exact shared runtime's `thread/loaded/list` must be adopted regardless of that label and
+    persisted with `runtime_owner=fleet_shared`. Only that persisted ownership is controllable; an
+    unowned transcript stays headless + view-only. Expose normalized managed/external provenance
+    separately from the raw provider label. Never restore the old takeover action: resuming one of
+    those ids on Fleet's server creates a second runtime agent.
     A live terminal is a separate, narrowly proved transport—not ownership evidence. Discover it
     only from a bounded process listing whose argv contains `codex resume`, the exact Fleet Unix
     socket, and one canonical thread UUID on a real TTY. Parent/child processes on the same TTY are
@@ -375,7 +377,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     is the source of truth for `ui_group`, `reason_label`, `primary_action`, `access`,
     `reply_requested`, and `new_response`. Fleet Briefing precedes the session queue; session order is
     Pinned → Needs you → Working → Available. Recent external/view-only sessions stay in
-    Working or Available; they move to History only after 24 hours without activity. Their lifecycle
+    Working or Available; they move to History after `dormant_seconds`. The rollout observer's
+    separate 24-hour discovery window does not control placement. Their lifecycle
     reason labels remain `Working` / `Available`; the separate `View only` access label carries
     ownership.
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination

@@ -253,6 +253,22 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertEqual(session["control_state"], "reconnecting")
         self.assertEqual(adapter._managed(), ["attached"])
 
+    def test_loaded_remote_cli_is_adopted_even_when_provider_labels_it_vscode(self):
+        thread = {**self.thread("remote-cli", {"type": "idle"}), "source": "vscode"}
+        adapter, client = self.adapter([thread])
+        client.loaded = ["remote-cli"]
+
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertFalse(session["headless"])
+        self.assertFalse(session["read_only"])
+        self.assertIsNone(session["read_only_reason"])
+        self.assertEqual(session["codex_source"], adapter.runtime_owner)
+        self.assertEqual(session["codex_provider_source"], "vscode")
+        self.assertEqual(adapter._managed(), ["remote-cli"])
+        self.assertIn("remote-cli", client.read_calls)
+
     def test_cross_app_server_turn_without_completion_is_running(self):
         thread = {**self.thread("managed", {"type": "notLoaded"}, updated=100),
                   "source": "vscode"}
@@ -275,6 +291,8 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(session["capabilities"]["compact"])
         self.assertFalse(session["capabilities"]["review"])
         self.assertFalse(session["capabilities"]["relay_agent"])
+        self.assertEqual(session["codex_source"], "external")
+        self.assertEqual(session["codex_provider_source"], "vscode")
         self.assertTrue(session["headless"])
         self.assertTrue(session["read_only"])
         denied = adapter.act({"type": "text", "session_id": "codex:managed",
@@ -387,13 +405,16 @@ class CodexAdapterFixtureTest(unittest.TestCase):
 
     def test_stalled_and_dormant_are_time_based(self):
         threads = [self.thread("stalled", {"type": "active"}, updated=99_900),
-                   self.thread("dormant", {"type": "notLoaded"}, updated=1)]
+                   self.thread("threshold", {"type": "notLoaded"}, updated=92_800),
+                   self.thread("dormant", {"type": "notLoaded"}, updated=92_799)]
         adapter, _ = self.adapter(threads, now=100_000)
         adapter._remember("stalled", "default")
+        adapter._remember("threshold", "default")
         adapter._remember("dormant", "default")
         adapter._refresh()
         states = {item["native_session_id"]: item["state"] for item in adapter.sessions()}
         self.assertEqual(states["stalled"], "stalled")
+        self.assertEqual(states["threshold"], "idle")
         self.assertEqual(states["dormant"], "dormant")
 
     def test_refresh_failure_marks_cached_sessions_stale(self):

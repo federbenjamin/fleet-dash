@@ -462,10 +462,14 @@ def _pending_placement(pending):
     return None
 
 
-def classify_placement(session, now, reply_available=None, read_sessions=None):
+def classify_placement(session, now, reply_available=None, read_sessions=None,
+                       dormant_seconds=None):
     """Pure provider-neutral session placement with diagnostic evidence."""
     reply_available = reply_available or {}
     read_sessions = read_sessions or {}
+    if dormant_seconds is None:
+        dormant_seconds = DEFAULT_CONFIG["dormant_seconds"]
+    dormant_seconds = max(0, float(dormant_seconds))
     sid = str(session.get("session_id") or "")
     revision = str(session.get("convo_v") or "")
     latest = session.get("_latest_prose") or {}
@@ -479,7 +483,7 @@ def classify_placement(session, now, reply_available=None, read_sessions=None):
     provider_stale = raw_state == "stale" or bool(session.get("stale"))
     quiet = max(0, round(float(session.get("quiet_s") or 0)))
     external_dormant = external and (
-        state == "dormant" or quiet > 24 * 60 * 60)
+        state == "dormant" or quiet > dormant_seconds)
     dismissed = str(reply_available.get(sid, ""))
     read_revision = str(read_sessions.get(sid, ""))
     reply_requested = bool(
@@ -1446,6 +1450,8 @@ class Engine:
                                       client=codex_client,
                                       state_path=state_path,
                                       stall_seconds=int(cfg.get("stall_seconds") or 180),
+                                      dormant_seconds=int(
+                                          cfg.get("dormant_seconds") or 7200),
                                       external_observer=self.codex_observer,
                                       runtime_owner=runtime_owner,
                                       runtime_migration=runtime_migration)
@@ -2036,7 +2042,8 @@ class Engine:
     def organize_session(self, session, now):
         """Add provider-neutral placement, reason, access, and action fields."""
         placement = classify_placement(
-            session, now, self.cfg.get("reply_available"), self.cfg.get("read_sessions"))
+            session, now, self.cfg.get("reply_available"), self.cfg.get("read_sessions"),
+            self.cfg.get("dormant_seconds"))
         session.pop("_latest_prose", None)
         normalized_state = placement.pop("state")
         session.update(placement)

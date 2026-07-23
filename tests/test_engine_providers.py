@@ -2714,7 +2714,7 @@ class EngineProviderTest(unittest.TestCase):
 
         older = codex_session()
         older.update(state="idle", headless=True, read_only=True,
-                     quiet_s=24 * 60 * 60 + 1,
+                     quiet_s=self.engine.cfg["dormant_seconds"] + 1,
                      _latest_prose={"role": "assistant", "text": "Finished."})
         historical = self.engine.organize_session(older, 200)
         self.assertEqual((historical["ui_group"], historical["reason_label"]),
@@ -2865,12 +2865,12 @@ class EngineProviderTest(unittest.TestCase):
                           inactive["primary_action"]),
                          ("history", "Inactive", "continue"))
         external_idle = organized(state="idle", headless=True, read_only=True,
-                                  quiet_s=24 * 60 * 60)
+                                  quiet_s=self.engine.cfg["dormant_seconds"])
         self.assertEqual((external_idle["ui_group"], external_idle["reason_label"],
                           external_idle["access"], external_idle["primary_action"]),
                          ("available", "Available", "view_only", "view"))
         historical = organized(state="idle", headless=True, read_only=True,
-                               quiet_s=24 * 60 * 60 + 1)
+                               quiet_s=self.engine.cfg["dormant_seconds"] + 1)
         self.assertEqual((historical["ui_group"], historical["reason_label"]),
                          ("history", "External"))
         reopenable = organized(state="reopenable", capabilities={"reopen": True})

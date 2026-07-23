@@ -53,11 +53,12 @@ and command/file approvals are never bulk actions.
 | Needs you | A structured question, approval, permission, or MCP form is pending; the latest assistant prose directly requests a reply; a likely prompt could not be normalized; or a confirmed session-specific failure requires intervention. |
 | Working | A provider reports an active turn, live turn evidence has no completion, compaction is active, or the turn is slow but not confirmed failed. External active turns retain the same Working reason while their access is labeled View only. |
 | Available | No turn is active and nothing requires a response. This includes interactive provider `idle`, completed non-question turns, and recently active external/view-only sessions. |
-| Session history | No turn is active and the session is dormant, reopenable, explicitly closed, or otherwise no longer part of the immediate inventory. External/view-only sessions become dormant after 24 hours without activity. |
+| Session history | No turn is active and the session is dormant, reopenable, explicitly closed, or otherwise no longer part of the immediate inventory. External/view-only sessions become dormant after the configured inactivity threshold (2 hours by default). |
 
 Fleet incrementally observes at most the 32 most recently updated external Codex rollouts from the
 last 24 hours, plus explicitly pinned external sessions. An active external session is Working and
-an idle one is Available, both with View-only access. After 24 hours without activity it becomes
+an idle one is Available, both with View-only access. After the configured inactivity threshold
+(2 hours by default) it becomes
 dormant and moves to Session history. If its final assistant prose asks a direct question, it moves
 to Needs you with View-only access instead.
 
@@ -81,7 +82,7 @@ to Needs you with View-only access instead.
 | Available | Available | No turn is active and nothing requires a response. External ownership is communicated separately by View-only access. | Continue, or View when external |
 | Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. Its placement remains Available, but the unreviewed outcome is presented in the Action inbox until reviewed. | Continue |
 | Session history | Inactive | A managed, interactive session is dormant. | Continue |
-| Session history | External | The external/view-only session has had no activity for more than 24 hours. | View |
+| Session history | External | The external/view-only session has exceeded the configured inactivity threshold (2 hours by default). | View |
 | Session history | Reopenable | The provider explicitly supports reopening the inactive session, or a closed Claude session still has its exact main transcript and original working directory. | Reopen; closed rows also retain View |
 | Session history | Closed | A durable transcript remains but no safe reopen target is available. | View |
 
@@ -111,7 +112,7 @@ when the user sends a response or explicitly chooses **Mark available**.
 | Non-question `turn_done` | Available / Available, optionally New response |
 | External/view-only non-question `turn_done` | Available / Available / View only, optionally New response |
 | Managed `dormant` | Session history / Inactive / Continue |
-| Inactive `headless` or other read-only external thread with more than 24 hours of quiet | Session history / External / View |
+| Inactive `headless` or other read-only external thread beyond the configured inactivity threshold (2 hours by default) | Session history / External / View |
 | `reopenable` | Session history / Reopenable / Reopen |
 | Closed Claude ledger entry with a validated main transcript and cwd | Session history / Reopenable / View or Reopen |
 | Explicitly closed ledger entry without a safe reopen target | Session history / Closed / View |
