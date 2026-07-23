@@ -703,7 +703,14 @@ def fleet():
                  "efforts": ["medium", "high"]}]},
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(STATE.get("codex_error")),
-                                    "error": STATE.get("codex_error")}},
+                                    "error": STATE.get("codex_error"),
+                                    "runtime": ({"mode": "migrating", "phase": "draining",
+                                        "blockers": ["turn active"], "error": None,
+                                        "launcher": {"state": "ready"}}
+                                        if STATE.get("scenario") == "runtime-migrating" else
+                                        {"mode": "managed", "phase": "committed",
+                                         "blockers": [], "error": None,
+                                         "launcher": {"state": "ready"}})}},
             "ledger": copy.deepcopy(STATE.get("ledger") or {"ok": True}),
             "settings": copy.deepcopy(STATE["settings"]),
             "page_v": 1}

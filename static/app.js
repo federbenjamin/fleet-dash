@@ -6168,9 +6168,19 @@ function render(f,force){
   });
   usageBar(f.usage,f.provider_usage);
   const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
+  const runtimeWarnings=Object.entries(f.providers||{}).flatMap(([provider,value])=>{
+    const runtime=value?.runtime;if(!runtime)return[];
+    const rows=[];
+    if(runtime.mode==='migrating'&&!['committed','isolated'].includes(runtime.phase)){
+      const detail=runtime.error||runtime.blockers?.join(', ')||'verifying the shared runtime';
+      rows.push(`<div class="provideralert"><b>${esc(provider)} runtime migration · ${esc(runtime.phase)}</b> — ${esc(detail)}. Claude Code remains available.</div>`);
+    }
+    if(runtime.launcher?.state==='repair_needed')rows.push(`<div class="provideralert"><b>codex terminal routing needs repair</b> — ${esc(runtime.launcher.error||'open a new shell after Fleet repairs the managed launcher')}</div>`);
+    return rows;
+  }).join('');
   const ledgerProblem=f.ledger&&f.ledger.ok===false?
     `<div class="provideralert"><b>Local data recovered</b> — ${esc(f.ledger.error||'Fleet started a clean local ledger after a storage failure.')}${f.ledger.quarantine?` Preserved as <code>${esc(f.ledger.quarantine)}</code>.`:''}</div>`:'';
-  $('#providerstate').innerHTML=ledgerProblem+providerProblems.map(([provider,value])=>
+  $('#providerstate').innerHTML=ledgerProblem+runtimeWarnings+providerProblems.map(([provider,value])=>
     `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
   const ae=document.activeElement;
   const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
