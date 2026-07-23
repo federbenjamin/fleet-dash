@@ -493,8 +493,9 @@ class ContextOps:
                     "description": meta.get("description", ""),
                     "depth": meta.get("spawnDepth", 0),
                     "model": t.model, "family": fam,
-                    "effort": self.agent_effort(meta.get("agentType"), reg.get("cwd", ""),
-                                                self.effort_for(sid)),
+                    "effort": (t.effort or
+                               self.agent_effort(meta.get("agentType"), reg.get("cwd", ""),
+                                                 self.effort_for(sid))),
                     "tokens": {"in": t.ti, "cache_write": t.tw,
                                "cache_read": t.tr, "out": t.to},
                     "total_tokens": t.total_tokens, "cost": round(t.cost(self.cfg), 4),

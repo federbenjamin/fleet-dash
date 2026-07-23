@@ -104,6 +104,7 @@ class EngineProviderTest(unittest.TestCase):
         self.patchers = [
             mock.patch.object(engine_paths, "HOME", self.tmp.name),
             mock.patch.object(engine_paths, "BASE", self.base),
+            mock.patch.object(engine_paths, "CAPTURE_BASE", self.base),
             mock.patch.object(engine_paths, "SESSIONS", self.sessions),
             mock.patch.object(engine_paths, "PROJECTS", self.projects),
             mock.patch.object(engine_paths, "CLAUDE_ACCOUNT", self.claude_account),

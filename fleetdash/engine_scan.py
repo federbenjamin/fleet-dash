@@ -766,7 +766,8 @@ class ScanOps:
             sess_effort = self.effort_for(sid)
             for a in agents:            # the agent chat overlay acts through the parent
                 a["session_id"] = sid
-                a["effort"] = self.agent_effort(a.get("agent_type"), cwd, sess_effort)
+                a["effort"] = (a.pop("transcript_effort", None)
+                               or self.agent_effort(a.get("agent_type"), cwd, sess_effort))
             # long tool calls freeze an agent's transcript ("stalled"); still active
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
 
@@ -1877,6 +1878,10 @@ class ScanOps:
                 "description": meta.get("description", ""),
                 "depth": meta.get("spawnDepth", 0),
                 "model": t.model, "family": fam,
+                # the child's own assistant rows carry the ACTUAL effort
+                # (≥2.1.217); the frontmatter pin / parent fallback in
+                # agent_effort covers older transcripts
+                "transcript_effort": t.effort or None,
                 "state": state, "quiet_s": round(quiet),
                 "tokens": {"in": t.ti, "cache_write": t.tw, "cache_read": t.tr, "out": t.to},
                 "total_tokens": t.total_tokens,

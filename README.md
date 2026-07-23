@@ -143,7 +143,7 @@ WebSocket-over-Unix protocol. The daemon command is visible in npm builds, but C
 official standalone installation at runtime; if it is missing or rejected, Fleet leaves the private
 source and terminal routing untouched and reports the migration blocker. Fleet never scrapes the
 Codex TUI. Staging remains isolated on its
-private `~/.claude/fleet-dash-staging/codex-app-server.sock` listener and explicit `--remote` routes
+private `~/.claude/fleet-dash-staging-state/codex-app-server.sock` listener and explicit `--remote` routes
 are never rewritten. For an
 recently updated external thread, Fleet may defensively observe a small allowlist of lifecycle and
 visible-message events in its local `~/.codex/sessions` rollout so the view-only card can track work
@@ -600,8 +600,8 @@ Fleet runs two deliberately separate app instances:
 
 | Instance | Code | Local URL | Runtime state | Purpose |
 |---|---|---|---|---|
-| Production | `~/.claude/fleet-dash-prod` | `http://127.0.0.1:8377` | `~/.claude/fleet-dash-state` | Stable app tracking `main` |
-| Staging | `~/.claude/fleet-dash` | `http://127.0.0.1:8378` | `~/.claude/fleet-dash-staging` | Development branches and live verification |
+| Production | `~/.claude/fleet-dash-prod` | `http://127.0.0.1:8377` | `~/.claude/fleet-dash-prod-state` | Stable app tracking `main` |
+| Staging | `~/.claude/fleet-dash` | `http://127.0.0.1:8378` | `~/.claude/fleet-dash-staging-state` | Development branches and live verification |
 
 Shared hook/statusline captures (`pending/`, `effort/`, `usage.json`) live in
 `~/.claude/fleet-dash-capture`, selected by `FLEET_DASH_CAPTURE_DIR` in both launchd plists. The
@@ -612,7 +612,7 @@ injector applet, browser origin, service worker, drafts, offline queue, and push
 reads the shared Claude/Codex registries and transcripts so real production sessions are visible,
 but the server removes their mutation capabilities and rejects forged action requests. Only exact
 session IDs created by staging are controllable. Every staging-created session is forced into a new
-`fleet-staging/*` branch and managed worktree under `~/.claude/fleet-dash-staging/workspaces`.
+`fleet-staging/*` branch and managed worktree under `~/.claude/fleet-dash-staging-state/workspaces`.
 Production and staging store browser credentials in separate `act_token_production` and
 `act_token_staging` cookies. This matters on localhost and the shared tailnet hostname because
 browser cookies do not distinguish ports.
@@ -640,7 +640,7 @@ with staging.
 2. On the Mac: `tailscale serve --bg 8377` → gives an HTTPS URL like
    `https://<mac-name>.<tailnet>.ts.net`.
 3. On the phone, open that URL once with `?token=<act_token>` appended (get it via:
-   `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash-state/config.json'))['act_token'])"`).
+   `python3 -c "import json;print(json.load(open('$HOME/.claude/fleet-dash-prod-state/config.json'))['act_token'])"`).
 4. In Safari, Share → **Add to Home Screen**. Open the installed Fleet app, then open Settings →
    **Devices & delivery**. Notification permission is requested only from the explicit Enable
    button. Desktop browsers can use **Install Fleet** when they expose the install prompt.
@@ -725,12 +725,12 @@ The applet is **stay-open** (`OSAAppletStayOpen`), so it stays resident and `ope
 `on reopen` handler instead of paying a process launch on every click.
 
 ```
-scripts/build-injector.sh production ~/.claude/fleet-dash-state/FleetDashInjector.app
+scripts/build-injector.sh production ~/.claude/fleet-dash-prod-state/FleetDashInjector.app
 ```
 (compiles `injector.applescript`, sets `OSAAppletStayOpen` + the bundle ID, and ad-hoc signs).
 A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 
-`scripts/build-injector.sh staging ~/.claude/fleet-dash-staging/FleetDashInjector.app` compiles the
+`scripts/build-injector.sh staging ~/.claude/fleet-dash-staging-state/FleetDashInjector.app` compiles the
 same source with staging's private request directory and bundle ID
 `com.benjaminfeder.fleet-dash.staging.injector`. The two resident applets therefore cannot race the
 same request/result files. The staging applet receives its own one-time iTerm automation approval.
