@@ -11,9 +11,6 @@ CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
       engine.py snapshot                            one-shot fleet JSON
 """
 import json, os, sys, glob, threading, queue
-# time/subprocess/signal are re-exported: tests patch them via this module
-# (e.g. mock.patch.object(engine_module.subprocess, "run")).
-import time, subprocess, signal  # noqa: F401
 from collections import deque
 from .codex_adapter import CodexAdapter
 from .codex_observer import CodexRolloutObserver
@@ -23,21 +20,12 @@ from .briefing import FleetOperations
 
 
 from . import paths as pathcfg
-from .config import (CLAUDE_MODELS, CLAUDE_EFFORTS)  # noqa: F401
-from .config import (  # noqa: F401 — re-exported for compatibility
-    DEFAULT_CONFIG, EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS, KEY_TOOLS, IMG_EXTS,
-    WAITING_CONFIRM_SECONDS, IMAGE_UPLOAD_BYTES, IMAGE_UPLOAD_TTL_SECONDS,
-    IMAGE_UPLOAD_SESSION_COUNT, IMAGE_UPLOAD_SESSION_BYTES, IMAGE_UPLOAD_GLOBAL_COUNT,
-    IMAGE_UPLOAD_GLOBAL_BYTES, IMAGE_UPLOAD_ID_RE, IMAGE_UPLOAD_MIMES, DANGER_COMMANDS,
-    BUILTIN_COMMANDS, _validated_claude_delivery_uncertain,
+from .config import (
+    CLAUDE_MODELS, CLAUDE_EFFORTS, _validated_claude_delivery_uncertain,
     _validated_claude_control_overrides, _validated_claude_control_uncertain,
-    _write_private_json, _scrub_private_log, _runtime_log_secrets, load_config,
-    model_family, usd, cwd_to_project_dir, ktok, iso_epoch)
-from .placement import (  # noqa: F401 — re-exported for compatibility
-    PRIMARY_ACTION_LABELS, ACCESS_LABELS, requests_reply, completed_handoff,
-    _fact_text, _pending_placement, classify_placement, classify_closed_placement,
-    redact_handoff_text)
-from .tail import Tail  # noqa: F401
+    _scrub_private_log, _runtime_log_secrets, load_config, model_family,
+    cwd_to_project_dir)
+from .tail import Tail
 
 
 from .engine_staging import StagingOps
@@ -164,14 +152,14 @@ class Engine(StagingOps,
         # remains Working instead of manufacturing a "Response needed" card.
         self.registry_status_since = {}  # session_id -> (status, first_seen)
         try:
-            from .codex_adapter import (CodexAppServer, CodexRuntimeMigration,
+            from .codex_protocol import CodexAppServer, UnixWebSocketProcess
+            from .codex_runtime import (CodexRuntimeMigration,
                                        LEGACY_RUNTIME_OWNER, MANAGED_RUNTIME_OWNER,
                                        codex_command, codex_control_socket,
                                        codex_runtime_migration_needed,
                                        ensure_managed_codex_runtime,
                                        ensure_shared_codex_runtime,
-                                       migrate_codex_runtime_metadata,
-                                       UnixWebSocketProcess)
+                                       migrate_codex_runtime_metadata)
             executable = codex_command(cfg.get("codex_command") or None)
             state_path = os.path.join(pathcfg.BASE, "codex_threads.json")
             staging_runtime = cfg.get("instance_mode") == "staging"
