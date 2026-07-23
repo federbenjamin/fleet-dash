@@ -435,7 +435,7 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
   await expect(page.locator('#sact textarea')).toBeDisabled();
 });
 
-test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions are unambiguous', async ({ page }, testInfo) => {
+test('Now hierarchy, Usage chip, active-subagent filter, and card actions are unambiguous', async ({ page }, testInfo) => {
   await reset(page);
   await expect(page.locator('#route-now #briefing')).toHaveCount(0);
   await expect(page.locator('#pinned')).toHaveCount(1);
@@ -445,7 +445,9 @@ test('Now hierarchy, Usage chip, active-subagent filter, and Claude card actions
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
 
   const claude = page.locator('[data-sid="claude-one"]');
+  const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(claude.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
+  await expect(codex.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
   if (testInfo.project.name === 'desktop') {
     await expect(claude.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
   }
@@ -1452,6 +1454,7 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   await expect(page.locator('#working')).toContainText('Working · 1');
   await expect(card.locator('.chip')).toContainText('Working elsewhere');
   await expect(card).toContainText('Working in ChatGPT desktop.');
+  await expect(card.getByRole('button', { name: 'View', exact: true })).toHaveCount(0);
   await expect(card.locator('.termbtn')).toHaveCount(0);
   await card.locator('.shead').click();
   await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
@@ -2709,7 +2712,10 @@ test('action inbox separates requests, work, availability, and unread responses'
   const working = page.locator('[data-sid="codex:thread-one"]');
   await expect(page.locator('#working')).toContainText('Working · 1');
   await expect(working.locator('.chip')).toHaveText('Working');
-  await expect(working.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
+  await expect(working.locator('.primarybtn')).toHaveCount(0);
+  await working.locator('.shead').click();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sclose').click();
   await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('working-queue.png'), fullPage: true });
 
@@ -2907,7 +2913,7 @@ test('repository action failures do not recreate an in-app GitHub page', async (
 
 test('message Outbox schedules exact session delivery and exposes durable central controls', async ({ page }, testInfo) => {
   await reset(page, 'base');
-  await page.locator('[data-sid="codex:thread-one"] .primarybtn').click();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sview')).toBeVisible();
   await page.locator('#sft-codex\\:thread-one').fill('Send this when the Codex session is available');
   await page.locator('#sact').getByRole('button', { name: 'message options' }).click();
@@ -3088,7 +3094,7 @@ test('notification actions are event-scoped, reject double taps, and cannot leak
 
 test('an omitted fleet row cannot close or erase an open conversation', async ({ page }) => {
   await reset(page,'base');
-  await page.locator('[data-sid="codex:thread-one"] .primarybtn').click();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sview')).toBeVisible();
   const fleet=await(await page.request.get('/api/fleet')).json();
   const omitted=structuredClone(fleet);omitted.sessions=omitted.sessions.filter(item=>item.session_id!=='codex:thread-one');
