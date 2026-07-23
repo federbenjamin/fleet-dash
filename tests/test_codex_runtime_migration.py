@@ -332,6 +332,58 @@ class RuntimeMigrationTest(unittest.TestCase):
         self.assertEqual(migration.phase, "blocked")
         killer.assert_not_called()
 
+    def test_official_npm_shim_accepts_only_its_exact_platform_binary(self):
+        with tempfile.TemporaryDirectory() as root:
+            package_root = os.path.join(root, "node_modules", "@openai", "codex")
+            wrapper = os.path.join(package_root, "bin", "codex.js")
+            vendor = os.path.join(
+                package_root, "node_modules", "@openai", "codex-darwin-arm64",
+                "vendor", "aarch64-apple-darwin", "bin", "codex")
+            os.makedirs(os.path.dirname(wrapper))
+            os.makedirs(os.path.dirname(vendor))
+            for path in (wrapper, vendor):
+                with open(path, "w") as handle:
+                    handle.write("#!/bin/sh\n")
+                os.chmod(path, 0o755)
+
+            def runner(command, **kwargs):
+                if command[0] == "lsof":
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout="p44\nccodex\nn" + self.legacy_socket + "\n",
+                        stderr="")
+                if command[:3] == ["ps", "-p", "44"]:
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=(f"{os.getuid()} {vendor} app-server --listen "
+                                f"unix://{self.legacy_socket}\n"), stderr="")
+                raise AssertionError(command)
+
+            with mock.patch("codex_adapter.platform.system", return_value="Darwin"), \
+                    mock.patch("codex_adapter.platform.machine", return_value="arm64"):
+                migration = CodexRuntimeMigration(
+                    wrapper, self.state_path, self.legacy_socket,
+                    self.managed_socket, mock.Mock(), runner=runner,
+                    probe=lambda _path: True)
+            self.assertEqual(migration._listener_pid(), 44)
+
+            unrelated = os.path.join(root, "unrelated", "codex")
+            os.makedirs(os.path.dirname(unrelated))
+            with open(unrelated, "w") as handle:
+                handle.write("#!/bin/sh\n")
+            os.chmod(unrelated, 0o755)
+
+            def unrelated_runner(command, **kwargs):
+                result = runner(command, **kwargs)
+                if command[:3] == ["ps", "-p", "44"]:
+                    result.stdout = (f"{os.getuid()} {unrelated} app-server --listen "
+                                     f"unix://{self.legacy_socket}\n")
+                return result
+
+            migration.runner = unrelated_runner
+            with self.assertRaisesRegex(CodexError, "not the exact legacy listener"):
+                migration._listener_pid()
+
 
 class ManagedDaemonAndLauncherTest(unittest.TestCase):
     def test_socket_selection_keeps_staging_private(self):
