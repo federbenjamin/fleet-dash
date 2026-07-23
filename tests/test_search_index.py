@@ -1,9 +1,11 @@
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from search_index import SearchIndex
 
@@ -265,6 +267,52 @@ class SearchIndexTest(unittest.TestCase):
         self.assertTrue(self.index.search("replacement worker")["results"])
         self.index.close()
         self.assertIsNotNone(replacement.poll())
+
+    def test_existing_document_counter_skips_full_corpus_count_on_restart(self):
+        self.index._db()
+        self.index.connection.execute(
+            "UPDATE search_stats SET documents=37 WHERE singleton=1")
+        self.index.connection.commit()
+        self.index.close()
+
+        statements = []
+        real_connect = sqlite3.connect
+
+        def traced_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        restarted = SearchIndex(self.db_path, self.claude, self.codex)
+        try:
+            with mock.patch("search_index.sqlite3.connect", side_effect=traced_connect):
+                self.assertEqual(restarted.status()["documents"], 37)
+        finally:
+            restarted.close()
+
+        normalized = [" ".join(statement.lower().split()) for statement in statements]
+        self.assertFalse(any(
+            "count(*) from documents" in statement for statement in normalized))
+
+    def test_missing_document_counter_is_backfilled_once(self):
+        self.index._db()
+        self.index.connection.execute(
+            """INSERT INTO sources(
+                id, source_key, path, provider, source_kind, session_id
+            ) VALUES(1, 'legacy-source', '/legacy.jsonl', 'claude', 'session', 'legacy')""")
+        self.index.connection.execute(
+            """INSERT INTO documents(
+                source_id, ordinal, role, kind, text
+            ) VALUES(1, 'legacy', 'user', 'message', 'legacy row')""")
+        self.index.connection.execute("DELETE FROM search_stats")
+        self.index.connection.commit()
+        self.index.close()
+
+        upgraded = SearchIndex(self.db_path, self.claude, self.codex)
+        try:
+            self.assertEqual(upgraded.status()["documents"], 1)
+        finally:
+            upgraded.close()
 
     def test_concurrent_reads_do_not_duplicate_incremental_writes(self):
         rows = [{"type": "user", "timestamp": "2026-07-16T00:00:%02dZ" % (i % 60),
