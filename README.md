@@ -376,9 +376,11 @@ the provider without affecting Claude sessions.
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
   Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
   the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
-  that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
+  based on `git status` (changed and untracked files); ignored build output does not make a worktree
+  dirty. Cleanup is blocked while another live Fleet
   session uses that worktree. A lock created by the Claude session itself is released only after that
   session closes; unrelated Git worktree locks remain blocked. The conversation moves to **History**.
+  Closing a full-chat workspace always returns to the dashboard, never to an earlier closed chat.
   The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping the

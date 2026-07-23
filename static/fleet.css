@@ -583,7 +583,10 @@ details.insfold>summary:hover{color:var(--fg)}
 .freetext.composer textarea{--composer-control-height:44px;width:100%;height:var(--composer-control-height);
   min-height:var(--composer-control-height);max-height:110px;line-height:22px;resize:none}
 .freetext.composer>.pbtn.send{height:var(--composer-control-height);min-height:var(--composer-control-height);
-  padding-inline:14px}
+  width:64px;padding-inline:0}
+/* Relay composers have no leading attachment control. Without this separate
+   grid, their button occupies the flexible message column and becomes huge. */
+.freetext.composer.relay-composer{grid-template-columns:minmax(0,1fr) auto}
 .actmsg{font-size:12px;margin-top:6px;color:var(--dim)}
 .sendpair{display:flex;gap:6px;flex:0 0 auto}.sendpair .pbtn{white-space:nowrap}
 .pbtn.attach{display:inline-flex;align-items:center;justify-content:center;background:var(--card2);

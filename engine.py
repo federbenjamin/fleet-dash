@@ -5636,19 +5636,13 @@ Treat this as an independent session. Verify the repository state before changin
         status_result = self._bounded_process(
             ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
              "--untracked-files=all"], timeout=8, max_output=1_048_576)
-        ignored_result = self._bounded_nul_paths(
-            ["git", "-C", worktree, "ls-files", "--others", "--ignored",
-             "--exclude-standard", "-z"], timeout=8, max_input=67_108_864, keep=40)
-        if not status_result["ok"] or not ignored_result["ok"]:
-            detail = status_result["stderr"] or ignored_result["stderr"] or \
-                "Git could not completely inspect the worktree"
+        if not status_result["ok"]:
+            detail = status_result["stderr"] or "Git could not inspect the worktree"
             return {**base, "inspect_ok": False, "registered": True,
                     "reason": detail[:500]}
 
         status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
         files = status.get("files") or []
-        ignored = ignored_result["paths"]
-        ignored_count = ignored_result["count"]
         categories = {
             "staged": [item for item in files if item.get("staged")],
             "unstaged": [item for item in files if item.get("unstaged") and
@@ -5668,9 +5662,12 @@ Treat this as an independent session. Verify the repository state before changin
                 dirty_files.append({**item, "category": category})
         shared = self._sessions_using_worktree(worktree, exclude=(sid,))
         dirty = bool(files)
-        destructive_contents = dirty or bool(ignored)
+        # "Dirty" deliberately has Git's meaning: tracked changes and untracked
+        # paths from `git status`. Ignored build output must not turn an otherwise
+        # clean worktree into a force-removal flow.
+        destructive_contents = dirty
         material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
-                    status_result["stdout"] + "\0" + ignored_result["digest"] + "\0" +
+                    status_result["stdout"] + "\0" +
                     json.dumps(shared, sort_keys=True, separators=(",", ":")))
         revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         result = {**base, "inspect_ok": True, "registered": True,
@@ -5680,8 +5677,6 @@ Treat this as an independent session. Verify the repository state before changin
                   "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
                   "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
                   "dirty_files_truncated": len(dirty_files) > 100,
-                  "ignored_count": ignored_count, "ignored_files": ignored,
-                  "ignored_files_truncated": ignored_count > len(ignored),
                   "shared_sessions": shared,
                   "remove_allowed": not destructive_contents and not shared,
                   "force_remove_allowed": destructive_contents and not shared}

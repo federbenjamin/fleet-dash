@@ -368,6 +368,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.Codex` + `~/.Codex` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
+  `close_worktree_preview` defines dirty strictly with `git status`; ignored generated output
+  neither appears as dirty nor requires force removal. `exitSessionWorkspace` returns directly
+  to its dashboard destination rather than traversing a replaced chat route.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
