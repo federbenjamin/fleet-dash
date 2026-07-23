@@ -242,6 +242,8 @@ Requires a `codex` executable with App Server support. Set `codex_enabled` to `f
 the provider without affecting Claude sessions.
 - **Needs you** includes native questions/approvals and ordinary assistant prose that directly asks
   for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
+  An unloaded external view-only thread is the exception: Fleet clears a prose-only request after
+  30 minutes because it cannot submit a reply to that runtime.
   Completed non-question turns remain **Available** and show **new** until opened.
 - **History** is one flat chronological destination for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
@@ -376,9 +378,11 @@ the provider without affecting Claude sessions.
   turn and subagents, then archives a Codex thread or terminates only the registered Claude process;
   Claude's iTerm tab remains open. A secondary Git worktree can be preserved or removed after close;
   the branch and primary worktree are never removed. Dirty removal is a separate red confirmation
-  that lists changed, untracked, and ignored files, and cleanup is blocked while another live Fleet
+  based on `git status` (changed and untracked files); ignored build output does not make a worktree
+  dirty. Cleanup is blocked while another live Fleet
   session uses that worktree. A lock created by the Claude session itself is released only after that
   session closes; unrelated Git worktree locks remain blocked. The conversation moves to **History**.
+  Closing a full-chat workspace always returns to the dashboard, never to an earlier closed chat.
   The card's bounded Markdown
   peek remains the scanning surface; full view is for actually reading and working a session.
   The chat view and the file viewer are **mutually exclusive** and swap in one tap: tapping the

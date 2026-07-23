@@ -1966,8 +1966,8 @@ class Handler(BaseHTTPRequestHandler):
                             {"path": "static/app.js", "category": "unstaged", "status": ".M"},
                             {"path": "notes.txt", "category": "untracked", "status": "??"}]
                             if dirty else []),
-                        "ignored_count": 1 if dirty else 0,
-                        "ignored_files": ["build/cache.bin"] if dirty else [],
+                        "ignored_count": 0,
+                        "ignored_files": [],
                         "shared_sessions": shared,
                         "remove_allowed": not dirty and not shared,
                         "force_remove_allowed": dirty and not shared,

@@ -160,6 +160,29 @@ test('responsive application shell routes, filters, and follows browser back', a
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
 });
 
+test('switching chats replaces a closed chat route and relay uses the normal send width', async ({ page }) => {
+  const closedSid = '11111111-2222-3333-4444-555555555555';
+  await reset(page, 'claude-archive');
+  await page.evaluate(sid => openClosed(sid), closedSid);
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('.closedbadge')).toHaveCount(1);
+
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('.closedbadge')).toHaveCount(0);
+  await page.locator('#sclose').click();
+  await expect(page.locator('#sview')).toBeHidden();
+  await expect(page.locator('#route-now')).toBeVisible();
+
+  await reset(page, 'subagent');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const mainSendWidth = await page.locator('#sact .freetext.composer .pbtn.send').evaluate(button =>
+    button.getBoundingClientRect().width);
+  await openSubagent(page, 'codex:thread-one', 'agent-child-one');
+  const relay = page.locator('.relay-composer .pbtn.send');
+  await expect(relay).toBeVisible();
+  await expect(relay).toHaveJSProperty('offsetWidth', mainSendWidth);
+});
+
 test('out-of-order fleet and Insights responses cannot overwrite newer state', async ({ page }) => {
   // This test needs Playwright's page.route to own /api/fleet. A service worker
   // can win registration during the setup idle callback and bypass page.route,
@@ -1540,7 +1563,7 @@ test('the shared workspace header keeps session controls across every section', 
   await expect(page.locator('#history')).toContainText('Codex parity work');
 });
 
-test('secondary-worktree close preserves by default and force removal lists every risk', async ({ page }) => {
+test('secondary-worktree close preserves by default and force removal lists Git-status changes', async ({ page }) => {
   await reset(page, 'close-worktree-dirty');
   await page.locator('[data-sid="claude-one"] .shead').click();
   await page.getByRole('button', { name: 'session actions' }).click();
@@ -1550,7 +1573,7 @@ test('secondary-worktree close preserves by default and force removal lists ever
   await expect(modal).toContainText('engine.py');
   await expect(modal).toContainText('static/app.js');
   await expect(modal).toContainText('notes.txt');
-  await expect(modal).toContainText('build/cache.bin');
+  await expect(modal).not.toContainText('build/cache.bin');
   await expect(modal.getByRole('button', { name: 'close · remove clean worktree' })).toBeDisabled();
   await modal.getByRole('button', { name: 'force remove dirty worktree' }).click();
   await expect(modal).toContainText('permanently deletes every listed worktree file');

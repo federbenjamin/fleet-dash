@@ -3275,9 +3275,11 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
   const closed=!liveSession&&(isClosedSession(sid)||closedMeta.has(sid)||String(sid).startsWith('codex:'));
   if(liveSession?.new_response)markRead(liveSession);
   const same=sessionView?.sid===sid,target=workspaceHash(sid,section,item);
+  const replacingOpenSession=!same&&Boolean(sessionView);
   let returnHash=same?sessionView.returnHash:
     (parseSessionHash()?'#now':(location.hash||'#now'));
-  let historyDepth=same?Number(sessionView.historyDepth||0):0;
+  let historyDepth=same?Number(sessionView.historyDepth||0):
+    (replacingOpenSession?Number(sessionView.historyDepth||0):0);
   if(!push&&history.state?.fdWorkspace){
     returnHash=history.state.returnHash||returnHash;
     historyDepth=Math.max(0,Number(history.state.depth)||0);
@@ -3297,7 +3299,13 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
     delete $('#sbody').dataset.renderKey;delete $('#sbody').dataset.canonicalKey;}
   $('#sview').style.display='flex';activateWorkspaceSection();syncVisualViewport();
   const routeState={fdWorkspace:1,sid,section,item,returnHash,depth:historyDepth};
-  if(push&&location.hash!==target)history.pushState(routeState,'',target);
+  // Switching from one session to another replaces the open workspace route.
+  // Otherwise closing the second chat exposes the first (often already-closed)
+  // chat instead of the dashboard.
+  if(push&&location.hash!==target){
+    if(replacingOpenSession)history.replaceState(routeState,'',target);
+    else history.pushState(routeState,'',target);
+  }
   else if(!push&&location.hash!==target)history.replaceState(routeState,'',target);
   if(closed&&!closedSession(sid))loadClosedMeta(sid);
   requestAnimationFrame(()=>{if(sessionView?.sid===sid){renderSession(true);restoreWorkspaceScroll();}});
@@ -3309,9 +3317,10 @@ function openSession(sid){openSessionWorkspace(sid,'chat',null,true);}
 function openClosed(sid){openSessionWorkspace(sid,'chat',null,true);}
 function exitSessionWorkspace(){
   if(!sessionView)return;
-  const depth=Math.max(0,Number(sessionView.historyDepth)||0),returnHash=sessionView.returnHash||'#now';
+  const returnHash=sessionView.returnHash||'#now';
   closeSession();
-  if(depth){history.go(-depth);return;}
+  // The close control always returns to the dashboard destination. Traversing
+  // browser history can instead reveal the chat that this one replaced.
   const route=returnHash.replace(/^#/,'').split('/')[0];
   history.replaceState({fdRoute:validRoutes.has(route)?route:'now'},'',returnHash);
   navigateTo(validRoutes.has(route)?route:'now',false);
@@ -3793,7 +3802,7 @@ function renderAgent(force){
     $('#sact').innerHTML=`<div class="session-context"><div class="relaynote">${reason}</div>
       ${parentWaiting?`<button class="pbtn" onclick="setSessionSection('chat')">Jump to parent request</button>`:''}
       ${statusLineHtml(info.status_line,'agent:'+agentView.sid+':'+agentView.aid)}</div>
-      ${!sessionView.closed&&!done&&!parentWaiting&&par?.capabilities?.relay_agent?`<div class="freetext composer"><textarea id="aft" data-draft-key="${esc(relayDraftKey(agentView.sid,agentView.aid))}" rows="2" placeholder="relay via parent  ·  ⌘/Ctrl+Return relay" autocomplete="off"
+      ${!sessionView.closed&&!done&&!parentWaiting&&par?.capabilities?.relay_agent?`<div class="freetext composer relay-composer"><textarea id="aft" data-draft-key="${esc(relayDraftKey(agentView.sid,agentView.aid))}" rows="2" placeholder="relay via parent  ·  ⌘/Ctrl+Return relay" autocomplete="off"
         oninput="setDraft('${esc(relayDraftKey(agentView.sid,agentView.aid))}',this.value)" onkeydown="composerKey(event,sendRelay)">${esc(draftValue(relayDraftKey(agentView.sid,agentView.aid)))}</textarea>
         <button class="pbtn send" onclick="sendRelay()">Relay</button></div>`:''}
       ${agentRelayHtml(agentView.sid,agentView.aid)}<div class="actmsg" id="amsg"></div>`;

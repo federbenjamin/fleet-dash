@@ -101,6 +101,10 @@ DEFAULT_CONFIG = {
     "context_windows": {"default": 1000000, "haiku": 200000, "sonnet": 1000000},
 }
 
+# A view-only thread from another runtime cannot receive a Fleet reply. Do not
+# leave a prose question in Needs you forever once that runtime has unloaded it.
+EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS = 30 * 60
+
 
 def _validated_claude_delivery_uncertain(raw):
     """Restore only bounded, non-secret prompt identity state."""
@@ -489,6 +493,13 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     reply_requested = bool(
         latest_assistant and requests_reply(latest_assistant.get("text"))
         and dismissed != revision)
+    external_reply_expired = bool(
+        reply_requested and external and not pending
+        and str(session.get("reg_status") or "").lower() == "notloaded"
+        and state in ("idle", "turn_done", "dormant")
+        and quiet >= EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS)
+    if external_reply_expired:
+        reply_requested = False
 
     candidates = []
     pending_rule = _pending_placement(pending)
@@ -516,6 +527,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     if state == "running":
         candidates.append(("placement.state.running", "working", "Working",
                            "view" if external else "open", "confirmed"))
+    if external_reply_expired:
+        candidates.append(("placement.external.reply_request_expired", "history", "External",
+                           "view", "confirmed"))
     if reply_requested:
         candidates.append(("placement.prose.reply_requested", "needs_you",
                            "Reply requested", "respond", "inferred"))
@@ -582,6 +596,10 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
         evidence.append({"kind": "access", "label": "Control",
                          "value": _fact_text(session.get("read_only_reason") or
                                              "Owned by another runtime; Fleet can only view it"),
+                         "confidence": "confirmed"})
+    if external_reply_expired:
+        evidence.append({"kind": "reply_request_expired", "label": "Reply request",
+                         "value": "Cleared after 1800s: external view-only thread is not loaded",
                          "confidence": "confirmed"})
     if provider_stale:
         evidence.append({"kind": "stale", "label": "Freshness",
@@ -5636,19 +5654,13 @@ Treat this as an independent session. Verify the repository state before changin
         status_result = self._bounded_process(
             ["git", "-C", worktree, "status", "--porcelain=v2", "--branch", "-z",
              "--untracked-files=all"], timeout=8, max_output=1_048_576)
-        ignored_result = self._bounded_nul_paths(
-            ["git", "-C", worktree, "ls-files", "--others", "--ignored",
-             "--exclude-standard", "-z"], timeout=8, max_input=67_108_864, keep=40)
-        if not status_result["ok"] or not ignored_result["ok"]:
-            detail = status_result["stderr"] or ignored_result["stderr"] or \
-                "Git could not completely inspect the worktree"
+        if not status_result["ok"]:
+            detail = status_result["stderr"] or "Git could not inspect the worktree"
             return {**base, "inspect_ok": False, "registered": True,
                     "reason": detail[:500]}
 
         status = RepositoryOutcomeCenter._parse_status(status_result["stdout"])
         files = status.get("files") or []
-        ignored = ignored_result["paths"]
-        ignored_count = ignored_result["count"]
         categories = {
             "staged": [item for item in files if item.get("staged")],
             "unstaged": [item for item in files if item.get("unstaged") and
@@ -5668,9 +5680,12 @@ Treat this as an independent session. Verify the repository state before changin
                 dirty_files.append({**item, "category": category})
         shared = self._sessions_using_worktree(worktree, exclude=(sid,))
         dirty = bool(files)
-        destructive_contents = dirty or bool(ignored)
+        # "Dirty" deliberately has Git's meaning: tracked changes and untracked
+        # paths from `git status`. Ignored build output must not turn an otherwise
+        # clean worktree into a force-removal flow.
+        destructive_contents = dirty
         material = (root + "\0" + worktree + "\0" + listing["stdout"] + "\0" +
-                    status_result["stdout"] + "\0" + ignored_result["digest"] + "\0" +
+                    status_result["stdout"] + "\0" +
                     json.dumps(shared, sort_keys=True, separators=(",", ":")))
         revision = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         result = {**base, "inspect_ok": True, "registered": True,
@@ -5680,8 +5695,6 @@ Treat this as an independent session. Verify the repository state before changin
                   "revision": revision, "dirty": dirty, "dirty_counts": dirty_counts,
                   "dirty_total": len(dirty_files), "dirty_files": dirty_files[:100],
                   "dirty_files_truncated": len(dirty_files) > 100,
-                  "ignored_count": ignored_count, "ignored_files": ignored,
-                  "ignored_files_truncated": ignored_count > len(ignored),
                   "shared_sessions": shared,
                   "remove_allowed": not destructive_contents and not shared,
                   "force_remove_allowed": destructive_contents and not shared}

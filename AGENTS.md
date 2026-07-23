@@ -297,8 +297,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
     with one chronological list and access/provider filters. `requests_reply` examines the newest
     complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
-    or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
-    response badge. Provider-wide stale state preserves the last placement and renders one banner.
+    or `mark_available_session`; opening does not clear it. Exception: an unloaded external/view-only
+    idle/turn-done/dormant thread auto-clears a prose-only reply request after 30 minutes, because
+    Fleet cannot submit to it. `mark_read_session` clears only the New response badge. Provider-wide
+    stale state preserves the last placement and renders one banner.
     External/view-only Available sessions move to History after `dormant_seconds`; the rollout
     observer's separate 24-hour discovery window does not control placement.
     Live Claude and Codex card headers own navigation-only `open` / `continue` / `view`; never render
@@ -368,6 +370,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
   + usage_stats. `Engine.commands(sid)` builds the slash catalog per session: BUILTIN_COMMANDS
   + `<cwd>/.Codex` + `~/.Codex` + every installed plugin's installPath (`commands/**/*.md`
   namespaced with `:`, `skills/*/SKILL.md`), description from frontmatter `description:`.
+  `close_worktree_preview` defines dirty strictly with `git status`; ignored generated output
+  neither appears as dirty nor requires force removal. `exitSessionWorkspace` returns directly
+  to its dashboard destination rather than traversing a replaced chat route.
 - `codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client, shared-runtime ownership, normalized
   Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`

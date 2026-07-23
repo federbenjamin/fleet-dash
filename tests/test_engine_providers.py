@@ -2853,6 +2853,33 @@ class EngineProviderTest(unittest.TestCase):
                            "text": "Which layout should I use?"})
         self.assertEqual((reply["ui_group"], reply["reason_label"]),
                          ("needs_you", "Reply requested"))
+        external_reply_fresh = organized(
+            state="idle", headless=True, read_only=True, reg_status="notLoaded",
+            quiet_s=1799, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((external_reply_fresh["ui_group"],
+                          external_reply_fresh["reply_requested"]), ("needs_you", True))
+        interactive_reply_old = organized(
+            state="idle", quiet_s=1800, _latest_prose={"role": "assistant",
+                                                         "text": "Which layout should I use?"})
+        self.assertEqual((interactive_reply_old["ui_group"],
+                          interactive_reply_old["reply_requested"]), ("needs_you", True))
+        loaded_external_reply_old = organized(
+            state="idle", headless=True, read_only=True, reg_status="loaded",
+            quiet_s=1800, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((loaded_external_reply_old["ui_group"],
+                          loaded_external_reply_old["reply_requested"]), ("needs_you", True))
+        external_reply_expired = organized(
+            state="idle", headless=True, read_only=True, reg_status="notLoaded",
+            quiet_s=1800, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((external_reply_expired["ui_group"],
+                          external_reply_expired["reason_label"],
+                          external_reply_expired["reply_requested"]),
+                         ("history", "External", False))
+        self.assertIn("reply_request_expired", {item["kind"] for item in
+                                                  external_reply_expired["state_evidence"]})
         running = organized(state="running")
         self.assertEqual((running["ui_group"], running["reason_label"]),
                          ("working", "Working"))
@@ -3133,7 +3160,8 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(preview["force_remove_allowed"])
         self.assertEqual(preview["dirty_counts"], {
             "staged": 1, "unstaged": 1, "untracked": 1, "conflicts": 0})
-        self.assertEqual(preview["ignored_files"], ["build/cache.bin"])
+        self.assertEqual(preview["ignored_files"], [])
+        self.assertEqual(preview["ignored_count"], 0)
         self.assertEqual({item["path"] for item in preview["dirty_files"]},
                          {"tracked.txt", "staged.txt", "untracked.txt"})
 
@@ -3156,9 +3184,14 @@ class EngineProviderTest(unittest.TestCase):
 
         clean = os.path.join(self.tmp.name, "close-clean")
         git("worktree", "add", "-b", "feature/clean", clean)
+        os.makedirs(os.path.join(clean, "build"))
+        with open(os.path.join(clean, "build", "cache.bin"), "w") as handle:
+            handle.write("ignored build output\n")
         clean_session = {"session_id": "same", "provider": "codex", "cwd": clean}
         clean_preview = self.engine.close_worktree_preview(clean_session)
         self.assertTrue(clean_preview["remove_allowed"])
+        self.assertFalse(clean_preview["dirty"])
+        self.assertEqual(clean_preview["dirty_files"], [])
         self.engine._mark_cleanup_ticket_closed(clean_preview["cleanup_ticket"], "same")
         clean_removed = self.engine.cleanup_closed_worktree({"session_id": "same",
             "cleanup_ticket": clean_preview["cleanup_ticket"], "force": False})
