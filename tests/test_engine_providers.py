@@ -15,6 +15,7 @@ from unittest import mock
 
 from fleetdash import engine as engine_module
 from fleetdash import paths as engine_paths
+from fleetdash import engine_uploads as engine_uploads_module
 from fleetdash.engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
                     load_config, classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
@@ -693,7 +694,7 @@ class EngineProviderTest(unittest.TestCase):
                 output.write(b"placeholder")
             return SimpleNamespace(returncode=0)
 
-        with mock.patch.object(engine_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
+        with mock.patch.object(engine_uploads_module, "IMAGE_UPLOAD_SESSION_BYTES", 100), \
              mock.patch.object(engine_module.subprocess, "run", side_effect=convert), \
              mock.patch.object(self.engine, "_strip_jpeg_metadata", return_value=b"j" * 20):
             rejected = self.engine.store_image_upload(
