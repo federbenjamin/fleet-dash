@@ -21,7 +21,7 @@ from briefing import FleetOperations, OperationsError
 from web_push import WebPushService
 
 HOME = os.path.expanduser("~")
-PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash")
+PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-state")
 BASE = os.path.abspath(os.path.expanduser(
     os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
 INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()

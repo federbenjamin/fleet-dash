@@ -12,7 +12,7 @@
   <dict>
     <key>FLEET_DASH_INSTANCE</key><string>staging</string>
     <key>FLEET_DASH_STATE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging</string>
-    <key>FLEET_DASH_CAPTURE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash</string>
+    <key>FLEET_DASH_CAPTURE_DIR</key><string>/Users/benjaminfeder/.claude/fleet-dash-capture</string>
     <key>FLEET_DASH_STAGING_SOURCE</key><string>/Users/benjaminfeder/.claude/fleet-dash</string>
     <key>FLEET_DASH_CODEX_SOCKET</key><string>/Users/benjaminfeder/.claude/fleet-dash-staging/codex-app-server.sock</string>
     <key>FLEET_DASH_PORT</key><string>8378</string>

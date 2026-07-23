@@ -13,7 +13,7 @@ except Exception:
 sid = d.get("session_id")
 if not sid:
     sys.exit(0)
-base = os.path.expanduser("~/.claude/fleet-dash/pending")
+base = os.path.expanduser("~/.claude/fleet-dash-capture/pending")
 path = os.path.join(base, f"{sid}.json")
 ev = d.get("hook_event_name")
 out = None
