@@ -1461,7 +1461,7 @@ class CodexAdapter:
     PROVIDER = "codex"
 
     def __init__(self, enabled=True, client=None, state_path=None, clock=None,
-                 stall_seconds=180, external_observer=None,
+                 stall_seconds=180, external_observer=None, dormant_seconds=7200,
                  models_cache_path=None, refresh_budget_seconds=1.5,
                  refresh_workers=4, runtime_owner=LEGACY_RUNTIME_OWNER,
                  runtime_migration=None):
@@ -1470,6 +1470,7 @@ class CodexAdapter:
         self.state_path = state_path
         self.clock = clock or time.time
         self.stall_seconds = stall_seconds
+        self.dormant_seconds = max(0, float(dormant_seconds))
         self.error = None
         self.error_at = None
         self._sessions = []
@@ -1799,8 +1800,7 @@ class CodexAdapter:
         detail_candidates = []
         for thread in clean_threads:
             tid = thread["id"]
-            source = thread.get("source") or "unknown"
-            adoptable = tid in loaded and source != "vscode"
+            adoptable = tid in loaded
             if (tid in managed or adoptable) and now >= self._detail_retry_after.get(tid, 0):
                 detail_candidates.append(tid)
         missing_materialized = {
@@ -1845,14 +1845,13 @@ class CodexAdapter:
             listed.add(tid)
             source = thread.get("source") or "unknown"
             # App Server also writes `source: vscode` for Fleet's own rich-client
-            # threads. Ownership comes from the runtime marker we persisted when
-            # creating/adopting the thread, never from this presentation label.
+            # threads and remote CLI clients. The exact managed daemon's loaded
+            # list is runtime evidence; this presentation label is not.
             is_managed = tid in managed
-            desktop_owned = source == "vscode" and not is_managed
             # A CLI connected with `codex --remote unix://...` is another client
             # of Fleet's canonical runtime. Adopt it automatically so both
             # surfaces steer the same live turn instead of resuming a copy.
-            if tid in loaded and not desktop_owned and not is_managed:
+            if tid in loaded and not is_managed:
                 self._remember(tid, modes.get(tid) or "default", {
                     "runtime_owner": self.runtime_owner, "origin": source,
                     "cwd": thread.get("cwd") or "", "model": thread.get("model") or "",
@@ -1933,7 +1932,7 @@ class CodexAdapter:
                 state = "running"
             elif completed_epoch is not None and 0 <= now - completed_epoch < 90:
                 state = "turn_done"
-            elif recorded_type == "notLoaded" and quiet > 86400:
+            elif recorded_type == "notLoaded" and quiet > self.dormant_seconds:
                 state = "dormant"
             else:
                 state = "idle"
@@ -2045,11 +2044,12 @@ class CodexAdapter:
                     messages, session_id=self.key(tid), provider="codex"),
                 "state": state, "reg_status": reg_status,
                 "headless": not is_managed, "read_only": not is_managed,
-                "read_only_reason": ("ChatGPT Desktop and VS Code use a different App Server; "
-                                     "this transcript is view only" if desktop_owned else
-                                     "This thread is not loaded in Fleet's shared App Server; "
-                                     "its transcript is view only"),
-                "codex_source": source,
+                "read_only_reason": (
+                    None if is_managed else
+                    "This thread is not loaded in Fleet's managed App Server; "
+                    "its transcript is view only"),
+                "codex_source": self.runtime_owner if is_managed else "external",
+                "codex_provider_source": source,
                 "observed_external": bool(observation),
                 "observation_confidence": (observation or {}).get("confidence"),
                 "observation_warning": ((observation or {}).get("warning") or

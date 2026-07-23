@@ -272,10 +272,12 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     **starting**, never **attach**. Preserve that empty shell only while `thread/loaded/list` still
     contains it; otherwise it has no runtime or rollout and must be discarded as a ghost. Keep the full-chat
     open/attach/view-only button directly left of its overflow menu. `source=vscode` is not ownership
-    evidence: App Server uses it for Fleet's rich-client threads too. Only a thread persisted with
-    the adapter's exact runtime-owner marker is controllable; an unowned Desktop/VS Code transcript stays
-    headless + view-only. Never restore the old takeover action: resuming one of those ids on Fleet's
-    server creates a second runtime agent.
+    evidence: App Server uses it for Fleet's rich-client and remote-CLI threads too. A thread present
+    in the exact managed daemon's `thread/loaded/list` must be adopted regardless of that label and
+    persisted with the adapter's runtime-owner marker. Only that persisted ownership is controllable;
+    an unowned transcript stays headless + view-only. Expose normalized managed/external provenance
+    separately from the raw provider label. Never restore the old takeover action: resuming one of
+    those ids on Fleet's server creates a second runtime agent.
     `CodexRolloutObserver` is the narrow exception to the adapter's no-rollout-parsing rule: only
     explicitly pinned external threads consume an allowlist of local lifecycle and visible-message
     events so `notLoaded` does not hide active Desktop/VS Code work. The observer is read-only,
@@ -295,6 +297,8 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     complete assistant prose outside code/quotes. Its revision remains Needs you until a user reply
     or `mark_available_session`; opening does not clear it. `mark_read_session` clears only the New
     response badge. Provider-wide stale state preserves the last placement and renders one banner.
+    External/view-only Available sessions move to History after `dormant_seconds`; the rollout
+    observer's separate 24-hour discovery window does not control placement.
     Keep [`docs/session-organization.md`](docs/session-organization.md) synchronized with any mapping.
 32. **Codex history backfill indexes main transcripts, not subagents.** On the first scan after each
     daemon start, `backfill_claude_history` discovers `~/.Codex/projects/*/*.jsonl`, extracts bounded

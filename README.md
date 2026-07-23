@@ -175,6 +175,9 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   compacted notification, so messages continue steering the same active turn after compaction instead
   of landing in a stale terminal input. The card's **attach** button opens this TUI form only when no
   exact attached terminal already exists.
+  App Server's raw `source` label is diagnostic only: it can report `vscode` for a remote CLI.
+  Fleet adopts a thread when the managed daemon's exact `thread/loaded/list` proves it is loaded,
+  persists that runtime ownership, and reports normalized managed/external provenance separately.
 - Existing Fleet-owned private-runtime threads migrate automatically. Fleet first preserves a
   `codex_threads.json.pre-managed-daemon.bak`, waits for active turns, requests, compaction,
   incomplete bootstrap, and attached legacy terminals to drain, compares every owned thread's
@@ -184,7 +187,8 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   Claude's scan or action locks.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
   transcripts through paginated `thread/list`, puts active work under **Working**, recently inactive
-  work under **Available**, and sessions quiet for more than 24 hours in **Session history**. They
+  work under **Available**, and sessions beyond the configured inactivity threshold (2 hours by
+  default) in **Session history**. They
   remain view-only. The 32 newest external threads updated within 24 hours, plus pinned external
   threads, observe local `task_started`, `task_complete`, `turn_aborted`, user-message, and
   agent-message rollout events, so their state and preview stay current without claiming control.
