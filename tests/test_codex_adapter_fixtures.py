@@ -5,8 +5,9 @@ import threading
 import time
 import unittest
 
-from fleetdash.codex_adapter import (CodexAdapter, CodexError, _elicitation_pending,
+from fleetdash.codex_adapter import (CodexAdapter, _elicitation_pending,
                            _last_message, _revision)
+from fleetdash.codex_runtime import CodexError
 
 
 class FixtureClient:

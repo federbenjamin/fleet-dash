@@ -152,14 +152,14 @@ class Engine(StagingOps,
         # remains Working instead of manufacturing a "Response needed" card.
         self.registry_status_since = {}  # session_id -> (status, first_seen)
         try:
-            from .codex_adapter import (CodexAppServer, CodexRuntimeMigration,
+            from .codex_protocol import CodexAppServer, UnixWebSocketProcess
+            from .codex_runtime import (CodexRuntimeMigration,
                                        LEGACY_RUNTIME_OWNER, MANAGED_RUNTIME_OWNER,
                                        codex_command, codex_control_socket,
                                        codex_runtime_migration_needed,
                                        ensure_managed_codex_runtime,
                                        ensure_shared_codex_runtime,
-                                       migrate_codex_runtime_metadata,
-                                       UnixWebSocketProcess)
+                                       migrate_codex_runtime_metadata)
             executable = codex_command(cfg.get("codex_command") or None)
             state_path = os.path.join(pathcfg.BASE, "codex_threads.json")
             staging_runtime = cfg.get("instance_mode") == "staging"

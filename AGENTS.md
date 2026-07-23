@@ -24,11 +24,15 @@ fleetdash/                everything server.py imports
   engine_worktree.py        worktree preview/cleanup tickets
   engine_uploads.py         phone image uploads
   engine_staging.py         staging isolation
-  codex_adapter.py          Codex App Server client + thread state
+  codex_protocol.py         App Server WebSocket/JSON-RPC client (UnixWebSocketProcess, CodexAppServer)
+  codex_runtime.py          Codex runtime lifecycle/migration + CodexError base exception
+  codex_adapter.py          CodexAdapter: thread/state normalization + capability mapping
   codex_observer.py         read-only external-thread rollout observer
   codex_launcher.py         Codex TUI router (stdlib-only, spawned as a script)
   claude_background.py      official `claude attach` background transport
-  briefing.py               notification store + policy + cadence scheduler
+  briefing.py               FleetOperations facade: projections/observe/budgets/devices
+  briefing_store.py           sqlite store: schema, migrations, row/serialization helpers
+  briefing_scheduler.py       cadence/quiet-hours/delivery-lease scheduling
   outbox.py                 durable send/schedule queues
   repo_center.py            repository/git observation
   search_index.py           search worker (stdlib-only, spawned as a script)
@@ -998,15 +1002,37 @@ because they are also spawned directly as scripts by absolute path.
 - `fleetdash/claude_background.py` — fixed-argv official Claude background attach/stop client,
   bounded private
   PTY readiness, allowlisted Engine key operations, per-job serialization, and secret-free errors.
-- `fleetdash/briefing.py` — canonical notification/briefing store, global kind policy,
-  quiet-hours and cadence
-  scheduler, policy-revision suppression, delivery leases, device health, and budget records.
+- `fleetdash/briefing.py` — `FleetOperations` facade (imported as `from .briefing import
+  FleetOperations`): list/detail/badge/unread projections, session observation, budgets,
+  forecasts, and device/notification management. Composed from two mixins split out of this
+  file as pure code motion:
+  - `fleetdash/briefing_store.py` — `StoreOps`: the SQLite store — table DDL, migrations
+    (including the M12 ntfy-legacy migration and severity normalization), connection/
+    transaction machinery, generic (de)serialization/validation, row projections, and
+    event/meta CRUD. Also defines the shared module constants and `OperationsError`
+    (re-exported from `briefing` for `from .briefing import OperationsError`).
+  - `fleetdash/briefing_scheduler.py` — `SchedulerOps`: cadence/policy scheduling — quiet
+    hours, kind-policy evaluation, delivery leases, wave/repeat logic, and push-revision
+    suppression.
 - `fleetdash/outbox.py` — scheduled/waiting messages plus provider-neutral automatic send
   fallback and Codex
   control-recovery queues; private queue-owned images are never projected as paths.
-- `fleetdash/codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client,
-  shared-runtime ownership, normalized
-  Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
+- `fleetdash/codex_protocol.py` — the App Server protocol client layer split out of
+  `codex_adapter`: the `UnixWebSocketProcess` Unix-transport shim, the synchronous JSON-RPC
+  `CodexAppServer`, and the error-payload normalization helpers those clients own
+  (`_error_text`/`_is_limit_error`/`_safe_json`). Depends only on `codex_runtime`
+  (CodexError, codex_command); never imports `codex_adapter`.
+- `fleetdash/codex_runtime.py` — the lowest Codex layer: the `CodexError` base exception,
+  executable resolution (`codex_command`), shared/managed App Server startup
+  (`ensure_shared_codex_runtime`/`ensure_managed_codex_runtime`, `codex_control_socket`),
+  and the private-to-managed metadata migration (`CodexRuntimeMigration`,
+  `migrate_codex_runtime_metadata`, `codex_runtime_migration_needed`,
+  `LEGACY_RUNTIME_OWNER`/`MANAGED_RUNTIME_OWNER`). Imports nothing from `codex_protocol`
+  or `codex_adapter`.
+- `fleetdash/codex_adapter.py` — `CodexAdapter`: normalized Codex
+  threads/turns/items/questions/approvals/artifacts/subagents, shared-runtime ownership, and
+  provider capability mapping. Imports the transport from `codex_protocol` and the runtime
+  lifecycle from `codex_runtime`.
 - `server.py` — ThreadingHTTPServer; `Handler.GET_ROUTES`/`POST_ROUTES` map each
   route to `(auth, handler)` so the token-auth surface is auditable in one place —
   new routes are added to those tables, never as new `if` branches.
