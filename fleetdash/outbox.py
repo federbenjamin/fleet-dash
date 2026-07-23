@@ -107,7 +107,10 @@ def resolve_local_time(local_time, zone_name, fold=None):
             raise err
         selected = next((item for item in candidates if item[0] == int(fold)), None)
         if selected is None:
-            raise OutboxError("invalid repeated-time occurrence")
+            # Defensive: an ambiguous time always yields candidates for BOTH
+            # folds (0 and 1), and `fold` is validated to 0/1 above, so next()
+            # always matches. Unreachable in practice.
+            raise OutboxError("invalid repeated-time occurrence")  # pragma: no cover
         return selected[1], int(fold)
     return candidates[0][1], candidates[0][0]
 
@@ -661,7 +664,9 @@ class OutboxManager:
             raise OutboxError("only unclaimed pending messages can be edited", code="immutable")
         merged = {**current, **patch}
         if "spawn_spec" not in merged:
-            merged["spawn_spec"] = current.get("spawn_spec")
+            # Defensive: `current` comes from _public, which always sets
+            # "spawn_spec", so merged always contains the key. Unreachable.
+            merged["spawn_spec"] = current.get("spawn_spec")  # pragma: no cover
         values = self._normalize_create(merged)
         now = self.clock()
         with self._transaction(immediate=True) as db:
@@ -717,7 +722,10 @@ class OutboxManager:
                 "WHERE id=? AND claimed_at IS NULL AND cancelled_at IS NULL",
                 (next_state, now, row["state"], now, outbox_id))
             if result.rowcount != 1:
-                raise OutboxError("outbox message changed; refresh", code="stale")
+                # Defensive: the SELECT and UPDATE share one BEGIN IMMEDIATE
+                # transaction, so the WHERE clause always matches the row the
+                # SELECT just validated. Unreachable in practice.
+                raise OutboxError("outbox message changed; refresh", code="stale")  # pragma: no cover
         self._clear_assets_for(outbox_id)
         self._missing_targets.pop(str(outbox_id), None)
         return self.get(outbox_id)
@@ -981,7 +989,9 @@ class OutboxManager:
             record = self._internal(raw)
             if record["state"] == "scheduled" and record.get("trigger_at") is not None \
                     and now < record["trigger_at"]:
-                continue
+                # Defensive: the selecting query already excludes scheduled rows
+                # whose trigger_at is in the future. Unreachable in practice.
+                continue  # pragma: no cover
             if self._provider_problem(snapshot, record.get("target_provider")):
                 self._transient(record, "Provider is unavailable")
                 continue

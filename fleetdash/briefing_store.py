@@ -374,7 +374,7 @@ class StoreOps:
         p256dh = cls._base64url(keys.get("p256dh"), "p256dh key", 65)
         try:
             public_key = base64.urlsafe_b64decode(p256dh + "=" * (-len(p256dh) % 4))
-        except (binascii.Error, ValueError):
+        except (binascii.Error, ValueError):  # pragma: no cover - defensive: _base64url already decoded the identical value, so this re-decode cannot fail
             raise OperationsError("invalid notification p256dh key")
         if public_key[0] != 4:
             raise OperationsError("invalid notification p256dh key")
@@ -386,7 +386,7 @@ class StoreOps:
                 raise OperationsError("invalid notification expiration")
         normalized = {"endpoint": endpoint, "expirationTime": expiration,
                       "keys": {"p256dh": p256dh, "auth": auth}}
-        if len(cls._json(normalized)) > 4096:
+        if len(cls._json(normalized)) > 4096:  # pragma: no cover - defensive: the normalized subscription is bounded by the 2048-char endpoint cap plus fixed 65/16-byte keys, so it never reaches 4096
             raise OperationsError("notification subscription is too large")
         return normalized, origin
 
