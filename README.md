@@ -135,13 +135,16 @@ the provider's native control path. Built 2026-07-13; still evolving.
 
 ## Codex CLI integration
 
-Fleet Dash owns one detached App Server as the canonical Codex runtime. It starts the documented
-`codex app-server --listen unix://…` transport, then connects as one client through the documented
-WebSocket-over-Unix protocol at `~/.claude/fleet-dash/codex-app-server.sock`. The detached listener
-survives a Fleet web daemon restart and is reused instead of duplicated. (`codex app-server daemon
-start` is not used: that manager requires Codex's standalone installer, while this machine uses the
-npm CLI.) Fleet never scrapes the Codex TUI. App Server remains the canonical runtime control
-surface; an exact TUI attached to that socket is also a bounded text/focus transport. For an
+Production Fleet, ordinary interactive `codex` terminals, and Codex Remote Control are clients of
+Codex's managed App Server daemon on its default control socket at
+`~/.codex/app-server-control/app-server-control.sock`. Fleet starts the idempotent manager with
+`codex app-server daemon start`, enables Remote Control, and connects through the documented
+WebSocket-over-Unix protocol. The daemon command is visible in npm builds, but Codex requires the
+official standalone installation at runtime; if it is missing or rejected, Fleet leaves the private
+source and terminal routing untouched and reports the migration blocker. Fleet never scrapes the
+Codex TUI. Staging remains isolated on its
+private `~/.claude/fleet-dash-staging/codex-app-server.sock` listener and explicit `--remote` routes
+are never rewritten. For an
 recently updated external thread, Fleet may defensively observe a small allowlist of lifecycle and
 visible-message events in its local `~/.codex/sessions` rollout so the view-only card can track work
 that another runtime reports only as `notLoaded`. Observation is limited to the 32 newest external
@@ -159,9 +162,12 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   **turn active** until that bootstrap turn finishes because resuming an active thread aborts its turn.
   A pre-bootstrap shell is retained only while Fleet's App Server still reports it loaded; if both
   that runtime state and the rollout are absent, Fleet removes the unusable ghost card.
-- A terminal started with
-  `codex resume --remote unix://$HOME/.claude/fleet-dash/codex-app-server.sock <thread-id>`
-  is another client of that same runtime. Fleet adopts socket-attached CLI threads and can steer the
+- Fleet installs an idempotent launcher at `~/.local/share/fleet-dash/bin/codex` and one marked PATH
+  block in `~/.zshrc` (with a one-time backup). It routes interactive `codex`, `resume`, `fork`, and
+  archive commands through `--remote unix://`; admin and noninteractive subcommands pass through to
+  the current real executable. Explicit `--remote` arguments also pass through unchanged. This means
+  a normal terminal session started in any directory is automatically another client of the same
+  managed runtime. Fleet adopts daemon-loaded CLI threads and can steer the
   active turn without resuming a second agent. If that exact command is running on one real TTY,
   Fleet can send through and focus the existing terminal when App Server turn authority is absent.
   Exact App Server authority wins when both routes exist. During compaction, Fleet follows the
@@ -169,6 +175,13 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   compacted notification, so messages continue steering the same active turn after compaction instead
   of landing in a stale terminal input. The card's **attach** button opens this TUI form only when no
   exact attached terminal already exists.
+- Existing Fleet-owned private-runtime threads migrate automatically. Fleet first preserves a
+  `codex_threads.json.pre-managed-daemon.bak`, waits for active turns, requests, compaction,
+  incomplete bootstrap, and attached legacy terminals to drain, compares every owned thread's
+  canonical history fingerprint on both runtimes, then SIGTERMs only the exact same-UID private
+  listener. Metadata commits only after target verification; corrupt state or any mismatch leaves
+  the source authoritative. Migration status is visible in the provider diagnostics and never holds
+  Claude's scan or action locks.
 - ChatGPT Desktop and Codex VS Code threads use a different App Server. Fleet discovers their
   transcripts through paginated `thread/list`, puts active work under **Working**, recently inactive
   work under **Available**, and sessions quiet for more than 24 hours in **Session history**. They
@@ -637,6 +650,7 @@ normalize to Critical.
 | `poll_seconds` | 2 | scan cadence |
 | `codex_enabled` | true | start the Codex App Server adapter |
 | `codex_command` | "" | optional absolute Codex executable path; auto-detected from PATH or `~/.nvm` |
+| `codex_remote_control` | true | enable Remote Control on the managed production daemon; staging remains private |
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |
 | `search_discover_seconds` | 2 | filesystem discovery cadence for new/changed transcript sources |
 | `search_batch_rows` | 250 | bounded JSONL rows committed per worker batch |

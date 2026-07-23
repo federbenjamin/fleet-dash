@@ -72,6 +72,7 @@ DEFAULT_CONFIG = {
     "bind": "127.0.0.1",
     "codex_enabled": True,
     "codex_command": "",
+    "codex_remote_control": True,
     "search_enabled": True,
     "search_discover_seconds": 2,
     "search_batch_rows": 250,
@@ -1376,6 +1377,7 @@ class Engine:
         self.web_push_lock = threading.RLock()
         self._provider_session_cache = {"codex": []}
         self.codex_scan_error = None
+        self.codex_launcher_status = None
         self._state_event_signatures = None
         self._handoff_links_cache = None
         self._handoff_links_version = 0
@@ -1384,22 +1386,73 @@ class Engine:
         # remains Working instead of manufacturing a "Response needed" card.
         self.registry_status_since = {}  # session_id -> (status, first_seen)
         try:
-            from codex_adapter import (CodexAppServer, codex_command,
-                                       codex_control_socket, ensure_shared_codex_runtime,
+            from codex_adapter import (CodexAppServer, CodexRuntimeMigration,
+                                       LEGACY_RUNTIME_OWNER, MANAGED_RUNTIME_OWNER,
+                                       codex_command, codex_control_socket,
+                                       codex_runtime_migration_needed,
+                                       ensure_managed_codex_runtime,
+                                       ensure_shared_codex_runtime,
+                                       migrate_codex_runtime_metadata,
                                        UnixWebSocketProcess)
             executable = codex_command(cfg.get("codex_command") or None)
-            control_socket = codex_control_socket()
-            codex_client = CodexAppServer(
-                [executable, "app-server", "--listen", "unix://" + control_socket],
-                process_factory=lambda *args, **kwargs: UnixWebSocketProcess(
-                    control_socket, timeout=8),
-                startup=lambda: ensure_shared_codex_runtime(executable, control_socket))
+            state_path = os.path.join(BASE, "codex_threads.json")
+            staging_runtime = cfg.get("instance_mode") == "staging"
+            managed_socket = codex_control_socket(managed=True)
+            legacy_socket = codex_control_socket(managed=False, state_dir=BASE)
+            remote_control = bool(cfg.get("codex_remote_control", True))
+
+            def client_for(socket_path, startup):
+                return CodexAppServer(
+                    [executable, "app-server", "--listen", "unix://" + socket_path],
+                    process_factory=lambda *args, **kwargs: UnixWebSocketProcess(
+                        socket_path, timeout=8), startup=startup)
+
+            runtime_migration = None
+            if staging_runtime:
+                control_socket = legacy_socket
+                runtime_owner = LEGACY_RUNTIME_OWNER
+                codex_client = client_for(
+                    control_socket,
+                    lambda: ensure_shared_codex_runtime(executable, control_socket))
+            elif codex_runtime_migration_needed(state_path, legacy_socket):
+                control_socket = legacy_socket
+                runtime_owner = LEGACY_RUNTIME_OWNER
+                codex_client = client_for(
+                    legacy_socket,
+                    lambda: ensure_shared_codex_runtime(executable, legacy_socket))
+
+                def target_factory():
+                    return client_for(
+                        managed_socket,
+                        lambda: ensure_managed_codex_runtime(
+                            executable, managed_socket,
+                            enable_remote_control=remote_control))
+
+                runtime_migration = CodexRuntimeMigration(
+                    executable, state_path, legacy_socket, managed_socket,
+                    target_factory)
+            else:
+                control_socket = managed_socket
+                runtime_owner = MANAGED_RUNTIME_OWNER
+                if bool(cfg.get("codex_enabled", True)):
+                    migrate_codex_runtime_metadata(state_path, phase="committed")
+                codex_client = client_for(
+                    managed_socket,
+                    lambda: ensure_managed_codex_runtime(
+                        executable, managed_socket,
+                        enable_remote_control=remote_control))
             self.codex_observer = CodexRolloutObserver()
             self.codex = CodexAdapter(enabled=bool(cfg.get("codex_enabled", True)),
                                       client=codex_client,
-                                      state_path=os.path.join(BASE, "codex_threads.json"),
+                                      state_path=state_path,
                                       stall_seconds=int(cfg.get("stall_seconds") or 180),
-                                      external_observer=self.codex_observer)
+                                      external_observer=self.codex_observer,
+                                      runtime_owner=runtime_owner,
+                                      runtime_migration=runtime_migration)
+            if not staging_runtime and bool(cfg.get("codex_enabled", True)):
+                self.codex_launcher_status = {
+                    "installed": False, "shell_configured": False,
+                    "state": "waiting_runtime"}
         except Exception as exc:
             self.codex_observer = None
             self.codex = CodexAdapter(enabled=False, client=object())
@@ -1408,6 +1461,28 @@ class Engine:
     @property
     def is_staging(self):
         return self.cfg.get("instance_mode") == "staging"
+
+    def _ensure_codex_launcher(self):
+        """Install routing only after the managed daemon is proven reachable."""
+        if self.is_staging or not self.cfg.get("codex_enabled", True):
+            return
+        if (self.codex_launcher_status or {}).get("state") == "ready":
+            return
+        runtime = (self.codex.runtime_status()
+                   if hasattr(self.codex, "runtime_status") else {})
+        client = getattr(self.codex, "client", None)
+        if (runtime.get("phase") != "committed" or
+                getattr(client, "connection_state", None) != "ready"):
+            return
+        try:
+            from codex_launcher import install_launcher
+            self.codex_launcher_status = install_launcher(
+                source=os.path.join(os.path.dirname(__file__), "codex_launcher.py"),
+                home=HOME)
+        except Exception as exc:
+            self.codex_launcher_status = {
+                "installed": False, "shell_configured": False,
+                "state": "repair_needed", "error": str(exc)[:300]}
 
     def _staging_owned(self):
         records = self.cfg.get("staging_owned_sessions") or {}
@@ -2846,6 +2921,7 @@ class Engine:
             codex_sessions = [copy.deepcopy(item) for item in self.codex.sessions()]
             self._provider_session_cache["codex"] = copy.deepcopy(codex_sessions)
             self.codex_scan_error = None
+            self._ensure_codex_launcher()
         except Exception as exc:
             self.codex_scan_error = str(exc)
             codex_sessions = copy.deepcopy(self._provider_session_cache.get("codex") or [])
@@ -2960,7 +3036,11 @@ class Engine:
                                    "codex": list(self.codex.models)},
             "providers": {"claude": {"ok": True},
                           "codex": {"ok": not bool(self.codex_scan_error or self.codex.error),
-                                    "error": self.codex_scan_error or self.codex.error}},
+                                    "error": self.codex_scan_error or self.codex.error,
+                                    "runtime": ({**self.codex.runtime_status(),
+                                                 "launcher": self.codex_launcher_status}
+                                                if hasattr(self.codex, "runtime_status")
+                                                else None)}},
             "settings": {k: self.cfg.get(k, DEFAULT_CONFIG[k]) for k in
                          ("stall_seconds", "preview_sessions", "preview_session_lines",
                           "preview_agents", "preview_agent_lines", "reader_width",
@@ -5816,7 +5896,8 @@ Treat this as an independent session. Verify the repository state before changin
             return dict(cached)
         try:
             from codex_adapter import codex_control_socket
-            expected_socket = os.path.realpath(codex_control_socket())
+            expected_socket = os.path.realpath(codex_control_socket(
+                managed=not self.is_staging, state_dir=BASE))
             result = subprocess.run(
                 ["ps", "-axo", "pid=,tty=,command="], capture_output=True,
                 text=True, timeout=2)
@@ -7678,7 +7759,8 @@ Treat this as an independent session. Verify the repository state before changin
         if not os.path.isdir(cwd):
             return {"ok": False, "error": "session working directory no longer exists"}
         executable = codex_command(self.cfg.get("codex_command") or None)
-        endpoint = "unix://" + codex_control_socket()
+        endpoint = "unix://" + codex_control_socket(
+            managed=not self.is_staging, state_dir=BASE)
         command = (f"cd {shlex.quote(cwd)} && {shlex.quote(executable)} resume "
                    f"--remote {shlex.quote(endpoint)} {shlex.quote(tid)}")
         result = self._iterm_write("SPAWN", [(command, False)])

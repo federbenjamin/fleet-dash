@@ -17,6 +17,9 @@ import glob
 import hashlib
 import socket
 import re
+import fcntl
+import signal
+import shlex
 from concurrent.futures import ThreadPoolExecutor, wait
 from collections import deque
 from repo_center import observed_test_outcome
@@ -110,12 +113,31 @@ def _local_model_catalog(path, max_bytes=4 * 1024 * 1024):
     return out
 
 
-def codex_control_socket():
-    """Return Fleet's custom path for Codex's supported Unix transport."""
-    configured = os.environ.get("FLEET_DASH_CODEX_SOCKET")
-    return os.path.abspath(os.path.expanduser(
-        configured or os.path.join("~", ".claude", "fleet-dash",
-                                   "codex-app-server.sock")))
+LEGACY_RUNTIME_OWNER = "fleet_shared"
+MANAGED_RUNTIME_OWNER = "managed_daemon"
+RUNTIME_MIGRATION_SCHEMA = 1
+
+
+def codex_control_socket(managed=True, state_dir=None):
+    """Return the canonical production socket or Fleet's isolated legacy socket.
+
+    Production uses Codex's documented default control socket so Fleet, the TUI,
+    and Remote Control are clients of one runtime. Staging and migration probes
+    keep an explicit private socket and can never join production accidentally.
+    """
+    if managed:
+        configured = os.environ.get("FLEET_DASH_CODEX_MANAGED_SOCKET")
+        codex_home = os.path.abspath(os.path.expanduser(
+            os.environ.get("CODEX_HOME") or os.path.join("~", ".codex")))
+        default = os.path.join(codex_home, "app-server-control",
+                               "app-server-control.sock")
+    else:
+        configured = os.environ.get("FLEET_DASH_CODEX_SOCKET")
+        default = os.path.join(
+            os.path.abspath(os.path.expanduser(
+                state_dir or os.path.join("~", ".claude", "fleet-dash"))),
+            "codex-app-server.sock")
+    return os.path.abspath(os.path.expanduser(configured or default))
 
 
 _shared_runtime_lock = threading.Lock()
@@ -144,7 +166,7 @@ def ensure_shared_codex_runtime(executable=None, socket_path=None, timeout=8,
     the accepting socket instead of creating another runtime.
     """
     executable = executable or codex_command()
-    socket_path = socket_path or codex_control_socket()
+    socket_path = socket_path or codex_control_socket(managed=False)
     process_factory = process_factory or subprocess.Popen
     sleeper = sleeper or time.sleep
     clock = clock or time.monotonic
@@ -171,6 +193,141 @@ def ensure_shared_codex_runtime(executable=None, socket_path=None, timeout=8,
                 raise CodexError(f"Codex shared App Server exited during startup ({code})")
             sleeper(.05)
         raise CodexError("Codex shared App Server socket did not become ready")
+
+
+def ensure_managed_codex_runtime(executable=None, socket_path=None, timeout=12,
+                                 runner=None, sleeper=None, clock=None, probe=None,
+                                 enable_remote_control=True):
+    """Start Codex's managed daemon and wait for its default control socket.
+
+    The command is idempotent. Current npm builds expose this command but the
+    manager itself requires the official standalone payload; its start result is
+    the authoritative prerequisite gate.
+    """
+    executable = executable or codex_command()
+    socket_path = socket_path or codex_control_socket(managed=True)
+    runner = runner or subprocess.run
+    sleeper = sleeper or time.sleep
+    clock = clock or time.monotonic
+    probe = probe or _socket_accepting
+    with _shared_runtime_lock:
+        if not probe(socket_path):
+            env = os.environ.copy()
+            command_dir = os.path.dirname(os.path.abspath(executable))
+            env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
+            try:
+                started = runner(
+                    [executable, "app-server", "daemon", "start"],
+                    capture_output=True, text=True, timeout=timeout, env=env)
+            except Exception as exc:
+                raise CodexError(f"Codex managed daemon failed to start: {exc}") from exc
+            if started.returncode:
+                detail = (started.stderr or started.stdout or
+                          f"exit {started.returncode}").strip()
+                raise CodexError("Codex managed daemon failed to start: " + detail)
+            deadline = clock() + timeout
+            while clock() < deadline:
+                if probe(socket_path):
+                    break
+                sleeper(.05)
+            else:
+                raise CodexError("Codex managed daemon socket did not become ready")
+        if enable_remote_control:
+            enabled = runner(
+                [executable, "app-server", "daemon", "enable-remote-control"],
+                capture_output=True, text=True, timeout=timeout)
+            if enabled.returncode:
+                detail = (enabled.stderr or enabled.stdout or
+                          f"exit {enabled.returncode}").strip()
+                raise CodexError("Codex daemon started, but Remote Control could not be enabled: " +
+                                 detail)
+
+
+def _atomic_codex_state_update(path, transform):
+    """Serialize migration writes across production/staging and fsync the result."""
+    if not path:
+        return {}
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    lock_path = path + ".migration.lock"
+    with open(lock_path, "a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                with open(path) as handle:
+                    state = json.load(handle) or {}
+            except FileNotFoundError:
+                state = {}
+            except ValueError as exc:
+                raise CodexError("Codex runtime state is corrupt; migration did not modify it") from exc
+            backup = path + ".pre-managed-daemon.bak"
+            if os.path.isfile(path) and not os.path.exists(backup):
+                shutil.copyfile(path, backup)
+                os.chmod(backup, 0o600)
+                with open(backup, "rb") as handle:
+                    os.fsync(handle.fileno())
+            updated = transform(dict(state))
+            tmp = path + ".migration.tmp"
+            with open(tmp, "w") as handle:
+                json.dump(updated, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            directory = os.open(os.path.dirname(path), os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return updated
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def migrate_codex_runtime_metadata(path, phase="committed", error=None,
+                                   blockers=None, clock=None):
+    """Checkpoint migration status and convert only proven Fleet-owned threads."""
+    now = (clock or time.time)()
+
+    def transform(state):
+        migration = dict(state.get("runtime_migration") or {})
+        migration.update({
+            "schema": RUNTIME_MIGRATION_SCHEMA,
+            "source": "fleet_private",
+            "target": MANAGED_RUNTIME_OWNER,
+            "phase": phase,
+            "updated_at": now,
+            "blockers": sorted(set(str(value)[:120] for value in (blockers or [])))[:50],
+            "error": str(error)[:500] if error else None,
+        })
+        migration.setdefault("started_at", now)
+        thread_meta = dict(state.get("thread_meta") or {})
+        converted = 0
+        if phase == "committed":
+            for tid, raw in list(thread_meta.items()):
+                meta = dict(raw or {})
+                if meta.get("runtime_owner") == LEGACY_RUNTIME_OWNER:
+                    meta.update(runtime_owner=MANAGED_RUNTIME_OWNER,
+                                control_runtime=MANAGED_RUNTIME_OWNER)
+                    thread_meta[tid] = meta
+                    converted += 1
+            migration["committed_at"] = now
+        migration["converted_threads"] = converted
+        state["thread_meta"] = thread_meta
+        state["runtime_migration"] = migration
+        return state
+
+    return _atomic_codex_state_update(path, transform)
+
+
+def codex_runtime_migration_needed(state_path, legacy_socket, probe=None):
+    """Return true only while an uncommitted private listener still exists."""
+    probe = probe or _socket_accepting
+    try:
+        with open(state_path) as handle:
+            state = json.load(handle) or {}
+    except (OSError, ValueError):
+        state = {}
+    migration = state.get("runtime_migration") or {}
+    return migration.get("phase") != "committed" and probe(legacy_socket)
 
 
 class _WebSocketInput:
@@ -1019,13 +1176,265 @@ class CodexAppServer:
         return {"ok": True}
 
 
+class CodexRuntimeMigration:
+    """Drain Fleet's private listener and atomically rebind to the managed daemon."""
+
+    def __init__(self, executable, state_path, legacy_socket, managed_socket,
+                 target_factory, clock=None, runner=None, killer=None, probe=None):
+        self.executable = os.path.realpath(executable)
+        self.state_path = state_path
+        self.legacy_socket = os.path.realpath(legacy_socket)
+        self.managed_socket = os.path.realpath(managed_socket)
+        self.target_factory = target_factory
+        self.clock = clock or time.time
+        self.runner = runner or subprocess.run
+        self.killer = killer or os.kill
+        self.probe = probe or _socket_accepting
+        self._lock = threading.Lock()
+        self._worker = None
+        self.phase = "draining"
+        self.error = None
+        self.blockers = []
+        self.converted_threads = 0
+
+    def mutation_blocked(self):
+        return self.phase in ("preflight", "switching", "source_stopped")
+
+    def diagnostics(self):
+        with self._lock:
+            return {"mode": "managed" if self.phase == "committed" else "migrating",
+                    "phase": self.phase, "blockers": list(self.blockers),
+                    "error": self.error, "converted_threads": self.converted_threads}
+
+    def maybe_migrate(self, adapter):
+        """Schedule one bounded attempt; never make Fleet's poll thread wait."""
+        with self._lock:
+            if self.phase == "committed" or (self._worker and self._worker.is_alive()):
+                return
+            self._worker = threading.Thread(
+                target=self._attempt, args=(adapter,), daemon=True,
+                name="fleet-codex-runtime-migration")
+            self._worker.start()
+
+    @staticmethod
+    def _turn_active(thread):
+        turns = thread.get("turns") or [] if isinstance(thread, dict) else []
+        if not turns:
+            return False
+        status = turns[-1].get("status") if isinstance(turns[-1], dict) else None
+        if isinstance(status, dict):
+            status = status.get("type") or status.get("status")
+        return str(status or "").lower() in {
+            "inprogress", "in_progress", "running", "started", "pending"}
+
+    @staticmethod
+    def _fingerprint(thread):
+        if not isinstance(thread, dict):
+            return None
+
+        def canonical(value):
+            if isinstance(value, dict):
+                return {key: canonical(item) for key, item in value.items()
+                        if item is not None}
+            if isinstance(value, list):
+                return [canonical(item) for item in value]
+            return value
+
+        stable = {key: thread.get(key) for key in
+                  ("id", "cwd", "name", "title", "archived", "parentThreadId", "gitInfo")
+                  if key in thread}
+        stable["turns"] = thread.get("turns") or []
+        raw = json.dumps(canonical(stable), sort_keys=True,
+                         separators=(",", ":"), default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _owned(self):
+        try:
+            with open(self.state_path) as handle:
+                state = json.load(handle) or {}
+        except (OSError, ValueError):
+            state = {}
+        meta = state.get("thread_meta") or {}
+        return [(tid, meta.get(tid) or {}) for tid in (state.get("threads") or [])
+                if (meta.get(tid) or {}).get("runtime_owner") == LEGACY_RUNTIME_OWNER]
+
+    def _terminal_blockers(self):
+        try:
+            result = self.runner(["ps", "-axo", "pid=,command="],
+                                 capture_output=True, text=True, timeout=4)
+        except Exception:
+            return ["legacy terminal check unavailable"]
+        if result.returncode:
+            return ["legacy terminal check unavailable"]
+        endpoint = "unix://" + self.legacy_socket
+        blockers = []
+        for line in result.stdout.splitlines():
+            if endpoint in line and "--remote" in line and "codex" in line:
+                blockers.append("legacy terminal attached")
+                break
+        return blockers
+
+    def _runtime_blockers(self, client, owned):
+        blockers = self._terminal_blockers()
+        owned_ids = {tid for tid, _ in owned}
+        requests = list(getattr(client, "approvals", {}).values())
+        if any((item or {}).get("thread_id") in owned_ids and
+               (item or {}).get("state", "pending") == "pending" for item in requests):
+            blockers.append("pending provider request")
+        states = getattr(client, "thread_state", {})
+        for tid, meta in owned:
+            live = states.get(tid) or {}
+            if live.get("compacting") is not None:
+                blockers.append("compaction active")
+                continue
+            if (live.get("status") == "running" or live.get("turn_id") or
+                    getattr(client, "owns_active_turn", lambda _tid: False)(tid)):
+                blockers.append("turn active")
+                continue
+            if meta.get("unmaterialized"):
+                blockers.append("bootstrap incomplete")
+                continue
+            try:
+                if self._turn_active(client.read_thread(tid)):
+                    blockers.append("turn active")
+            except Exception:
+                blockers.append("source read unavailable")
+        return sorted(set(blockers))
+
+    def _listener_pid(self):
+        result = self.runner(
+            ["lsof", "-nP", "-U", "-a", "-c", "codex", "-Fpcn", self.legacy_socket],
+            capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            raise CodexError("could not identify the legacy Codex listener")
+        pids = {int(line[1:]) for line in result.stdout.splitlines()
+                if line.startswith("p") and line[1:].isdigit()}
+        if len(pids) != 1:
+            raise CodexError("legacy Codex listener identity is ambiguous")
+        pid = next(iter(pids))
+        inspected = self.runner(["ps", "-p", str(pid), "-o", "uid=,command="],
+                                capture_output=True, text=True, timeout=5)
+        if inspected.returncode or not inspected.stdout.strip():
+            raise CodexError("legacy Codex listener disappeared during identity check")
+        uid_text, _, command = inspected.stdout.strip().partition(" ")
+        try:
+            uid = int(uid_text)
+            argv = shlex.split(command.strip())
+        except (ValueError, OSError) as exc:
+            raise CodexError("legacy Codex listener identity is malformed") from exc
+        expected = ["app-server", "--listen", "unix://" + self.legacy_socket]
+        if uid != os.getuid() or len(argv) < 4 or argv[-3:] != expected or \
+                os.path.realpath(argv[0]) != self.executable:
+            raise CodexError("refusing to stop a process that is not the exact legacy listener")
+        return pid
+
+    def _retire_legacy(self):
+        if not self.probe(self.legacy_socket):
+            return
+        pid = self._listener_pid()
+        self.killer(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if not self.probe(self.legacy_socket):
+                return
+            time.sleep(.05)
+        raise CodexError("legacy Codex listener did not stop after SIGTERM")
+
+    def _checkpoint(self, phase, error=None, blockers=None):
+        state = migrate_codex_runtime_metadata(
+            self.state_path, phase=phase, error=error, blockers=blockers,
+            clock=self.clock)
+        migration = state.get("runtime_migration") or {}
+        with self._lock:
+            self.phase = phase
+            self.error = str(error)[:500] if error else None
+            self.blockers = list(blockers or [])
+            self.converted_threads = int(migration.get("converted_threads") or 0)
+
+    def _attempt(self, adapter):
+        target = None
+        try:
+            with adapter._runtime_action_lock:
+                owned = self._owned()
+                blockers = self._runtime_blockers(adapter.client, owned)
+                if blockers:
+                    self._checkpoint("draining", blockers=blockers)
+                    return
+                self._checkpoint("preflight")
+                source_threads = {}
+                for tid, meta in owned:
+                    if not meta.get("unmaterialized"):
+                        source_threads[tid] = adapter.client.read_thread(tid)
+                target = self.target_factory()
+                target.start()
+                target.list_threads()
+                mismatches = []
+                for tid, source in source_threads.items():
+                    try:
+                        candidate = target.read_thread(tid)
+                    except Exception:
+                        mismatches.append("target history unavailable")
+                        continue
+                    if self._fingerprint(source) != self._fingerprint(candidate):
+                        mismatches.append("history fingerprint mismatch")
+                if mismatches:
+                    raise CodexError("; ".join(mismatches[:10]))
+                self._checkpoint("switching")
+                self._retire_legacy()
+                self._checkpoint("source_stopped")
+                # Commit durable authority before rebinding the in-memory client.
+                # A crash on either side of this line has one clear restart owner:
+                # legacy before commit, managed after commit.
+                self._checkpoint("committed")
+                old = adapter.client
+                adapter.client = target
+                adapter.runtime_owner = MANAGED_RUNTIME_OWNER
+                adapter._loaded_threads = set()
+                adapter._loaded_generation = None
+                adapter._last_refresh = 0
+                target = None
+                old.close()
+        except Exception as exc:
+            source_gone = False
+            try:
+                source_gone = not self.probe(self.legacy_socket)
+            except Exception:
+                pass
+            if target is not None and source_gone:
+                # The source has crossed the point of no return. Keep the
+                # already-verified target live and retry only the durable commit;
+                # never revive or reconnect the retired private runtime.
+                old = adapter.client
+                adapter.client = target
+                adapter._loaded_threads = set()
+                adapter._loaded_generation = None
+                adapter._last_refresh = 0
+                target = None
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            if target is not None:
+                try:
+                    target.close()
+                except Exception:
+                    pass
+            try:
+                self._checkpoint("blocked", error=exc)
+            except Exception:
+                with self._lock:
+                    self.phase = "blocked"
+                    self.error = str(exc)[:500]
+
+
 class CodexAdapter:
     PROVIDER = "codex"
 
     def __init__(self, enabled=True, client=None, state_path=None, clock=None,
                  stall_seconds=180, external_observer=None,
                  models_cache_path=None, refresh_budget_seconds=1.5,
-                 refresh_workers=4):
+                 refresh_workers=4, runtime_owner=LEGACY_RUNTIME_OWNER,
+                 runtime_migration=None):
         self.enabled = enabled
         self.client = client or CodexAppServer()
         self.state_path = state_path
@@ -1069,6 +1478,12 @@ class CodexAdapter:
         self._refresh_diagnostics = deque(maxlen=50)
         self.external_observer = external_observer
         self._tracked_external = set()
+        self.runtime_owner = runtime_owner
+        self.runtime_migration = runtime_migration
+        self._runtime_action_lock = threading.RLock()
+
+    def _owns_metadata(self, meta):
+        return (meta or {}).get("runtime_owner") == self.runtime_owner
 
     def _mutation_lock(self, thread_id):
         with self._mutation_locks_guard:
@@ -1127,6 +1542,8 @@ class CodexAdapter:
     def sessions(self):
         if not self.enabled:
             return []
+        if self.runtime_migration:
+            self.runtime_migration.maybe_migrate(self)
         with self._lock:
             if not self._refreshing and self.clock() - self._last_refresh >= 2:
                 self._refreshing = True
@@ -1320,7 +1737,7 @@ class CodexAdapter:
         modes = dict(persisted.get("modes") or {})
         thread_meta = dict(persisted.get("thread_meta") or {})
         managed = {tid for tid in (persisted.get("threads") or [])
-                   if (thread_meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"}
+                   if self._owns_metadata(thread_meta.get(tid) or {})}
         with self._lock:
             tracked_external = set(self._tracked_external)
             previous_by_tid = {
@@ -1407,7 +1824,7 @@ class CodexAdapter:
             # surfaces steer the same live turn instead of resuming a copy.
             if tid in loaded and not desktop_owned and not is_managed:
                 self._remember(tid, modes.get(tid) or "default", {
-                    "runtime_owner": "fleet_shared", "origin": source,
+                    "runtime_owner": self.runtime_owner, "origin": source,
                     "cwd": thread.get("cwd") or "", "model": thread.get("model") or "",
                     "effort": thread.get("effort"), "name": thread.get("name"),
                     "created_at": _epoch(thread.get("createdAt")) or now,
@@ -1757,7 +2174,7 @@ class CodexAdapter:
             for session in out:
                 tid = session.get("native_session_id")
                 meta = latest_meta.get(tid) or {}
-                if meta.get("runtime_owner") != "fleet_shared":
+                if not self._owns_metadata(meta):
                     continue
                 latest_revision = int(meta.get("settings_revision") or 0)
                 projected_revision = int(session.get("settings_revision") or 0)
@@ -1855,7 +2272,7 @@ class CodexAdapter:
             for item in protocol:
                 kind = str(item.get("kind") or "unknown")
                 counts[kind] = counts.get(kind, 0) + 1
-            return {
+            out = {
                 "provider_error": self.error,
                 "provider_error_at": self.error_at,
                 "model_error": self._model_error,
@@ -1872,12 +2289,30 @@ class CodexAdapter:
                 "refresh_errors": list(self._refresh_diagnostics),
                 "protocol_events": counts,
             }
+            if self.runtime_migration:
+                out["runtime"] = self.runtime_migration.diagnostics()
+            else:
+                out["runtime"] = {"mode": ("managed" if self.runtime_owner ==
+                                             MANAGED_RUNTIME_OWNER else "private"),
+                                  "phase": "committed" if self.runtime_owner ==
+                                           MANAGED_RUNTIME_OWNER else "isolated",
+                                  "blockers": [], "error": None}
+            return out
+
+    def runtime_status(self):
+        if self.runtime_migration:
+            return self.runtime_migration.diagnostics()
+        return {"mode": ("managed" if self.runtime_owner == MANAGED_RUNTIME_OWNER
+                          else "private"),
+                "phase": ("committed" if self.runtime_owner == MANAGED_RUNTIME_OWNER
+                           else "isolated"),
+                "blockers": [], "error": None}
 
     def _managed(self):
         state = self._state()
         meta = state.get("thread_meta") or {}
         return [tid for tid in (state.get("threads") or [])
-                if (meta.get(tid) or {}).get("runtime_owner") == "fleet_shared"]
+                if self._owns_metadata(meta.get(tid) or {})]
 
     def _modes(self):
         return dict(self._state().get("modes") or {})
@@ -1928,7 +2363,8 @@ class CodexAdapter:
                         expected_settings_revision):
                 return False
             thread_meta[tid] = {**current_meta, **(meta or {}),
-                                "runtime_owner": "fleet_shared"}
+                                "runtime_owner": self.runtime_owner,
+                                "control_runtime": self.runtime_owner}
             state["thread_meta"] = {key: value for key, value in thread_meta.items()
                                     if key in kept}
             self._save_state(state)
@@ -2012,7 +2448,7 @@ class CodexAdapter:
         state = self._state()
         meta = (state.get("thread_meta") or {}).get(tid) or {}
         if tid not in (state.get("threads") or []) or \
-                meta.get("runtime_owner") != "fleet_shared":
+                not self._owns_metadata(meta):
             return False, "external Codex thread is view only"
         if meta.get("unmaterialized"):
             return False, "the Codex thread never created a saved conversation"
@@ -2033,7 +2469,14 @@ class CodexAdapter:
             return {"ok": False, "error": str(exc)}
 
     def start_thread(self, cwd, model=None, effort=None, mode="plan",
-                     initial_text=None):
+                     initial_text=None, _runtime_locked=False):
+        if not _runtime_locked:
+            with self._runtime_action_lock:
+                if self.runtime_migration and self.runtime_migration.mutation_blocked():
+                    raise CodexError("Codex runtime migration is switching control; retry shortly",
+                                     code="provider_control_unavailable", queueable=True)
+                return self.start_thread(cwd, model, effort, mode, initial_text,
+                                         _runtime_locked=True)
         if mode not in ("plan", "default"):
             raise CodexError("unknown Codex collaboration mode")
         thread = self.client.start_thread(cwd, model, effort)
@@ -2277,7 +2720,15 @@ class CodexAdapter:
         # renders it only inside its sandboxed static-preview iframe.
         return ctype, data, None
 
-    def act(self, action, _mutation_locked=False):
+    def act(self, action, _mutation_locked=False, _runtime_locked=False):
+        if not _runtime_locked:
+            with self._runtime_action_lock:
+                if self.runtime_migration and self.runtime_migration.mutation_blocked():
+                    return {"ok": False,
+                            "error": "Codex runtime migration is switching control; message can be queued",
+                            "code": "provider_control_unavailable", "queueable": True}
+                return self.act(action, _mutation_locked=_mutation_locked,
+                                _runtime_locked=True)
         typ = action.get("type")
         tid = self.native(action.get("session_id"))
         try:
@@ -2287,7 +2738,7 @@ class CodexAdapter:
             meta = (self._state().get("thread_meta") or {}).get(tid) or {}
             if not known:
                 return {"ok": False, "error": "unknown Codex session"}
-            if known.get("read_only") or meta.get("runtime_owner") != "fleet_shared":
+            if known.get("read_only") or not self._owns_metadata(meta):
                 return {"ok": False,
                         "error": known.get("read_only_reason") or
                                  "external Codex thread is view only"}

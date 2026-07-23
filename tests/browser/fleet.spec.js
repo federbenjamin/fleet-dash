@@ -2624,6 +2624,18 @@ test('confirmed ledger recovery is visible without taking either provider down',
   await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
 });
 
+test('Codex runtime migration warning keeps Claude available and leaks no runtime path', async ({ page }) => {
+  await reset(page, 'runtime-migrating');
+  const warning = page.locator('#providerstate');
+  await expect(warning).toContainText('codex runtime migration · draining');
+  await expect(warning).toContainText('turn active');
+  await expect(warning).toContainText('Claude Code remains available');
+  await expect(warning).not.toContainText('app-server-control.sock');
+  await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sact textarea[placeholder="send message"]')).toBeVisible();
+});
+
 test('backfilled Claude history supports both view and reopen', async ({ page }) => {
   await reset(page, 'claude-archive');
   await goTo(page, 'history');
