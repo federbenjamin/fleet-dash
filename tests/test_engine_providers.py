@@ -13,8 +13,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import engine as engine_module
-from engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
+from fleetdash import engine as engine_module
+from fleetdash.engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
                     load_config, classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
 
@@ -1145,7 +1145,7 @@ class EngineProviderTest(unittest.TestCase):
         headless = (f" 104 ?? /opt/codex resume --remote "
                     f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=exact + duplicate_child + wrong_socket + headless)):
             routes = self.engine._codex_terminal_routes(force=True)
@@ -1154,7 +1154,7 @@ class EngineProviderTest(unittest.TestCase):
         ambiguous = exact + (f" 105 ttys003 /opt/codex resume --remote "
                              f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=ambiguous)):
             self.assertEqual(self.engine._codex_terminal_routes(force=True), {})

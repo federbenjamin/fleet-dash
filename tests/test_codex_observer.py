@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from codex_observer import (CodexRolloutObserver, MAX_READ_BYTES_PER_OBSERVE,
+from fleetdash.codex_observer import (CodexRolloutObserver, MAX_READ_BYTES_PER_OBSERVE,
                             MAX_ROW_BYTES)
 
 

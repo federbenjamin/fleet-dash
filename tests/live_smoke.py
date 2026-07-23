@@ -12,7 +12,7 @@ ROOT = "http://127.0.0.1:8377"
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from codex_adapter import (CodexAppServer, UnixWebSocketProcess,
+from fleetdash.codex_adapter import (CodexAppServer, UnixWebSocketProcess,
                            codex_control_socket)
 
 

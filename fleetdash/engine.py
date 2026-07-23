@@ -12,13 +12,13 @@ CLI:  engine.py spend [--cwd DIR | --session SID]   one-shot spend table
 """
 import json, os, re, sys, glob, time, shlex, sqlite3, secrets, signal, subprocess, threading, contextlib, urllib.request, plistlib, hashlib, copy, uuid, selectors, queue, mmap, stat, math
 from collections import deque
-from codex_adapter import CodexAdapter
-from codex_observer import CodexRolloutObserver
-from claude_background import ClaudeBackgroundTransport, ClaudeBackgroundError
-from repo_center import RepositoryOutcomeCenter, observed_test_outcome
-from outbox import OutboxError, OutboxManager
-from briefing import FleetOperations, OperationsError
-from web_push import WebPushService
+from .codex_adapter import CodexAdapter
+from .codex_observer import CodexRolloutObserver
+from .claude_background import ClaudeBackgroundTransport, ClaudeBackgroundError
+from .repo_center import RepositoryOutcomeCenter, observed_test_outcome
+from .outbox import OutboxError, OutboxManager
+from .briefing import FleetOperations, OperationsError
+from .web_push import WebPushService
 
 HOME = os.path.expanduser("~")
 PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-state")
@@ -1435,7 +1435,7 @@ class Engine:
         # remains Working instead of manufacturing a "Response needed" card.
         self.registry_status_since = {}  # session_id -> (status, first_seen)
         try:
-            from codex_adapter import (CodexAppServer, CodexRuntimeMigration,
+            from .codex_adapter import (CodexAppServer, CodexRuntimeMigration,
                                        LEGACY_RUNTIME_OWNER, MANAGED_RUNTIME_OWNER,
                                        codex_command, codex_control_socket,
                                        codex_runtime_migration_needed,
@@ -1526,7 +1526,7 @@ class Engine:
                 getattr(client, "connection_state", None) != "ready"):
             return
         try:
-            from codex_launcher import install_launcher
+            from .codex_launcher import install_launcher
             self.codex_launcher_status = install_launcher(
                 source=os.path.join(os.path.dirname(__file__), "codex_launcher.py"),
                 home=HOME)
@@ -5955,7 +5955,7 @@ Treat this as an independent session. Verify the repository state before changin
         if now - cached_at < 2 and (cached or not force):
             return dict(cached)
         try:
-            from codex_adapter import codex_control_socket
+            from .codex_adapter import codex_control_socket
             expected_socket = os.path.realpath(codex_control_socket(
                 managed=not self.is_staging, state_dir=BASE))
             result = subprocess.run(

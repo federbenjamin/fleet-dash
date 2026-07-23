@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from repo_center import RepositoryOutcomeCenter, observed_test_outcome
+from fleetdash.repo_center import RepositoryOutcomeCenter, observed_test_outcome
 
 
 class Result:
@@ -138,8 +138,8 @@ class RepositoryOutcomeCenterTests(unittest.TestCase):
         self.assertIn("repository unavailable", snapshot["error"])
 
     def test_github_missing_auth_network_and_malformed_payloads_degrade_visibly(self):
-        with mock.patch("repo_center.shutil.which", return_value=None):
-            with mock.patch("repo_center.os.path.isfile", return_value=False):
+        with mock.patch("fleetdash.repo_center.shutil.which", return_value=None):
+            with mock.patch("fleetdash.repo_center.os.path.isfile", return_value=False):
                 center = RepositoryOutcomeCenter()
             missing = center._github_pr("branch", "owner/repo")
         self.assertEqual(missing["state"], "unavailable")

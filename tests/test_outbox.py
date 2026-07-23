@@ -3,7 +3,7 @@ import tempfile
 import threading
 import unittest
 
-from outbox import OutboxError, OutboxManager, resolve_local_time
+from fleetdash.outbox import OutboxError, OutboxManager, resolve_local_time
 
 
 class Clock:

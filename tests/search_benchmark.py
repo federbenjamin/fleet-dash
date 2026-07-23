@@ -10,7 +10,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from search_index import SearchIndex
+from fleetdash.search_index import SearchIndex
 
 
 def percentile(values, quantile):

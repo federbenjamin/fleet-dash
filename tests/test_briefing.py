@@ -8,7 +8,7 @@ from datetime import datetime
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from briefing import FleetOperations, OperationsError
+from fleetdash.briefing import FleetOperations, OperationsError
 
 
 class Clock:
