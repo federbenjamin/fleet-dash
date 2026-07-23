@@ -344,8 +344,8 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertFalse(session["headless"])
         self.assertFalse(session["read_only"])
         self.assertTrue(session["capabilities"]["submit"])
-        self.assertTrue(session["capabilities"]["focus_terminal"])
-        self.assertEqual(session["capabilities"]["focus_terminal_mode"], "attach")
+        self.assertFalse(session["capabilities"]["focus_terminal"])
+        self.assertIsNone(session["capabilities"]["focus_terminal_mode"])
 
     def test_owned_app_server_turn_keeps_control_capabilities(self):
         thread = self.thread("managed", {"type": "active"}, updated=990)
@@ -801,7 +801,7 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(first[0]["collaboration_mode"], "plan")
         self.assertFalse(first[0]["capabilities"]["focus_terminal"])
-        self.assertEqual(first[0]["capabilities"]["focus_terminal_label"], "starting")
+        self.assertNotIn("focus_terminal_label", first[0]["capabilities"])
         restarted = CodexAdapter(client=client, state_path=self.state_path,
                                  clock=lambda: 1000, stall_seconds=30,
                                  models_cache_path=os.path.join(

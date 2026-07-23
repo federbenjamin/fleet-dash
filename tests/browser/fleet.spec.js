@@ -812,15 +812,10 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
   if (testInfo.project.name === 'desktop') {
-    const terminal = codex.getByRole('button', { name: 'Attach' });
     const pin = codex.getByRole('button', { name: 'pin session', exact: true });
-    await expect(terminal).toBeEnabled();
+    await expect(codex.locator('.termbtn')).toHaveCount(0);
     await expect(pin).toBeVisible();
-    expect(await terminal.evaluate((el) => el.nextElementSibling === document.querySelector(
-      '[data-sid="codex:thread-one"] .spin'))).toBe(true);
     expect(await pin.evaluate((el) => getComputedStyle(el).borderStyle)).toBe('solid');
-    await terminal.click();
-    await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   }
 
   for (let index = 0; index < 20; index += 1) await refresh(page);
@@ -1255,12 +1250,7 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await reset(page);
   const card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
-  const attach = page.locator('#sctrl > .termbtn');
-  await expect(attach).toHaveText('Attach');
-  await expect(attach).toBeEnabled();
-  expect(await attach.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
-  await attach.click();
-  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
+  await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
   await page.getByRole('button', { name: 'session actions' }).click();
   await page.getByRole('button', { name: 'Default', exact: true }).click();
   await expect.poll(async () => (await fixtureState(page)).sessions[1].collaboration_mode)
@@ -1270,16 +1260,31 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await input.fill('Run the deterministic check');
   await page.locator('#sact').getByRole('button', { name: 'send' }).click();
   await refresh(page);
-  await expect(page.locator('#sctrl > .termbtn')).toHaveText('turn active');
-  await expect(page.locator('#sctrl > .termbtn')).toBeDisabled();
+  await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
   await page.getByRole('button', { name: 'session actions' }).click();
   await page.getByRole('menuitem', { name: /Stop turn/ }).click();
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
   await expect(card.locator('.chip')).toContainText('Available');
-  await expect(page.locator('#sctrl > .termbtn')).toHaveText('Attach');
-  await expect(page.locator('#sctrl > .termbtn')).toBeEnabled();
+  await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
+});
+
+test('an exact existing Codex terminal exposes Open without Attach', async ({ page }, testInfo) => {
+  await reset(page, 'codex-terminal');
+  const card = page.locator('[data-sid="codex:thread-one"]');
+  if (testInfo.project.name === 'desktop') {
+    const cardOpen = card.getByRole('button', { name: 'Open', exact: true });
+    await expect(cardOpen).toBeEnabled();
+  }
+  await card.locator('.shead').click();
+  const open = page.locator('#sctrl > .termbtn');
+  await expect(open).toHaveText('Open');
+  await expect(open).toBeEnabled();
+  expect(await open.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
+  await open.click();
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
+  await expect(page.getByRole('button', { name: 'Attach' })).toHaveCount(0);
 });
 
 test('Claude permission modes are capability-gated and bypass always warns', async ({ page }) => {
@@ -1447,13 +1452,9 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   await expect(page.locator('#working')).toContainText('Working · 1');
   await expect(card.locator('.chip')).toContainText('Working elsewhere');
   await expect(card).toContainText('Working in ChatGPT desktop.');
-  if ((await page.viewportSize()).width > 700)
-    await expect(card.getByRole('button', { name: 'view only' })).toBeDisabled();
+  await expect(card.locator('.termbtn')).toHaveCount(0);
   await card.locator('.shead').click();
-  const viewOnly = page.locator('#sctrl > .termbtn');
-  await expect(viewOnly).toHaveText('view only');
-  await expect(viewOnly).toBeDisabled();
-  expect(await viewOnly.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
+  await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('menuitem', { name: /Stop turn/ })).toBeDisabled();
   await expect(page.getByRole('menuitem', { name: /Close session/ })).toBeDisabled();

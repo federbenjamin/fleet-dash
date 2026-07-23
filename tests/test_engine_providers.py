@@ -1097,26 +1097,35 @@ class EngineProviderTest(unittest.TestCase):
         self.assertFalse(refused["ok"])
         self.assertIn("view only", refused["error"])
 
-    def test_codex_terminal_attaches_to_shared_runtime(self):
+    def test_codex_terminal_focus_requires_exact_existing_route(self):
         session = codex_session()
         session["cwd"] = self.cwd
-        session["capabilities"].update(focus_terminal=True,
-                                       focus_terminal_mode="attach")
         self.codex.session = session
         writes = []
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps)) or {"ok": True})
-        with mock.patch("codex_adapter.codex_command", return_value="/opt/codex"), \
-             mock.patch("codex_adapter.codex_control_socket",
-                        return_value="/Users/test/.codex/app-server-control.sock"):
-            result = self.engine.act({"type": "focus", "session_id": "codex:same"})
+        self.engine._codex_terminal_route = lambda tid, force=False: (
+            {"tty": "/dev/ttys007", "pid": 700} if tid == "same" and force else None)
+        result = self.engine.act({"type": "focus", "session_id": "codex:same"})
         self.assertTrue(result["ok"])
         self.assertTrue(result["shared_runtime"])
-        self.assertEqual(writes[0][0], "SPAWN")
-        command = writes[0][1][0][0]
-        self.assertIn("codex resume --remote", command)
-        self.assertIn("unix:///Users/test/.codex/app-server-control.sock", command)
-        self.assertTrue(command.endswith(" same"))
+        self.assertTrue(result["focused"])
+        self.assertEqual(writes, [
+            ("/dev/ttys007", [("__FOCUS__", False)])])
+        self.assertEqual(self.codex.actions, [])
+
+    def test_codex_terminal_focus_never_spawns_when_route_is_missing(self):
+        self.codex.session = codex_session()
+        self.engine._codex_terminal_route = lambda tid, force=False: None
+        writes = []
+        self.engine._iterm_write = lambda tty, steps, step_delay=None: (
+            writes.append((tty, steps)) or {"ok": True})
+
+        result = self.engine.act({"type": "focus", "session_id": "codex:same"})
+
+        self.assertFalse(result["ok"])
+        self.assertIn("no attached Codex terminal", result["error"])
+        self.assertEqual(writes, [])
         self.assertEqual(self.codex.actions, [])
 
     def test_codex_terminal_discovery_requires_exact_socket_uuid_and_unique_tty(self):

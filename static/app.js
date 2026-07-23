@@ -2530,17 +2530,16 @@ const terminalActions=new Map();
 function terminalButton(s,card=false){
   if(!s)return'';
   const cls=`expandbtn termbtn${card?' deskonly':''}`;
-  if(s.capabilities?.focus_terminal){
-    const attach=s.capabilities?.focus_terminal_mode==='attach';
-    const title=attach?'open a Codex TUI attached to this shared runtime':"bring this session's terminal tab to the front";
-    const action=terminalActions.get(s.session_id)||{};
-    return`<button class="${cls}" title="${esc(title)}"
-      ${action.busy?'disabled':''} onclick="event.stopPropagation();focusSession('${s.session_id}',this)">${action.busy?'Opening…':action.ok?'Opened ✓':attach?'Attach':'Terminal'}</button>`;
-  }
   if(s.provider==='codex'){
-    const label=s.capabilities?.focus_terminal_label||(s.read_only?'view only':'no terminal');
-    return`<button class="${cls}" disabled
-      title="${esc(s.capabilities?.focus_terminal_reason||'Codex terminal unavailable')}">${label}</button>`;
+    if(!s.capabilities?.focus_terminal||s.capabilities?.focus_terminal_mode!=='focus')return'';
+    const action=terminalActions.get(s.session_id)||{};
+    return`<button class="${cls}" title="bring this session's terminal tab to the front"
+      ${action.busy?'disabled':''} onclick="event.stopPropagation();focusSession('${s.session_id}',this)">${action.busy?'Opening…':action.ok?'Opened ✓':'Open'}</button>`;
+  }
+  if(s.capabilities?.focus_terminal){
+    const action=terminalActions.get(s.session_id)||{};
+    return`<button class="${cls}" title="bring this session's terminal tab to the front"
+      ${action.busy?'disabled':''} onclick="event.stopPropagation();focusSession('${s.session_id}',this)">${action.busy?'Opening…':action.ok?'Opened ✓':'Terminal'}</button>`;
   }
   return'';
 }
@@ -4102,7 +4101,6 @@ function cardDetail(s){
           <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
           <span>spend</span><b>${s.cost_source==='unavailable'?'unavailable — App Server reports tokens, not currency':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}`}</b>
           ${s.error?`<span>provider error</span><b>${esc(s.error)}</b>`:''}
-          ${!s.capabilities?.focus_terminal&&s.provider==='codex'?`<span>terminal focus</span><b>${esc(s.capabilities?.focus_terminal_reason||'unavailable')}</b>`:''}
         </div>
       </details>
       <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}

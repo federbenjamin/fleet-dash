@@ -310,11 +310,13 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     actually loaded on that socket are persisted with `thread_meta.runtime_owner=fleet_shared` and
     may be steered by Fleet or an attached `codex resume --remote unix://...` TUI. A newly created
     Fleet thread immediately starts a visible normal `hi` turn; `thread/start` alone has no rollout
-    and cannot be resumed by the TUI. `thread/resume` aborts an active turn, so expose disabled
-    **turn active** instead of attach until the turn finishes. Before materialization, expose disabled
-    **starting**, never **attach**. Preserve that empty shell only while `thread/loaded/list` still
-    contains it; otherwise it has no runtime or rollout and must be discarded as a ghost. Keep the full-chat
-    open/attach/view-only button directly left of its overflow menu. `source=vscode` is not ownership
+    and cannot be resumed by the TUI. `thread/resume` can abort an active turn or create a second
+    runtime agent when ownership is wrong, so Fleet must never start or resume a Codex TUI. Render no
+    Attach button and no disabled starting/turn-active/view-only terminal placeholder. Preserve an
+    empty shell only while `thread/loaded/list` still contains it; otherwise it has no runtime or
+    rollout and must be discarded as a ghost. An **Open** control is allowed only when bounded process
+    discovery proves the exact thread UUID, Fleet socket, and one real TTY; it focuses that existing
+    terminal and does nothing else. Keep it directly left of the full-chat overflow menu. `source=vscode` is not ownership
     evidence: App Server uses it for Fleet's rich-client and remote-CLI threads too. A thread present
     in the exact shared runtime's `thread/loaded/list` must be adopted regardless of that label and
     persisted with `runtime_owner=fleet_shared`. Only that persisted ownership is controllable; an

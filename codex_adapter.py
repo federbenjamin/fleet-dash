@@ -2023,8 +2023,6 @@ class CodexAdapter:
             can_change_settings = bool(settings_supported and state not in
                 ("running", "stalled", "needs_you", "blocked", "error", "stale") and
                 not compacting)
-            can_attach = (is_managed and materialized and
-                          state not in ("running", "stalled", "needs_you"))
             reg_status = ("running" if state in ("running", "stalled") else
                           "turn_done" if state == "turn_done" else
                           live.get("status") or recorded_type)
@@ -2081,19 +2079,8 @@ class CodexAdapter:
                         ("running", "stalled", "needs_you") and not compacting,
                     "review": is_managed and state not in
                         ("running", "stalled", "needs_you"),
-                    "files": bool(files), "focus_terminal": can_attach,
-                    "focus_terminal_mode": "attach" if can_attach else None,
-                    "focus_terminal_label": ("attach" if can_attach else
-                                             "starting" if is_managed and not materialized else
-                                             "view only" if not is_managed else
-                                             "turn active"),
-                    "focus_terminal_reason": ("Open a Codex TUI attached to Fleet's shared "
-                                              "App Server" if can_attach else
-                                              "Fleet is creating the saved Codex session needed "
-                                              "by the terminal" if is_managed and not materialized else
-                                              "Wait for the current Codex turn to finish before "
-                                              "attaching" if is_managed else
-                                              "External Codex runtime is view only"),
+                    "files": bool(files), "focus_terminal": False,
+                    "focus_terminal_mode": None,
                     "answer_structured": bool(pending and pending.get("kind") in
                                               ("question", "elicitation")),
                     "decide_approval": bool(pending), "spawn_agent": True,
@@ -2173,13 +2160,7 @@ class CodexAdapter:
                         "Available when the Codex turn is idle" if settings_supported and
                         state in ("running", "needs_you") else ""),
                     focus_terminal=False,
-                    focus_terminal_mode=None,
-                    focus_terminal_label=("turn active" if state in
-                                          ("running", "needs_you") else "starting"),
-                    focus_terminal_reason=(
-                        "Wait for the current Codex turn to finish before attaching"
-                        if state in ("running", "needs_you") else
-                        "Fleet is syncing this Codex session with the shared App Server"))
+                    focus_terminal_mode=None)
                 fallback["control_state"] = ("connected_active" if owned_turn else
                                              "reconnecting" if uncontrolled_active else
                                              "connected_idle")
@@ -2558,10 +2539,7 @@ class CodexAdapter:
                                                      "text": initial_text})
                             current["capabilities"].update(
                                 focus_terminal=False,
-                                focus_terminal_mode=None,
-                                focus_terminal_label="turn active",
-                                focus_terminal_reason=(
-                                    "Wait for the current Codex turn to finish before attaching"))
+                                focus_terminal_mode=None)
         return thread
 
     def _stub_session(self, tid, meta, mode):
@@ -2585,9 +2563,7 @@ class CodexAdapter:
                     "agents": [], "agents_running": 0, "agents_total": 0,
                     "agent_cost": None, "capabilities": {"submit": True,
                     "interrupt": False, "close": True, "focus_terminal": False,
-                    "focus_terminal_mode": None, "focus_terminal_label": "starting",
-                    "focus_terminal_reason": ("Fleet is creating the saved Codex session needed "
-                                              "by the terminal"),
+                    "focus_terminal_mode": None,
                     "answer_structured": False, "takeover": False,
                     "archive": True, "compact": True, "review": True, "files": False,
                     "decide_approval": False, "spawn_agent": True, "relay_agent": False,

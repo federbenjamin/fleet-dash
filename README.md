@@ -158,8 +158,9 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   those saved selections after a daemon restart or compaction instead of losing the ability to send
   the next Plan-mode turn. Every new
   Fleet Codex session immediately sends a visible, normal `hi` turn. That creates the rollout the
-  TUI needs instead of leaving an empty, unresumable thread shell. **Attach** stays disabled as
-  **turn active** until that bootstrap turn finishes because resuming an active thread aborts its turn.
+  runtime needs instead of leaving an empty, unresumable thread shell. Fleet never starts or resumes
+  a TUI for the thread: `thread/resume` can abort an active turn and can create a second runtime
+  agent when ownership is wrong.
   A pre-bootstrap shell is retained only while Fleet's App Server still reports it loaded; if both
   that runtime state and the rollout are absent, Fleet removes the unusable ghost card.
 - Fleet installs an idempotent launcher at `~/.local/share/fleet-dash/bin/codex` and one marked PATH
@@ -173,8 +174,8 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
   Exact App Server authority wins when both routes exist. During compaction, Fleet follows the
   provider's replacement turn ID from either the current `contextCompaction` item or the legacy
   compacted notification, so messages continue steering the same active turn after compaction instead
-  of landing in a stale terminal input. The card's **attach** button opens this TUI form only when no
-  exact attached terminal already exists.
+  of landing in a stale terminal input. When that exact command is still running on one real TTY,
+  the card shows **Open** to focus it. Otherwise Codex has no terminal control.
   App Server's raw `source` label is diagnostic only: it can report `vscode` for a remote CLI.
   Fleet adopts a thread when the managed daemon's exact `thread/loaded/list` proves it is loaded,
   persists that runtime ownership, and reports normalized managed/external provenance separately.
@@ -319,10 +320,11 @@ the provider without affecting Claude sessions.
   replaces Fleet's settled feedback on the next refresh. Rapid follow-up Claude messages queue while
   its registry catches up with a just-started turn, so they cannot land in the wrong terminal state.
 - A Claude card's whole header opens Fleet chat; the redundant second chat button is gone. **Terminal**
-  (desktop only) brings that Claude iTerm tab to the front. A managed
-  Codex card shows **Attach**, which opens a new Codex TUI connected to the canonical shared runtime.
-  External Codex cards show disabled **view only** because their Desktop/VS Code runtime is separate.
-  The same open/attach/view-only control appears immediately left of the ⋮ menu in full-screen chat.
+  (desktop only) brings that Claude iTerm tab to the front; for a Claude background job it starts the
+  official `claude attach` client. Codex shows **Open** only when Fleet proves that the exact thread
+  already has one live terminal on the managed socket. Fleet never creates a Codex terminal from the
+  dashboard, and it renders no disabled terminal placeholder for active, starting, or view-only Codex
+  sessions. When present, **Open** sits immediately left of the ⋮ menu in full-screen chat.
 - **Pin sessions to a watchlist at the top:** pinning lifts the full card into a
   **📌 pinned sessions** block at the top of Now. Pinned cards keep the order in which
   they were pinned; a new pin appends at the bottom, and urgency/activity changes do not move it.
