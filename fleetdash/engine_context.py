@@ -204,30 +204,56 @@ class ContextOps:
             return eff or parent_effort
         return parent_effort
 
+    def _transcript_effort(self, sid):
+        """Live effort from the session's own transcript.
+
+        Claude Code ≥2.1.217 stamps the live effort level onto every assistant
+        row (top-level `effort`); Tail folds it with byte-offset evidence
+        order. Returns (value or None, evidence byte offset)."""
+        reg, path = self._reg_main_path(sid)
+        if not path:
+            return None, 0
+        mt = self.tails.get(path)
+        if mt is None:
+            return None, 0
+        v = getattr(mt, "effort", "") or ""
+        return (v if v in CLAUDE_EFFORTS else None,
+                int(getattr(mt, "effort_evidence_offset", 0) or 0))
+
     def effort_for(self, sid):
         """Effort level ('high', 'max', …) for a session.
 
-        It exists ONLY in the statusline payload Claude Code pipes to the statusline
-        command (`"effort":{"level":…}`) — not in the transcript, not in the session
-        registry. So the statusline script side-writes it here (see its
-        `fleet-dash effort side-write` block); no statusline, no effort."""
+        Primary source: transcript assistant rows (Claude Code ≥2.1.217 stamps
+        the live effort onto each one). Legacy fallback: the statusline
+        side-write file (`fleet-dash effort side-write` block), kept for older
+        Claude builds. A Fleet-issued accepted /effort override wins until
+        strictly newer native evidence arrives (invariant 65): a transcript
+        effort row at a byte offset past the acceptance baseline, or a newer
+        statusline side-write mtime."""
+        t_eff, t_off = self._transcript_effort(sid)
+        s_eff, s_mtime = None, 0.0
         path = os.path.join(capture_base(), "effort", sid)
         try:
-            stat = os.stat(path)
+            st = os.stat(path)
             with open(path) as f:
                 v = f.read().strip()
+            if v in CLAUDE_EFFORTS:
+                s_eff, s_mtime = v, st.st_mtime
         except OSError:
-            override = self._claude_effort_overrides.get(sid)
-            return override[0] if override else None
+            pass
         override = self._claude_effort_overrides.get(sid)
         if override:
-            # A newer statusline render is the native source of truth and also
-            # catches model/effort changes made directly in Claude's terminal.
-            if stat.st_mtime > override[1] and v in self.EFFORTS:
+            value, accepted_at = override
+            entry = (self._claude_control_overrides.get(sid) or {}).get("effort") or {}
+            baseline = int(entry.get("baseline", 0) or 0)
+            if t_eff and baseline > 0 and t_off > baseline:
                 self._retire_claude_control_override(sid, "effort")
-            else:
-                return override[0]
-        return v if v in CLAUDE_EFFORTS else None
+                return t_eff
+            if s_eff and s_mtime > accepted_at:
+                self._retire_claude_control_override(sid, "effort")
+                return s_eff
+            return value
+        return t_eff or s_eff
 
     def compacting_secs(self, sid, cwd, mt):
         """Seconds a compaction has been running, or None.
@@ -517,16 +543,22 @@ class ContextOps:
         if snapshot is not None:
             files = snapshot.get("files") or []
             messages = snapshot.get("messages") or []
+            delivered = snapshot.get("delivered_paths") or {}
         else:
             with self.scan_lock:
                 mt = self.tail_for(path)
                 mt.poll()
                 files = list(mt.files)
                 messages = list(mt.convo)
+                delivered = dict(mt.delivered_paths)
         allowed = {f["path"] for f in files}
         for m in messages:              # inline chips can outlive the files deque
             if m.get("role") == "tool":
                 allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
+        # The durable delivery whitelist outlives both ring buffers, so an old
+        # delivery stays selectable (its file-history backup may still resolve
+        # it). Delivery-derived only — never the backup mapping (invariant 10).
+        allowed.update(p for p in delivered if isinstance(p, str))
         return selector if any(self.file_id(sid, path) == selector for path in allowed) else None
 
     def file_content(self, sid, file_id):
@@ -574,6 +606,7 @@ class ContextOps:
             files = snapshot.get("files") or []
             messages = snapshot.get("messages") or []
             file_backups = snapshot.get("file_backups") or {}
+            delivered = snapshot.get("delivered_paths") or {}
         else:
             with self.scan_lock:
                 mt = self.tail_for(path)
@@ -581,10 +614,12 @@ class ContextOps:
                 files = list(mt.files)
                 messages = list(mt.convo)
                 file_backups = dict(mt.file_backups)
+                delivered = dict(mt.delivered_paths)
         allowed = {f["path"] for f in files}
         for m in messages:              # inline chips can outlive the files deque
             if m.get("role") == "tool":
                 allowed.update(p for p in m.get("files") or [] if isinstance(p, str))
+        allowed.update(p for p in delivered if isinstance(p, str))
         fpath = next((path for path in allowed if self.file_id(sid, path) == selector), None)
         if not fpath:
             return None, None, "not a file this session delivered"

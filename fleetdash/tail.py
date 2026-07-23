@@ -2,7 +2,7 @@
 import os, re, json, time
 from collections import deque
 from . import paths as pathcfg
-from .config import KEY_TOOLS, ktok, iso_epoch, usd, model_family
+from .config import KEY_TOOLS, CLAUDE_EFFORTS, ktok, iso_epoch, usd, model_family
 
 class Tail:
     """Incremental jsonl reader: keeps byte offset + running aggregates."""
@@ -15,6 +15,10 @@ class Tail:
         # Byte offsets, rather than row timestamps, establish provider evidence
         # order. Compaction can append older-timestamped rows after a command.
         self.model_evidence_offset = 0
+        # Claude Code ≥2.1.217 stamps the live effort level onto every
+        # assistant row (top-level `effort`); this is the primary effort source.
+        self.effort = ""
+        self.effort_evidence_offset = 0
         # Claude writes mode changes as top-level `permission-mode` records and
         # also stamps the effective mode onto human prompt rows. Keep the newest
         # observed value; the live registry does not expose it.
@@ -30,6 +34,11 @@ class Tail:
         self.convo = deque(maxlen=120)  # recent turns + key-tool calls
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
+        # Durable delivery whitelist: files/convo are ring buffers, so a
+        # delivered path can age out while its file-history backup survives.
+        # This bounded insertion-ordered map keeps it selectable (invariant 10:
+        # the whitelist stays delivery-derived — never the backup mapping).
+        self.delivered_paths = {}       # path -> last delivery ts, capped
         # Claude snapshots files it writes beneath ~/.claude/file-history/<sid>.
         # Keep only transcript-declared path -> opaque backup-name mappings so a
         # delivered scratch file remains readable after Claude removes its temp dir.
@@ -164,6 +173,12 @@ class Tail:
         content = m.get("content")
         ctypes = [b.get("type") for b in content if isinstance(b, dict)] if isinstance(content, list) else ["str"]
         if role == "assistant":
+            eff = o.get("effort")
+            if isinstance(eff, str) and eff in CLAUDE_EFFORTS:
+                self.effort = eff
+                if evidence_offset is not None:
+                    self.effort_evidence_offset = max(
+                        self.effort_evidence_offset, int(evidence_offset))
             u = m.get("usage")
             if u:
                 self.ti += u.get("input_tokens", 0)
@@ -555,6 +570,10 @@ class Tail:
         self.files.append({"path": path,
                            "caption": caption or (previous or {}).get("caption", ""),
                            "ts": ts})
+        self.delivered_paths.pop(path, None)   # move-to-end on re-delivery
+        self.delivered_paths[path] = ts
+        while len(self.delivered_paths) > 1024:
+            self.delivered_paths.pop(next(iter(self.delivered_paths)))
 
     def last_message(self, limit=160):
         """Newest prose for the card peek, preserving Markdown block structure."""

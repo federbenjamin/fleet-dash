@@ -111,6 +111,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
     SendUserFile tool_use rows, and it's token-gated. Never accept a free-form client path:
     that would turn the act token into an arbitrary-disk-read credential over the tailnet.
+    The whitelist is the files deque + convo chips + `Tail.delivered_paths` (bounded durable map
+    fed only by `_file_add`); the `file_backups` mapping tracks every checkpointed file and must
+    never widen the whitelist.
 11. **Convo capture filters user-row noise in `Tail._fold`** — isMeta rows, `<command-`/
     `<local-command`/`Caveat:` prefixes, `<system-reminder>` blocks, and the post-compaction
     "This session is being continued from" blob. Consecutive assistant text rows merge into one
@@ -194,12 +197,14 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
     labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
     ourselves would defeat a security gate from a remote device — don't.
-22. **Effort exists ONLY in the statusline payload.** `"effort":{"level":…}` is piped to the
-    statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
-    cannot derive it. `~/.Codex/statusline-command.sh` side-writes it to
-    `fleet-dash-capture/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
-    `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
-    alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
+22. **Live effort comes from the transcript (≥2.1.217); the statusline side-write is a legacy
+    fallback.** Every assistant transcript row (main AND subagent) carries a top-level `effort`;
+    `Tail.effort` + `Tail.effort_evidence_offset` fold it with byte-offset evidence order and
+    `Engine.effort_for` prefers it. The statusline side-write at
+    `fleet-dash-capture/effort/<session_id>` remains a wall-clock fallback for older builds.
+    A Fleet-issued accepted `/effort` override persists until newer native evidence (transcript
+    row past the recorded baseline, or newer side-write mtime); zero/absent baselines retire only
+    via the wall-clock path. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
     (`.Codex/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
     the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
     types (`plugin:agent`) have no local file: fall back to the parent.

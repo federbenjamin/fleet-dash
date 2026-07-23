@@ -745,6 +745,7 @@ class ScanOps:
                 "messages": copy.deepcopy(list(mt.convo)),
                 "files": copy.deepcopy(list(mt.files)),
                 "file_backups": copy.deepcopy(mt.file_backups),
+                "delivered_paths": dict(mt.delivered_paths),
             }
             self.drain_stats(mt)
             mtime = os.path.getmtime(main_path)
@@ -1431,6 +1432,8 @@ class ScanOps:
             return int(getattr(tail, "model_evidence_offset", 0) or 0)
         if field == "permission_mode":
             return int(getattr(tail, "permission_mode_evidence_offset", 0) or 0)
+        if field == "effort":
+            return int(getattr(tail, "effort_evidence_offset", 0) or 0)
         return 0
 
     def _record_claude_control_overrides(self, sid, tail, accepted):
@@ -1515,8 +1518,17 @@ class ScanOps:
                     if not newer:
                         tail.permission_mode = item["value"]
                 else:
-                    newer = bool(native_effort and
-                                 effort_mtime > float(item.get("accepted_at", 0)))
+                    # Transcript assistant rows are the primary effort evidence
+                    # (byte-offset ordered); the statusline side-write remains a
+                    # legacy wall-clock fallback. A zero/absent baseline is a
+                    # pre-transcript-evidence record: never let older transcript
+                    # rows retire it (only the wall-clock path may).
+                    baseline = int(item.get("baseline", 0) or 0)
+                    newer = bool(
+                        (getattr(tail, "effort", "") and baseline > 0 and
+                         int(getattr(tail, "effort_evidence_offset", 0) or 0) > baseline)
+                        or (native_effort and
+                            effort_mtime > float(item.get("accepted_at", 0))))
                 if newer:
                     entry.pop(field, None)
                     changed_overrides = True
@@ -1541,8 +1553,12 @@ class ScanOps:
                         newer = (int(getattr(tail, "permission_mode_evidence_offset", 0) or 0) >
                                  int(item.get("baseline", 0)))
                     else:
-                        newer = bool(native_effort and effort_mtime >
-                                     float(record.get("attempted_at", 0)))
+                        baseline = int(item.get("baseline", 0) or 0)
+                        newer = bool(
+                            (getattr(tail, "effort", "") and baseline > 0 and
+                             int(getattr(tail, "effort_evidence_offset", 0) or 0) > baseline)
+                            or (native_effort and effort_mtime >
+                                float(record.get("attempted_at", 0))))
                     resolved = resolved and newer
                 if resolved:
                     uncertain.pop(sid, None)

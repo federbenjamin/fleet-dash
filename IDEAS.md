@@ -34,20 +34,20 @@ pass; revisit individually.
 
 ## Drift / latent gaps noticed while auditing (verify before fixing)
 
-- **The statusline effort side-write block is missing.**
-  `~/.claude/statusline-command.canonical.sh` (the golden copy that
-  `fix-statusline.sh` restores on every SessionStart) contains no
-  "fleet-dash effort side-write" block, so `fleet-dash-capture/effort/<sid>`
-  has not been updated since 2026-07-14. Invariant 22 describes the block as
-  present. Until it is restored to the canonical file, the UI falls back to
-  model-only labels and persisted `/effort` overrides.
-- **`file_selector_for_path` ignores `file_backups`.** `file_content`
-  resolves missing Claude deliveries through the transcript's
-  file-history-snapshot backup mapping (invariant 10), but the selector gate
-  never adds backup-only paths to `allowed`. If a delivered file is deleted
-  AND its path has fallen out of the files deque/convo chips, the chip 404s
-  even though a backup exists. Dead local removed in the 2026-07-23 pass;
-  decide whether the selector should consult backups.
+- ~~Statusline effort side-write block missing~~ — **resolved 2026-07-23** by
+  switching the primary effort source to the transcript: Claude Code ≥2.1.217
+  stamps `effort` on every assistant row (main + subagent); `Tail.effort` folds
+  it and `effort_for` prefers it (invariant 22 rewritten). The side-write file
+  remains a legacy fallback; restoring the canonical statusline block is now
+  optional (only matters for pre-2.1.217 builds).
+- ~~`file_selector_for_path` ignores backups~~ — **resolved 2026-07-23** with
+  `Tail.delivered_paths`, a bounded durable delivery whitelist that outlives
+  the files/convo ring buffers; backups stay resolution-only (they track every
+  checkpointed file and must never widen the whitelist).
+- **Subagent effort could use the child transcript directly.** Child rows now
+  carry `effort` too; `agent_effort` still uses the frontmatter pin → parent
+  fallback. Folding the child's own rows would catch a runtime discrepancy
+  with the pin. Low value while the fallback matches runtime behavior.
 - **Instance naming asymmetry.** Production state lives in
   `~/.claude/fleet-dash-state`, staging state in `~/.claude/fleet-dash-staging`,
   production code in `~/.claude/fleet-dash-prod`, dev/staging code in

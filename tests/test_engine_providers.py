@@ -655,6 +655,78 @@ class EngineProviderTest(unittest.TestCase):
         self.assertNotIn("/untrusted", self.engine.tail_for(transcript).file_backups)
         self.assertIsNone(self.engine._claude_file_backup(sid, "../../config.json"))
 
+    def test_delivery_whitelist_outlives_ring_buffers(self):
+        delivered = os.path.join(self.cwd, "old-delivery.md")
+        with open(delivered, "w") as handle:
+            handle.write("old delivery body")
+        self.engine.scan()
+        # The files deque and convo chips are ring buffers; simulate a delivery
+        # that aged out of both — only the durable whitelist remembers it.
+        self.engine._claude_context_snapshots["same"] = {
+            "revision": 1, "messages": [], "files": [],
+            "file_backups": {}, "delivered_paths": {delivered: 5.0}}
+        fid = self.engine.file_id("same", delivered)
+        self.assertEqual(self.engine.file_selector_for_path("same", delivered), fid)
+        ctype, data, error = self.engine.file_content("same", fid)
+        self.assertIsNone(error)
+        self.assertEqual(data, b"old delivery body")
+        # Tail keeps every delivered path (bounded), while files stays a ring.
+        tail = self.engine.tail_for(self.transcript)
+        for index in range(12):
+            tail._file_add(f"/tmp/burst-{index}", "", index)
+        self.assertEqual(len(tail.files), 10)
+        for index in range(12):
+            self.assertIn(f"/tmp/burst-{index}", tail.delivered_paths)
+        # The backup mapping alone must never widen the whitelist.
+        self.engine._claude_context_snapshots["same"] = {
+            "revision": 2, "messages": [], "files": [],
+            "file_backups": {delivered: "abcdef1234567890@v1"},
+            "delivered_paths": {}}
+        self.assertIsNone(self.engine.file_selector_for_path("same", delivered))
+        _, _, error = self.engine.file_content("same", fid)
+        self.assertIsNotNone(error)
+
+    def test_transcript_effort_is_primary_and_retires_overrides(self):
+        def effort_row(level):
+            return json.dumps({"type": "assistant",
+                "timestamp": "2026-07-15T00:00:05Z", "effort": level,
+                "message": {"role": "assistant", "model": "claude-sonnet",
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 1},
+                    "content": [{"type": "text", "text": "row"}]}}) + "\n"
+        with open(self.transcript, "a") as handle:
+            handle.write(effort_row("high"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "high")
+
+        with open(self.transcript, "a") as handle:   # junk values never surface
+            handle.write(effort_row("turbo"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "high")
+
+        pid = os.getpid()
+        self.engine._tty_cache[pid] = "ttys-test"
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda sid, cwd, mt: None
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+        accepted = self.engine.act({"type": "session_settings", "session_id": "same",
+            "model": "sonnet", "effort": "low", "expected_model": "claude-sonnet",
+            "expected_effort": "high"})
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(self.engine.effort_for("same"), "low")
+        fleet = self.engine.scan()   # older transcript rows must not retire it
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "low")
+
+        with open(self.transcript, "a") as handle:   # newer native evidence wins
+            handle.write(effort_row("medium"))
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["effort"], "medium")
+        self.assertNotIn(
+            "effort", self.engine._claude_control_overrides.get("same") or {})
+
     def test_image_upload_quota_rejects_before_conversion(self):
         self.engine.scan()
         root = os.path.join(self.base, "uploads")

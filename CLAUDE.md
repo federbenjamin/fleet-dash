@@ -122,6 +122,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 10. **`/api/file` serves ONLY whitelisted paths** — paths recorded from that session's own
     SendUserFile tool_use rows, and it's token-gated. Never accept a free-form client path:
     that would turn the act token into an arbitrary-disk-read credential over the tailnet.
+    The whitelist is the files deque + convo chips + `Tail.delivered_paths` (a bounded durable
+    map fed only by `_file_add`, because the two ring buffers can age a delivery out); the
+    `file_backups` mapping tracks EVERY checkpointed file and must NEVER widen the whitelist.
     A missing Claude delivery may resolve through the transcript's `file-history-snapshot` mapping,
     but only beneath `~/.claude/file-history/<exact UUID>/` with a regex-bounded opaque backup
     basename. The mapping is server-observed; the client still supplies only the delivered path.
@@ -214,18 +217,23 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     walks ANCESTORS (an exact-path check falsely flags every worktree as untrusted), the picker
     labels untrusted dirs, and the spawn reply carries `trust_prompt`. Setting that flag
     ourselves would defeat a security gate from a remote device — don't.
-22. **Claude's reported effort exists only in the statusline payload.** `"effort":{"level":…}` is piped to the
-    statusline command — it is in NEITHER the transcript NOR the session registry, so the daemon
-    cannot derive it. `~/.claude/statusline-command.sh` side-writes it to
-    `fleet-dash-capture/effort/<session_id>` (its `fleet-dash effort side-write` block, write-on-change);
-    `Engine.effort_for` reads that. No statusline render → no effort → the UI shows the model
-    alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
+22. **Claude's live effort comes from the transcript (≥2.1.217); the statusline side-write is a
+    legacy fallback.** Claude Code stamps the current effort level onto every assistant transcript
+    row (top-level `effort`, main AND subagent transcripts — verified 2026-07-23). `Tail.effort` +
+    `Tail.effort_evidence_offset` fold it with byte-offset evidence order (row timestamps lie under
+    compaction), and `Engine.effort_for` prefers it. The old path — the statusline payload's
+    `"effort":{"level":…}` side-written to `fleet-dash-capture/effort/<session_id>` by
+    `~/.claude/statusline-command.sh` — remains as a wall-clock fallback for older builds, but the
+    canonical statusline currently lacks that block, so without transcript rows the UI shows the
+    model alone. SUBAGENT effort comes from the agent DEFINITION's frontmatter pin
     (`.claude/agents/<type>.md` → `effort:`), falling back to the parent session's effort when
     the agent pins none — that fallback is not a guess, it is what the runtime does. Plugin
     types (`plugin:agent`) have no local file: fall back to the parent. The narrow exception is a
     Fleet-issued, successfully delivered native `/effort` change: persist its accepted value with the
-    current statusline mtime so a daemon restart cannot revert the UI. A newer statusline side-write
-    remains authoritative and retires the override.
+    transcript effort-evidence offset (and acceptance time) so a daemon restart cannot revert the
+    UI. Newer native evidence retires the override: a transcript effort row past the recorded
+    baseline, or a newer statusline side-write. A zero/absent baseline (pre-transcript-evidence
+    record) may only be retired by the wall-clock path — old transcript rows must never revert it.
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     reads the ledger's validated `transcript_path` (falling back to the legacy cwd mapping only for
     old rows). Its overlay is read-only — no send box, no stop, no mute. A closed Claude session may
