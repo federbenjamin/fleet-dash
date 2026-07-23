@@ -242,6 +242,8 @@ Requires a `codex` executable with App Server support. Set `codex_enabled` to `f
 the provider without affecting Claude sessions.
 - **Needs you** includes native questions/approvals and ordinary assistant prose that directly asks
   for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
+  An unloaded external view-only thread is the exception: Fleet clears a prose-only request after
+  30 minutes because it cannot submit a reply to that runtime.
   Completed non-question turns remain **Available** and show **new** until opened.
 - **History** is one flat chronological destination for dormant, inactive external, reopenable, and
   closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,

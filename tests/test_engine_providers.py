@@ -2853,6 +2853,33 @@ class EngineProviderTest(unittest.TestCase):
                            "text": "Which layout should I use?"})
         self.assertEqual((reply["ui_group"], reply["reason_label"]),
                          ("needs_you", "Reply requested"))
+        external_reply_fresh = organized(
+            state="idle", headless=True, read_only=True, reg_status="notLoaded",
+            quiet_s=1799, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((external_reply_fresh["ui_group"],
+                          external_reply_fresh["reply_requested"]), ("needs_you", True))
+        interactive_reply_old = organized(
+            state="idle", quiet_s=1800, _latest_prose={"role": "assistant",
+                                                         "text": "Which layout should I use?"})
+        self.assertEqual((interactive_reply_old["ui_group"],
+                          interactive_reply_old["reply_requested"]), ("needs_you", True))
+        loaded_external_reply_old = organized(
+            state="idle", headless=True, read_only=True, reg_status="loaded",
+            quiet_s=1800, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((loaded_external_reply_old["ui_group"],
+                          loaded_external_reply_old["reply_requested"]), ("needs_you", True))
+        external_reply_expired = organized(
+            state="idle", headless=True, read_only=True, reg_status="notLoaded",
+            quiet_s=1800, _latest_prose={"role": "assistant",
+                                          "text": "Which layout should I use?"})
+        self.assertEqual((external_reply_expired["ui_group"],
+                          external_reply_expired["reason_label"],
+                          external_reply_expired["reply_requested"]),
+                         ("history", "External", False))
+        self.assertIn("reply_request_expired", {item["kind"] for item in
+                                                  external_reply_expired["state_evidence"]})
         running = organized(state="running")
         self.assertEqual((running["ui_group"], running["reason_label"]),
                          ("working", "Working"))

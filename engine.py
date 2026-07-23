@@ -101,6 +101,10 @@ DEFAULT_CONFIG = {
     "context_windows": {"default": 1000000, "haiku": 200000, "sonnet": 1000000},
 }
 
+# A view-only thread from another runtime cannot receive a Fleet reply. Do not
+# leave a prose question in Needs you forever once that runtime has unloaded it.
+EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS = 30 * 60
+
 
 def _validated_claude_delivery_uncertain(raw):
     """Restore only bounded, non-secret prompt identity state."""
@@ -489,6 +493,13 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     reply_requested = bool(
         latest_assistant and requests_reply(latest_assistant.get("text"))
         and dismissed != revision)
+    external_reply_expired = bool(
+        reply_requested and external and not pending
+        and str(session.get("reg_status") or "").lower() == "notloaded"
+        and state in ("idle", "turn_done", "dormant")
+        and quiet >= EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS)
+    if external_reply_expired:
+        reply_requested = False
 
     candidates = []
     pending_rule = _pending_placement(pending)
@@ -516,6 +527,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     if state == "running":
         candidates.append(("placement.state.running", "working", "Working",
                            "view" if external else "open", "confirmed"))
+    if external_reply_expired:
+        candidates.append(("placement.external.reply_request_expired", "history", "External",
+                           "view", "confirmed"))
     if reply_requested:
         candidates.append(("placement.prose.reply_requested", "needs_you",
                            "Reply requested", "respond", "inferred"))
@@ -582,6 +596,10 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
         evidence.append({"kind": "access", "label": "Control",
                          "value": _fact_text(session.get("read_only_reason") or
                                              "Owned by another runtime; Fleet can only view it"),
+                         "confidence": "confirmed"})
+    if external_reply_expired:
+        evidence.append({"kind": "reply_request_expired", "label": "Reply request",
+                         "value": "Cleared after 1800s: external view-only thread is not loaded",
                          "confidence": "confirmed"})
     if provider_stale:
         evidence.append({"kind": "stale", "label": "Freshness",
