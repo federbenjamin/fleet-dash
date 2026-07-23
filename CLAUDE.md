@@ -18,7 +18,7 @@ snapshot_cache ─ server.py ─ GET /api/fleet ─ dashboard.html + static/app.
                           ├ GET /api/context?sid= ─ Tail.convo ring (recent turns) + Tail.files
                           │   (SendUserFile deliveries); page refetches only when the session's
                           │   convo_v/files_n fields in /api/fleet move
-                          ├ GET /api/file?sid=&p= (token) ─ Engine.file_content (whitelist)
+                          ├ GET /api/file?sid=&fid= (token) ─ Engine.file_content (whitelist)
                           └ POST /api/act (token) ─ Engine.act ─ inject-request.txt ─
                             open -g FleetDashInjector.app ─ iTerm write by tty ─ inject-result.txt
 Claude/Codex JSONL ─ fleetdash/search_index.py --worker (nice 10) ─ search.db WAL/FTS5
