@@ -346,10 +346,12 @@ class ManagedDaemonAndLauncherTest(unittest.TestCase):
 
     def test_managed_daemon_capability_start_remote_enable_and_reuse(self):
         calls = []
+        environments = []
         ready = {"value": False}
 
         def runner(command, **kwargs):
             calls.append(command)
+            environments.append(kwargs.get("env"))
             if command[-1:] == ["start"]:
                 ready["value"] = True
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -359,12 +361,16 @@ class ManagedDaemonAndLauncherTest(unittest.TestCase):
             probe=lambda _path: ready["value"], sleeper=lambda _seconds: None)
         self.assertEqual(calls[0][-1], "start")
         self.assertEqual(calls[1][-1], "enable-remote-control")
+        self.assertEqual(environments[0], environments[1])
+        self.assertEqual(environments[1]["PATH"].split(os.pathsep)[0], "/opt")
         calls.clear()
+        environments.clear()
         ensure_managed_codex_runtime(
             "/opt/codex", "/managed.sock", runner=runner,
             probe=lambda _path: True, sleeper=lambda _seconds: None)
         self.assertEqual(calls, [["/opt/codex", "app-server", "daemon",
                                   "enable-remote-control"]])
+        self.assertEqual(environments[0]["PATH"].split(os.pathsep)[0], "/opt")
 
     def test_launcher_argument_matrix(self):
         endpoint = "unix:///managed.sock"

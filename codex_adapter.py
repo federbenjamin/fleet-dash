@@ -211,10 +211,10 @@ def ensure_managed_codex_runtime(executable=None, socket_path=None, timeout=12,
     clock = clock or time.monotonic
     probe = probe or _socket_accepting
     with _shared_runtime_lock:
+        env = os.environ.copy()
+        command_dir = os.path.dirname(os.path.abspath(executable))
+        env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
         if not probe(socket_path):
-            env = os.environ.copy()
-            command_dir = os.path.dirname(os.path.abspath(executable))
-            env["PATH"] = command_dir + os.pathsep + env.get("PATH", "")
             try:
                 started = runner(
                     [executable, "app-server", "daemon", "start"],
@@ -235,7 +235,7 @@ def ensure_managed_codex_runtime(executable=None, socket_path=None, timeout=12,
         if enable_remote_control:
             enabled = runner(
                 [executable, "app-server", "daemon", "enable-remote-control"],
-                capture_output=True, text=True, timeout=timeout)
+                capture_output=True, text=True, timeout=timeout, env=env)
             if enabled.returncode:
                 detail = (enabled.stderr or enabled.stdout or
                           f"exit {enabled.returncode}").strip()
