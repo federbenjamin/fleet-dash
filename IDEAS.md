@@ -12,26 +12,28 @@ pass; revisit individually.
   `InjectionTransport` owning the applet mailbox + locks, a `LedgerStore`
   owning the sqlite handles) injected into `Engine.__init__`, letting each
   piece be constructed and tested alone.
-- **Retire `fleetdash/engine.py`'s compat re-export block.** Tests and
-  server.py still import `DEFAULT_CONFIG`, `Tail`, `classify_placement`, etc.
-  from `fleetdash.engine`. Update importers to the real modules
-  (`fleetdash.config`, `fleetdash.tail`, `fleetdash.placement`) and delete the
-  `# noqa` block; also drop the `time/subprocess/signal` re-imports once
-  `test_engine_providers.py` patches those on the owning mixin modules
-  instead of `engine_module`.
-- **`codex_adapter.py` (3.5k lines) and `briefing.py` (2.7k lines) are the
-  next split candidates.** Codex: protocol client (`UnixWebSocketProcess` /
-  `CodexAppServer`) vs. adapter/state vs. runtime migration. Briefing:
-  store/schema vs. scheduler/cadence vs. projections.
+- ~~Retire `fleetdash/engine.py`'s compat re-export block~~ — **resolved
+  2026-07-23**: server.py and `test_engine_providers.py` now import from the
+  owning modules (`fleetdash.config`/`tail`/`placement`), the test patches
+  `subprocess`/`time`/`os`/`signal` on the modules themselves, and engine.py
+  keeps only the imports it uses.
+- ~~`codex_adapter.py` and `briefing.py` splits~~ — **resolved 2026-07-23**:
+  codex split into `codex_runtime.py` (lifecycle/migration, lowest layer) +
+  `codex_protocol.py` (`UnixWebSocketProcess`/`CodexAppServer`) +
+  `codex_adapter.py` (adapter/state) in PR #35; briefing split into
+  `briefing_store.py` (StoreOps) + `briefing_scheduler.py` (SchedulerOps) +
+  the `FleetOperations` facade in `briefing.py` in PR #33. Both pure code
+  motion, importers updated, 405 tests green.
 - ~~`static/app.js` single 6.2k-line script~~ — **resolved 2026-07-23**: split
   into 16 raw ES modules under `static/js/` (no bundler; user decision). Shared
   state lives on `globalThis`, functions/consts publish via `Object.assign`,
   `dashboard.html` modulepreloads every module, and sw.js/`page_v`/fixture
   server cover the new files. See the `static/js/` file-map bullet +
   invariant 71 in AGENTS.md for the module contract.
-- **`server.py` route table.** The Handler's do_GET/do_POST dispatch is a long
-  if/elif chain; a table of `(path, token_required, handler)` would make the
-  auth surface auditable at a glance.
+- ~~`server.py` route table~~ — **resolved 2026-07-23**: `Handler.GET_ROUTES` /
+  `POST_ROUTES` map route → `(auth, handler method)`; the auth kinds are
+  `open`, `token`, `token-text` (`/api/file`'s plain-text 403), and `self`
+  (capability-action/upload own their request cycle).
 
 ## Drift / latent gaps noticed while auditing (verify before fixing)
 
@@ -64,8 +66,10 @@ pass; revisit individually.
 
 - ~~CLAUDE.md/AGENTS.md duplication~~ — **resolved 2026-07-23**: AGENTS.md is
   the single canonical guide (with a code-structure section); CLAUDE.md is
-  just `@AGENTS.md`. Still open: the 70-invariant list has outgrown flat
-  prose — numbered anchors / grouping would help discoverability.
-- `docs/` mixes roadmaps, postmortems, and one live reference
-  (`session-organization.md`); subfolders (`roadmaps/`, `postmortems/`) would
-  keep the live reference findable.
+  just `@AGENTS.md`. The invariant-list discoverability follow-up is also
+  resolved 2026-07-23: a thematic quick map heads the Invariants section;
+  numbers stay stable because code comments cite "invariant N".
+- ~~`docs/` subfolders~~ — **resolved 2026-07-23**: roadmaps moved to
+  `docs/roadmaps/`, postmortems/regression evidence to `docs/postmortems/`;
+  `docs/session-organization.md` (the one live reference) stays at the root.
+  Cross-references updated.

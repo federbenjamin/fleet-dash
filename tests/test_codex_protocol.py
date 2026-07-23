@@ -11,8 +11,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from fleetdash.codex_adapter import (CodexAppServer, CodexError, UnixWebSocketProcess,
-                           ensure_shared_codex_runtime)
+from fleetdash.codex_protocol import CodexAppServer, UnixWebSocketProcess
+from fleetdash.codex_runtime import CodexError, ensure_shared_codex_runtime
 
 
 class QueueOutput:

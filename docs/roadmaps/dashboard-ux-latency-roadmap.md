@@ -330,7 +330,7 @@ Status: Complete · 2026-07-16
   every remaining slow action.
 - Compare baseline and final p50/p95 on the same fixture/live corpus. Treat a regression in an
   unrelated flow as a failure of this pass.
-- Reconcile `README.md`, `CLAUDE.md`, `docs/platform-roadmap.md`, and this ledger.
+- Reconcile `README.md`, `CLAUDE.md`, `docs/roadmaps/platform-roadmap.md`, and this ledger.
 
 Implemented immediate/busy/failure UI for Outbox, native requests, relay, Terminal, provider mode,
 Settings, search/History pagination, slash commands, files, Briefing, and stable pinning. Poll,

@@ -1051,7 +1051,7 @@ reloaded, fresh live console/network and daemon logs were clean, and the branch 
 ### M11 — Dashboard UX and responsiveness
 
 Completed 2026-07-16. The detailed product decisions and implementation ledger live in
-[`docs/dashboard-ux-latency-roadmap.md`](dashboard-ux-latency-roadmap.md).
+[`docs/roadmaps/dashboard-ux-latency-roadmap.md`](dashboard-ux-latency-roadmap.md).
 
 - Now puts state totals in filter chips, adds a flat active-subagent view, moves Fleet Briefing above
   Pinned, and moves provider/account usage into a compact warning-aware chip. Pinned order is the
@@ -1094,7 +1094,7 @@ responsive, deterministic, and live evidence. The daemon is running the M11 engi
 
 Implemented 2026-07-16/17; N0a/N0b and N1–N6 are complete. The
 approved implementation contract, requirements catalogue, migration order, and release gates live in
-[`docs/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
+[`docs/roadmaps/push-notification-redesign-roadmap.md`](push-notification-redesign-roadmap.md).
 
 - **N0a/N0b — Compatibility prototype and baseline (complete):** runtime/latency and encrypted-
   request evidence passed, followed by installed iPhone/macOS app-closed delivery, icon badges,
@@ -1127,7 +1127,7 @@ reads 4.981 ms p95, no-op actions 1.532 ms p95, canonical projection 2.202 ms p9
 
 Implemented on `fix/provider-control-recovery` on 2026-07-17. The detailed requirements, settled
 choices, source mapping, and still-open release gates live in
-[`docs/provider-control-composer-notification-settings-roadmap.md`](provider-control-composer-notification-settings-roadmap.md).
+[`docs/roadmaps/provider-control-composer-notification-settings-roadmap.md`](provider-control-composer-notification-settings-roadmap.md).
 
 - Claude background actions and close use Claude Code's official attach/detach/stop commands through
   a bounded private PTY; foreground iTerm injection and its proven question key map are unchanged.

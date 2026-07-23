@@ -23,7 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fleetdash.engine import Engine, load_config  # noqa: E402
+from fleetdash.config import load_config  # noqa: E402
+from fleetdash.engine import Engine  # noqa: E402
 from fleetdash.paths import BASE, PROJECTS  # noqa: E402
 from fleetdash.search_index import SearchIndex  # noqa: E402
 
@@ -163,6 +164,29 @@ class Handler(BaseHTTPRequestHandler):
             project(item, source_sid)
         return out
 
+    # ------------------------------------------------------------- POST routes
+    # route -> (auth, handler name). auth "token" requires the act token and a
+    # JSON body dict is parsed for the handler; "self" routes own their whole
+    # request cycle including any credential decision (capability actions are
+    # deliberately token-less, uploads read a raw body after the token check).
+    POST_ROUTES = {
+        "/api/push/capability-action": ("self", "post_capability_action"),
+        "/api/upload-image": ("self", "post_upload_image"),
+        "/api/act": ("token", "post_act"),
+        "/api/settings": ("token", "post_settings"),
+        "/api/search/rebuild": ("token", "post_search_rebuild"),
+        "/api/notifications/read": ("token", "post_notifications_read"),
+        "/api/notifications/snooze": ("token", "post_notifications_snooze"),
+        "/api/notifications/wake": ("token", "post_notifications_wake"),
+        "/api/notifications/mute": ("token", "post_notifications_mute"),
+        "/api/notifications/retry": ("token", "post_notifications_retry"),
+        "/api/notification-policy": ("token", "post_notification_policy"),
+        "/api/push/subscription": ("token", "post_push_subscription"),
+        "/api/push/device-settings": ("token", "post_push_device_settings"),
+        "/api/push/test": ("token", "post_push_test"),
+        "/api/legacy-ntfy/test": ("token", "post_legacy_ntfy_test"),
+    }
+
     def do_POST(self):
         self.begin_request()
         try:
@@ -176,61 +200,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         route = self.path.split("?", 1)[0]
-        if route not in ("/api/act", "/api/upload-image", "/api/settings", "/api/search/rebuild",
-                         "/api/notifications/read", "/api/notifications/snooze",
-                         "/api/notifications/wake", "/api/notifications/mute",
-                         "/api/notifications/retry", "/api/push/subscription",
-                         "/api/notification-policy",
-                         "/api/push/test", "/api/push/device-settings",
-                         "/api/push/capability-action", "/api/legacy-ntfy/test"):
+        auth, handler = self.POST_ROUTES.get(route, (None, None))
+        if handler is None:
             return self.reply(404, "text/plain", b"not found")
-        if route == "/api/push/capability-action":
-            if self.headers.get("Transfer-Encoding") or \
-               self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() \
-               != "application/json":
-                return self.reply(400, "application/json",
-                                  b'{"ok": false, "error": "notification capability is unavailable"}')
-            try:
-                n = int(self.headers.get("Content-Length", "0"))
-                if n <= 0 or n > 4096:
-                    raise ValueError("invalid capability body")
-                self.connection.settimeout(5)
-                action = json.loads(self.rfile.read(n))
-                if (not isinstance(action, dict) or set(action) != {"capability"} or
-                        not isinstance(action.get("capability"), str)):
-                    raise ValueError("invalid capability body")
-            except Exception:
-                return self.reply(400, "application/json",
-                                  b'{"ok": false, "error": "notification capability is unavailable"}')
-            result = self.eng.push_capability_action(action)
-            status = 200 if result.get("ok") else 409
-            return self.reply(status, "application/json", json.dumps(result).encode())
+        if auth == "self":
+            return getattr(self, handler)()
         if not self.token_ok():
             print(f"{route} denied: no/bad token (open the ?token= URL once on this device)",
                   file=sys.stderr, flush=True)
             return self.reply(403, "application/json",
                               b'{"ok": false, "error": "bad or missing act token"}')
-        if route == "/api/upload-image":
-            if self.headers.get("Transfer-Encoding"):
-                return self.reply(400, "application/json",
-                                  b'{"ok": false, "error": "chunked uploads are unsupported"}')
-            try:
-                n = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                n = 0
-            if n <= 0 or n > 10 * 1024 * 1024:
-                return self.reply(413, "application/json",
-                                  b'{"ok": false, "error": "image must be 10 MB or smaller"}')
-            self.connection.settimeout(20)
-            data = self.rfile.read(n)
-            if len(data) != n:
-                return self.reply(400, "application/json",
-                                  b'{"ok": false, "error": "incomplete image upload"}')
-            result = self.eng.store_image_upload(
-                self.query("sid"), self.query("id"), self.query("name"),
-                self.headers.get("Content-Type", ""), data)
-            status = 200 if result.get("ok") else 400
-            return self.reply(status, "application/json", json.dumps(result).encode())
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n < 0 or n > 65536:
@@ -242,59 +221,125 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("JSON body must be an object")
         except Exception:
             return self.reply(400, "application/json", b'{"ok": false, "error": "bad json"}')
-        if route == "/api/settings":
-            result = self.eng.update_settings(action)
-            audit = {"ok": bool(result.get("ok")), "field_count": min(len(action), 1000)}
-            print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notifications/read":
-            result = self.eng.notifications_mark_read(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notifications/snooze":
-            result = self.eng.notifications_snooze(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notifications/wake":
-            result = self.eng.notifications_wake(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notifications/mute":
-            result = self.eng.notifications_mute(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notifications/retry":
-            result = self.eng.notifications_retry(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/notification-policy":
-            result = self.eng.notification_policy_update(action)
-            return self.reply(200 if result.get("ok") else 409, "application/json",
-                              json.dumps(result).encode())
-        if route == "/api/push/subscription":
-            result = self.eng.push_subscription(action)
-            device_ref = hashlib.sha256(
-                str(action.get("device_id") or "").encode()).hexdigest()[:12]
-            audit = {"ok": bool(result.get("ok")), "device_ref": device_ref,
-                     "operation": ("forget" if action.get("forget") else
-                                   "remove" if action.get("remove") else "register")}
-            print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/push/device-settings":
-            result = self.eng.push_device_settings(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/push/test":
-            result = self.eng.push_test(action)
-            return self.reply(200, "application/json", json.dumps(result).encode())
-        if route == "/api/legacy-ntfy/test":
-            result = self.eng.legacy_ntfy_test()
-            status = 200 if result.get("ok") else 409
-            return self.reply(status, "application/json", json.dumps(result).encode())
-        if route == "/api/search/rebuild":
-            search = getattr(self.eng, "search", None)
-            try:
-                result = (search.rebuild() if search else
-                          {"ok": False, "error": "search index is unavailable"})
-            except Exception as exc:
-                print(f"search rebuild failed: {exc}", file=sys.stderr, flush=True)
-                result = {"ok": False, "error": "search index is temporarily unavailable"}
-            print("search: rebuild requested", file=sys.stderr, flush=True)
-            return self.reply(200, "application/json", json.dumps(result).encode())
+        return getattr(self, handler)(action)
+
+    def post_capability_action(self):
+        # Deliberately credential-omitting: the HMAC capability inside the body
+        # is the whole authorization (invariant 48). Never check the act token.
+        if self.headers.get("Transfer-Encoding") or \
+           self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() \
+           != "application/json":
+            return self.reply(400, "application/json",
+                              b'{"ok": false, "error": "notification capability is unavailable"}')
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            if n <= 0 or n > 4096:
+                raise ValueError("invalid capability body")
+            self.connection.settimeout(5)
+            action = json.loads(self.rfile.read(n))
+            if (not isinstance(action, dict) or set(action) != {"capability"} or
+                    not isinstance(action.get("capability"), str)):
+                raise ValueError("invalid capability body")
+        except Exception:
+            return self.reply(400, "application/json",
+                              b'{"ok": false, "error": "notification capability is unavailable"}')
+        result = self.eng.push_capability_action(action)
+        status = 200 if result.get("ok") else 409
+        return self.reply(status, "application/json", json.dumps(result).encode())
+
+    def post_upload_image(self):
+        if not self.token_ok():
+            print("/api/upload-image denied: no/bad token (open the ?token= URL once on this device)",
+                  file=sys.stderr, flush=True)
+            return self.reply(403, "application/json",
+                              b'{"ok": false, "error": "bad or missing act token"}')
+        if self.headers.get("Transfer-Encoding"):
+            return self.reply(400, "application/json",
+                              b'{"ok": false, "error": "chunked uploads are unsupported"}')
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 10 * 1024 * 1024:
+            return self.reply(413, "application/json",
+                              b'{"ok": false, "error": "image must be 10 MB or smaller"}')
+        self.connection.settimeout(20)
+        data = self.rfile.read(n)
+        if len(data) != n:
+            return self.reply(400, "application/json",
+                              b'{"ok": false, "error": "incomplete image upload"}')
+        result = self.eng.store_image_upload(
+            self.query("sid"), self.query("id"), self.query("name"),
+            self.headers.get("Content-Type", ""), data)
+        status = 200 if result.get("ok") else 400
+        return self.reply(status, "application/json", json.dumps(result).encode())
+
+    def post_settings(self, action):
+        result = self.eng.update_settings(action)
+        audit = {"ok": bool(result.get("ok")), "field_count": min(len(action), 1000)}
+        print(f"settings: {json.dumps(audit)[:200]}", file=sys.stderr, flush=True)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notifications_read(self, action):
+        result = self.eng.notifications_mark_read(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notifications_snooze(self, action):
+        result = self.eng.notifications_snooze(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notifications_wake(self, action):
+        result = self.eng.notifications_wake(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notifications_mute(self, action):
+        result = self.eng.notifications_mute(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notifications_retry(self, action):
+        result = self.eng.notifications_retry(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_notification_policy(self, action):
+        result = self.eng.notification_policy_update(action)
+        return self.reply(200 if result.get("ok") else 409, "application/json",
+                          json.dumps(result).encode())
+
+    def post_push_subscription(self, action):
+        result = self.eng.push_subscription(action)
+        device_ref = hashlib.sha256(
+            str(action.get("device_id") or "").encode()).hexdigest()[:12]
+        audit = {"ok": bool(result.get("ok")), "device_ref": device_ref,
+                 "operation": ("forget" if action.get("forget") else
+                               "remove" if action.get("remove") else "register")}
+        print(f"push subscription: {json.dumps(audit)}", file=sys.stderr, flush=True)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_push_device_settings(self, action):
+        result = self.eng.push_device_settings(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_push_test(self, action):
+        result = self.eng.push_test(action)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_legacy_ntfy_test(self, action):
+        result = self.eng.legacy_ntfy_test()
+        status = 200 if result.get("ok") else 409
+        return self.reply(status, "application/json", json.dumps(result).encode())
+
+    def post_search_rebuild(self, action):
+        search = getattr(self.eng, "search", None)
+        try:
+            result = (search.rebuild() if search else
+                      {"ok": False, "error": "search index is unavailable"})
+        except Exception as exc:
+            print(f"search rebuild failed: {exc}", file=sys.stderr, flush=True)
+            result = {"ok": False, "error": "search index is temporarily unavailable"}
+        print("search: rebuild requested", file=sys.stderr, flush=True)
+        return self.reply(200, "application/json", json.dumps(result).encode())
+
+    def post_act(self, action):
         audit = dict(action)
         if action.get("type") != "ping":
             # Keep the action/identity audit trail without persisting message or
@@ -307,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
         if not result.get("ok"):
             print(f"act failed: {json.dumps(audit)[:300]} -> {result.get('error')}",
                   file=sys.stderr, flush=True)
-        self.reply(200, "application/json", json.dumps(result).encode())
+        return self.reply(200, "application/json", json.dumps(result).encode())
 
     def query(self, key):
         return (parse_qs(urlparse(self.path).query).get(key) or [""])[0]
@@ -327,6 +372,36 @@ class Handler(BaseHTTPRequestHandler):
         return {**out, "messages": messages[start:cursor], "message_total": len(messages),
                 "next_cursor": start if start > 0 else None}
 
+    # -------------------------------------------------------------- GET routes
+    # route -> (auth, handler name). "open" serves without credentials (bounded
+    # projections that expose no local paths); "token" requires the act token
+    # and answers a JSON 403; "token-text" is /api/file's plain-text 403.
+    GET_ROUTES = {
+        "/api/fleet": ("open", "get_fleet"),
+        "/api/context": ("open", "get_context"),
+        "/api/closed_context": ("open", "get_closed_context"),
+        "/api/agent_context": ("open", "get_agent_context"),
+        "/api/insights": ("open", "get_insights"),
+        "/api/briefing": ("open", "get_briefing"),
+        "/api/budgets": ("open", "get_budgets"),
+        "/api/workstreams": ("open", "get_workstreams"),
+        "/api/evidence": ("open", "get_evidence"),
+        "/api/history": ("open", "get_history"),
+        "/api/file": ("token-text", "get_file"),
+        "/api/commands": ("token", "get_commands"),
+        "/api/search": ("token", "get_search"),
+        "/api/search/status": ("token", "get_search_status"),
+        "/api/search/context": ("token", "get_search_context"),
+        "/api/handoff": ("token", "get_handoff"),
+        "/api/repo": ("token", "get_repo"),
+        "/api/outbox": ("token", "get_outbox"),
+        "/api/notifications": ("token", "get_notifications"),
+        "/api/notification-policy": ("token", "get_notification_policy"),
+        "/api/push/config": ("token", "get_push_config"),
+        "/api/push/devices": ("token", "get_push_devices"),
+        "/api/diagnostics": ("token", "get_diagnostics"),
+    }
+
     def do_GET(self):
         self.begin_request()
         try:
@@ -340,178 +415,225 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_GET(self):
         route = self.path.split("?", 1)[0]
-        if route in ("/api/search", "/api/search/status", "/api/search/context",
-                     "/api/handoff", "/api/repo", "/api/outbox", "/api/diagnostics",
-                     "/api/notifications", "/api/push/config", "/api/push/devices",
-                     "/api/notification-policy"):
-            if not self.token_ok():
-                return self.reply(403, "application/json",
-                                  b'{"ok": false, "error": "bad or missing act token"}')
-            if route == "/api/handoff":
-                out = self.eng.handoff_preview(self.query("sid"), self.query("provider"))
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/repo":
-                out = self.eng.repository_snapshot(
-                    self.query("root"), self.query("worktree"),
-                    self.query("force") in ("1", "true"))
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/outbox":
-                out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
-                                               self.query("limit") or 100)
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/notifications":
-                states = [item for item in self.query("state").split(",") if item]
-                kinds = [item for item in self.query("kind").split(",") if item]
-                out = self.eng.notifications_snapshot(
-                    self.query("device") or "default", self.query("cursor") or None,
-                    self.query("limit") or 100, states, kinds, self.query("id") or None)
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/notification-policy":
-                out = self.eng.notification_policy_snapshot()
-                return self.reply(200 if out.get("ok") else 503, "application/json",
-                                  json.dumps(out).encode())
-            if route == "/api/push/config":
-                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
-                out = self.eng.push_config(device)
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/push/devices":
-                device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
-                out = self.eng.push_devices(device)
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            if route == "/api/diagnostics":
-                out = self.diagnostics()
-                with self.eng.lock:
-                    out["engine"] = dict(
-                        (self.eng.snapshot_cache.get("diagnostics") or {}))
-                search = getattr(self.eng, "search", None)
-                if search:
-                    try:
-                        out["search"] = search.status()
-                    except Exception as exc:
-                        out["search"] = {"ok": False, "error": str(exc)}
-                push_diagnostics = getattr(self.eng, "push_diagnostics", None)
-                if push_diagnostics:
-                    out["web_push"] = push_diagnostics()
-                legacy_diagnostics = getattr(self.eng, "legacy_ntfy_diagnostics", None)
-                if legacy_diagnostics:
-                    out["legacy_ntfy"] = legacy_diagnostics()
-                return self.reply(200, "application/json", json.dumps(out).encode())
-            search = getattr(self.eng, "search", None)
-            if not search:
-                return self.reply(503, "application/json",
-                                  b'{"ok": false, "error": "search index is unavailable"}')
-            try:
-                if route == "/api/search/status":
-                    out = search.status()
-                elif route == "/api/search/context":
-                    out = self.project_search_file_ids(
-                        search.context(self.query("id"), self.query("radius") or 12))
-                else:
-                    out = self.project_search_file_ids(search.search(
-                        query=self.query("q"), provider=self.query("provider"),
-                        kind=self.query("kind"), project=self.query("project"),
-                        cursor=self.query("cursor") or 0,
-                        limit=self.query("limit") or 30))
-            except Exception as exc:
-                print(f"search request failed: {exc}", file=sys.stderr, flush=True)
-                out = {"ok": False, "error": "search index is temporarily unavailable"}
-            return self.reply(200, "application/json", json.dumps(out).encode())
-        if route == "/api/context":
-            out = self.paginate_context(self.eng.session_context(self.query("sid")))
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/closed_context":
-            out = self.paginate_context(self.eng.closed_context(self.query("sid")))
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/agent_context":
-            out = self.paginate_context(
-                self.eng.agent_context(self.query("sid"), self.query("aid")))
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/file":
-            # reads file bytes off disk -> token-gated like /api/act
-            if not self.token_ok():
+        auth, handler = self.GET_ROUTES.get(route, (None, None))
+        if handler is not None:
+            if auth == "token-text" and not self.token_ok():
                 return self.reply(403, "text/plain",
                                   b"missing act token (open the ?token= URL once on this device)")
-            ctype, data, err = self.eng.file_content(self.query("sid"), self.query("fid"))
-            if err:
-                return self.reply(404, "text/plain", err.encode())
-            self.reply(200, ctype, data,
-                       extra_headers={"X-Content-Type-Options": "nosniff"})
-        elif route == "/api/commands":
-            # reads command/skill names + descriptions off disk -> token-gated
-            if not self.token_ok():
+            if auth == "token" and not self.token_ok():
                 return self.reply(403, "application/json",
                                   b'{"ok": false, "error": "bad or missing act token"}')
-            out = self.eng.commands(self.query("sid"))
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/insights":
+            return getattr(self, handler)()
+        if route in STATIC_FILES:
+            return self.get_static(route)
+        if route == "/" or route.startswith("/index"):
+            return self.get_index()
+        return self.reply(404, "text/plain", b"not found")
+
+    def get_handoff(self):
+        out = self.eng.handoff_preview(self.query("sid"), self.query("provider"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_repo(self):
+        out = self.eng.repository_snapshot(
+            self.query("root"), self.query("worktree"),
+            self.query("force") in ("1", "true"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_outbox(self):
+        out = self.eng.outbox_snapshot(self.query("state"), self.query("cursor") or 0,
+                                       self.query("limit") or 100)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_notifications(self):
+        states = [item for item in self.query("state").split(",") if item]
+        kinds = [item for item in self.query("kind").split(",") if item]
+        out = self.eng.notifications_snapshot(
+            self.query("device") or "default", self.query("cursor") or None,
+            self.query("limit") or 100, states, kinds, self.query("id") or None)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_notification_policy(self):
+        out = self.eng.notification_policy_snapshot()
+        return self.reply(200 if out.get("ok") else 503, "application/json",
+                          json.dumps(out).encode())
+
+    def get_push_config(self):
+        device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+        out = self.eng.push_config(device)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_push_devices(self):
+        device = self.query("device") or self.headers.get("X-Fleet-Device-ID") or ""
+        out = self.eng.push_devices(device)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_diagnostics(self):
+        out = self.diagnostics()
+        with self.eng.lock:
+            out["engine"] = dict(
+                (self.eng.snapshot_cache.get("diagnostics") or {}))
+        search = getattr(self.eng, "search", None)
+        if search:
             try:
-                days = max(1, min(90, int(self.query("days") or 7)))
-            except ValueError:
-                days = 7
-            self.reply(200, "application/json", json.dumps(self.eng.insights(days)).encode())
-        elif route == "/api/briefing":
-            out = self.eng.briefing_snapshot(
-                self.query("device") or "default", self.query("cursor") or None,
-                self.query("limit") or 100)
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/budgets":
-            spawn = {key: self.query(key) for key in ("provider", "model", "project", "cwd")
-                     if self.query(key)}
-            self.reply(200, "application/json",
-                       json.dumps(self.eng.budgets_snapshot(spawn or None)).encode())
-        elif route == "/api/workstreams":
-            self.reply(200, "application/json",
-                       json.dumps(self.eng.workstreams_snapshot()).encode())
-        elif route == "/api/evidence":
-            out = self.eng.state_history(self.query("sid"), self.query("cursor") or 0,
-                                         self.query("limit") or 40)
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/history":
-            out = self.eng.history_snapshot(
-                self.query("cursor") or 0, self.query("limit") or 100,
-                self.query("q"), self.query("provider"), self.query("access"),
-                self.query("sid"))
-            self.reply(200, "application/json", json.dumps(out).encode())
-        elif route == "/api/fleet":
-            with self.eng.lock:
-                snap = dict(self.eng.snapshot_cache)
-            closed = list(snap.get("closed") or [])
-            snap["closed_total"] = len(closed)
-            snap["closed_ids"] = [item.get("session_id") for item in closed
-                                  if item.get("session_id")]
-            # Pinned history remains on the main fleet surface. Everything else
-            # is fetched only while the History page or a closed overlay needs it.
-            snap["closed"] = [item for item in closed if item.get("pinned")]
-            try:  # page version: lets stale tabs self-reload on dashboard.html changes
-                assets = [os.path.join(APP_ROOT, "dashboard.html")]
-                assets.extend(os.path.join(APP_ROOT, spec[0]) for spec in STATIC_FILES.values())
-                snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
-            except OSError:
-                pass
-            self.reply(200, "application/json", json.dumps(snap).encode())
-        elif route in STATIC_FILES:
-            try:
-                path, content_type, cache_control, headers = STATIC_FILES[route]
-                with open(os.path.join(APP_ROOT, path), "rb") as f:
-                    body = f.read()
-                    if route == "/static/manifest.webmanifest" and \
-                       self.eng.cfg.get("instance_mode") == "staging":
-                        manifest = json.loads(body)
-                        manifest.update(name="Fleet Staging", short_name="Staging",
-                                        description="Isolated Fleet Dash staging app")
-                        body = json.dumps(manifest).encode()
-                    self.reply(200, content_type, body, cache_control=cache_control,
-                               extra_headers=headers)
-            except FileNotFoundError:
-                self.reply(404, "text/plain", b"asset missing")
-        elif route == "/" or route.startswith("/index"):
-            try:
-                with open(os.path.join(APP_ROOT, "dashboard.html"), "rb") as f:
-                    self.reply(200, "text/html; charset=utf-8", f.read())
-            except FileNotFoundError:
-                self.reply(500, "text/plain", b"dashboard.html missing")
-        else:
-            self.reply(404, "text/plain", b"not found")
+                out["search"] = search.status()
+            except Exception as exc:
+                out["search"] = {"ok": False, "error": str(exc)}
+        push_diagnostics = getattr(self.eng, "push_diagnostics", None)
+        if push_diagnostics:
+            out["web_push"] = push_diagnostics()
+        legacy_diagnostics = getattr(self.eng, "legacy_ntfy_diagnostics", None)
+        if legacy_diagnostics:
+            out["legacy_ntfy"] = legacy_diagnostics()
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def _search_index(self):
+        search = getattr(self.eng, "search", None)
+        if not search:
+            self.reply(503, "application/json",
+                       b'{"ok": false, "error": "search index is unavailable"}')
+        return search
+
+    def get_search(self):
+        search = self._search_index()
+        if not search:
+            return
+        try:
+            out = self.project_search_file_ids(search.search(
+                query=self.query("q"), provider=self.query("provider"),
+                kind=self.query("kind"), project=self.query("project"),
+                cursor=self.query("cursor") or 0,
+                limit=self.query("limit") or 30))
+        except Exception as exc:
+            print(f"search request failed: {exc}", file=sys.stderr, flush=True)
+            out = {"ok": False, "error": "search index is temporarily unavailable"}
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_search_status(self):
+        search = self._search_index()
+        if not search:
+            return
+        try:
+            out = search.status()
+        except Exception as exc:
+            print(f"search request failed: {exc}", file=sys.stderr, flush=True)
+            out = {"ok": False, "error": "search index is temporarily unavailable"}
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_search_context(self):
+        search = self._search_index()
+        if not search:
+            return
+        try:
+            out = self.project_search_file_ids(
+                search.context(self.query("id"), self.query("radius") or 12))
+        except Exception as exc:
+            print(f"search request failed: {exc}", file=sys.stderr, flush=True)
+            out = {"ok": False, "error": "search index is temporarily unavailable"}
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_context(self):
+        out = self.paginate_context(self.eng.session_context(self.query("sid")))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_closed_context(self):
+        out = self.paginate_context(self.eng.closed_context(self.query("sid")))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_agent_context(self):
+        out = self.paginate_context(
+            self.eng.agent_context(self.query("sid"), self.query("aid")))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_file(self):
+        # reads file bytes off disk -> token-gated like /api/act
+        ctype, data, err = self.eng.file_content(self.query("sid"), self.query("fid"))
+        if err:
+            return self.reply(404, "text/plain", err.encode())
+        return self.reply(200, ctype, data,
+                          extra_headers={"X-Content-Type-Options": "nosniff"})
+
+    def get_commands(self):
+        # reads command/skill names + descriptions off disk -> token-gated
+        out = self.eng.commands(self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_insights(self):
+        try:
+            days = max(1, min(90, int(self.query("days") or 7)))
+        except ValueError:
+            days = 7
+        return self.reply(200, "application/json",
+                          json.dumps(self.eng.insights(days)).encode())
+
+    def get_briefing(self):
+        out = self.eng.briefing_snapshot(
+            self.query("device") or "default", self.query("cursor") or None,
+            self.query("limit") or 100)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_budgets(self):
+        spawn = {key: self.query(key) for key in ("provider", "model", "project", "cwd")
+                 if self.query(key)}
+        return self.reply(200, "application/json",
+                          json.dumps(self.eng.budgets_snapshot(spawn or None)).encode())
+
+    def get_workstreams(self):
+        return self.reply(200, "application/json",
+                          json.dumps(self.eng.workstreams_snapshot()).encode())
+
+    def get_evidence(self):
+        out = self.eng.state_history(self.query("sid"), self.query("cursor") or 0,
+                                     self.query("limit") or 40)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_history(self):
+        out = self.eng.history_snapshot(
+            self.query("cursor") or 0, self.query("limit") or 100,
+            self.query("q"), self.query("provider"), self.query("access"),
+            self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_fleet(self):
+        with self.eng.lock:
+            snap = dict(self.eng.snapshot_cache)
+        closed = list(snap.get("closed") or [])
+        snap["closed_total"] = len(closed)
+        snap["closed_ids"] = [item.get("session_id") for item in closed
+                              if item.get("session_id")]
+        # Pinned history remains on the main fleet surface. Everything else
+        # is fetched only while the History page or a closed overlay needs it.
+        snap["closed"] = [item for item in closed if item.get("pinned")]
+        try:  # page version: lets stale tabs self-reload on dashboard.html changes
+            assets = [os.path.join(APP_ROOT, "dashboard.html")]
+            assets.extend(os.path.join(APP_ROOT, spec[0]) for spec in STATIC_FILES.values())
+            snap["page_v"] = max(int(os.path.getmtime(path)) for path in assets)
+        except OSError:
+            pass
+        return self.reply(200, "application/json", json.dumps(snap).encode())
+
+    def get_static(self, route):
+        try:
+            path, content_type, cache_control, headers = STATIC_FILES[route]
+            with open(os.path.join(APP_ROOT, path), "rb") as f:
+                body = f.read()
+                if route == "/static/manifest.webmanifest" and \
+                   self.eng.cfg.get("instance_mode") == "staging":
+                    manifest = json.loads(body)
+                    manifest.update(name="Fleet Staging", short_name="Staging",
+                                    description="Isolated Fleet Dash staging app")
+                    body = json.dumps(manifest).encode()
+                return self.reply(200, content_type, body, cache_control=cache_control,
+                                  extra_headers=headers)
+        except FileNotFoundError:
+            return self.reply(404, "text/plain", b"asset missing")
+
+    def get_index(self):
+        try:
+            with open(os.path.join(APP_ROOT, "dashboard.html"), "rb") as f:
+                return self.reply(200, "text/html; charset=utf-8", f.read())
+        except FileNotFoundError:
+            return self.reply(500, "text/plain", b"dashboard.html missing")
 
     def error_reply(self, message):
         if getattr(self, "_request_route", "").startswith("/api/"):
