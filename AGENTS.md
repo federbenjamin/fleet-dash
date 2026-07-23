@@ -28,7 +28,9 @@ fleetdash/                everything server.py imports
   codex_observer.py         read-only external-thread rollout observer
   codex_launcher.py         Codex TUI router (stdlib-only, spawned as a script)
   claude_background.py      official `claude attach` background transport
-  briefing.py               notification store + policy + cadence scheduler
+  briefing.py               FleetOperations facade: projections/observe/budgets/devices
+  briefing_store.py           sqlite store: schema, migrations, row/serialization helpers
+  briefing_scheduler.py       cadence/quiet-hours/delivery-lease scheduling
   outbox.py                 durable send/schedule queues
   repo_center.py            repository/git observation
   search_index.py           search worker (stdlib-only, spawned as a script)
@@ -998,9 +1000,18 @@ because they are also spawned directly as scripts by absolute path.
 - `fleetdash/claude_background.py` — fixed-argv official Claude background attach/stop client,
   bounded private
   PTY readiness, allowlisted Engine key operations, per-job serialization, and secret-free errors.
-- `fleetdash/briefing.py` — canonical notification/briefing store, global kind policy,
-  quiet-hours and cadence
-  scheduler, policy-revision suppression, delivery leases, device health, and budget records.
+- `fleetdash/briefing.py` — `FleetOperations` facade (imported as `from .briefing import
+  FleetOperations`): list/detail/badge/unread projections, session observation, budgets,
+  forecasts, and device/notification management. Composed from two mixins split out of this
+  file as pure code motion:
+  - `fleetdash/briefing_store.py` — `StoreOps`: the SQLite store — table DDL, migrations
+    (including the M12 ntfy-legacy migration and severity normalization), connection/
+    transaction machinery, generic (de)serialization/validation, row projections, and
+    event/meta CRUD. Also defines the shared module constants and `OperationsError`
+    (re-exported from `briefing` for `from .briefing import OperationsError`).
+  - `fleetdash/briefing_scheduler.py` — `SchedulerOps`: cadence/policy scheduling — quiet
+    hours, kind-policy evaluation, delivery leases, wave/repeat logic, and push-revision
+    suppression.
 - `fleetdash/outbox.py` — scheduled/waiting messages plus provider-neutral automatic send
   fallback and Codex
   control-recovery queues; private queue-owned images are never projected as paths.
