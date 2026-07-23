@@ -20,34 +20,12 @@ from .outbox import OutboxError, OutboxManager
 from .briefing import FleetOperations, OperationsError
 from .web_push import WebPushService
 
-HOME = os.path.expanduser("~")
-PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-state")
-BASE = os.path.abspath(os.path.expanduser(
-    os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
-INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()
-if INSTANCE_MODE not in ("production", "staging"):
-    INSTANCE_MODE = "production"
-_CAPTURE_BASE_OVERRIDE = os.environ.get("FLEET_DASH_CAPTURE_DIR")
-CAPTURE_BASE = os.path.abspath(os.path.expanduser(
-    _CAPTURE_BASE_OVERRIDE or PRODUCTION_BASE))
-PROJECTS = os.path.join(HOME, ".claude", "projects")
-SESSIONS = os.path.join(HOME, ".claude", "sessions")
-CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")
-CLAUDE_USAGE = os.path.join(CAPTURE_BASE, "usage.json")
-CLAUDE_STATS = os.path.join(HOME, ".claude", "stats-cache.json")
-CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
-CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
-CLAUDE_USAGE_PREFS = os.path.join(
-    HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
-
-
-def capture_base():
-    """Shared hook/statusline artifacts; tests that patch BASE keep working."""
-    return CAPTURE_BASE if _CAPTURE_BASE_OVERRIDE else BASE
+from . import paths as pathcfg
+from .paths import capture_base  # legacy alias; reads paths.* at call time
 
 DEFAULT_CONFIG = {
-    "instance_mode": INSTANCE_MODE,
-    "instance_name": "Fleet Staging" if INSTANCE_MODE == "staging" else "Fleet Dash",
+    "instance_mode": pathcfg.INSTANCE_MODE,
+    "instance_name": "Fleet Staging" if pathcfg.INSTANCE_MODE == "staging" else "Fleet Dash",
     "staging_owned_sessions": {},
     "poll_seconds": 2,
     "stall_seconds": 600,
@@ -260,7 +238,7 @@ def _scrub_private_log(path, values):
 def _runtime_log_secrets(cfg):
     values = [cfg.get("act_token"), cfg.get("ntfy_topic"), cfg.get("dashboard_url"),
               cfg.get("web_push_subject")]
-    secret_path = os.path.join(BASE, "push-secrets.json")
+    secret_path = os.path.join(pathcfg.BASE, "push-secrets.json")
     try:
         info = os.lstat(secret_path)
         if not stat.S_ISREG(info.st_mode) or info.st_size > 32768:
@@ -283,12 +261,12 @@ def _runtime_log_secrets(cfg):
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
-    path = os.path.join(BASE, "config.json")
+    path = os.path.join(pathcfg.BASE, "config.json")
     try:
         with open(path) as f:
             raw = json.load(f)
     except FileNotFoundError:
-        os.makedirs(BASE, exist_ok=True)
+        os.makedirs(pathcfg.BASE, exist_ok=True)
         raw = {}
     except Exception as e:
         print(f"config.json unreadable ({e}); using defaults", file=sys.stderr)
@@ -307,8 +285,8 @@ def load_config():
     # Instance identity and listener overrides belong to launchd, not to a
     # browser-editable config file. A stale copied config must never turn a
     # staging process into production or make it bind production's port.
-    merged["instance_mode"] = INSTANCE_MODE
-    merged["instance_name"] = "Fleet Staging" if INSTANCE_MODE == "staging" else "Fleet Dash"
+    merged["instance_mode"] = pathcfg.INSTANCE_MODE
+    merged["instance_name"] = "Fleet Staging" if pathcfg.INSTANCE_MODE == "staging" else "Fleet Dash"
     port_override = os.environ.get("FLEET_DASH_PORT")
     if port_override:
         try:
@@ -339,7 +317,7 @@ def usd(cfg, fam, ti, tw, tr, to):
 
 
 def cwd_to_project_dir(cwd):
-    return os.path.join(PROJECTS, cwd.replace("/", "-").replace(".", "-"))
+    return os.path.join(pathcfg.PROJECTS, cwd.replace("/", "-").replace(".", "-"))
 
 
 # convo view shows these tools only — read-only chatter (Read/Grep/Glob/task
@@ -1035,7 +1013,7 @@ class Tail:
             v = inp.get("skill") or ""
         else:
             v = inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or ""
-        v = str(v).replace(HOME, "~")
+        v = str(v).replace(pathcfg.HOME, "~")
         return v[:90] + ("…" if len(v) > 90 else "")
 
     @staticmethod
@@ -1336,9 +1314,9 @@ class Engine:
     def __init__(self, cfg):
         self.cfg = cfg
         self.config_lock = threading.RLock()
-        _scrub_private_log(os.path.join(BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
+        _scrub_private_log(os.path.join(pathcfg.BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
         for runtime_name in ("config.json", "fleet-dash.log"):
-            runtime_path = os.path.join(BASE, runtime_name)
+            runtime_path = os.path.join(pathcfg.BASE, runtime_name)
             try:
                 if not os.path.islink(runtime_path):
                     os.chmod(runtime_path, 0o600, follow_symlinks=False)
@@ -1415,12 +1393,12 @@ class Engine:
         self._operational_git_queue = queue.Queue(maxsize=300)
         self._operational_git_workers_started = False
         self.repo_center = RepositoryOutcomeCenter(cache_seconds=8)
-        ledger_path = os.path.join(BASE, "ledger.db")
+        ledger_path = os.path.join(pathcfg.BASE, "ledger.db")
         self.ledger_status = self._prepare_ledger(ledger_path)
         self.outbox = OutboxManager(
             ledger_path,
-            recovery_source_root=os.path.join(BASE, "uploads"),
-            asset_root=os.path.join(BASE, "outbox-images"))
+            recovery_source_root=os.path.join(pathcfg.BASE, "uploads"),
+            asset_root=os.path.join(pathcfg.BASE, "outbox-images"))
         self.operations = FleetOperations(ledger_path)
         self.web_push = None
         self.web_push_lock = threading.RLock()
@@ -1444,10 +1422,10 @@ class Engine:
                                        migrate_codex_runtime_metadata,
                                        UnixWebSocketProcess)
             executable = codex_command(cfg.get("codex_command") or None)
-            state_path = os.path.join(BASE, "codex_threads.json")
+            state_path = os.path.join(pathcfg.BASE, "codex_threads.json")
             staging_runtime = cfg.get("instance_mode") == "staging"
             managed_socket = codex_control_socket(managed=True)
-            legacy_socket = codex_control_socket(managed=False, state_dir=BASE)
+            legacy_socket = codex_control_socket(managed=False, state_dir=pathcfg.BASE)
             remote_control = bool(cfg.get("codex_remote_control", True))
 
             def client_for(socket_path, startup):
@@ -1529,7 +1507,7 @@ class Engine:
             from .codex_launcher import install_launcher
             self.codex_launcher_status = install_launcher(
                 source=os.path.join(os.path.dirname(__file__), "codex_launcher.py"),
-                home=HOME)
+                home=pathcfg.HOME)
         except Exception as exc:
             self.codex_launcher_status = {
                 "installed": False, "shell_configured": False,
@@ -1574,7 +1552,7 @@ class Engine:
             return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
         stem = requested or "session"
         name = f"{stem}-{secrets.token_hex(4)}"
-        parent = os.path.join(BASE, "workspaces")
+        parent = os.path.join(pathcfg.BASE, "workspaces")
         path = os.path.join(parent, name)
         branch = f"fleet-staging/{name}"
         try:
@@ -1700,7 +1678,7 @@ class Engine:
     # -- live sessions from the CLI registry
     def live_sessions(self):
         out = []
-        for p in glob.glob(os.path.join(SESSIONS, "*.json")):
+        for p in glob.glob(os.path.join(pathcfg.SESSIONS, "*.json")):
             try:
                 with open(p) as handle:
                     d = json.load(handle)
@@ -1761,13 +1739,13 @@ class Engine:
 
     @staticmethod
     def _image_upload_paths(upload_id):
-        root = os.path.join(BASE, "uploads")
+        root = os.path.join(pathcfg.BASE, "uploads")
         return root, os.path.join(root, upload_id + ".jpg"), os.path.join(root, upload_id + ".json")
 
     def _cleanup_image_uploads(self, now=None):
         with self._image_upload_lock:
             now = float(now or time.time())
-            root = os.path.join(BASE, "uploads")
+            root = os.path.join(pathcfg.BASE, "uploads")
             try:
                 entries = os.scandir(root)
             except FileNotFoundError:
@@ -2343,7 +2321,7 @@ class Engine:
         for path in (root, cwd):
             if path and path not in dirs:
                 dirs.append(path)
-        paths = [CLAUDE_SETTINGS]
+        paths = [pathcfg.CLAUDE_SETTINGS]
         for directory in dirs:
             paths.extend((os.path.join(directory, ".claude", "settings.json"),
                           os.path.join(directory, ".claude", "settings.local.json")))
@@ -3312,7 +3290,7 @@ class Engine:
     def _record_repository_action(self, action_id, kind, root, worktree, started,
                                   status, revision, summary=None, error=None):
         self.ensure_db()
-        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
         try:
             db.execute("""INSERT INTO repo_actions(
                 action_id,kind,root,worktree,started_at,finished_at,status,summary,error,revision)
@@ -3326,7 +3304,7 @@ class Engine:
 
     def repository_action_history(self, root, worktree, limit=8):
         self.ensure_db()
-        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
         try:
             rows = db.execute("""SELECT action_id,kind,started_at,finished_at,status,
                 summary,error FROM repo_actions WHERE root=? AND worktree=?
@@ -3370,7 +3348,7 @@ class Engine:
 
     def _persist_config_fields(self, changed):
         """Merge internal/UI state into config.json without dropping secret fields."""
-        path = os.path.join(BASE, "config.json")
+        path = os.path.join(pathcfg.BASE, "config.json")
         with self.config_lock:
             try:
                 with open(path) as handle:
@@ -3567,7 +3545,7 @@ class Engine:
         # Fallback identity when Claude Usage is not installed. Follow file changes
         # instead of pinning the first account for the daemon's entire lifetime.
         try:
-            stat = os.stat(CLAUDE_ACCOUNT)
+            stat = os.stat(pathcfg.CLAUDE_ACCOUNT)
             signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             signature = None
@@ -3576,7 +3554,7 @@ class Engine:
             return cached[1]
         email = None
         try:
-            with open(CLAUDE_ACCOUNT) as f:
+            with open(pathcfg.CLAUDE_ACCOUNT) as f:
                 email = (json.load(f).get("oauthAccount") or {}).get("emailAddress")
         except (OSError, ValueError):
             email = None
@@ -3599,7 +3577,7 @@ class Engine:
         refresh, and quota fields and never return or cache the raw profile objects.
         """
         try:
-            stat = os.stat(CLAUDE_USAGE_PREFS)
+            stat = os.stat(pathcfg.CLAUDE_USAGE_PREFS)
             signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             return None
@@ -3607,7 +3585,7 @@ class Engine:
         if cached and cached[0] == signature:
             return cached[1]
         try:
-            with open(CLAUDE_USAGE_PREFS, "rb") as handle:
+            with open(pathcfg.CLAUDE_USAGE_PREFS, "rb") as handle:
                 prefs = plistlib.load(handle)
             profiles_blob = prefs.get("profiles_v3") or b"[]"
             if isinstance(profiles_blob, bytes):
@@ -3692,7 +3670,7 @@ class Engine:
         number represents all model tokens processed, not just cache misses.
         """
         try:
-            stat = os.stat(CLAUDE_STATS)
+            stat = os.stat(pathcfg.CLAUDE_STATS)
             signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             return None
@@ -3700,7 +3678,7 @@ class Engine:
         if cached and cached[0] == signature:
             return cached[1]
         try:
-            with open(CLAUDE_STATS) as f:
+            with open(pathcfg.CLAUDE_STATS) as f:
                 models = (json.load(f).get("modelUsage") or {}).values()
             total, found = 0, False
             fields = ("inputTokens", "cacheCreationInputTokens",
@@ -3730,7 +3708,7 @@ class Engine:
         # and refreshes them independently. The statusline side-write remains the
         # single-account fallback when that app is absent or unreadable.
         try:
-            with open(CLAUDE_USAGE) as f:
+            with open(pathcfg.CLAUDE_USAGE) as f:
                 d = json.load(f)
         except (OSError, ValueError):
             d = {}
@@ -3884,7 +3862,7 @@ class Engine:
                 return self.db
             # This long-lived connection belongs to the sequential scan loop.
             # HTTP request threads use their own short-lived connections below.
-            self.db = sqlite3.connect(os.path.join(BASE, "ledger.db"), check_same_thread=False)
+            self.db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), check_same_thread=False)
             self.db.execute("""CREATE TABLE IF NOT EXISTS agent_runs(
                 agent_id TEXT PRIMARY KEY, session_id TEXT, project TEXT,
                 agent_type TEXT, model TEXT, description TEXT,
@@ -3952,7 +3930,7 @@ class Engine:
         get an independent connection and close it after the response is built.
         """
         self.ensure_db()
-        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=5)
+        db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=5)
         db.execute("PRAGMA busy_timeout=5000")
         return db
 
@@ -3971,7 +3949,7 @@ class Engine:
         if not path:
             return None
         real = os.path.realpath(os.path.expanduser(str(path)))
-        root = os.path.realpath(PROJECTS)
+        root = os.path.realpath(pathcfg.PROJECTS)
         if os.path.dirname(os.path.dirname(real)) != root:
             return None
         if os.path.basename(real) != f"{sid}.jsonl" or not os.path.isfile(real):
@@ -3983,7 +3961,7 @@ class Engine:
         if not cwd:
             return None
         real = os.path.realpath(os.path.expanduser(str(cwd)))
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         if not os.path.isdir(real):
             return None
         if real != home and not real.startswith(home + os.sep):
@@ -4026,7 +4004,7 @@ class Engine:
         """Latest prompt-history label/cwd per Claude session, without prompt bodies."""
         out = {}
         try:
-            handle = open(CLAUDE_HISTORY, errors="replace")
+            handle = open(pathcfg.CLAUDE_HISTORY, errors="replace")
         except OSError:
             return out
         with handle:
@@ -4098,7 +4076,7 @@ class Engine:
         ).fetchall())
         history = self._history_titles()
         imported = 0
-        for candidate in sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))):
+        for candidate in sorted(glob.glob(os.path.join(pathcfg.PROJECTS, "*", "*.jsonl"))):
             sid = os.path.splitext(os.path.basename(candidate))[0]
             path = self._safe_claude_transcript(sid, candidate)
             if not path or known.get(sid) == path:
@@ -4337,7 +4315,7 @@ class Engine:
         where = "session_id=?" + (" AND id<?" if cursor else "")
         params = [sid] + ([cursor] if cursor else []) + [limit + 1]
         try:
-            db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+            db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
             rows = db.execute(
                 f"SELECT {','.join(cols)} FROM state_events WHERE {where} "
                 "ORDER BY id DESC LIMIT ?", params).fetchall()
@@ -4379,7 +4357,7 @@ class Engine:
         """Persist identity/status only. The edited handoff body is never retained."""
         now = time.time()
         self.ensure_db()
-        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
         try:
             db.execute("""INSERT INTO session_links(
                 source_session_id,source_provider,destination_session_id,
@@ -4400,7 +4378,7 @@ class Engine:
 
     def _handoff_link(self, source_sid, destination_sid):
         self.ensure_db()
-        db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+        db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
         try:
             row = db.execute("""SELECT source_session_id,source_provider,
                 destination_session_id,destination_provider,created_at,status,error,preview_hash
@@ -4425,7 +4403,7 @@ class Engine:
             rows = cached[1]
         else:
             self.ensure_db()
-            db = sqlite3.connect(os.path.join(BASE, "ledger.db"), timeout=2)
+            db = sqlite3.connect(os.path.join(pathcfg.BASE, "ledger.db"), timeout=2)
             try:
                 rows = db.execute("""SELECT source_session_id,source_provider,
                     destination_session_id,destination_provider,created_at,status,error
@@ -4522,7 +4500,7 @@ class Engine:
         candidates.extend(context.get("files") or [])
         for item in candidates:
             path = os.path.realpath(os.path.expanduser(str(item.get("path") or "")))
-            if not path or path in seen or not path.startswith(os.path.realpath(HOME) + os.sep):
+            if not path or path in seen or not path.startswith(os.path.realpath(pathcfg.HOME) + os.sep):
                 continue
             seen.add(path)
             artifacts.append({"path": path, "name": os.path.basename(path),
@@ -4776,7 +4754,7 @@ Treat this as an independent session. Verify the repository state before changin
         so the picker flags them instead of pretending a remote start will work. We
         never WRITE this flag: it is a security gate, not a preference."""
         try:
-            with open(os.path.join(HOME, ".claude.json")) as f:
+            with open(os.path.join(pathcfg.HOME, ".claude.json")) as f:
                 projects = (json.load(f) or {}).get("projects") or {}
         except Exception:
             return set()
@@ -4802,7 +4780,7 @@ Treat this as an independent session. Verify the repository state before changin
         """Directories the daemon has actually seen sessions in — the new-session
         picker's menu (a phone has no file browser). Only offers dirs a spawn would
         actually accept: never list what spawn_session will refuse."""
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         trusted = self.trusted_dirs()
 
         def ok(d):
@@ -5002,7 +4980,7 @@ Treat this as an independent session. Verify the repository state before changin
         (`plugin:agent`) have no local file: fall back to the parent."""
         if not agent_type or ":" in agent_type:
             return parent_effort
-        for root in (os.path.join(cwd, ".claude"), os.path.join(HOME, ".claude")):
+        for root in (os.path.join(cwd, ".claude"), os.path.join(pathcfg.HOME, ".claude")):
             p = os.path.join(root, "agents", f"{agent_type}.md")
             try:
                 mtime = os.path.getmtime(p)
@@ -5056,7 +5034,7 @@ Treat this as an independent session. Verify the repository state before changin
         PreCompact hook's checkpoint file is the one live artifact — its mtime
         is the compaction's start. Sessions whose project has no PreCompact
         hook simply never show the pill (the finished-event row still lands)."""
-        p = os.path.join(HOME, ".claude", "compaction",
+        p = os.path.join(pathcfg.HOME, ".claude", "compaction",
                          os.path.basename(cwd_to_project_dir(cwd)), f"checkpoint-{sid}.md")
         try:
             started = os.path.getmtime(p)
@@ -5109,9 +5087,9 @@ Treat this as an independent session. Verify the repository state before changin
             add("/" + name, desc, "built-in")
         if cwd:
             scan_dir(os.path.join(cwd, ".claude"), "project")
-        scan_dir(os.path.join(HOME, ".claude"), "user")
+        scan_dir(os.path.join(pathcfg.HOME, ".claude"), "user")
         try:
-            with open(os.path.join(HOME, ".claude", "plugins",
+            with open(os.path.join(pathcfg.HOME, ".claude", "plugins",
                                    "installed_plugins.json")) as f:
                 plugins = json.load(f).get("plugins") or {}
         except Exception:
@@ -5144,7 +5122,7 @@ Treat this as an independent session. Verify the repository state before changin
             return None
         if not re.fullmatch(r"[0-9a-f]{8,64}@v[0-9]{1,8}", str(backup_name or "")):
             return None
-        root = os.path.realpath(os.path.join(HOME, ".claude", "file-history", str(sid)))
+        root = os.path.realpath(os.path.join(pathcfg.HOME, ".claude", "file-history", str(sid)))
         candidate = os.path.realpath(os.path.join(root, str(backup_name)))
         if os.path.dirname(candidate) != root or not os.path.isfile(candidate):
             return None
@@ -5957,7 +5935,7 @@ Treat this as an independent session. Verify the repository state before changin
         try:
             from .codex_adapter import codex_control_socket
             expected_socket = os.path.realpath(codex_control_socket(
-                managed=not self.is_staging, state_dir=BASE))
+                managed=not self.is_staging, state_dir=pathcfg.BASE))
             result = subprocess.run(
                 ["ps", "-axo", "pid=,tty=,command="], capture_output=True,
                 text=True, timeout=2)
@@ -6074,7 +6052,7 @@ Treat this as an independent session. Verify the repository state before changin
             return self._claude_background
         try:
             self._claude_background = ClaudeBackgroundTransport(
-                self.cfg.get("claude_command") or None, home=HOME)
+                self.cfg.get("claude_command") or None, home=pathcfg.HOME)
             self._claude_background_error = None
             return self._claude_background
         except ClaudeBackgroundError as exc:
@@ -6098,7 +6076,7 @@ Treat this as an independent session. Verify the repository state before changin
                              "Claude background connection is unavailable"}
         try:
             executable, job_id, cwd = transport.attach_command(
-                self._background_job_id(reg), reg.get("cwd") or HOME)
+                self._background_job_id(reg), reg.get("cwd") or pathcfg.HOME)
         except ClaudeBackgroundError as exc:
             return {"ok": False, "code": "background_connection_lost",
                     "error": str(exc)[:300]}
@@ -6434,7 +6412,7 @@ Treat this as an independent session. Verify the repository state before changin
         """Start the isolated delivery runtime without delaying daemon availability."""
         with self.web_push_lock:
             if self.web_push is None:
-                self.web_push = WebPushService(self.operations, BASE, self.cfg)
+                self.web_push = WebPushService(self.operations, pathcfg.BASE, self.cfg)
             self.web_push.start()
 
     def push_capability_action(self, payload):
@@ -6518,7 +6496,7 @@ Treat this as an independent session. Verify the repository state before changin
         if provider not in ("claude", "codex"):
             raise OutboxError("unknown provider")
         cwd = os.path.realpath(os.path.expanduser(str(spec.get("cwd") or "").strip()))
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         if not cwd or not os.path.isdir(cwd):
             raise OutboxError("no such directory")
         if cwd != home and not cwd.startswith(home + os.sep):
@@ -7647,7 +7625,7 @@ Treat this as an independent session. Verify the repository state before changin
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name):
             return {"ok": False, "error": "worktree name: letters, digits, . _ - only"}
         repo_key = hashlib.sha256(os.path.realpath(root).encode()).hexdigest()[:12]
-        parent = os.path.join(HOME, ".claude", "fleet-dash-worktrees", repo_key)
+        parent = os.path.join(pathcfg.HOME, ".claude", "fleet-dash-worktrees", repo_key)
         path = os.path.join(parent, name)
         if os.path.lexists(path):
             return {"ok": False, "error": "that managed worktree path already exists"}
@@ -7720,7 +7698,7 @@ Treat this as an independent session. Verify the repository state before changin
 
         cwd = os.path.realpath(os.path.expanduser(
             str(action.get("cwd") or source.get("cwd") or "").strip()))
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         if not cwd or not os.path.isdir(cwd):
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
@@ -7821,7 +7799,7 @@ Treat this as an independent session. Verify the repository state before changin
         if self.is_staging and not action.get("__staging_internal"):
             return self._spawn_staging_session(action, "codex")
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         if not cwd or not os.path.isdir(cwd):
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
@@ -7850,13 +7828,13 @@ Treat this as an independent session. Verify the repository state before changin
 
         Every value that reaches the shell is allowlisted or quoted: the model and
         effort and permission mode must be members of fixed sets above, the worktree
-        name is regex-bounded, and the directory must be an existing dir under $HOME. Nothing the
+        name is regex-bounded, and the directory must be an existing dir under $pathcfg.HOME. Nothing the
         client sends is interpolated raw — the act token opens a terminal here, so a
         free-form command string would be a remote shell."""
         if self.is_staging and not action.get("__staging_internal"):
             return self._spawn_staging_session(action, "claude", reserved_sid=reserved_sid)
         cwd = os.path.realpath(os.path.expanduser(str(action.get("cwd") or "").strip()))
-        home = os.path.realpath(HOME)
+        home = os.path.realpath(pathcfg.HOME)
         if not cwd or not os.path.isdir(cwd):
             return {"ok": False, "error": "no such directory"}
         if cwd != home and not cwd.startswith(home + os.sep):
@@ -7952,8 +7930,8 @@ Treat this as an independent session. Verify the repository state before changin
                     lines.append("0 " + base64.b64encode(text.encode()).decode())
                 if nl:                  # raw CR — raw-mode TUIs' Enter (LF toggles!)
                     lines.append("2 ")
-            req_path = os.path.join(BASE, "inject-request.txt")
-            res_path = os.path.join(BASE, "inject-result.txt")
+            req_path = os.path.join(pathcfg.BASE, "inject-request.txt")
+            res_path = os.path.join(pathcfg.BASE, "inject-result.txt")
             try:
                 os.remove(res_path)
             except OSError:
@@ -7970,7 +7948,7 @@ Treat this as an independent session. Verify the repository state before changin
                     os.remove(tmp_path)
                 except OSError:
                     pass
-            app = os.path.join(BASE, "FleetDashInjector.app")
+            app = os.path.join(pathcfg.BASE, "FleetDashInjector.app")
             try:
                 launched = subprocess.run(
                     ["open", "-g", app], capture_output=True, text=True, timeout=10)
@@ -8202,7 +8180,7 @@ Treat this as an independent session. Verify the repository state before changin
 
 def find_session_for_cwd(cwd):
     hits = []
-    for p in glob.glob(os.path.join(SESSIONS, "*.json")):
+    for p in glob.glob(os.path.join(pathcfg.SESSIONS, "*.json")):
         try:
             d = json.load(open(p))
             os.kill(d["pid"], 0)
@@ -8252,7 +8230,7 @@ def main():
         if "--session" in args:
             sid = args[args.index("--session") + 1]
         if sid and not cwd:
-            for p in glob.glob(os.path.join(SESSIONS, "*.json")):
+            for p in glob.glob(os.path.join(pathcfg.SESSIONS, "*.json")):
                 try:
                     d = json.load(open(p))
                 except Exception:

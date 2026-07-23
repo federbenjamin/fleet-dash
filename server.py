@@ -23,7 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fleetdash.engine import Engine, load_config, BASE, PROJECTS  # noqa: E402
+from fleetdash.engine import Engine, load_config  # noqa: E402
+from fleetdash.paths import BASE, PROJECTS  # noqa: E402
 from fleetdash.search_index import SearchIndex  # noqa: E402
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))

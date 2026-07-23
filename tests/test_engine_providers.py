@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from fleetdash import engine as engine_module
+from fleetdash import paths as engine_paths
 from fleetdash.engine import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, Engine, Tail, completed_handoff,
                     load_config, classify_placement, redact_handoff_text, requests_reply)
 from server import Handler
@@ -100,16 +101,16 @@ class EngineProviderTest(unittest.TestCase):
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
         self.patchers = [
-            mock.patch.object(engine_module, "HOME", self.tmp.name),
-            mock.patch.object(engine_module, "BASE", self.base),
-            mock.patch.object(engine_module, "SESSIONS", self.sessions),
-            mock.patch.object(engine_module, "PROJECTS", self.projects),
-            mock.patch.object(engine_module, "CLAUDE_ACCOUNT", self.claude_account),
-            mock.patch.object(engine_module, "CLAUDE_USAGE", self.claude_usage),
-            mock.patch.object(engine_module, "CLAUDE_STATS", self.claude_stats),
-            mock.patch.object(engine_module, "CLAUDE_HISTORY", self.claude_history),
-            mock.patch.object(engine_module, "CLAUDE_SETTINGS", self.claude_settings),
-            mock.patch.object(engine_module, "CLAUDE_USAGE_PREFS",
+            mock.patch.object(engine_paths, "HOME", self.tmp.name),
+            mock.patch.object(engine_paths, "BASE", self.base),
+            mock.patch.object(engine_paths, "SESSIONS", self.sessions),
+            mock.patch.object(engine_paths, "PROJECTS", self.projects),
+            mock.patch.object(engine_paths, "CLAUDE_ACCOUNT", self.claude_account),
+            mock.patch.object(engine_paths, "CLAUDE_USAGE", self.claude_usage),
+            mock.patch.object(engine_paths, "CLAUDE_STATS", self.claude_stats),
+            mock.patch.object(engine_paths, "CLAUDE_HISTORY", self.claude_history),
+            mock.patch.object(engine_paths, "CLAUDE_SETTINGS", self.claude_settings),
+            mock.patch.object(engine_paths, "CLAUDE_USAGE_PREFS",
                               self.claude_usage_prefs),
         ]
         for patcher in self.patchers:
@@ -461,14 +462,14 @@ class EngineProviderTest(unittest.TestCase):
         path = os.path.join(migration_base, "config.json")
         with open(path, "w") as handle:
             json.dump({"stall_seconds": 240, "act_token": "existing"}, handle)
-        with mock.patch.object(engine_module, "BASE", migration_base):
+        with mock.patch.object(engine_paths, "BASE", migration_base):
             migrated = load_config()
         self.assertEqual(migrated["stall_seconds"], 600)
         self.assertTrue(migrated["_stall_default_v2"])
 
         with open(path, "w") as handle:
             json.dump({"stall_seconds": 900, "act_token": "existing"}, handle)
-        with mock.patch.object(engine_module, "BASE", migration_base):
+        with mock.patch.object(engine_paths, "BASE", migration_base):
             custom = load_config()
         self.assertEqual(custom["stall_seconds"], 900)
 
@@ -953,7 +954,7 @@ class EngineProviderTest(unittest.TestCase):
             handle.write(b"not a sqlite database")
         cfg = dict(DEFAULT_CONFIG)
         cfg.update({"codex_enabled": False, "ntfy_topic": ""})
-        with mock.patch.object(engine_module, "BASE", recovery_base):
+        with mock.patch.object(engine_paths, "BASE", recovery_base):
             recovered = Engine(cfg)
             try:
                 fleet = recovered.scan()
@@ -1268,7 +1269,7 @@ class EngineProviderTest(unittest.TestCase):
         self.assertEqual(writes, [])
 
     def test_codex_spawn_starts_visible_initial_hi(self):
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({
                 "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
                 "effort": "high", "mode": "plan"})
@@ -1281,7 +1282,7 @@ class EngineProviderTest(unittest.TestCase):
             "mode": "plan", "initial_text": "hi"})
 
     def test_codex_spawn_uses_explicit_initial_message_when_supplied(self):
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             result = self.engine.spawn_codex_session({
                 "provider": "codex", "cwd": self.cwd, "model": "gpt-5.4",
                 "effort": "high", "mode": "default", "initial_text": "Start exact work"})
@@ -1324,7 +1325,7 @@ class EngineProviderTest(unittest.TestCase):
                 "cwd": self.cwd, "model": "gpt-5.4", "effort": "high",
                 "mode": "plan", "worktree": False, "worktree_name": ""}})
         self.assertTrue(created["ok"])
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             self.engine.run_outbox()
         row = self.engine.outbox.get(created["item"]["id"])
         self.assertEqual(row["state"], "sent")
@@ -2415,7 +2416,7 @@ class EngineProviderTest(unittest.TestCase):
         self.engine._iterm_write = lambda tty, steps, step_delay=None: (
             writes.append((tty, steps)) or {"ok": True})
         self.engine.is_trusted = lambda cwd, trusted=None: True
-        with mock.patch.object(engine_module, "HOME", self.tmp.name):
+        with mock.patch.object(engine_paths, "HOME", self.tmp.name):
             spawned = self.engine.spawn_session({"cwd": self.cwd, "model": "sonnet",
                 "effort": "high", "permission_mode": "acceptEdits",
                 "worktree": True, "worktree_name": "live-e2e"})
