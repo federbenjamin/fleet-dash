@@ -11,6 +11,24 @@
 <meta name="apple-mobile-web-app-title" content="Fleet Dash">
 <title>Fleet Dash</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
+<!-- modulepreload flattens the module-import waterfall into one parallel
+     fetch burst (the sw shell is network-first, so every load refetches) -->
+<link rel="modulepreload" href="/static/js/main.js">
+<link rel="modulepreload" href="/static/js/state-store.js">
+<link rel="modulepreload" href="/static/js/nav.js">
+<link rel="modulepreload" href="/static/js/search.js">
+<link rel="modulepreload" href="/static/js/ui-utils.js">
+<link rel="modulepreload" href="/static/js/outbox.js">
+<link rel="modulepreload" href="/static/js/push.js">
+<link rel="modulepreload" href="/static/js/notifications.js">
+<link rel="modulepreload" href="/static/js/context.js">
+<link rel="modulepreload" href="/static/js/viewer-handoff.js">
+<link rel="modulepreload" href="/static/js/overlays.js">
+<link rel="modulepreload" href="/static/js/workspace.js">
+<link rel="modulepreload" href="/static/js/cards.js">
+<link rel="modulepreload" href="/static/js/settings-actions.js">
+<link rel="modulepreload" href="/static/js/history-spawn.js">
+<link rel="modulepreload" href="/static/js/insights.js">
 <link rel="icon" href="/static/icons/fleet.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/static/icons/fleet-192.png">
 <link rel="stylesheet" href="/static/fleet.css">
@@ -207,6 +225,6 @@
     onclick="dismissOverlay()">←</button><span id="searchviewtitle"></span><span id="searchviewaction"></span></div>
   <div id="searchviewbody"></div>
 </div>
-<script src="/static/app.js"></script>
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

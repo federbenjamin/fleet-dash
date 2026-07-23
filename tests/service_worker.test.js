@@ -72,11 +72,11 @@ test('shell caching rejects query-bearing keys', async () => {
   const response = {ok: true, clone: () => response};
   const app = harness(async () => response);
   await app.dispatch('fetch', {request: {method: 'GET', mode: 'no-cors',
-    url: 'https://fleet.test/static/app.js?token=private'}});
+    url: 'https://fleet.test/static/js/main.js?token=private'}});
   assert.deepEqual(app.cacheWrites, []);
   await app.dispatch('fetch', {request: {method: 'GET', mode: 'no-cors',
-    url: 'https://fleet.test/static/app.js'}});
-  assert.deepEqual(app.cacheWrites, ['/static/app.js']);
+    url: 'https://fleet.test/static/js/main.js'}});
+  assert.deepEqual(app.cacheWrites, ['/static/js/main.js']);
 });
 
 test('capability action omits credentials and closes only after success', async () => {

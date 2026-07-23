@@ -23,11 +23,12 @@ pass; revisit individually.
   next split candidates.** Codex: protocol client (`UnixWebSocketProcess` /
   `CodexAppServer`) vs. adapter/state vs. runtime migration. Briefing:
   store/schema vs. scheduler/cadence vs. projections.
-- **`static/app.js` is a 6.2k-line single script.** A split needs a decision
-  first: ES modules served raw (multiple requests, sw shell-cache list and
-  `page_v` mtime logic must cover every file) vs. introducing a bundling step
-  (repo currently has no build). Either way the render/act/overlay/draft
-  subsystems are separable.
+- ~~`static/app.js` single 6.2k-line script~~ — **resolved 2026-07-23**: split
+  into 16 raw ES modules under `static/js/` (no bundler; user decision). Shared
+  state lives on `globalThis`, functions/consts publish via `Object.assign`,
+  `dashboard.html` modulepreloads every module, and sw.js/`page_v`/fixture
+  server cover the new files. See the `static/js/` file-map bullet +
+  invariant 71 in AGENTS.md for the module contract.
 - **`server.py` route table.** The Handler's do_GET/do_POST dispatch is a long
   if/elif chain; a table of `(path, token_required, handler)` would make the
   auth surface auditable at a glance.

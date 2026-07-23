@@ -1320,7 +1320,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, "text/html; charset=utf-8", handle.read())
         assets = {
             "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8"),
-            "/static/app.js": ("static/app.js", "text/javascript; charset=utf-8"),
+            **{f"/static/js/{name}": (f"static/js/{name}", "text/javascript; charset=utf-8")
+               for name in ("main.js", "state-store.js", "nav.js", "search.js",
+                            "ui-utils.js", "outbox.js", "push.js", "notifications.js",
+                            "context.js", "viewer-handoff.js", "overlays.js",
+                            "workspace.js", "cards.js", "settings-actions.js",
+                            "history-spawn.js", "insights.js")},
             "/static/manifest.webmanifest": ("static/manifest.webmanifest",
                                                 "application/manifest+json"),
             "/static/offline.html": ("static/offline.html", "text/html; charset=utf-8"),
@@ -1962,7 +1967,7 @@ class Handler(BaseHTTPRequestHandler):
                             "conflicts": 0}, "dirty_total": 3 if dirty else 0,
                         "dirty_files": ([
                             {"path": "engine.py", "category": "staged", "status": "M."},
-                            {"path": "static/app.js", "category": "unstaged", "status": ".M"},
+                            {"path": "static/js/cards.js", "category": "unstaged", "status": ".M"},
                             {"path": "notes.txt", "category": "untracked", "status": "??"}]
                             if dirty else []),
                         "ignored_count": 0,
