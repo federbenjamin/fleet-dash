@@ -752,8 +752,10 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     inert lower layers, and opener restoration. The highest visible z-index owns focus. Every one of
     those surfaces uses the shared visual viewport on phones; focused fields scroll into the
     remaining viewport instead of exposing the screen beneath the keyboard. The labelled, focusable
-    card header opens Chat by pointer or keyboard; do not restore a redundant Chat button. Pin and
-    other explicit controls stop propagation and retain their own action.
+    card header opens Chat by pointer or keyboard; live Claude and Codex cards must not duplicate
+    navigation-only Open/Continue/View actions as buttons. Respond/Review, Pin, terminal focus, and
+    other explicit controls stop propagation and retain their own action. History rows keep their
+    separate action buttons.
 
 64. **Outbox identity and retries are concurrency-safe.** Scheduled creation persists the browser's
     stable `client_request_id` as the unique idempotency key. Editable updates/retargets require the

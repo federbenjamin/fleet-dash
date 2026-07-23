@@ -31,6 +31,9 @@ again as a full card. An unreviewed completed response also appears in the inbox
 until it is opened or marked reviewed, then returns to the Available cards. Pinned
 cards keep their inline interaction instead of duplicating an inbox row. Pins persist
 in Fleet's server settings across browser reloads, daemon restarts, and devices.
+Live Claude and Codex card headers execute navigation-only Open, Continue, and View actions, so
+those cards do not render a duplicate button. Respond and Review remain explicit controls. History
+rows retain their action buttons because they use a separate row interaction.
 
 Empty Pinned, Action inbox, and Working sections are hidden. Available remains visible
 with an empty-state message. History shows one flat list or an explicit empty state; it is not a

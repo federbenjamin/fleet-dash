@@ -301,6 +301,9 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
     response badge. Provider-wide stale state preserves the last placement and renders one banner.
     External/view-only Available sessions move to History after `dormant_seconds`; the rollout
     observer's separate 24-hour discovery window does not control placement.
+    Live Claude and Codex card headers own navigation-only `open` / `continue` / `view`; never render
+    those as duplicate `.primarybtn` controls. Keep explicit `respond` / `review` controls and
+    History-row actions.
     Keep [`docs/session-organization.md`](docs/session-organization.md) synchronized with any mapping.
 32. **Codex history backfill indexes main transcripts, not subagents.** On the first scan after each
     daemon start, `backfill_claude_history` discovers `~/.Codex/projects/*/*.jsonl`, extracts bounded

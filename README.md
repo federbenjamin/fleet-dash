@@ -319,7 +319,9 @@ the provider without affecting Claude sessions.
   evidence reconciles it. A newer model, effort, or Codex mode chosen directly in the provider
   replaces Fleet's settled feedback on the next refresh. Rapid follow-up Claude messages queue while
   its registry catches up with a just-started turn, so they cannot land in the wrong terminal state.
-- A Claude card's whole header opens Fleet chat; the redundant second chat button is gone. **Terminal**
+- A Claude or Codex card's whole header opens Fleet chat, so live cards do not duplicate conversation
+  navigation with **Open**, **Continue**, or **View** buttons. Explicit **Respond** and **Review**
+  controls remain when the label carries action meaning beyond navigation. **Terminal**
   (desktop only) brings that Claude iTerm tab to the front; for a Claude background job it starts the
   official `claude attach` client. Codex shows **Open** only when Fleet proves that the exact thread
   already has one live terminal on the managed socket. Fleet never creates a Codex terminal from the

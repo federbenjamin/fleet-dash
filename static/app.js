@@ -4015,7 +4015,8 @@ function cardFrame(s){
 // each tick doesn't flash.
 function cardTop(s){
   if(s.provisional)return provisionalCardTop(s);
-  const showPrimary=!(s.provider==='claude'&&(!s.primary_action||['open','continue','view'].includes(s.primary_action)));
+  const navigationOnly=!s.primary_action||['open','continue','view'].includes(s.primary_action);
+  const showPrimary=!(navigationOnly&&['claude','codex'].includes(s.provider));
   // delivered-file chips + the session peek both need the context cache; the
   // conversation itself now lives only in the full view
   if(previewSessions()&&s.last_msg)ensureCtx(s.session_id,ctxVersion(s));
