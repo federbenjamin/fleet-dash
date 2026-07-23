@@ -559,8 +559,8 @@ staging/live evidence passes.
   network-only and uncached.
 - `tests/test_engine_providers.py`, Codex protocol/fixture tests, Outbox tests, Briefing/Web Push tests,
   server tests, browser fixtures/specs, privacy probes, live notification tests, and latency tests.
-- `README.md`, `CLAUDE.md`, `docs/platform-roadmap.md`,
-  `docs/push-notification-redesign-roadmap.md`, and relevant organization/latency docs.
+- `README.md`, `CLAUDE.md`, `docs/roadmaps/platform-roadmap.md`,
+  `docs/roadmaps/push-notification-redesign-roadmap.md`, and relevant organization/latency docs.
 
 ## Superseded documentation decisions
 

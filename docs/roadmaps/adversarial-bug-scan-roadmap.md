@@ -6,7 +6,7 @@ Scope: current draft PR and isolated staging; production promotion is approved a
 Evidence date: 2026-07-18.
 
 Follow-on mobile chat/Markdown layout work is tracked separately in
-[`mobile-chat-viewer-layout-fix-plan.md`](mobile-chat-viewer-layout-fix-plan.md); its open gates now
+[`mobile-chat-viewer-layout-fix-plan.md`](../postmortems/mobile-chat-viewer-layout-fix-plan.md); its open gates now
 also block staging approval and production promotion.
 
 This is the source of truth for the adversarial scan. A finding appears here only after a second

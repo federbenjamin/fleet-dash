@@ -84,6 +84,22 @@ are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapsh
 
 ## Invariants — violating these re-breaks debugged behavior
 
+Numbers are stable identifiers (code comments cite "invariant N") — never renumber;
+new invariants append. Quick map by theme (an invariant may appear in two groups):
+
+- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68
+- Applet, transports & click latency: 3, 24, 25
+- Session/agent state & Now placement: 7, 31–33, 49, 61, 69
+- Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
+- Codex runtime & ownership: 30, 38, 49, 65, 69
+- Security boundaries (files, spawn, trust, uploads, staging, closed sessions):
+  10, 19–21, 23, 41, 54, 56
+- Notifications & Web Push: 2, 8, 44, 46–48
+- Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68
+- Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45,
+  51, 53, 55, 57–60, 62, 63, 67, 70
+- HTTP routing gotcha: 6
+
 1. **Pending questions NEVER come from the transcript.** The CLI flushes AskUserQuestion
    tool_use rows only when answered (row timestamps are creation-time and lie). Hook capture
    (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) is the only source.
