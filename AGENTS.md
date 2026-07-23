@@ -24,7 +24,9 @@ fleetdash/                everything server.py imports
   engine_worktree.py        worktree preview/cleanup tickets
   engine_uploads.py         phone image uploads
   engine_staging.py         staging isolation
-  codex_adapter.py          Codex App Server client + thread state
+  codex_protocol.py         App Server WebSocket/JSON-RPC client (UnixWebSocketProcess, CodexAppServer)
+  codex_runtime.py          Codex runtime lifecycle/migration + CodexError base exception
+  codex_adapter.py          CodexAdapter: thread/state normalization + capability mapping
   codex_observer.py         read-only external-thread rollout observer
   codex_launcher.py         Codex TUI router (stdlib-only, spawned as a script)
   claude_background.py      official `claude attach` background transport
@@ -1004,9 +1006,22 @@ because they are also spawned directly as scripts by absolute path.
 - `fleetdash/outbox.py` — scheduled/waiting messages plus provider-neutral automatic send
   fallback and Codex
   control-recovery queues; private queue-owned images are never projected as paths.
-- `fleetdash/codex_adapter.py` — detached Unix-listener/WebSocket JSON-RPC client,
-  shared-runtime ownership, normalized
-  Codex threads/turns/items/questions/approvals/artifacts/subagents, and provider capability mapping.
+- `fleetdash/codex_protocol.py` — the App Server protocol client layer split out of
+  `codex_adapter`: the `UnixWebSocketProcess` Unix-transport shim, the synchronous JSON-RPC
+  `CodexAppServer`, and the error-payload normalization helpers those clients own
+  (`_error_text`/`_is_limit_error`/`_safe_json`). Depends only on `codex_runtime`
+  (CodexError, codex_command); never imports `codex_adapter`.
+- `fleetdash/codex_runtime.py` — the lowest Codex layer: the `CodexError` base exception,
+  executable resolution (`codex_command`), shared/managed App Server startup
+  (`ensure_shared_codex_runtime`/`ensure_managed_codex_runtime`, `codex_control_socket`),
+  and the private-to-managed metadata migration (`CodexRuntimeMigration`,
+  `migrate_codex_runtime_metadata`, `codex_runtime_migration_needed`,
+  `LEGACY_RUNTIME_OWNER`/`MANAGED_RUNTIME_OWNER`). Imports nothing from `codex_protocol`
+  or `codex_adapter`.
+- `fleetdash/codex_adapter.py` — `CodexAdapter`: normalized Codex
+  threads/turns/items/questions/approvals/artifacts/subagents, shared-runtime ownership, and
+  provider capability mapping. Imports the transport from `codex_protocol` and the runtime
+  lifecycle from `codex_runtime`.
 - `server.py` — ThreadingHTTPServer; GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),

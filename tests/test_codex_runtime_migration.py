@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from fleetdash.codex_adapter import (
+from fleetdash.codex_runtime import (
     CodexError,
     CodexRuntimeMigration,
     LEGACY_RUNTIME_OWNER,
@@ -359,8 +359,8 @@ class RuntimeMigrationTest(unittest.TestCase):
                                 f"unix://{self.legacy_socket}\n"), stderr="")
                 raise AssertionError(command)
 
-            with mock.patch("fleetdash.codex_adapter.platform.system", return_value="Darwin"), \
-                    mock.patch("fleetdash.codex_adapter.platform.machine", return_value="arm64"):
+            with mock.patch("fleetdash.codex_runtime.platform.system", return_value="Darwin"), \
+                    mock.patch("fleetdash.codex_runtime.platform.machine", return_value="arm64"):
                 migration = CodexRuntimeMigration(
                     wrapper, self.state_path, self.legacy_socket,
                     self.managed_socket, mock.Mock(), runner=runner,

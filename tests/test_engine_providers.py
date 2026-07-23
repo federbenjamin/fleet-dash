@@ -1220,7 +1220,7 @@ class EngineProviderTest(unittest.TestCase):
         headless = (f" 104 ?? /opt/codex resume --remote "
                     f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_runtime.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=exact + duplicate_child + wrong_socket + headless)):
             routes = self.engine._codex_terminal_routes(force=True)
@@ -1229,7 +1229,7 @@ class EngineProviderTest(unittest.TestCase):
         ambiguous = exact + (f" 105 ttys003 /opt/codex resume --remote "
                              f"unix://{socket_path} {thread_id}\n")
         self.engine._codex_terminal_routes_cache = (0.0, {})
-        with mock.patch("fleetdash.codex_adapter.codex_control_socket", return_value=socket_path), \
+        with mock.patch("fleetdash.codex_runtime.codex_control_socket", return_value=socket_path), \
              mock.patch.object(engine_module.subprocess, "run", return_value=SimpleNamespace(
                  returncode=0, stdout=ambiguous)):
             self.assertEqual(self.engine._codex_terminal_routes(force=True), {})
