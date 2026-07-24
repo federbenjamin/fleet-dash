@@ -101,9 +101,13 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **One session workspace:** every live or historical session opens at a stable
   `#session/<sid>/chat` route with persistent **Chat**, **Files**, **Subagents**, and **Details**
   sections. On wide desktops (≥1200px) the workspace is a persistent **docked right pane** beside
-  the queue — tapping any session opens it there without covering Now; the splitter between the
-  panes drags (650–1200px, persisted), and ⤢/⤡ toggles an expanded view that keeps the nav rail
-  and centers the chat column. Narrow windows and phones keep the full-screen workspace. Files and agents have opaque, directly reloadable selection routes; local paths never
+  the queue — tapping any session **always opens it split** there, never full-width. The splitter
+  between the panes drags (650–1200px); its position moves only when you drag it — route changes,
+  window quirks, and scrollbars never nudge it, and a transiently narrow window clamps the shown
+  width without forgetting your setting. ⤢/⤡ temporarily expands the pane to the full width right
+  of the nav rail; the expansion is transient — opening another session or choosing any rail
+  destination returns to the split, and it never survives a reload. Narrow windows and phones
+  keep the full-screen workspace. Files and agents have opaque, directly reloadable selection routes; local paths never
   appear in the URL or context response. The Subagents section starts with **Active** enabled on
   every initial open, preserves spawn order and required ancestors, and offers **All** for terminal
   agents; its tab count includes active agents only. On desktop the Files and Subagents list dividers
@@ -116,7 +120,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   Main-agent activity appears as the newest non-interactive Chat row. Closed
   sessions show explicit retained/unavailable states; eligible exact-session resumes use a
   text-only, idempotent first send, while external Codex threads remain view-only.
-- **⚙ settings** (desktop rail or mobile More): an install-and-delivery rail distinguishes browser
+- **⚙ settings** (desktop rail or mobile More): an ordinary left-column destination — on wide
+  desktops it renders beside a docked session pane instead of covering it, like every other rail
+  item. An install-and-delivery rail distinguishes browser
   install, notification permission, and registered-device health. It can enable/repair a Web Push
   subscription, rename or pause this device, disconnect it, and queue a real test push without
   making the Settings request wait for the push provider.
@@ -314,11 +320,11 @@ the provider without affecting Claude sessions.
   code blocks and tables collapse rather than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
   height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 800
-  characters of the latest session message. That line setting also fixes the height of ordinary
-  collapsed session cards, so short/missing messages and poll updates do not move the list.
+  characters of the latest session message. That line setting is the peek's MAXIMUM: a collapsed
+  card sizes to `min(configured lines, actual message lines)`, so a one-line reply renders a
+  one-line card instead of reserving empty preview rows.
   Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
-  running subagents grow to fit those controls; their collapsed message peek still reserves the
-  configured number of lines, so a short message does not leave a different-sized hole. Overflow
+  running subagents grow to fit those controls. Overflow
   replaces the final collapsed row with a clickable `...`. Only a truncated peek responds to a
   whole-row tap; a fully visible collapsed peek is inert. Once expanded, the exposed content is
   inert too—use **Less** to collapse it. Expansion reveals the full bounded 800-character preview. Tapping a

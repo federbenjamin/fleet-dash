@@ -113,11 +113,6 @@ function applyRouteNav(route){
 }
 function navigateTo(route,push=true,preserveNotificationDetail=false){
   closeMobileMore();
-  if(route==='settings'){
-    applyRouteNav('settings');
-    openSettings();
-    return;
-  }
   if(route==='history'){
     // Decommissioned destination: session history lives in Search TYPE=SESSION.
     searchFilters.kind='session';syncSearchControls();
@@ -129,10 +124,15 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
   // the destination is actually visible beside it (prototype behavior)
   if(push&&globalThis.sessionView&&globalThis.workspaceExpanded&&workspaceDocked())toggleWorkspaceExpand();
   if(route!=='notifications'||!preserveNotificationDetail)notificationDetailId=null;
+  if(currentRoute==='settings'&&route!=='settings')leaveSettingsRoute();
   currentRoute=route;
   document.querySelectorAll('[data-destination]').forEach(section=>{section.hidden=section.dataset.destination!==route;});
   applyRouteNav(route);
-  if(push&&location.hash!=='#'+route)history.pushState({fdRoute:route},'','#'+route);
+  // Settings keeps its section in the hash (#settings/<section>); a bare
+  // #settings entry is only pushed when arriving from another route.
+  if(push&&location.hash!=='#'+route&&
+    !(route==='settings'&&location.hash.startsWith('#settings/')))
+    history.pushState({fdRoute:route},'','#'+route);
   if(route==='workstreams'){
     const workstreams=$('#workstreams');
     if(workstreams&&!workstreamsLoadedAt&&!workstreams.firstChild){
@@ -150,6 +150,7 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
     else if(route==='search'){loadSearchStatus();runSearch(true);}
     else if(route==='workstreams')loadWorkstreams();
     else if(route==='notifications'){renderNotifications();loadNotifications(true);}
+    else if(route==='settings')enterSettingsRoute(push);
   });
   window.scrollTo({top:0,behavior:'auto'});
 }

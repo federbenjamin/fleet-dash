@@ -597,11 +597,30 @@ function schedulePeekOverflow(){
   peekMeasurePending=true;
   requestAnimationFrame(()=>{
     peekMeasurePending=false;
-    document.querySelectorAll('.sessionpeek').forEach(row=>{
+    // The collapsed peek hugs its content: min(configured lines, measured
+    // content lines) — a short last message must not reserve empty preview
+    // rows (operator decision 2026-07-24). The card's --session-card-lines
+    // drives both the peek box and the fixed card frame, so writing the
+    // measured minimum shrinks them together; each poll re-render restores
+    // the configured value and this same-frame measurement re-applies.
+    // Batched read → write → read so the fleet costs two reflows, not 2N.
+    const configured=clampS();
+    const rows=[...document.querySelectorAll('.sessionpeek')].map(row=>{
       row.classList.remove('truncated');
-      if(row.classList.contains('expanded'))return;
+      if(row.classList.contains('expanded'))return null;
       const body=row.querySelector('.peekmd');
-      if(body&&body.scrollHeight>body.clientHeight+1)row.classList.add('truncated');
+      if(!body)return null;
+      const lineHeight=parseFloat(getComputedStyle(body).lineHeight)||17.9;
+      return{row,body,lines:Math.max(1,Math.min(configured,Math.round(body.scrollHeight/lineHeight)))};
+    }).filter(Boolean);
+    rows.forEach(({row,lines})=>{
+      const card=row.closest('.card');
+      if(card&&card.style.getPropertyValue('--session-card-lines')!==''&&
+        Number(card.style.getPropertyValue('--session-card-lines'))!==lines)
+        card.style.setProperty('--session-card-lines',String(lines));
+    });
+    rows.forEach(({row,body})=>{
+      if(body.scrollHeight>body.clientHeight+1)row.classList.add('truncated');
     });
   });
 }

@@ -607,9 +607,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     mistakes it for current provider state. Never make unhashed shell assets cache-first. Bump
     `SHELL_CACHE` for structural shell changes. All other `/api/*` responses—including actions,
     conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
-45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
-    card uses the measured fixed frame `76px + preview_session_lines × 17.9px` on desktop and
-    `100px + lines × 17.9px` on mobile, where the meta rail renders as a 24px inline status row
+45. **The session-peek line setting caps ordinary collapsed-card height; short content shrinks
+    it.** A `.fixedpeek` card uses the measured fixed frame `76px + lines × 17.9px` on desktop and
+    `100px + lines × 17.9px` on mobile, where `lines = min(preview_session_lines, measured content
+    lines)` — `schedulePeekOverflow` writes the post-layout minimum into the card's
+    `--session-card-lines` each render so a short last message never reserves empty preview rows
+    (operator decision 2026-07-24); the meta rail renders as a 24px inline status row
     directly under the header (Console 10a — `.cmain{display:contents}` + flex `order`
     interleave the one `.cmeta` node; never render it twice, which breaks strict-mode
     locators) (or zero preview rows when session peeks are disabled); the card
@@ -748,8 +751,8 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     rather than sampling the same prefix forever. Image
     uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
     service worker never caches image bytes.
-55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
-    existing loading-spinner pattern before building the full settings tree. Search TYPE=SESSION
+55. **Heavy destinations paint before they work.** Opening Settings must reveal the destination and
+    its existing loading-spinner pattern before building the full settings tree. Search TYPE=SESSION
     renders its cached session list on navigation and refetches only when criteria change;
     revisiting must never paginate implicitly—only **Show more** owns the next 100 rows. Opening
     New session paints only the workspace pane form, not a synchronous full-fleet render. A
@@ -778,11 +781,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     Browser credentials use the instance-scoped `act_token_production` and `act_token_staging`
     cookie names. Cookies do not distinguish ports, so a shared `act_token` name makes opening one
     instance silently break authenticated reads and actions in the other.
-57. **Every collapsed session peek owns its configured line area.** On `.fixedpeek` cards,
-    `.sessionpeek` grows from the metadata row to the More button and its `.peekbody` stretches with
-    it. A non-fixed card that grows for running subagents or another visible control still gives a
-    short `.sessionpeek` the configured `preview_session_lines` minimum before stacking those rows
-    below it. Keep message content top-aligned and the truncated `...` control bottom-anchored; never
+57. **A collapsed session peek hugs its content up to the configured line cap.** The peek box and
+    the card frame both key off `--session-card-lines = min(preview_session_lines, measured content
+    lines)` (invariant 45), so a one-line message renders a one-line peek on fixed and non-fixed
+    cards alike — the configured value is a MAXIMUM, not a floor (operator decision 2026-07-24).
+    Keep message content top-aligned and the truncated `...` control bottom-anchored; never
     return unused preview height as a strip of card background.
 58. **The mobile full-chat composer follows the visual viewport.** `syncVisualViewport` projects
     `window.visualViewport.height/offsetTop` into CSS variables used by `#sview`, `#aview`, and
@@ -806,11 +809,14 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     retains trusted activation. Cancel changes nothing; selection closes the menu and stays drafted
     without refocusing. Safari's native keyboard
     accessory bar is not controllable from a web app, so layout must remain correct with it present.
-59. **Settings is section-routed and mutation-safe.** The overlay owns Notifications, Devices &
+59. **Settings is section-routed and mutation-safe.** Settings is an ordinary left-column
+    DESTINATION (`#route-settings`, operator decision 2026-07-24 — it renders beside a docked
+    session pane like Search or Notifications and never covers it; the old full-screen
+    `#settingsview` overlay must not return). It owns Notifications, Devices &
     delivery, Sessions, Appearance, Budgets & spawning, and Advanced at exact
     `#settings/<section>` routes. Desktop uses a rail; mobile renders one section under a sticky
-    selector. Browser/native Back unwinds section history before closing Settings and restores any
-    underlying full-chat state. Async loaders may rerender only the section whose data they own—an
+    selector. Browser/native Back unwinds section history before leaving the destination; an open
+    session pane simply stays open beside it. Async loaders may rerender only the section whose data they own—an
     unrelated push/workstream/budget response must never detach an active control. Inputs that save
     on blur must not synchronously replace the button the user is clicking. Settings serializes
     reentrant renders and defers data-driven replacement while a text, number, or select field owns
@@ -868,7 +874,8 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     tail into older loaded pages and preserve the reader's scroll anchor.
 
 63. **Full-screen overlays are stack-aware modals — except the desktop-docked session pane.**
-    Settings/Search/Handoff/Outbox/Schedule/Confirm surfaces, and the session workspace whenever it
+    Search/Handoff/Outbox/Schedule/Confirm surfaces (Settings is a destination, invariant 59,
+    not an overlay), and the session workspace whenever it
     presents full-screen (mobile and viewports below the invariant-72 dock threshold), have dialog
     semantics, an accessible name, focus entry/trap, inert lower layers, and opener restoration. The
     highest visible z-index owns focus. When the workspace is DOCKED (`#sview.docked`) it is
@@ -1010,12 +1017,18 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     `#sview.docked`) beside the left destination column instead of covering it; below that
     threshold and on mobile it remains the full-screen surface, and a window resize converts
     in place (`applyWorkspaceChrome`). The splitter (`#ssplit`, the pane's left edge) resizes the
-    PANE width, clamped to [650, min(1200, viewport − rail − 420)] px and persisted in
-    `fleet.paneSplit.v1`; it is keyboard-operable (arrows/Home/End) with ARIA values. ⤢/⤡
-    (`#sexpand`) toggles pane ↔ expanded (`html.fd-expanded`): expanded keeps the nav rail, fills
-    everything right of it, hides the covered `#appmain`, and centers chat at ~820px; the state
-    persists in `fleet.paneExpanded.v1`, and choosing a rail destination returns an expanded
-    workspace to pane mode so the destination is visible beside it. The docked pane is NOT a modal
+    PANE width and is keyboard-operable (arrows/Home/End) with ARIA values. **The divider position
+    is the user's number** (operator decision 2026-07-24): `workspacePaneWidth` holds the manual
+    preference verbatim (persisted in `fleet.paneSplit.v1`) and only the render-time
+    `applyPaneSplit` clamps to the live bounds [650, min(1200, viewport − rail − 420)] px — a
+    transient clamp (narrow window) must never overwrite the preference, and route changes must
+    never move the divider (`html{scrollbar-gutter:stable}` keeps a destination's document
+    scrollbar from shifting the fixed pane sideways). ⤢/⤡ (`#sexpand`) toggles pane ↔ expanded
+    (`html.fd-expanded`): expanded keeps the nav rail, fills everything right of it, hides the
+    covered `#appmain`, and centers chat at ~820px. **Expansion is transient and never persisted**
+    (operator decision 2026-07-24, `fleet.paneExpanded.v1` removed): opening a session (card tap,
+    new sid) and choosing any rail destination always return to the split pane; ⤢ only lasts
+    within the currently open session view. The docked pane is NOT a modal
     (invariant 63); route ownership, sections, and Back behavior are unchanged (invariant 36). The
     card open in the pane carries `.paneopen`; needs-you question cards flip their cue to
     `ANSWER IN PANE →` exactly when docking is available (`workspaceDockable()`), staying

@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'fleet-shell-n10-v1';
+const SHELL_CACHE = 'fleet-shell-n11-v1';
 const RUNTIME_CACHE = 'fleet-runtime-n6-v1';
 const SHELL_ASSETS = [
   '/',

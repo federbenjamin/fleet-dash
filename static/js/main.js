@@ -114,7 +114,7 @@ function render(f,force){
   renderSession();
   if(pendingWorkspaceRoute){const route=pendingWorkspaceRoute;pendingWorkspaceRoute=null;applyWorkspaceRoute(route);}
   schedulePeekOverflow();
-  applyRouteNav(settingsOpen?'settings':currentRoute);
+  applyRouteNav(currentRoute);
   const titleCount=Math.max(Number(t.needs_me)||0,Number(notificationData.active)||0,Number(notificationData.unread)||0);
   document.title=(titleCount?`(${titleCount}) `:'')+instanceName;
   perfRecord('render_ms',performance.now()-renderStarted);

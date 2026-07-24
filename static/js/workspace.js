@@ -1,27 +1,40 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{workspaceDockable,workspaceDocked,paneSplitBounds,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
+Object.assign(globalThis,{workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
 globalThis.sessionView=null;            // one session workspace: section + optional file/agent selection
 // Console two-pane shell: on wide desktops the workspace docks as a persistent
 // right pane beside the queue (never a modal there); ⤢ expands it to the full
-// width right of the rail; below the threshold it stays the full-screen overlay.
-const PANE_SPLIT_KEY='fleet.paneSplit.v1',PANE_EXPANDED_KEY='fleet.paneExpanded.v1';
+// width right of the rail — transient only, never persisted: every session
+// open and every rail navigation returns to the split pane (operator decision
+// 2026-07-24). Below the threshold it stays the full-screen overlay.
+const PANE_SPLIT_KEY='fleet.paneSplit.v1';
+try{localStorage.removeItem('fleet.paneExpanded.v1');}catch(_){}
 globalThis.workspacePaneWidth=(()=>{try{const value=Number(localStorage.getItem(PANE_SPLIT_KEY));
   return Number.isFinite(value)&&value>0?value:720;}catch(_){return 720;}})();
-globalThis.workspaceExpanded=(()=>{try{return localStorage.getItem(PANE_EXPANDED_KEY)==='1';}catch(_){return false;}})();
+globalThis.workspaceExpanded=false;
 function workspaceDockable(){return matchMedia('(min-width:1200px)').matches;}
 function workspaceDocked(){return Boolean(sessionView)&&workspaceDockable();}
 function paneSplitBounds(){
   const rail=$('#sidenav')?.getBoundingClientRect().width||136;
   return{min:650,max:Math.max(650,Math.min(1200,Math.round(innerWidth-rail-420)))};
 }
-function setPaneSplit(width,persist=false){
+// The divider position is the USER's number: workspacePaneWidth holds the manual
+// preference verbatim, and only render-time clamps to the current bounds. A
+// transient clamp (small window) must never overwrite the preference, or
+// re-widening the window would leave the divider drifted (operator decision
+// 2026-07-24: the divider moves only by manual drag/keys).
+function applyPaneSplit(){
   const bounds=paneSplitBounds();
-  workspacePaneWidth=Math.round(Math.max(bounds.min,Math.min(bounds.max,Number(width)||720)));
-  document.documentElement.style.setProperty('--fleet-pane-width',workspacePaneWidth+'px');
+  const applied=Math.round(Math.max(bounds.min,Math.min(bounds.max,workspacePaneWidth)));
+  document.documentElement.style.setProperty('--fleet-pane-width',applied+'px');
   const splitter=$('#ssplit');
   if(splitter){splitter.setAttribute('aria-valuemin',String(bounds.min));
     splitter.setAttribute('aria-valuemax',String(bounds.max));
-    splitter.setAttribute('aria-valuenow',String(workspacePaneWidth));}
+    splitter.setAttribute('aria-valuenow',String(applied));}
+}
+function setPaneSplit(width,persist=false){
+  const bounds=paneSplitBounds();
+  workspacePaneWidth=Math.round(Math.max(bounds.min,Math.min(bounds.max,Number(width)||720)));
+  applyPaneSplit();
   if(persist)try{localStorage.setItem(PANE_SPLIT_KEY,String(workspacePaneWidth));}catch(_){}
 }
 function startPaneSplit(event){
@@ -51,7 +64,7 @@ function applyWorkspaceChrome(){
   root.classList.toggle('fd-expanded',expanded);
   view.classList.toggle('docked',docked);
   view.setAttribute('aria-modal',docked?'false':'true');
-  if(docked&&!expanded)setPaneSplit(workspacePaneWidth);
+  if(docked&&!expanded)applyPaneSplit();
   const expand=$('#sexpand');
   if(expand){expand.hidden=!docked;expand.textContent=expanded?'⤡':'⤢';
     expand.title=expanded?'collapse to pane':'expand to full width';
@@ -59,8 +72,7 @@ function applyWorkspaceChrome(){
   syncModalStack();
 }
 function toggleWorkspaceExpand(){
-  workspaceExpanded=!workspaceExpanded;
-  try{localStorage.setItem(PANE_EXPANDED_KEY,workspaceExpanded?'1':'0');}catch(_){}
+  workspaceExpanded=!workspaceExpanded;   // transient: never persisted
   applyWorkspaceChrome();renderSession(true);
 }
 window.addEventListener('resize',()=>{if(sessionView)applyWorkspaceChrome();});
@@ -371,6 +383,9 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
   if(liveSession?.new_response)markRead(liveSession);
   const same=sessionView?.sid===sid,target=workspaceHash(sid,section,item);
   const replacingOpenSession=!same&&Boolean(sessionView);
+  // opening a session (card tap, new sid) always starts in the split pane;
+  // ⤢ expansion is transient within one open session view
+  if(!same)workspaceExpanded=false;
   let returnHash=same?sessionView.returnHash:
     (parseSessionHash()?'#now':(location.hash||'#now'));
   let historyDepth=same?Number(sessionView.historyDepth||0):

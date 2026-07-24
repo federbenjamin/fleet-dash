@@ -161,8 +161,8 @@ function closeViewer(){viewerSid=null;viewerPath=null;}
 // go from none-open to open, and the phone's back-swipe (popstate) closes it
 // instead of navigating away from the dashboard. Closing via ✕/Esc calls
 // history.back() so the pushed entry is consumed and history stays balanced.
-globalThis.histPushed=false;globalThis.schedulePushed=false;globalThis.settingsPushed=false;globalThis.settingsSectionDepth=0;
-const fullscreenOverlaySelectors=['#sview','#settingsview','#searchview','#handoffview','#outboxview','#scheduleview'];
+globalThis.histPushed=false;globalThis.schedulePushed=false;globalThis.settingsSectionDepth=0;
+const fullscreenOverlaySelectors=['#sview','#searchview','#handoffview','#outboxview','#scheduleview'];
 const anyOverlay=()=>fullscreenOverlaySelectors.some(id=>$(id).style.display==='flex');
 function syncOverlayHistory(){
   if(anyOverlay()&&!histPushed){histPushed=true;history.pushState({fdOverlay:1},'');}
@@ -173,7 +173,6 @@ window.addEventListener('popstate',()=>{
     settingsSection=SETTINGS_SECTIONS.includes(destination.detail)?destination.detail:'notifications';
     settingsSectionDepth=Math.max(0,settingsSectionDepth-1);renderSettings(true);return;
   }
-  if(settingsPushed){settingsPushed=false;closeSettings();return;}
   if(schedulePushed){schedulePushed=false;closeSchedule();return;}
   if(handoffPushed){
     handoffPushed=false;
@@ -186,7 +185,7 @@ window.addEventListener('popstate',()=>{
   if(workspace){applyWorkspaceRoute(workspace);return;}
   if(histPushed){
     histPushed=false;
-    closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();
+    closeConfirm();closeHandoff();closeViewer();closeAgent();closeSession();closeSearchView();closeOutbox();closeSchedule();
     return;
   }
   if(sessionView)closeSession();
@@ -199,13 +198,11 @@ function dismissOverlay(){
   if(overflowOpen)return closeOverflow();
   if(document.querySelector('.composerplus.open'))return closeComposerMenus();
   if($('#confirm').style.display==='flex')return closeConfirm();   // ask first
-  if(settingsOpen&&settingsSectionDepth)return history.go(-(settingsSectionDepth+1));
-  if(settingsPushed)return history.back();
   if(handoffPushed)return history.back();
   if(schedulePushed)return history.back();
   if(sessionView)return history.back();
   if(histPushed)history.back();          // → popstate does the actual close
-  else{closeHandoff();closeViewer();closeAgent();closeSession();closeSettings();closeSearchView();closeOutbox();closeSchedule();}
+  else{closeHandoff();closeViewer();closeAgent();closeSession();closeSearchView();closeOutbox();closeSchedule();}
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
@@ -219,7 +216,7 @@ document.addEventListener('click',e=>{
 // Full-screen surfaces are real, stack-aware dialogs. Their markup predates the
 // modal controller, so semantics and focus ownership are applied centrally.
 const modalDefinitions=[
-  ['sview','stitle2','Session workspace'],['settingsview','settitle','Settings'],
+  ['sview','stitle2','Session workspace'],
   ['searchview','searchviewtitle','Search result'],['handoffview','handofftitle','Continue in another session'],
   ['outboxview',null,'Message Outbox'],['scheduleview','scheduletitle','Schedule message'],
   ['confirm',null,'Confirmation']];
