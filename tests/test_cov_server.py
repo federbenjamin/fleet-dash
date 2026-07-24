@@ -5,6 +5,7 @@ Uses the same lightweight Handler harness as tests/test_server.py — a
 MagicMock) and a captured ``reply`` — so nothing binds a socket or touches a
 real ``~/.claude``.
 """
+import gzip
 import io
 import json
 import os
@@ -560,6 +561,68 @@ class ErrorReplyAndReplyTest(unittest.TestCase):
         self.assertIn(("X-Extra", "1"), sent)
         self.assertIn(("body", b"{}"), sent)
         self.assertEqual(len(Handler.route_metrics["/api/fleet"]["elapsed_ms"]), 1)
+        Handler.route_metrics.clear()
+
+    def compress_probe(self, ctype="application/json", size=4000,
+                       accept="gzip, deflate", extra_headers=None):
+        """Run reply() against a recording socket and return (headers, body)."""
+        Handler.route_metrics.clear()
+        handler = Handler.__new__(Handler)
+        handler.path = handler._request_route = "/api/fleet"
+        handler._request_started = time.perf_counter()
+        handler.headers = {"Accept-Encoding": accept} if accept is not None else {}
+        sent, written = {}, []
+        handler.send_response = lambda code: None
+        handler.send_header = lambda key, value: sent.__setitem__(key, value)
+        handler.end_headers = lambda: None
+        handler.wfile = SimpleNamespace(write=written.append)
+        body = json.dumps({"pad": "x" * size}).encode()
+        Handler.reply(handler, 200, ctype, body, extra_headers=extra_headers)
+        return sent, written[0], body
+
+    def test_large_json_is_gzipped_and_metrics_stay_uncompressed(self):
+        sent, wire, body = self.compress_probe()
+        self.assertEqual(sent["Content-Encoding"], "gzip")
+        self.assertEqual(sent["Vary"], "Accept-Encoding")
+        self.assertEqual(gzip.decompress(wire), body)
+        self.assertLess(len(wire), len(body))
+        self.assertEqual(sent["Content-Length"], str(len(wire)))
+        # the app's own size, so payload metrics keep meaning what they meant
+        self.assertEqual(sent["X-Fleet-Payload-Bytes"], str(len(body)))
+        self.assertEqual(Handler.route_metrics["/api/fleet"]["payload_bytes"][0],
+                         len(body))
+        Handler.route_metrics.clear()
+
+    def test_compression_is_declined_where_it_would_not_help(self):
+        for label, kwargs in (
+                ("no Accept-Encoding", {"accept": None}),
+                ("client refuses gzip", {"accept": "gzip;q=0, identity"}),
+                ("other codec only", {"accept": "br, deflate"}),
+                ("below one MTU", {"size": 40}),
+                ("already-compressed bytes", {"ctype": "image/png"}),
+                ("caller set its own encoding",
+                 {"extra_headers": {"content-encoding": "identity"}})):
+            with self.subTest(label):
+                sent, wire, body = self.compress_probe(**kwargs)
+                self.assertNotEqual(sent.get("Content-Encoding"), "gzip")
+                self.assertEqual(wire, body)
+        Handler.route_metrics.clear()
+
+    def test_gzip_quality_and_malformed_accept_encoding(self):
+        for accept, expected in (("gzip;q=0.5", True), ("GZIP", True),
+                                 ("gzip;q=bogus", True), ("gzip;q=0.0", False),
+                                 ("identity", False), ("", False)):
+            with self.subTest(accept):
+                handler = Handler.__new__(Handler)
+                handler.headers = {"Accept-Encoding": accept}
+                self.assertEqual(Handler._accepts_gzip(handler), expected)
+
+    def test_a_compression_failure_never_fails_the_response(self):
+        with mock.patch.object(server.gzip, "compress",
+                               side_effect=RuntimeError("no zlib")):
+            sent, wire, body = self.compress_probe()
+        self.assertEqual(wire, body)
+        self.assertNotIn("Content-Encoding", sent)
         Handler.route_metrics.clear()
 
     def test_log_message_is_silent(self):

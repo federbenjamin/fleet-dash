@@ -314,6 +314,15 @@ fetches out of the render path into `tick()`, batch-applied, one render per poll
 
 Also drop `closed_ids` from the poll payload (40 KB of 245 KB).
 
+**Superseded 2026-07-24 by response compression, which was not in this plan.** `Handler.reply`
+now gzips JSON/text responses: the fleet snapshot goes 225,140 → 38,360 bytes on the wire (17%),
+measured live on 49 sessions, saving ~186 KB per poll — 5.3 MB/minute at the two-second cadence.
+That is an order of magnitude more than removing `closed_ids`, it needs no client change, and it
+helps every response rather than one field. `closed_ids` costs roughly 7 KB compressed now, so
+removing it — which would risk the "a live session vanished, is it closed?" path in
+`renderSession` — is no longer worth doing. The rest of W4 (collapsed cards not fetching
+`/api/context`) is unaffected and still open.
+
 Viewport-gated fetching (option 3C) stays in reserve.
 
 ### W5 — tmux transport and closed-loop delivery (D5, D6, D10)

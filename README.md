@@ -695,6 +695,10 @@ with staging.
    path. The separate legacy ntfy switch permits only a generic manual test; it is never automatic,
    a fallback, or a duplicate destination.
 
+Fleet compresses its own responses, which matters most over a tailnet on cellular: the two-second
+fleet poll goes from about 220 KB to about 38 KB on the wire — roughly 5 MB per minute saved with
+49 sessions open. Nothing to configure; your browser negotiates it.
+
 **Devices & delivery** lists every connected browser. The current browser keeps its setup controls;
 other devices can be renamed, tested, paused/resumed, or removed remotely. Removing a device revokes
 its subscription and suppresses queued delivery while retaining redacted delivery history.

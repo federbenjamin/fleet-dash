@@ -1253,7 +1253,14 @@ because they are also spawned directly as scripts by absolute path.
   threads/turns/items/questions/approvals/artifacts/subagents, shared-runtime ownership, and
   provider capability mapping. Imports the transport from `codex_protocol` and the runtime
   lifecycle from `codex_runtime`.
-- `server.py` — ThreadingHTTPServer; `Handler.GET_ROUTES`/`POST_ROUTES` map each
+- `server.py` — ThreadingHTTPServer. `Handler.reply` **gzips** any response ≥1400 bytes whose
+  type is JSON/text/SVG/JS when the client accepts it (level 4: the fleet snapshot goes
+  225,140 → 38,360 bytes, 17%, for ~1.3 ms — measured live on 49 sessions 2026-07-24). Metrics
+  and `X-Fleet-Payload-Bytes` keep reporting the size the app PRODUCED, not the wire size, so
+  payload budgets stay comparable; a compression failure falls back to the plain body rather
+  than failing the response. The service worker caches and replays an encoded `/api/fleet`
+  correctly — verified by the PWA/offline specs, which is why the browser fixture server
+  compresses the same responses. `Handler.GET_ROUTES`/`POST_ROUTES` map each
   route to `(auth, handler)` so the token-auth surface is auditable in one place —
   new routes are added to those tables, never as new `if` branches.
   GET `/` + `/api/fleet` + `/api/context`

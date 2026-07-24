@@ -921,6 +921,22 @@ test('session placement evidence lives in the Details section', async ({ page },
   await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
 });
 
+test('the fleet poll is served compressed', async ({ page }) => {
+  await reset(page);
+  // the browser decodes transparently, so compare what crossed the wire with
+  // what the page received
+  const transfer = await page.evaluate(async () => {
+    performance.clearResourceTimings();
+    await tick(true);
+    const entry = performance.getEntriesByType('resource')
+      .filter(item => item.name.includes('/api/fleet')).at(-1);
+    return entry && { encoded: entry.encodedBodySize, decoded: entry.decodedBodySize };
+  });
+  expect(transfer.decoded).toBeGreaterThan(1400);
+  expect(transfer.encoded).toBeGreaterThan(0);
+  expect(transfer.encoded).toBeLessThan(transfer.decoded);
+});
+
 test('render work coalesces to one paint per frame', async ({ page }) => {
   await reset(page, 'claude-question-slow');
   await page.evaluate(() => openSession('claude-one'));
