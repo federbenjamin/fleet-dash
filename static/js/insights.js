@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{loadBudgets,budgetEditable,budgetValue,budgetForecastText,renderBudgetPanel,budgetTargetOptions,budgetSettingsHtml,editBudget,addBudget,removeBudget,saveBudgets,updateSpawnForecastDisplay,loadSpawnForecast,queueSpawnForecast,spawnForecastHtml,loadInsights,setInsightsDays,insTable,insFold,insightsSection});
+Object.assign(globalThis,{loadBudgets,budgetEditable,budgetValue,budgetForecastText,renderBudgetPanel,budgetTargetOptions,budgetSettingsHtml,editBudget,addBudget,removeBudget,saveBudgets,updateSpawnForecastDisplay,loadSpawnForecast,queueSpawnForecast,spawnForecastHtml,loadInsights,setInsightsDays,insTable,insFold,insDayLabel,insSpendChart,insBarList,insightsSection});
 globalThis.budgetData={ok:true,budgets:[],forecasts:{},measurement_labels:{}};globalThis.budgetLoading=false;globalThis.budgetLoadedAt=0;
 globalThis.budgetDraft=null;globalThis.spawnForecast=null;globalThis.spawnBudgetHeadroom=[];globalThis.spawnForecastTimer=null;
 globalThis.spawnForecastAbort=null;globalThis.spawnForecastSequence=0;
@@ -137,6 +137,39 @@ function insFold(key,title,inner){
   return`<details class="insfold" ${insOpen.has(key)?'open':''} ontoggle="insOpen[this.open?'add':'delete']('${key}')">
     <summary>${title}</summary>${inner}</details>`;
 }
+const MONTHS=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function insDayLabel(day,previous){
+  const [,month,date]=String(day).split('-');
+  const label=Number(date)===1||!previous||String(previous).slice(0,7)!==String(day).slice(0,7)?
+    `${MONTHS[Number(month)-1]||''} ${Number(date)}`:String(Number(date));
+  return label;
+}
+function insSpendChart(d){
+  // agents = ledger $ per day; sessions = measured usage_stats $ per day.
+  // These are different measures than the lifetime session totals above —
+  // the legend says so instead of pretending they reconcile.
+  const days={};
+  (d.token_mix||[]).forEach(x=>{(days[x.day]=days[x.day]||{day:x.day,sessions:0,agents:0}).sessions=
+    (x.input||0)+(x.write||0)+(x.read||0)+(x.output||0);});
+  (d.by_day||[]).forEach(x=>{(days[x.day]=days[x.day]||{day:x.day,sessions:0,agents:0}).agents=x.cost||0;});
+  const series=Object.values(days).sort((a,b)=>a.day<b.day?-1:1);
+  if(!series.length)return`<div class="inscard inschart"><span class="inslabel">$ BY DAY</span>
+    <div class="settingsempty">No measured spend in this window.</div></div>`;
+  const peak=Math.max(...series.map(x=>x.sessions+x.agents),0.01);
+  const every=Math.max(1,Math.ceil(series.length/10));
+  return`<div class="inscard inschart"><div class="inscharthead"><span class="inslabel">$ BY DAY</span>
+      <span class="inslegend"><i class="agent"></i> agents · <i class="sess"></i> sessions (measured that day)</span></div>
+    <div class="insbars">${series.map(x=>`<div class="insbarcol" title="${esc(x.day)} · agents ${fmt$(x.agents)} · sessions ${fmt$(x.sessions)}">
+      <i class="agent" style="height:${Math.round(x.agents/peak*100)}%"></i>
+      <i class="sess" style="height:${Math.round(x.sessions/peak*100)}%"></i></div>`).join('')}</div>
+    <div class="insdays">${series.map((x,i)=>`<span>${i%every?'':esc(insDayLabel(x.day,series[i-1]&&series[i-1].day))}</span>`).join('')}</div></div>`;
+}
+function insBarList(rows){
+  if(!rows.length)return'<div class="settingsempty">No data in window.</div>';
+  const peak=Math.max(...rows.map(x=>x.value),0.01);
+  return rows.map(x=>`<div class="insrow ${x.cls||''}"><div class="insrowhead"><span>${esc(x.name)}</span><span>${fmt$(x.value)}</span></div>
+    <div class="insmeter"><i style="width:${Math.round(x.value/peak*100)}%"></i></div></div>`).join('');
+}
 function insightsSection(){
   const c=insightsCache[insightsDays],d=c&&c.data;
   let body='<div class="ctxload">crunching…</div>';
@@ -144,8 +177,22 @@ function insightsSection(){
     const mixTot=(d.token_mix||[]).reduce((a,x)=>({input:a.input+x.input,write:a.write+x.write,
       read:a.read+x.read,output:a.output+x.output}),{input:0,write:0,read:0,output:0});
     const mixRow=x=>`<tr><td>${x.day}</td><td class="r">${x.input.toFixed(2)}</td><td class="r">${x.write.toFixed(2)}</td><td class="r">${x.read.toFixed(2)}</td><td class="r">${x.output.toFixed(2)}</td><td class="r"><b>${(x.input+x.write+x.read+x.output).toFixed(2)}</b></td></tr>`;
-    body=`<div class="insbar">${[7,30,90].map(n=>`<button class="mqarr${insightsDays===n?' cur':''}" onclick="setInsightsDays(${n})">${n}d</button>`).join('')}
-        <span class="setnum">agents ${fmt$(d.totals.agent_cost)} · sessions active in window ${fmt$(d.totals.session_cost)} (lifetime $) · cache busts ~${fmt$(d.totals.bust_cost||0)}</span></div>`
+    const runs=(d.agents||[]).reduce((total,agent)=>total+(agent.runs||0),0);
+    const topPeak=Math.max(...(d.top_sessions||[]).map(s=>s.cost||0),0.01);
+    body=`<div class="inshead"><div class="insstats">
+        <span><b>${fmt$(d.totals.agent_cost)}</b> agents</span>
+        <span><b>${fmt$(d.totals.session_cost)}</b> sessions in window <small>lifetime $</small></span>
+        <span class="bust"><b>~${fmt$(d.totals.bust_cost||0)}</b> cache busts re-paid</span>
+        <span class="insruns">agent runs ${runs}</span></div>
+      <div class="inswin">${[7,30,90].map(n=>`<button class="${insightsDays===n?'cur':''}" onclick="setInsightsDays(${n})">${n}D</button>`).join('')}</div></div>
+      <div class="insgrid">${insSpendChart(d)}
+        <div class="inscard"><span class="inslabel">BY MODEL <small>agents + sessions $</small></span>
+          ${insBarList((d.models||[]).slice(0,6).map(m=>({name:m.name,value:(m.agents||0)+(m.sessions||0),cls:'model'})))}
+          <span class="inslabel skills">BY SKILL</span>
+          ${insBarList((d.skills||[]).slice(0,6).map(s=>({name:s.name,value:s.cost||0})))}</div></div>
+      <div class="inscard instop"><span class="inslabel">TOP SESSIONS · LIFETIME $</span>
+        ${(d.top_sessions||[]).length?(d.top_sessions||[]).map(s=>`<div class="instoprow"><b>${esc(s.title||'?')}</b><span>${esc(s.project||'')}</span>
+          <div class="insmeter"><i style="width:${Math.round((s.cost||0)/topPeak*100)}%"></i></div><em>${fmt$(s.cost||0)}</em></div>`).join(''):'<div class="settingsempty">No sessions in window.</div>'}</div>`
       +insFold('cache',`cache invalidations — est ${fmt$(d.totals.bust_cost||0)} re-paid in window`,
         insTable([['cause'],['events',1],['tokens re-paid',1],['est $',1]],
           (d.cache_busts||[]).map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.events}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
@@ -161,17 +208,12 @@ function insightsSection(){
       +insFold('tools','by tool — context injected by tool results (est tokens)',
         insTable([['tool'],['uses',1],['tokens in',1],['avg/use',1]],
           d.tools.map(x=>`<tr><td>${esc(x.name)}</td><td class="r">${x.uses}</td><td class="r">${fmtTok(x.tokens)}</td><td class="r">${fmtTok(x.avg_tokens)}</td></tr>`)))
-      +insFold('models','by model',
+      +insFold('models','by model — agents vs sessions split',
         insTable([['model'],['agents $',1],['sessions $',1]],
           d.models.map(m=>`<tr><td>${esc(m.name)}</td><td class="r">${m.agents.toFixed(2)}</td><td class="r">${m.sessions.toFixed(2)}</td></tr>`)))
       +insFold('projects','by project (sessions active in window; lifetime $)',
         insTable([['project'],['agents $',1],['sessions $',1]],
-          d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`)))
-      +insFold('bydayy','agent $ by day',
-        insTable([['day'],['$',1]],d.by_day.map(x=>`<tr><td>${x.day}</td><td class="r">${x.cost.toFixed(2)}</td></tr>`)))
-      +insFold('topsess','top sessions (lifetime $)',
-        insTable([['session'],['project'],['$',1]],
-          d.top_sessions.map(s=>`<tr><td>${esc(s.title||'?')}</td><td>${esc(s.project||'')}</td><td class="r">${s.cost.toFixed(2)}</td></tr>`)));
+          d.projects.map(p=>`<tr><td>${esc(p.name)}</td><td class="r">${p.agents.toFixed(2)}</td><td class="r">${p.sessions.toFixed(2)}</td></tr>`)));
   }else if(c?.error){body=`<div class="ctxload" role="alert">✗ ${esc(c.error)} <button onclick="loadInsights(true)">retry</button></div>`;}
   else if(d&&!d.ok){body=`<div class="ctxload">✗ ${esc(d.error||'failed')}</div>`;}
   return`<div class="insightspanel">${body}</div>`;

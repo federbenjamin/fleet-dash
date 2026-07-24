@@ -815,6 +815,14 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     focus; checkbox state never blocks a legitimate refresh. Policy edits lock their
     own row while saving, use expected revisions, paint Saved/Error in place, and roll back on
     failure. Muted-session search filters existing rows in place so typing focus survives.
+    Console section contents (locked, mockups 9a/11a–11d): Devices & delivery also owns the
+    manual legacy-ntfy card; Sessions owns the conversation-peek toggles/line counts, the stall
+    threshold, muted sessions, and the pinned-session list (unpin only — pinning stays the card
+    gesture, invariant 28); Appearance owns only device-local presentation — the reading theme
+    control writes invariant 27's `viewer_light` (Console dark / Paper light, no app-wide theme),
+    plus navigation side and reading width. Advanced keeps diagnostics only. Each policy-rule
+    summary renders the two independent status chips (`FLEET CENTER · ON/OFF`, `PUSH · <cadence>`)
+    because in-app visibility and push cadence are separate controls (invariant 47/48).
 60. **A fullscreen question is a persistent, independently scrollable drawer.** `#sact` renders a
     `.question-drawer` keyed by session id + pending nonce. Preserve its nested scroll position when
     the two-second poll replaces the action DOM; the conversation and question have separate scroll
@@ -1069,7 +1077,10 @@ because they are also spawned directly as scripts by absolute path.
   constants) composed from ten topical mixins, plus the spend CLI
   (`PYTHONPATH=~/.claude/fleet-dash python3 -m fleetdash.engine spend --cwd|--session`,
   used by the global `/subagent-spend` command). GET `/api/insights?days=N` aggregates
-  agent_runs + session_runs + usage_stats. `Engine.commands(sid)` builds the slash
+  agent_runs + session_runs + usage_stats. The Console Insights page charts `by_day`
+  (agent ledger $) stacked with `token_mix` daily totals (measured session $) — two
+  different measures, labelled as such in the legend; missing data renders as absent,
+  never as a fabricated zero (invariant 32). `Engine.commands(sid)` builds the slash
   catalog per session: BUILTIN_COMMANDS + `<cwd>/.claude` + `~/.claude` + every
   installed plugin's installPath (`commands/**/*.md` namespaced with `:`,
   `skills/*/SKILL.md`), description from frontmatter `description:`.

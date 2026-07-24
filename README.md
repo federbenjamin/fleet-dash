@@ -117,11 +117,14 @@ the provider's native control path. Built 2026-07-13; still evolving.
   subscription, rename or pause this device, disconnect it, and queue a real test push without
   making the Settings request wait for the push provider.
   Subscription endpoints and encryption keys are write-only; the UI receives only redacted health.
-  A separate **Legacy ntfy** panel can send one generic manual test when explicitly enabled and
-  configured. It has no automatic categories, fallback, duplicates, content-bearing payload, or
-  tap target. The page also selects the per-device desktop navigation side and
-  **Fit the screen** or **Centered · fixed width** for every full-screen reading surface. Server
-  settings persist to `config.json`; the navigation side stays in that browser.
+  A **Legacy ntfy** panel under **Devices & delivery** can send one generic manual test when
+  explicitly enabled and configured. It has no automatic categories, fallback, duplicates,
+  content-bearing payload, or tap target. **Sessions** owns the conversation-peek toggles and line
+  counts, the stalled-session threshold, muted sessions, and the pinned-session list (unpin from
+  Settings; pin from any card). **Appearance** selects the per-device reading theme (Console dark /
+  Paper light for chat, files, and subagent views), the desktop navigation side, and **Fit the
+  screen** or **Centered · fixed width** for every full-screen reading surface. Server settings
+  persist to `config.json`; the theme and navigation side stay in that browser.
 - **🔔 per-session mute** on every card header (works collapsed): 🔕 silences that session's
   Web Push deliveries without hiding its canonical in-app notifications. Mutes persist
   across daemon restarts until manually unmuted.
@@ -528,14 +531,18 @@ the provider without affecting Claude sessions.
   upward reader gesture disengages follow-tail.
 - The needs-you context box on a card is deliberately short (~150px, scrollable); the detail
   panel's "recent conversation" is the tall one.
-- **History destination:** inactive sessions plus every surviving top-level Claude transcript
-  (title, provider, project, state, and age), loaded 100 rows at a time. Search and combine Access
-  and Provider filters. A closed row always has **View**. It also has **Reopen** when its exact
-  transcript and original working directory still exist; Reopen starts `claude --resume <id>` in a
-  new iTerm tab. Tap the row itself for its info block. Session ids, cwds and agent ids in any info
-  block are **tap-to-copy**.
-- **Insights destination** (7/30/90-day window; each subsection its own dropdown): where
-  the tokens and money actually go —
+- **Session rows in Search (TYPE=SESSION):** inactive sessions plus every surviving top-level
+  Claude transcript (title, provider, project, state, and age), loaded 100 rows at a time.
+  Combine the search text with the Access chips and Provider filter. A closed row always has
+  **View**. It also has **Reopen** when its exact transcript and original working directory still
+  exist; Reopen starts `claude --resume <id>` in a new iTerm tab. Session ids, cwds and agent ids
+  in any info block are **tap-to-copy**.
+- **Insights destination** (7/30/90-day window): the headline is a stat strip (agent $, lifetime $
+  of sessions active in the window, estimated cache-bust $ re-paid, agent-run count) over CSS bar
+  charts — **$ by day** stacks the agent ledger's per-day $ with the per-day measured session $
+  (the two series are different measures and are labelled as such), **by model** and **by skill**
+  render top aggregates, and **top sessions** ranks lifetime $. The full tables stay below,
+  each subsection its own dropdown — where the tokens and money actually go —
   - **cache invalidations**: every API call whose cache_read fell short of the previous
     call's read+write, counting only tokens actually re-paid (as cache-write/uncached),
     classified by cause — compaction, model switch, idle/TTL, skill invocation, tail
@@ -549,7 +556,7 @@ the provider without affecting Claude sessions.
     most recent);
   - **by tool**: uses + estimated tokens injected by tool results (chars/4) — the
     context-bloat view; a huge "tokens in" here is paid again on every later turn;
-  - **by model**, **by project**, **agent $ by day**, **top sessions**.
+  - **by model** (agents vs sessions split), **by project**.
   Session-level $ figures are lifetime costs of sessions active in the window (per-day
   session attribution isn't recorded). Tool/skill volumes accumulate from transcripts the
   daemon has tailed — history starts when this feature landed (2026-07-14) plus whatever
