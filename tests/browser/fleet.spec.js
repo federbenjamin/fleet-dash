@@ -1102,14 +1102,16 @@ test('full chat renders a large message without discarding text', async ({ page 
 test('saving a numeric setting does not swallow the next control click', async ({ page }) => {
   await reset(page, 'base');
   await goTo(page, 'settings');
-  await openSettingsSection(page, 'appearance');
+  // conversation peeks live in the Sessions section (Console 11b)
+  await openSettingsSection(page, 'sessions');
   const previewHeight = page.locator('.settingsfield').filter({hasText:'Session peek height'})
     .locator('input[type="number"]');
   await previewHeight.fill('5');
-  await page.getByRole('button', {name:'Centered'}).click();
+  const subagentPeek = page.getByRole('checkbox', {name:/Subagent conversation peek/});
+  await subagentPeek.check();
   await expect.poll(async () => (await fixtureState(page)).settings.preview_session_lines).toBe(5);
-  await expect.poll(async () => (await fixtureState(page)).settings.reader_width).toBe('centered');
-  await expect(page.getByRole('button', {name:'Centered'})).toHaveAttribute('aria-pressed','true');
+  await expect.poll(async () => (await fixtureState(page)).settings.preview_agents).toBe(true);
+  await expect(subagentPeek).toBeChecked();
 });
 
 test('large conversations load newest-first in bounded pages without losing older turns', async ({ page }) => {
@@ -3245,11 +3247,11 @@ test('notification policy controls every kind, warns on aggressive cadence, and 
     'All events (Info, Warning, or Critical)');
   await expect(question).toContainText('does not change sound, color, or presentation');
   await expect(question.getByLabel('Show Question in Fleet')).toBeChecked();
-  await expect(question.locator('summary')).toContainText('In app on');
+  await expect(question.locator('summary')).toContainText('FLEET CENTER · ON');
   await question.getByLabel('Show Question in Fleet').uncheck();
   await expect.poll(async () => (await fixtureState(page)).actions.filter(action =>
     action.type==='notification_policy'&&action.kind==='question').at(-1)?.patch?.in_app_enabled).toBe(false);
-  await expect(question.locator('summary')).toContainText('In app off');
+  await expect(question.locator('summary')).toContainText('FLEET CENTER · OFF');
   await expect(question.getByLabel('Web Push cadence')).toHaveValue('remind_once');
   await question.getByLabel('Apply this change to 1 active event').check();
   await question.getByLabel('Web Push cadence').selectOption('repeat');
@@ -3475,7 +3477,8 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
   await page.getByRole('button', { name: 'Save budgets' }).click();
   await expect(page.locator('#setmsg')).toContainText('saved ✓');
   await expect.poll(async () => (await fixtureState(page)).budgets.length).toBe(2);
-  await openSettingsSection(page, 'advanced');
+  // legacy ntfy lives in Devices & delivery (Console 11a); Advanced keeps diagnostics only
+  await openSettingsSection(page, 'devices');
   await page.getByLabel('Enable manual legacy tests').check();
   await expect.poll(async () => (await fixtureState(page)).settings.legacy_ntfy_enabled)
     .toBe(true);
@@ -3513,6 +3516,42 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
   await expect(page.locator('.spawnforecast')).toContainText('medium confidence');
   await expect(page.locator('.spawnforecast')).toContainText('Budget:');
   await page.screenshot({ path: testInfo.outputPath('budgets-and-forecast.png'), fullPage: true });
+});
+
+test('Console settings sections own their moved controls and Insights renders charts', async ({ page }, testInfo) => {
+  await reset(page, 'base');
+  await goTo(page, 'settings');
+  // Sessions (11b): peeks, stall threshold, mutes, pins
+  await openSettingsSection(page, 'sessions');
+  await expect(page.locator('#settings')).toContainText('Session conversation peek');
+  await expect(page.locator('#settings')).toContainText('Stalled-session threshold');
+  await expect(page.locator('#settings')).toContainText('Pinned sessions');
+  // Appearance (11d): device-local reading theme beside nav side and width
+  await openSettingsSection(page, 'appearance');
+  const theme = page.getByRole('group', { name: 'Reading theme' });
+  await expect(theme.getByRole('button', { name: 'Console dark' })).toHaveAttribute('aria-pressed', 'true');
+  await theme.getByRole('button', { name: 'Paper light' }).click();
+  await expect(theme.getByRole('button', { name: 'Paper light' })).toHaveAttribute('aria-pressed', 'true');
+  expect(await page.evaluate(() => localStorage.getItem('viewer_light'))).toBe('1');
+  await theme.getByRole('button', { name: 'Console dark' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('viewer_light'))).toBe('0');
+  await expect(page.locator('#settings')).not.toContainText('Session conversation peek');
+  // Advanced keeps diagnostics only; ntfy moved to Devices & delivery
+  await openSettingsSection(page, 'advanced');
+  await expect(page.locator('#settings')).toContainText('Diagnostics');
+  await expect(page.locator('#settings')).not.toContainText('Legacy ntfy');
+  await page.locator('#setclose').click();
+  // Insights (9b): headline stats, window chips, chart cards, detail folds
+  await goTo(page, 'insights');
+  await expect(page.locator('.insstats')).toContainText('agents');
+  await expect(page.locator('.insstats')).toContainText('cache busts re-paid');
+  await expect(page.locator('.inswin button.cur')).toHaveText('7D');
+  await expect(page.locator('.inschart')).toContainText('$ BY DAY');
+  await expect(page.locator('.instop')).toContainText('TOP SESSIONS · LIFETIME $');
+  const fold = page.locator('.insfold').filter({ hasText: 'by agent type' });
+  await fold.locator('summary').click();
+  await expect(fold).toHaveAttribute('open', '');
+  await page.screenshot({ path: testInfo.outputPath('console-insights.png'), fullPage: true });
 });
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
