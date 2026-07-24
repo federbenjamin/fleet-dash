@@ -153,7 +153,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   by default. Claude sessions choose Manual, Auto, Accept Edits, Plan, or the advanced Don't Ask
   permission mode; Auto remains subject to Claude's account/model eligibility. Claude sessions can
   request a **new git worktree** — it opens
-  a fresh iTerm tab running `claude` with those flags. There is no initial-message field: Fleet
+  a fresh terminal running `claude` with those flags (a detached tmux window when tmux is
+  installed — see [Terminal transport](#terminal-transport-tmux-and-the-legacy-applet) —
+  otherwise an iTerm tab). There is no initial-message field: Fleet
   immediately turns the pane into the provisional session's chat with a startup spinner, replaces
   it in place with the exact native session, and the first message is typed there (a **scheduled**
   spawn's message is typed in the Schedule overlay instead). A rejected start keeps the exact setup
@@ -365,7 +367,8 @@ the provider without affecting Claude sessions.
 - A Claude or Codex card's whole header opens Fleet chat, so live cards do not duplicate conversation
   navigation with **Open**, **Continue**, or **View** buttons. Explicit **Respond** and **Review**
   controls remain when the label carries action meaning beyond navigation. **Open in Terminal**
-  (desktop only, behind the workspace ⋮ menu) brings that Claude iTerm tab to the front; for a
+  (desktop only, behind the workspace ⋮ menu) brings that Claude terminal to the front — under
+  tmux it selects the pane and raises the app named by `terminal_app`; for a
   Claude background job it starts the
   official `claude attach` client. Codex shows **Open** only when Fleet proves that the exact thread
   already has one live terminal on the managed socket. Fleet never creates a Codex terminal from the
@@ -545,7 +548,7 @@ the provider without affecting Claude sessions.
   Claude transcript (title, provider, project, state, and age), loaded 100 rows at a time.
   Combine the search text with the Access chips and Provider filter. A closed row always has
   **View**. It also has **Reopen** when its exact transcript and original working directory still
-  exist; Reopen starts `claude --resume <id>` in a new iTerm tab. Session ids, cwds and agent ids
+  exist; Reopen starts `claude --resume <id>` in a new terminal. Session ids, cwds and agent ids
   in any info block are **tap-to-copy**.
 - **Insights destination** (7/30/90-day window): the headline is a stat strip (agent $, lifetime $
   of sessions active in the window, estimated cache-bust $ re-paid, agent-run count) over CSS bar
@@ -590,9 +593,11 @@ session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompt
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
 only writes AskUserQuestion rows to the transcript *after* they're answered. Hook evidence is
 immediate; a bare registry `waiting` flag is confirmed for 3 seconds because Claude can flash it
-between progress prose and the next tool call. Answers are injected
-by `FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
-applet types into the iTerm session matched by tty). Finished agent runs and closed sessions are
+between progress prose and the next tool call. Answers are injected through whichever terminal
+transport owns that session — tmux `send-keys` when its tty is a live tmux pane, otherwise
+`FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
+applet types into the iTerm session matched by tty). See
+[Terminal transport](#terminal-transport-tmux-and-the-legacy-applet). Finished agent runs and closed sessions are
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
@@ -714,6 +719,10 @@ normalize to Critical.
 | `codex_enabled` | true | start the Codex App Server adapter |
 | `codex_command` | "" | optional absolute Codex executable path; auto-detected from PATH or `~/.nvm` |
 | `codex_remote_control` | true | enable Remote Control on the managed production daemon; staging remains private |
+| `terminal_transport` | "auto" | `auto` = tmux for a session whose tty is a live tmux pane, applet otherwise (new sessions spawn into tmux when it is installed) · `tmux` = tmux only · `applet` = the legacy iTerm2 path only |
+| `terminal_app` | "iTerm" | application "Open in Terminal" raises after selecting the tmux pane; `""` selects the pane and raises nothing |
+| `tmux_command` | "" | optional absolute tmux executable; otherwise PATH, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
+| `tmux_session` | "fleet" | tmux session new spawns join (`tmux attach -t fleet`); letters, digits, `_` and `-` only |
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |
 | `search_discover_seconds` | 2 | filesystem discovery cadence for new/changed transcript sources |
 | `search_batch_rows` | 250 | bounded JSONL rows committed per worker batch |
@@ -758,6 +767,49 @@ named `tests/live_*_smoke.py` are opt-in checks against the running daemon; paid
 in their docstring and archive threads they create. `tests/search_benchmark.py` creates a disposable
 100k-message/2k-source corpus and enforces the warm, cold, and append-lag search gates.
 
+## Terminal transport (tmux and the legacy applet)
+
+Fleet controls Claude by typing into its terminal. There are two ways to do that, and Fleet picks
+per session from the tty it already resolved for that session's PID — you never choose one in the
+browser.
+
+**tmux** is used when the session's tty belongs to a live tmux pane. It is emulator-agnostic, so it
+keeps working if you change terminal app, it works over SSH, and — the part worth having on its own
+— **your sessions stop dying with the terminal.** Quitting or crashing iTerm today kills every
+Claude session inside it; a tmux server outlives the emulator, a crash, and a reattach.
+
+**The applet** (`FleetDashInjector.app`) is the original path and is entirely
+`tell application "iTerm2"`. It still runs any session sitting in a plain iTerm tab, but nothing new
+should depend on it.
+
+Start a session under tmux and Fleet drives it there automatically:
+
+```bash
+tmux new -s fleet            # then run claude inside it, as usual
+tmux attach -t fleet         # reattach from any terminal, any time
+```
+
+**New sessions Fleet spawns itself** (New session, Reopen, background-job attach) become extra
+windows in that same `fleet` session — the name comes from `tmux_session` in `config.json`. Nothing
+has to be frontmost, so spawning from your phone stops depending on a Mac GUI app; you just need the
+tmux session to exist. The spawn reply and `fleet-dash.log` carry its `tmux attach -t fleet` line,
+and a shell is left running in the pane after the session exits so its scrollback survives.
+
+**Fleet will not create the tmux session for you, on purpose.** A tmux server inherits the
+environment of whoever starts it, and the Fleet daemon runs under launchd with
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin` — a session started from there answers
+`command not found: claude`, and would give any Bash command Claude ran the same crippled
+environment. Starting the session yourself is what makes the spawned pane match the one you would
+have opened by hand. With no such session running, spawns fall back to a new iTerm tab exactly as
+before.
+
+To go back to the old behaviour entirely, set `"terminal_transport": "applet"` and restart the
+daemon. `"tmux"` is the opposite: sessions not in a tmux pane expose no terminal transport at all.
+
+Two things this does **not** change. tmux delivers exactly the same keystroke recipes at the same
+pacing as the applet — the ask-TUI key map is untouched. And a session already running in a plain
+terminal tab cannot be moved into tmux; it stays on the applet until you restart it.
+
 ## Rebuilding the injector applet
 
 The applet is **stay-open** (`OSAAppletStayOpen`), so it stays resident and `open -g` hits its
@@ -786,6 +838,12 @@ same request/result files. The staging applet receives its own one-time iTerm au
   proves that task id resumed.
 - The input-needed Notification (~6s after a question) must not clobber the question capture.
 - launchd-context osascript **hangs forever** on the TCC check (can't show the dialog) → applet.
+  That is what makes the applet unavoidable *for iTerm*, and what makes tmux worth having: it is a
+  plain subprocess with no Apple Events, no TCC grant, and no code-signed bundle.
+- tmux `send-keys -l -- <text>` delivers the argument byte for byte (verified on 3.7b): no key-name
+  lookup, no C-escape processing (`a\eb\nc` stays literal), UTF-8 and embedded LF preserved, raw
+  ESC/CR passed through. `paste-buffer` is **not** used: without `-r` it rewrites LF as CR, which
+  would submit a multi-line message one line at a time.
 - TUI keys: digits toggle; **Enter toggles the focused row in multi-select** (does NOT submit);
   submit = right-arrow to the `✔ Submit` tab + Enter; Enter must be raw CR (iTerm newline = LF).
   The ask TUI also numbers a "Type something" row (n+1, the Other path) and a "Chat about this"
@@ -806,7 +864,7 @@ same request/result files. The staging applet receives its own one-time iTerm au
 
 - Permission-prompt injection (allow/always/deny keys) is wired but **untested against a real
   permission dialog**; dialog variants may need `permission_keys` tuning.
-- Claude background jobs do not have an iTerm route. Fleet controls a validated eight-character
+- Claude background jobs do not have a terminal route at all. Fleet controls a validated eight-character
   background job through Claude Code's official `claude attach <job>` client in a private PTY,
   detaches with Ctrl-Z after each action, and uses `claude stop <job>` for close. A true Claude VS
   Code extension session has neither that background-job identity nor a terminal route and remains

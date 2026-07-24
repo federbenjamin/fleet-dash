@@ -25,6 +25,12 @@ CLAUDE_HISTORY = os.path.join(HOME, ".claude", "history.jsonl")
 CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 CLAUDE_USAGE_PREFS = os.path.join(
     HOME, "Library", "Preferences", "HamedElfayome.Claude-Usage.plist")
+# One socket per running `tmux -L <name>` server. The transport dispatcher
+# enumerates this directory to find the pane that owns a session's tty, and
+# spawns into `default` beneath it. launchd's environment carries no
+# TMUX_TMPDIR, which is also the interactive default, so both agree on /tmp.
+TMUX_SOCKETS = os.path.join(
+    os.environ.get("TMUX_TMPDIR") or "/tmp", f"tmux-{os.getuid()}")
 
 
 def capture_base():
