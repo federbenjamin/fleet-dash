@@ -117,6 +117,9 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
     return;
   }
   if(!validRoutes.has(route))route='now';
+  // choosing a rail destination returns an expanded workspace to pane mode so
+  // the destination is actually visible beside it (prototype behavior)
+  if(push&&globalThis.sessionView&&globalThis.workspaceExpanded&&workspaceDocked())toggleWorkspaceExpand();
   if(route!=='notifications'||!preserveNotificationDetail)notificationDetailId=null;
   currentRoute=route;
   document.querySelectorAll('[data-destination]').forEach(section=>{section.hidden=section.dataset.destination!==route;});

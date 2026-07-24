@@ -424,7 +424,9 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
   await expect(strip.locator('.status-primary')).toContainText('fleet-dash');
   await expect(strip.locator('.status-secondary')).toContainText('Opus 4.8 · high');
   await expect(strip.locator('.status-secondary')).toContainText('Ctx: 47%  →174k');
-  await expect(page.locator('#stitle2')).not.toContainText('fleet-dash');
+  // Console header carries the identity line (project · branch · provider);
+  // operational metadata still lives only in the status strip.
+  await expect(page.locator('#stitle2 .sesstitle small')).toHaveText('fleet-dash · codex-integration · claude');
   expect(await page.evaluate(() => Boolean(document.querySelector('#sact .statusstrip')
     .compareDocumentPosition(document.querySelector('#sact .composer')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
   await expect(strip.locator('.status-graph i')).toHaveCount(50);
@@ -918,7 +920,7 @@ test('workspace uses active agent counts, persistent desktop splits, and one par
       description:'Completed child'});
     session.agents_total=2;render(last,true);openSession('codex:thread-one');
   });
-  await expect(page.locator('#stab-subagents')).toHaveText('Subagents 1');
+  await expect(page.locator('#stab-subagents')).toHaveText('Agents 1');
   const actionHeight=()=>page.locator('#sact').evaluate(element=>element.getBoundingClientRect().height);
   const heights=[await actionHeight()];
 
@@ -1046,9 +1048,10 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
   chat = page.locator('#sbody > .aconvo');
-  const centeredChat = await chat.evaluate(el => ({ width: el.getBoundingClientRect().width,
-    left: el.getBoundingClientRect().left,
-    right: innerWidth - el.getBoundingClientRect().right }));
+  // measure inside #sbody: the workspace may be a docked right pane on desktop
+  const centeredChat = await chat.evaluate(el => {const rect=el.getBoundingClientRect(),
+    parent=el.parentElement.getBoundingClientRect();
+    return { width: rect.width, left: rect.left-parent.left, right: parent.right-rect.right };});
   expect(centeredChat.width).toBeLessThanOrEqual(760);
   expect(Math.abs(centeredChat.left - centeredChat.right)).toBeLessThan(2);
   await page.locator('#sclose').click();
@@ -1479,7 +1482,7 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
-  await expect(page.locator('#sact textarea[placeholder="send message"]')).toBeVisible();
+  await expect(page.locator('#sact textarea[placeholder^="send message"]')).toBeVisible();
   const strip=page.locator('#sact .statusstrip');
   await expect(strip).toContainText('claude · high');
   await expect(strip).not.toContainText('Ctx:');
@@ -1550,11 +1553,11 @@ test('the shared workspace header keeps session controls across every section', 
   await reset(page);
   const claude = page.locator('[data-sid="claude-one"]');
   await claude.locator('.shead').click();
-  const openTerminal = page.locator('#sctrl > .termbtn');
-  await expect(openTerminal).toHaveText('Terminal');
-  await expect(openTerminal).toBeEnabled();
-  expect(await openTerminal.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
-  await openTerminal.click();
+  // Console: Claude terminal access lives behind the workspace ⋮ menu, never as
+  // a standalone button (Codex's proved exact-terminal Open keeps its button).
+  await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
+  await page.getByRole('button', { name: 'session actions' }).click();
+  await page.getByRole('menuitem', { name: /Open in Terminal/ }).click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   await page.getByRole('button', { name: 'session actions' }).click();
   await expect(page.getByRole('button', { name: 'Plan', exact: true })).toBeVisible();
@@ -1795,7 +1798,7 @@ test('fullscreen question drawer preserves reading position and resizes from nea
     return {viewBottom:view.y+view.height,headBottom:head.y+head.height,tabsBottom:tabs.y+tabs.height,drawerTop:drawer.y,
       composerBottom:composer.y+composer.height};
   });
-  expect(geometry.drawerTop).toBeLessThanOrEqual(geometry.tabsBottom+20);
+  expect(geometry.drawerTop).toBeLessThanOrEqual(Math.max(geometry.headBottom,geometry.tabsBottom)+20);
   expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
 
   let expandedGrip=null;
@@ -2679,7 +2682,7 @@ test('Codex runtime migration warning keeps Claude available and leaks no runtim
   await expect(warning).not.toContainText('app-server-control.sock');
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   await page.locator('[data-sid="claude-one"] .shead').click();
-  await expect(page.locator('#sact textarea[placeholder="send message"]')).toBeVisible();
+  await expect(page.locator('#sact textarea[placeholder^="send message"]')).toBeVisible();
 });
 
 test('backfilled Claude history supports both view and reopen', async ({ page }) => {
@@ -3130,7 +3133,7 @@ test('an omitted fleet row cannot close or erase an open conversation', async ({
   await expect(page.locator('#sview')).toBeVisible();
 });
 
-test('full-screen surfaces are semantic focus modals and session headers open Chat by keyboard', async ({ page }) => {
+test('full-screen surfaces are semantic focus modals and session headers open Chat by keyboard', async ({ page }, testInfo) => {
   await reset(page,'base');
   const card=page.locator('[data-sid="claude-one"]');
   const header=card.locator('.shead');
@@ -3143,24 +3146,42 @@ test('full-screen surfaces are semantic focus modals and session headers open Ch
   await expect(page.locator('#sview')).toBeVisible();
   await page.locator('#sclose').click();
   await expect(page.locator('#sview')).toBeHidden();
-  await header.focus();await page.keyboard.press('Enter');
+  // let the close-transition focus restoration settle before refocusing
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await header.focus();await expect(header).toBeFocused();await page.keyboard.press('Enter');
   const session=page.locator('#sview');await expect(session).toBeVisible();
-  await expect(session).toHaveAttribute('role','dialog');await expect(session).toHaveAttribute('aria-modal','true');
-  await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
-  expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(true);
+  await expect(session).toHaveAttribute('role','dialog');
+  const docked=!testInfo.project.name.startsWith('mobile');
+  if(docked){
+    // Desktop-docked pane: a persistent NON-modal surface. The queue stays
+    // interactive beside it; focus is neither trapped nor moved into the pane.
+    await expect(session).toHaveAttribute('aria-modal','false');
+    await expect(session).toHaveClass(/docked/);
+    expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(false);
+    await page.locator('#nowfilter').click();
+    await expect(page.locator('#nowfilter')).toBeFocused();
+  }else{
+    await expect(session).toHaveAttribute('aria-modal','true');
+    await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
+    expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(true);
+  }
   await page.locator('#sact').getByRole('button',{name:'message options'}).click();
   const scheduleOpener=page.locator('#sact').getByRole('menuitem',{name:'Schedule message'});
   await scheduleOpener.click();
   await expect(page.locator('#scheduleview')).toHaveAttribute('role','dialog');
+  // even the docked pane goes inert under a real stacked modal
   expect(await page.locator('#sview').evaluate(element=>element.inert)).toBe(true);
   await page.locator('#scheduleview').getByRole('button',{name:'back'}).click();
   await expect(page.locator('#scheduleview')).toBeHidden();
-  await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
+  if(!docked)await expect.poll(()=>page.evaluate(()=>document.activeElement?.closest('#sview')?.id)).toBe('sview');
+  expect(await page.locator('#sview').evaluate(element=>element.inert)).toBe(false);
   await page.locator('#sclose').click();await expect(session).toBeHidden();
-  await expect(header).toBeFocused();
-  // The live poll always rebuilds volatile card headers. That reconciliation
-  // must not erase the focus which the closed dialog returned to the header.
-  await page.evaluate(()=>render(last,true));await expect(header).toBeFocused();
+  if(!docked){
+    // The live poll always rebuilds volatile card headers. That reconciliation
+    // must not erase the focus which the closed dialog returned to the header.
+    await expect(header).toBeFocused();
+    await page.evaluate(()=>render(last,true));await expect(header).toBeFocused();
+  }
   expect(await page.locator('#appshell').evaluate(element=>element.inert)).toBe(false);
 });
 

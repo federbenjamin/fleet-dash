@@ -202,7 +202,7 @@ function renderComposer(s,surface='session'){
     <div class="image-drafts" id="imgdraft-${s.session_id}"></div>
     <div class="slashwrap" id="slash-${inputId}"></div>
     <div class="actmsg" id="${msg}-${s.session_id}"></div>
-    <div class="freetext composer">${composerTools(s.session_id,inputId)}<textarea id="${inputId}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="1" placeholder="send message" autocomplete="off"
+    <div class="freetext composer">${composerTools(s.session_id,inputId)}<textarea id="${inputId}" data-draft-key="${esc(composerDraftKey(s.session_id))}" rows="1" placeholder="${matchMedia('(pointer:coarse)').matches?'send message':`send message · return = newline · ${/Mac|iPhone|iPad|iPod/.test(navigator.platform||'')?'⌘↵':'Ctrl↵'} = send`}" autocomplete="off"
       oninput="composerInput(this,'${s.session_id}','${pre}')" onfocus="composerFocus(this,'${s.session_id}','${pre}')"
       onkeydown="composerKey(event,()=>sendText('${s.session_id}','${pre}','${msg}'));if(event.key==='Escape')slashClose()">${esc(draftValue(composerDraftKey(s.session_id)))}</textarea>
       <button class="pbtn send" onclick="sendText('${s.session_id}','${pre}','${msg}')">send</button></div></div>`;

@@ -299,8 +299,8 @@ function mqBlock(s,p,pre){
       <span class="mqpos"><b>${qi+1}</b> of ${qs.length} · ${donecnt}/${qs.length} answered</span>
       <button class="mqarr" ${qi===qs.length-1||locked?'disabled':''} onclick="mqNav('${sid}',1)">›</button></div>
     <div class="qtext"><b>${esc(q.header||'')}</b> ${esc(q.question)}${ms?' <small>(pick all that apply)</small>':''}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
-        onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+    <div class="optgrid">${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}${/\(recommended\)/i.test(String(o.label||''))?' rec':''}" ${locked?'disabled':''}
+        onclick="mqToggle('${sid}',${qi},${i+1},${ms},${qs.length})">${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}</div>
     ${q.allowOther!==false?`<div class="freetext"><input ${q.secret?'':`data-draft-key="${esc(questionDraftPrefix(sid,p.nonce)+`other:${qi}`)}"`} ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''} value="${esc(st.other[qi]||'')}"
       oninput="mqOther('${sid}',${qi},this.value)"></div>`:''}
     <div class="mqsum">selected: ${picked?esc(picked):'—'}</div>
@@ -419,7 +419,7 @@ function cardPending(s){
     <div class="ptool"><span class="ptlabel">◆ ${esc(n>1?`multi-part question (${n})`:(q0.header||'question'))} — ${esc(nativePromptLabel(s))}</span></div>
     <div class="qcardtext">${esc(q0.question||'')}</div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
-    <div class="qcardsummary"><span>${esc(summary)}</span><span class="qanswercue">ANSWER IN CHAT →</span></div>
+    <div class="qcardsummary"><span>${esc(summary)}</span><span class="qanswercue">ANSWER IN ${workspaceDockable()?'PANE':'CHAT'} →</span></div>
   </div>`;
 }
 function openSessionQ(sid){

@@ -171,14 +171,18 @@
 </div>
 <div id="confirm"></div>
 <div id="sview" role="dialog" aria-modal="true" aria-label="Session workspace">
-  <div id="shead2"><button id="sclose" aria-label="close session workspace" onclick="closeOverflow();exitSessionWorkspace()">✕</button><span id="stitle2"></span>
+  <div id="ssplit" role="separator" aria-orientation="vertical" aria-label="Resize session pane" tabindex="0"
+    onpointerdown="startPaneSplit(event)" onkeydown="paneSplitKey(event)"><i></i></div>
+  <div id="shead2"><button id="sexpand" hidden aria-label="expand workspace to full width" title="expand to full width"
+      onclick="toggleWorkspaceExpand()">⤢</button>
+    <button id="sclose" aria-label="close session workspace" onclick="closeOverflow();exitSessionWorkspace()">✕</button><span id="stitle2"></span>
+    <nav id="stabs" role="tablist" aria-label="Session sections">
+      <button id="stab-chat" role="tab" onclick="setSessionSection('chat')">Chat</button>
+      <button id="stab-files" role="tab" onclick="setSessionSection('files')">Files <small id="sfilecount"></small></button>
+      <button id="stab-subagents" role="tab" onclick="setSessionSection('subagents')">Agents <small id="sagentcount"></small></button>
+      <button id="stab-details" role="tab" onclick="setSessionSection('details')">Details</button>
+    </nav>
     <span id="sctrl"></span></div>
-  <nav id="stabs" role="tablist" aria-label="Session sections">
-    <button id="stab-chat" role="tab" onclick="setSessionSection('chat')">Chat</button>
-    <button id="stab-files" role="tab" onclick="setSessionSection('files')">Files <small id="sfilecount"></small></button>
-    <button id="stab-subagents" role="tab" onclick="setSessionSection('subagents')">Subagents <small id="sagentcount"></small></button>
-    <button id="stab-details" role="tab" onclick="setSessionSection('details')">Details</button>
-  </nav>
   <div id="sworkspace">
     <section id="spanel-chat" class="workspacepanel" role="tabpanel" aria-labelledby="stab-chat">
       <div id="schat"><div id="sbody"></div><div id="sactivity"></div></div>

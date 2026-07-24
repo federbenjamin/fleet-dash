@@ -64,6 +64,14 @@ function overflowMenu(key,s,kind='session',done=false){
           (s?.permission_mode?"Available only while Claude is idle":"Waiting for Claude to report its mode"))}</small>`:''}
       </span><span class="ovsep"></span>`:''}
       ${kind==='session'?sessionSettingsControls(s):''}
+      ${lifecycle&&s?.provider==='claude'&&s?.capabilities?.focus_terminal?`<button class="ovitem" role="menuitem"
+        onclick="closeOverflow();focusSession('${s.session_id}',this)"><span>Open in Terminal</span><small>iTerm</small></button>`:''}
+      ${lifecycle&&s?.session_id&&!s?.provisional?`<button class="ovitem" role="menuitem"
+          onclick="closeOverflow();toggleSessionPin('${s.session_id}')">
+          <span>${pinnedSessions.has(s.session_id)?'Unpin session':'Pin session'}</span><small>⌖</small></button>
+        <button class="ovitem" role="menuitem"
+          onclick="closeOverflow();toggleMute('${s.session_id}',${s.muted?'false':'true'},'${kind==='viewer'?'vmsg':'smsg'}-${s.session_id}')">
+          <span>${s.muted?'Unmute push':'Mute push for session'}</span><small>${s.muted?'🔔':'🔕'}</small></button>`:''}
       <button class="ovitem" role="menuitem" onclick="closeOverflow();toggleTheme()">
         <span>Appearance</span><small>light / dark</small></button>
       ${canHandoff?`<span class="ovsep"></span>

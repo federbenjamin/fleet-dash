@@ -31,9 +31,9 @@ function singleQBlock(s,p,pre){
       <button class="xbtn" ${locked?'disabled':''} title="${p.dismiss_action==='cancel_turn'?'dismiss by stopping this Codex turn':'dismiss — chat about this instead'}" onclick="sendDismiss('${sid}','${p.nonce}','${pre}')">✕</button></div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(sid,f,f.caption)).join('')}</div>`:''}
     <div class="qtext">${esc(q.question)}</div>
-    ${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}" ${locked?'disabled':''}
+    <div class="optgrid">${(q.options||[]).map((o,i)=>`<button class="optbtn ${sel.has(i+1)?'sel':''}${/\(recommended\)/i.test(String(o.label||''))?' rec':''}" ${locked?'disabled':''}
         onclick="${ms?`toggleOpt('${sid}',${i+1})`:`sendOption('${sid}','${p.nonce}',[${i+1}],'${pre}')`}">
-        ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}
+        ${esc(o.label)}${o.description?`<small>${esc(o.description)}</small>`:''}</button>`).join('')}</div>
     ${q.allowOther!==false?`<div class="freetext"><input id="oth-${pre}-${sid}" ${q.secret?'':`data-draft-key="${esc(otherKey)}"`} ${locked?'disabled':''} placeholder="Other — type your own answer" ${q.secret?'type="password"':''}
       value="${esc(otherDraft[sid]||'')}" oninput="otherDraft['${sid}']=this.value"
       ${ms?'':`onkeydown="if(event.key==='Enter')sendOther('${sid}','${p.nonce}',${n},'${pre}')"`}>
@@ -89,9 +89,12 @@ function renderViewerBar(force){
 }
 // Full chat headers identify the conversation. Operational metadata lives in
 // the status strip above the composer, where it can update independently.
+// Console: title + one quiet mono identity line (project · branch · provider · access).
 function sessTitleBlock(s){
-  if(!s)return '<b>session</b>';
-  return `<b>${esc(s.title||s.project||'session')}</b>`;
+  if(!s)return '<span class="sesstitle"><b>session</b></span>';
+  const identity=[s.project,s.branch&&s.branch!=='HEAD'?s.branch:null,s.provider,
+    s.access==='view_only'||s.read_only?'view only':null].filter(Boolean).join(' · ');
+  return `<span class="sesstitle"><b>${esc(s.title||s.project||'session')}</b>${identity?`<small>${esc(identity)}</small>`:''}</span>`;
 }
 function viewerFormat(name,kind){
   if(kind==='image')return'image';
@@ -237,21 +240,27 @@ function resolveModalOpener(record){
   return null;
 }
 function modalVisible(root){return root&&root.style.display==='flex';}
-function modalStack(){return modalDefinitions.map(([id])=>document.getElementById(id)).filter(modalVisible)
+// The desktop-docked session pane (#sview.docked) is NOT a modal: the queue
+// stays interactive beside it, so it never joins the modal stack, never inerts
+// lower layers, and never traps Tab. It still goes inert under a real modal.
+function modalStack(){return modalDefinitions.map(([id])=>document.getElementById(id))
+  .filter(root=>modalVisible(root)&&!root.classList.contains('docked'))
   .sort((a,b)=>(Number(getComputedStyle(a).zIndex)||0)-(Number(getComputedStyle(b).zIndex)||0));}
 function modalFocusable(root){return[...root.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
   .filter(element=>!element.hidden&&element.getClientRects().length);}
 function syncModalStack(){
   const stack=modalStack(),top=stack.at(-1)||null;
   for(const [id] of modalDefinitions){
-    const root=document.getElementById(id),visible=stack.includes(root);
-    if(visible&&!modalOpenState.has(root)){
+    const root=document.getElementById(id),displayed=modalVisible(root),inStack=stack.includes(root);
+    if(inStack&&!modalOpenState.has(root)){
       modalOpenState.add(root);modalOpeners.set(root,modalOpener(document.activeElement));
-    }else if(!visible&&modalOpenState.has(root)){
+    }else if(!inStack&&modalOpenState.has(root)){
       modalOpenState.delete(root);modalLastClosedOpener=modalOpeners.get(root)||modalLastClosedOpener;
     }
-    root.inert=visible&&root!==top;
-    root.setAttribute('aria-hidden',visible&&root===top?'false':'true');
+    // a displayed docked pane (visible, not in the stack) is a lower layer:
+    // interactive when nothing modal is above it, inert under the top modal
+    root.inert=(inStack&&root!==top)||(!inStack&&displayed&&Boolean(top));
+    root.setAttribute('aria-hidden',displayed&&(root===top||(!inStack&&!top))?'false':'true');
   }
   for(const id of ['appshell','bottomnav','mobilemore','usagepanel']){
     const root=document.getElementById(id);if(root)root.inert=Boolean(top);
