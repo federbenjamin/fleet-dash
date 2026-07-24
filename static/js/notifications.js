@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{loadBriefing,briefingItem,briefingBudget,briefingGroup,safeGithubUrl,openGithub,openBriefingSource,markBriefingReviewed,toggleBriefing,briefingPanelHtml,renderBriefing,notificationBucket,notificationCounts,updateNotificationBadges,reconcileSystemNotifications,setNotificationSection,notificationParams,loadNotifications,loadNotificationDetail,openNotification,closeNotificationDetail,renderNotificationActionFeedback,notificationPost,snoozeNotification,wakeNotification,muteNotification,retryNotificationDelivery,markNotificationsRead,notificationTime,notificationRow,deliveryProblemRow,notificationDetailHtml,renderNotifications,peekMd});
+Object.assign(globalThis,{loadBriefing,briefingItem,briefingBudget,briefingGroup,safeGithubUrl,openGithub,openBriefingSource,markBriefingReviewed,toggleBriefing,briefingPanelHtml,renderBriefing,notificationBucket,notificationCounts,updateNotificationBadges,reconcileSystemNotifications,setNotificationSection,notificationParams,loadNotifications,loadNotificationDetail,openNotification,closeNotificationDetail,renderNotificationActionFeedback,notificationPost,snoozeNotification,wakeNotification,muteNotification,retryNotificationDelivery,markNotificationsRead,notificationTime,selectNotification,openNotificationSource,notificationSubcard,notificationRow,deliveryProblemRow,notificationDetailHtml,renderNotifications,peekMd});
 globalThis.briefingData={ok:true,sections:{attention:[],completed:[],slow:[],outcomes:[],budgets:[],measurements:[],reviewed:[]},unread:0};;
 globalThis.briefingLoading=false;globalThis.briefingLoadPromise=null;globalThis.briefingLoadedAt=0;globalThis.briefingOpen=false;globalThis.briefingReviewing=false;globalThis.briefingReviewError='';
 async function loadBriefing(force=false){
@@ -100,6 +100,7 @@ globalThis.notificationItems=[];globalThis.notificationSection='needs';globalThi
 globalThis.notificationPollingEnabled=false;
 globalThis.notificationError='';globalThis.notificationLoadedAt=0;globalThis.notificationAbort=null;globalThis.notificationSequence=0;
 globalThis.notificationDetail=null;globalThis.notificationDetailLoading=false;globalThis.notificationDetailError='';
+globalThis.notificationSelected=null;   // event id whose row grew its actions sub-card
 const notificationActionStates=new Map();globalThis.notificationActionGeneration=0;
 if(pushActionFallback&&notificationDetailId)notificationActionStates.set(notificationDetailId,{busy:false,
   message:`${pushActionFallback==='snooze'?'Snooze':'Mute'} from the notification did not complete. Review the current state and try again.`,
@@ -220,15 +221,18 @@ function closeNotificationDetail(){
   notificationDetailId=null;notificationDetail=null;notificationDetailError='';renderNotifications();
 }
 function renderNotificationActionFeedback(key){
-  // Snooze/wake/mute are initiated in the open detail pane. Updating all
-  // notification filters and up to 60 list rows just to paint "Working…"
-  // delays first feedback on mobile. Delivery retries still need their list
-  // row rebuilt, so keep the full fallback for non-detail action keys.
+  // Snooze/wake/mute paint their busy/success state inside the surface that
+  // initiated them — the open detail pane or the tapped row's sub-card — not by
+  // rebuilding the whole list and every filter (invariant 55). Delivery retries
+  // still fall back to the full render so their list row rebuilds.
   if(key===notificationDetailId){
     const detail=$('#notificationdetail');
     if(detail){detail.innerHTML=notificationDetailHtml(notificationDetail);
       detail.classList.toggle('open',Boolean(notificationDetailId));return;}
   }
+  const row=document.querySelector(`.notificationrow[data-event-id="${CSS.escape(String(key))}"]`);
+  const item=notificationItems.find(value=>value.id===key);
+  if(row&&item){row.outerHTML=notificationRow(item);return;}
   renderNotifications();
 }
 async function notificationPost(key,path,payload,success){
@@ -284,21 +288,69 @@ async function markNotificationsRead(cursor=notificationData.event_cursor,render
 function notificationTime(item){const value=Number(typeof item==='number'?item:
   item?.changed_at||item?.opened_at||item?.updated_at)||0;if(!value)return'';
   const delta=Date.now()/1000-value;return delta<0?'in '+fmtAge(-delta):fmtAge(delta)+' ago';}
+// Row taps grow a thin actions sub-card on the tapped row (Console locked
+// decision); the cue button opens the event's session — in the docked pane on
+// wide desktops — while canonical detail stays behind the sub-card's Details.
+function selectNotification(id){
+  const started=performance.now();
+  notificationSelected=notificationSelected===id?null:id;
+  renderNotifications();recordInputFeedback(started,'notification_select');
+}
+function notificationSessionReachable(item){
+  return Boolean(item.session_id&&(((last||{}).sessions||[]).some(s=>s.session_id===item.session_id)||
+    isClosedSession(item.session_id)));
+}
+function openNotificationSource(id){
+  const item=notificationItems.find(value=>value.id===id);if(!item)return;
+  if(item.unread)void markNotificationsRead(item.sequence,false);
+  if(notificationSessionReachable(item)){openSession(item.session_id);return;}
+  openNotification(id);
+}
+function notificationSubcard(item){
+  const id=enc(item.id),revision=enc(item.source_revision);
+  const action=notificationActionStates.get(item.id)||{};
+  const busy=action.busy?'disabled':'';
+  const active=item.state==='active',snoozed=item.state==='snoozed',resolved=!active&&!snoozed;
+  return`<div class="notificationsubcard" onclick="event.stopPropagation()">
+    ${active?`<span class="subcardlabel">Snooze</span>
+      <button ${busy} onclick="snoozeNotification(decodeURIComponent('${id}'),decodeURIComponent('${revision}'),'quarter')">15m</button>
+      <button ${busy} onclick="snoozeNotification(decodeURIComponent('${id}'),decodeURIComponent('${revision}'),'hour')">1h</button>
+      <button ${busy} onclick="snoozeNotification(decodeURIComponent('${id}'),decodeURIComponent('${revision}'),'tomorrow')">Tomorrow</button>`:''}
+    ${snoozed?`<button class="subcardprimary" ${busy} onclick="wakeNotification(decodeURIComponent('${id}'),decodeURIComponent('${revision}'))">Wake now</button>`:''}
+    ${item.session_id&&(!resolved||item.muted)?`<button ${busy} onclick="muteNotification(decodeURIComponent('${id}'),decodeURIComponent('${revision}'),${item.muted?'false':'true'})">${item.muted?'Unmute':'Mute'}</button>`:''}
+    <button onclick="openNotification(decodeURIComponent('${id}'))">Details</button>
+    ${item.unread?`<button class="subcardread" onclick="markNotificationsRead(${Number(item.sequence)||0})">Mark read</button>`:''}
+    ${action.message?`<span class="subcardmsg ${action.error?'bad':''}" role="status">${action.busy?'◌ ':''}${esc(action.message)}</span>`:''}
+  </div>`;
+}
 function notificationRow(item){
-  const bucket=notificationBucket(item),id=enc(item.id),meta=[notificationKinds[item.kind]||item.kind,item.provider,
-    notificationTime(item)].filter(Boolean).join(' · ');
-  return`<button class="notificationrow ${esc(bucket)} ${item.unread?'unread':''}" onclick="openNotification(decodeURIComponent('${id}'))">
-    <span class="notificationspine"></span><span class="notificationcopy"><span><b>${esc(item.title||'Fleet update')}</b>${item.unread?'<i aria-label="unread"></i>':''}</span>
-    <small>${esc(item.summary||'')}</small><em>${esc(meta)}</em></span><span class="notificationchev">›</span></button>`;
+  const bucket=notificationBucket(item),id=enc(item.id),selected=notificationSelected===item.id;
+  const glyph=bucket==='needs'?'◆':bucket==='problems'?'▲':bucket==='snoozed'?'◌':'●';
+  const kindLabel=[bucket==='snoozed'?'Snoozed':'',notificationKinds[item.kind]||item.kind]
+    .filter(Boolean).join(' · ');
+  const when=[item.provider,notificationTime(item),item.unread?'unread':'read'].filter(Boolean).join(' · ');
+  return`<div class="notificationrow ${esc(bucket)} kind-${esc(item.kind)} ${item.unread?'unread':''}${selected?' selected':''}" data-event-id="${esc(item.id)}"
+      role="button" tabindex="0" aria-expanded="${selected}" onclick="selectNotification(decodeURIComponent('${id}'))"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+    <div class="notificationhead"><span class="notificationkindtag">${glyph} ${esc(kindLabel)}</span>
+      <span class="notificationwhen">${esc(when)}</span></div>
+    <b class="notificationtitle">${esc(item.title||'Fleet update')}</b>
+    ${item.summary?`<small class="notificationsummary">${esc(item.summary)}</small>`:''}
+    ${notificationSessionReachable(item)?`<button class="notificationcue" onclick="event.stopPropagation();openNotificationSource(decodeURIComponent('${id}'))">${workspaceDockable()?'OPEN IN PANE →':'OPEN SESSION →'}</button>`:''}
+    ${selected?notificationSubcard(item):''}
+  </div>`;
 }
 function deliveryProblemRow(item){
   const pending=['queued','sending','retrying'].includes(item.status);
   const action=notificationActionStates.get('delivery:'+item.id)||{};
   const label=item.status==='subscription_expired'?'Reconnect '+(item.display_name||'device'):
     pending?'Delivery retry pending':'Delivery failed';
-  return`<article class="notificationrow problems deliveryproblem"><span class="notificationspine"></span><span class="notificationcopy"><span><b>${esc(label)}</b></span>
-    <small>${item.status==='subscription_expired'?'The browser subscription expired. Reconnect before retrying.':pending?'A retry is queued; the problem clears after a confirmed delivery.':`Attempt ${item.attempt||0}${item.remote_status?` · HTTP ${item.remote_status}`:''}`}</small>
-    <em>${esc([item.platform,notificationTime(item)].filter(Boolean).join(' · '))}</em></span><span class="deliveryactions">${action.message?`<span role="status">${action.busy?'◌ ':''}${esc(action.message)}</span>`:''}${item.can_retry?`<button ${action.busy?'disabled':''} onclick="retryNotificationDelivery(decodeURIComponent('${enc(item.id)}'))">Retry</button>`:pending?'<span>Waiting</span>':`<button onclick="navigateTo('settings')">Reconnect</button>`}</span></article>`;
+  return`<article class="notificationrow problems deliveryproblem">
+    <div class="notificationhead"><span class="notificationkindtag">▲ Push delivery</span>
+      <span class="notificationwhen">${esc([item.platform,notificationTime(item)].filter(Boolean).join(' · '))}</span></div>
+    <b class="notificationtitle">${esc(label)}</b>
+    <small class="notificationsummary">${item.status==='subscription_expired'?'The browser subscription expired. Reconnect before retrying.':pending?'A retry is queued; the problem clears after a confirmed delivery.':`Attempt ${item.attempt||0}${item.remote_status?` · HTTP ${item.remote_status}`:''}`}</small>
+    <span class="deliveryactions">${action.message?`<span role="status">${action.busy?'◌ ':''}${esc(action.message)}</span>`:''}${item.can_retry?`<button ${action.busy?'disabled':''} onclick="retryNotificationDelivery(decodeURIComponent('${enc(item.id)}'))">Retry</button>`:pending?'<span>Waiting</span>':`<button onclick="navigateTo('settings')">Reconnect</button>`}</span></article>`;
 }
 function notificationDetailHtml(item){
   if(notificationDetailLoading)return'<div class="notificationdetailstate"><span class="delivery sending">◌</span> Checking current state…</div>';
@@ -364,6 +416,10 @@ function renderNotifications(){
   }
   detail.innerHTML=notificationDetailHtml(notificationDetail);
   detail.classList.toggle('open',Boolean(notificationDetailId));
+  // The desktop list runs full-width with row sub-cards; an open detail route
+  // (deep link, sub-card Details) restores the list/detail split.
+  const layout=$('#notificationlayout');
+  if(layout)layout.classList.toggle('detail-open',Boolean(notificationDetailId));
   const more=$('#notificationmore');if(more)more.hidden=!notificationData.next_cursor||notificationSection==='briefing';
   updateNotificationBadges();
 }

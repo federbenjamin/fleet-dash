@@ -392,6 +392,7 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
     sessionEvidenceOpen=false;$('#sbody').innerHTML='<div class="ctxload">loading conversation…</div>';
     $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
     delete $('#sbody').dataset.renderKey;delete $('#sbody').dataset.canonicalKey;}
+  $('#sview').classList.remove('newform-view');
   $('#sview').style.display='flex';applyWorkspaceChrome();activateWorkspaceSection();syncVisualViewport();
   const routeState={fdWorkspace:1,sid,section,item,returnHash,depth:historyDepth};
   // Switching from one session to another replaces the open workspace route.
@@ -499,6 +500,7 @@ async function loadClosedMeta(sid){
 }
 function closeSession(){
   saveWorkspaceScroll();closeOverflow();sessionView=null;agentView=null;viewerSid=null;viewerPath=null;
+  newOpen=false;$('#sview').classList.remove('newform-view');
   sessionEvidenceOpen=false;slashClose();
   sessionTailObserver?.disconnect();sessionTailObserver=null;
   closeComposerMenus();
@@ -769,6 +771,7 @@ async function reopenClosed(sid,button){
 }
 function renderSession(force){
   if(!sessionView||!last)return;
+  if(sessionView.newForm)return renderNewSessionPane(force);
   if(sessionView.closed)return renderClosed(force);
   const current=(last.sessions||[]).find(x=>x.session_id===sessionView.sid)||
     (spawnProvisional&&spawnProvisional.id===sessionView.sid?provisionalSessionObject():null);

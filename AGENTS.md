@@ -466,8 +466,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     separate 24-hour discovery window does not control placement. Their lifecycle
     reason labels remain `Working` / `Available`; the separate `View only` access label carries
     ownership.
-    Pinned/Needs/Working hide when empty; Available stays visible. History is a separate destination
-    with one chronological list and access/provider filters. `requests_reply` examines the newest
+    Pinned/Needs/Working hide when empty; Available stays visible. The standalone History
+    destination is decommissioned: the flat chronological session inventory (dormant, external,
+    reopenable, closed) lives in **Search under TYPE=SESSION** — an empty query lists every session
+    newest-first with access chips (All/Continue/View only/Reopen) and the provider filter; legacy
+    `#history` deep links land there. `requests_reply` examines the newest
     complete assistant prose outside code/quotes, and only its FINAL question. Comprehension tags
     ("does that make sense?", "how does that look?", "right?") and idle solicitations ("what's
     next?", "anything else?") are excluded because they request no decision; a forced choice, a
@@ -531,12 +534,18 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     exact session to become writable before delivering once. Failure preserves the draft and closed
     state. Never infer Codex ownership from transcript access, source, or thread visibility.
 39. **New-session identity is optimistic but exact.** `spawnProvisional` immediately owns one
-    client-generated card/full-chat identity and the initial user message while `/api/act spawn` is
-    pending. Only the exact server-returned `session_id` may replace it; never reconcile by cwd.
-    Claude's initial text is sent after that exact session becomes discoverable, while Codex accepts
-    it atomically at thread creation. Explicit spawn rejection may offer retry; a lost response may
-    have created a session and must not retry automatically. Forecast requests are abortable and
-    sequence-gated so an older model result cannot overwrite the latest selection. Message and relay
+    client-generated card/full-chat identity (and any scheduled initial message) while
+    `/api/act spawn` is pending. Only the exact server-returned `session_id` may replace it; never
+    reconcile by cwd. A Claude initial text is sent after that exact session becomes discoverable,
+    while Codex accepts it atomically at thread creation. Explicit spawn rejection may offer retry;
+    a lost response may have created a session and must not retry automatically. Forecast requests
+    are abortable and sequence-gated so an older model result cannot overwrite the latest selection.
+    Console locked decisions: the spawn form fills the session workspace pane (docked beside the
+    queue on wide desktops, full-screen on mobile; `#newsess` in Now keeps only the entry button)
+    and on spawn the pane becomes the provisional session's chat; the form has **no initial-message
+    field** — the first message is typed into the live chat, or into the Schedule overlay for a
+    scheduled spawn; quick-spawn recents are device-local (`fleet.quickSpawns.v1`, non-secret spawn
+    configuration only) and right-click/context-menu pins a row. Message and relay
     composers are `<textarea>` controls: Return is always a newline; only Command-Return on macOS or
     Control-Return elsewhere sends.
 40. **Claude permission mode is a native, state-gated control.** `Tail.permission_mode` accepts only
@@ -638,7 +647,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     event successfully before marking through its sequence; browser/native back closes the detail.
     Snooze, Wake, Mute/Unmute, and Retry are separate token-gated POST routes and event mutations
     require the exact source revision. Badges count canonical active/unread events, never delivery
-    attempts. Desktop is a list/detail split; mobile detail is a fixed drawer above the bottom bar.
+    attempts. The desktop list runs full-width and a tapped row grows a thin actions sub-card on
+    that row (snooze 15m/1h/tomorrow, mute, mark read, Details — Console locked decision: never a
+    bar on the chat pane); a session event's cue button opens its session (the docked pane on wide
+    desktops), and an open exact detail route restores the list/detail split. Mobile detail stays a
+    fixed drawer above the bottom bar.
     Delivery failures may expose bounded device name/platform/status/timestamps and retryability,
     never endpoint, origin, subscription material, keys, or raw errors. Canonical reconciliation is
     incremental: its signature contains only push-relevant actions, mutes, eligible stalls, provider
@@ -734,10 +747,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     uploads may retry before provider dispatch; an unknown dispatch outcome never auto-retries. The
     service worker never caches image bytes.
 55. **Heavy destinations paint before they work.** Opening Settings must reveal the overlay and its
-    existing loading-spinner pattern before building the full settings tree. History navigation must
-    reveal the already-rendered destination before starting its first fetch/render in the next
-    animation frame; revisiting History must never paginate implicitly—only **Show more** owns the
-    next 100 rows. New Session paints only `#newsess`, not a synchronous full-fleet render. A
+    existing loading-spinner pattern before building the full settings tree. Search TYPE=SESSION
+    renders its cached session list on navigation and refetches only when criteria change;
+    revisiting must never paginate implicitly—only **Show more** owns the next 100 rows. Opening
+    New session paints only the workspace pane form, not a synchronous full-fleet render. A
     notification detail action paints its busy/success state inside the active detail pane, not by
     rebuilding the list and every filter; canonical list reconciliation remains asynchronous. Keep
     these narrow commits: rebuilding whole surfaces produced 133–1026 ms first-feedback outliers even
@@ -1127,8 +1140,9 @@ because they are also spawned directly as scripts by absolute path.
   exact-context reader, controlled rebuild, and worker-parent lifecycle. It never crawls arbitrary
   repository files. Unknown/malformed/oversized records stay bounded and visible in Search warnings.
 - `dashboard.html` — semantic application shell and overlay roots. Desktop navigation is a per-device left/right rail;
-  mobile navigation is a bottom bar with History/Insights/Settings under More. Destinations are URL-hash
-  routed, participate in browser/native back, and keep History/Insights out of Now.
+  mobile navigation is a bottom bar with Insights/Settings under More. Destinations are URL-hash
+  routed and participate in browser/native back; the flat session inventory lives in Search
+  TYPE=SESSION (invariant 31), not a separate History destination.
 - `static/fleet.css` — design tokens, responsive shell, shared cards, reading surfaces, and reduced-
   motion/mobile rules.
 - `static/js/` — the browser app as 16 raw ES modules (no bundler), split from

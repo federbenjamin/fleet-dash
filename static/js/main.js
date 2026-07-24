@@ -80,7 +80,6 @@ function render(f,force){
   $('#providerstate').innerHTML=ledgerProblem+runtimeWarnings+providerProblems.map(([provider,value])=>
     `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
   const ae=document.activeElement;
-  const typingHistory=ae&&ae.tagName==='INPUT'&&$('#history').contains(ae);
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')&&$('#newsess').contains(ae);
   if(force||!touching()){
     if(nowState==='subagents'){
@@ -104,7 +103,7 @@ function render(f,force){
         'Available','ready for another message','available',true);
     }
     if(!typingNew)$('#newsess').innerHTML=newSection();
-    if(!typingHistory)$('#history').innerHTML=historySection(f);
+    if(currentRoute==='search'&&searchFilters.kind==='session')renderSearchResults();
     if(currentRoute==='workstreams')renderWorkstreams(workstreamData);
     if(currentRoute==='notifications')renderNotifications();
     renderSavedViews('now');
@@ -153,7 +152,8 @@ async function tick(force=false){
     if(notificationPollingEnabled)loadNotifications(true);
     if(currentRoute==='notifications'&&notificationSection==='briefing')loadBriefing();
     if(currentRoute==='insights')loadBudgets();
-    if(currentRoute==='history'&&Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
+    if(currentRoute==='search'&&searchFilters.kind==='session'&&
+      Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
     if(!fleetOffline)void flushOfflineMessages();
   }catch(e){if(sequence===pollSequence&&(e.name!=='AbortError'||timedOut)){
     if(timedOut)console.warn('Fleet poll timed out; keeping the last usable screen');

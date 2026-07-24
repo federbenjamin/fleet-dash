@@ -14,8 +14,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
   delivery state, then open the same full-chat response controls used everywhere else; there are no
-  checkboxes, bulk actions, or duplicate right-side navigation buttons. The
-  separate **History** destination owns dormant, external, reopenable, and closed sessions. Cards
+  checkboxes, bulk actions, or duplicate right-side navigation buttons. The flat inventory of
+  dormant, external, reopenable, and closed sessions lives in **Search under TYPE=SESSION**. Cards
   use reasons such as **Reply requested**, **Command approval**, **Working**, and **Inactive**
   instead of raw provider lifecycle terms. A separate **View only** access label identifies sessions
   owned by another runtime. An archived external thread is removed from Fleet inventory rather than
@@ -32,22 +32,26 @@ the provider's native control path. Built 2026-07-13; still evolving.
   (desktop) or long-press (mobile); pinned cards show a `⌖ pinned` marker.
 - **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
   **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
-  mobile tab show active/unread counts; opening a row loads its current exact state before marking it
-  read. Event detail supports 15-minute, one-hour, and tomorrow snooze, early wake, session mute until
-  manual unmute, delivery retry, and expired-device reconnect. Exact links use
-  `#notifications/<event-id>` and participate in refresh and browser/native back. Desktop keeps a
-  split list/detail view; mobile opens detail as a full-height drawer. Briefing now lives here instead
+  mobile tab show active/unread counts. Tapping a row grows a thin actions sub-card on that row
+  (Snooze 15m/1h/Tomorrow, Mute, Mark read, Details); a session event's cue button opens its session
+  — in the docked workspace pane on wide desktops. Canonical detail (behind **Details** and exact
+  `#notifications/<event-id>` links, which participate in refresh and browser/native back) loads the
+  event's current exact state before marking it read and adds early wake, delivery retry, and
+  expired-device reconnect; opening it restores the desktop list/detail split, and mobile opens it
+  as a full-height drawer. Briefing lives here instead
   of competing with the live Action Inbox on Now. Every event type has two independent controls:
   **Show in Fleet Notification Center** governs in-app history/badges, while **Web Push** governs
   lock-screen delivery and cadence.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
-  Search, Workstreams, History, Insights, and Settings. At 390×844 and other narrow widths it becomes
-  a fixed bottom bar; History, Insights, and Settings live under More. The URL hash preserves destinations
-  across refresh and browser/native back gestures. Settings places the desktop rail on the left or
+  Search, Workstreams, Insights, and Settings. At 390×844 and other narrow widths it becomes
+  a fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
+  across refresh and browser/native back gestures (legacy `#history` links land on Search
+  TYPE=SESSION). Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
-  filters whose named saved views remain on this device. Settings and History paint their visible
-  destination immediately, then do heavier rendering/fetch work on the next frame. Returning to
-  History preserves the loaded page; only **Show more** fetches the next 100 sessions. New Session
+  filters whose named saved views remain on this device. Settings paints its visible
+  destination immediately, then does heavier rendering/fetch work on the next frame. Returning to
+  the session list re-renders its cached rows; only **Show more** fetches the next 100 sessions.
+  New Session
   and notification actions paint local feedback without rebuilding the fleet or Notification Center.
 - **Lightweight Workstreams:** sessions are grouped by canonical Git repository; linked worktrees
   roll into the main repository while keeping their branch and worktree labels. Non-Git folders use
@@ -84,7 +88,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   stale instead of replacing it with an empty/error screen; refreshed tails merge with older pages.
 - **Incremental global search:** Search covers every retained Claude and Codex main transcript,
   saved subagent transcript, session metadata, and provider-referenced text artifact on this Mac —
-  including sessions Fleet did not create. Provider, project, and event-type filters narrow results;
+  including sessions Fleet did not create. Provider, project, and event-type filters narrow results
+  (the **Sessions** type is the flat session inventory described above, served from the durable
+  ledger rather than the transcript index);
   each hit opens bounded exact context and can jump to the live session, known subagent, or safe
   artifact preview. An isolated low-priority worker maintains `search.db` with SQLite WAL/FTS5, so
   initial indexing and transcript updates do not block the provider poll or `/api/fleet`. Progress,
@@ -124,15 +130,21 @@ the provider's native control path. Built 2026-07-13; still evolving.
   The running-agent count stays visible everywhere. The whole header opens Chat (and is keyboard
   accessible); the pin remains an independent control. Active-subagent previews contain only real
   agent rows—there is no placeholder row when only one agent is active.
-- **➕ new coding session** (button under the live list): choose Claude Code or Codex CLI, then
+- **➕ new coding session** (header button and the button under the live list): the spawn form
+  fills the session workspace pane (docked beside the queue on wide desktops, full-screen on
+  mobile). **Quick spawn · recents** rows replay a previous configuration with one tap and
+  right-click pins a favorite (device-local). Choose Claude Code or Codex CLI, then
   pick a directory (recent ones the daemon has seen, or type a path under `~`), a model, and an
-  effort level (`low`…`max`). Codex sessions also choose Plan or Default mode and start in Plan
+  effort level (`low`…`max`) as chip groups. Codex sessions also choose Plan or Default mode and
+  start in Plan
   by default. Claude sessions choose Manual, Auto, Accept Edits, Plan, or the advanced Don't Ask
   permission mode; Auto remains subject to Claude's account/model eligibility. Claude sessions can
   request a **new git worktree** — it opens
-  a fresh iTerm tab running `claude` with those flags. Fleet immediately opens a provisional
-  card and full chat with the initial message and a startup spinner, then replaces it in place with
-  the exact native session. A rejected start keeps the exact setup available to retry or restore.
+  a fresh iTerm tab running `claude` with those flags. There is no initial-message field: Fleet
+  immediately turns the pane into the provisional session's chat with a startup spinner, replaces
+  it in place with the exact native session, and the first message is typed there (a **scheduled**
+  spawn's message is typed in the Schedule overlay instead). A rejected start keeps the exact setup
+  available to retry or restore.
   Model changes paint immediately while stale forecast requests are cancelled or ignored.
   Untrusted folders are flagged: Claude Code asks "do you
   trust the files in this folder?" at startup and **only your Mac can answer that** — trust is
@@ -258,9 +270,10 @@ the provider without affecting Claude sessions.
   turns do not. Each Action Inbox row opens directly; it has no checkbox, bulk action, or duplicate
   View/Respond control. Other completed non-question turns remain **Available** without entering
   the Action Inbox.
-- **History** is one flat chronological destination for dormant, inactive external, reopenable, and
-  closed sessions. Search it by title/project/message, then combine Access chips (All, Continue,
-  View only, Reopen) with Provider chips (All, Claude, Codex). Dormant means no active turn and no
+- The session inventory is one flat chronological list in **Search under TYPE=SESSION** — an empty
+  query lists every dormant, inactive external, reopenable, and closed session newest-first. Filter
+  it with the search box, the Access chips (All, Continue,
+  View only, Reopen), and the Provider filter. Dormant means no active turn and no
   recent activity; it is a diagnostic raw state, not a separate page section. Fleet indexes every
   surviving top-level Claude transcript under `~/.claude/projects` on startup, including sessions
   from before Fleet was installed. Saved subagent transcripts remain inside their parent

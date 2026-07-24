@@ -1,9 +1,13 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{syncSearchControls,setSearchQuery,setSearchFilter,queueSearch,searchParams,searchHasCriteria,renderSearchStatus,loadSearchStatus,searchWhen,renderSearchResults,updateSearchProjects,runSearch,searchContextMessage,searchSourceAction,openSearchContext,closeSearchView,switchSearchView,rebuildSearch});
+Object.assign(globalThis,{syncSearchControls,setSearchQuery,setSearchFilter,setSearchAccess,queueSearch,searchParams,searchHasCriteria,renderSearchStatus,loadSearchStatus,searchWhen,renderSearchResults,runSessionSearch,sessionResultRow,renderSessionResults,updateSearchProjects,runSearch,searchContextMessage,searchSourceAction,openSearchContext,closeSearchView,switchSearchView,rebuildSearch});
 globalThis.searchTimer=null;globalThis.searchAbort=null;globalThis.searchCursor=0;globalThis.searchBusy=false;
 globalThis.searchItems=[];globalThis.searchProjects=[];globalThis.searchStatusData=null;globalThis.searchStatusAt=0;globalThis.searchError='';
 globalThis.searchView=null;
-const searchFilters={query:draftValue('filter:search'),provider:'',kind:'',project:''};
+// TYPE=SESSION replaces the old History destination: an empty query lists every
+// session chronologically with access chips. Legacy #history deep links land here.
+globalThis.searchAccess='all';globalThis.sessionSearchSignature='';
+const searchFilters={query:draftValue('filter:search'),provider:'',
+  kind:location.hash.replace(/^#/,'').split('/')[0]==='history'?'session':'',project:''};
 function syncSearchControls(){
   const controls={query:$('#searchquery'),provider:$('#searchprovider'),kind:$('#searchkind'),
     project:$('#searchproject')};
@@ -25,6 +29,10 @@ function setSearchFilter(key,value){
   // dependent request so a rapid second action cannot revive stale criteria.
   syncSearchControls();runSearch(true);
 }
+function setSearchAccess(value){
+  searchAccess=['all','continue','view','reopen'].includes(value)?value:'all';
+  runSearch(true);
+}
 function queueSearch(reset){clearTimeout(searchTimer);searchTimer=setTimeout(()=>runSearch(reset),180);}
 function searchParams(cursor){
   const params=new URLSearchParams({q:searchFilters.query,provider:searchFilters.provider,
@@ -36,6 +44,12 @@ function searchHasCriteria(){return Boolean(searchFilters.query.trim()||searchFi
 function renderSearchStatus(){
   const el=$('#searchstatus'),warnings=$('#searchwarnings'),s=searchStatusData;
   if(!el)return;
+  if(searchFilters.kind==='session'){
+    // Session results come from the durable ledger, not the transcript index —
+    // index progress is irrelevant here. Show the flat-list count instead.
+    el.innerHTML=`<span>${historyCount(last||{sessions:[]})}</span><span>${searchFilters.query.trim()||searchAccess!=='all'||searchFilters.provider?'filtered':'no query — chronological'}</span>`;
+    if(warnings)warnings.innerHTML='';return;
+  }
   if(!s){el.innerHTML='<span>Checking the local index…</span>';if(warnings)warnings.innerHTML='';return;}
   if(!s.ok){el.innerHTML=`<span class="searcherror">${esc(s.error||'Search unavailable')}</span>`;if(warnings)warnings.innerHTML='';return;}
   const warning=(s.errors||0)+(s.malformed_rows||0)+(s.unknown_rows||0)+(s.oversized_docs||0);
@@ -64,6 +78,15 @@ function searchWhen(value){
 }
 function renderSearchResults(){
   const el=$('#searchresults'),more=$('#searchmore');if(!el||!more)return;
+  const chips=$('#searchsessionchips');
+  if(chips){
+    chips.hidden=searchFilters.kind!=='session';
+    chips.querySelectorAll('[data-search-access]').forEach(button=>{
+      const active=button.dataset.searchAccess===searchAccess;
+      button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));
+    });
+  }
+  if(searchFilters.kind==='session')return renderSessionResults(el,more);
   if(searchError&&!searchItems.length){el.innerHTML=`<div class="searchempty searcherror">${esc(searchError)} <button onclick="runSearch(true)">retry</button></div>`;more.hidden=true;return;}
   if(searchBusy&&!searchItems.length){el.innerHTML='<div class="searchempty">Searching…</div>';more.hidden=true;return;}
   if(!searchItems.length){el.innerHTML=`<div class="searchempty">${searchHasCriteria()?
@@ -87,9 +110,67 @@ function updateSearchProjects(projects){
   if(searchProjects.includes(current))select.value=current;
   else{searchFilters.project='';select.value='';}
 }
+// ---- TYPE=SESSION: the flat chronological session list (History replacement) --
+function sessionResultRow(item){
+  const sid=String(item.session_id||''),encoded=enc(sid);
+  const isClosed=item.closed_at!=null&&!item.capabilities;
+  const badge=isClosed?'closed':(item.reason_label==='External'||item.primary_action==='view')?'external':'inactive';
+  const activity=item.activity_at||item.last_seen||item.closed_at||((last&&last.t)||0);
+  const title=item.title||item.name||item.project||'Session';
+  const meta=[item.project,item.branch&&item.branch!=='HEAD'?item.branch:'',item.provider||'claude',
+    item.primary_action==='view'?'view only':''].filter(Boolean).join(' · ');
+  const canReopen=isClosed&&item.can_reopen;
+  return`<div class="searchresult sessionresult" data-history-sid="${esc(sid)}" role="button" tabindex="0"
+      onclick="${isClosed?`openClosed(decodeURIComponent('${encoded}'))`:`primarySessionAction(decodeURIComponent('${encoded}'))`}"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+    <span class="sessionbadge ${esc(badge)}">${badge==='closed'?'Closed':badge==='external'?'External':'Inactive'}</span>
+    <span class="searchcopy"><span class="searchtitle"><b>${esc(title)}</b></span>
+      <span class="searchmeta">${esc(meta)}</span></span>
+    <span class="sessionresultside">
+      ${isClosed?`<button class="historyaction" onclick="event.stopPropagation();openClosed(decodeURIComponent('${encoded}'))">View</button>
+        ${canReopen?`<button class="historyaction" ${reopenedSessions.has(sid)?'disabled':''} onclick="event.stopPropagation();reopenClosed(decodeURIComponent('${encoded}'),this)">${reopenedSessions.has(sid)?'opened ✓':'Reopen'}</button>`:''}`
+        :`<button class="historyaction" onclick="event.stopPropagation();primarySessionAction(decodeURIComponent('${encoded}'))">${esc(item.primary_action_label||'View')}</button>`}
+      <button class="spin sessionpin${pinnedSessions.has(sid)?' on':''}" ${pinActions.get(sid)?.busy?'disabled':''} aria-label="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
+        title="${pinnedSessions.has(sid)?'unpin session':'pin session'}"
+        onclick="event.stopPropagation();toggleSessionPin(decodeURIComponent('${encoded}'))">⌖</button>
+      <span class="searchtime">${fmtAge(Math.max(0,Math.round(((last&&last.t)||Date.now()/1000)-activity)))} ago</span>
+    </span>
+  </div>`;
+}
+function renderSessionResults(el,more){
+  const items=filteredHistory(last||{sessions:[]});
+  renderSearchStatus();
+  if(!items.length&&!historyLoading){
+    el.innerHTML=historyData.ok?
+      '<div class="searchempty">No matching sessions. Inactive and closed sessions appear here.</div>':
+      `<div class="searchempty searcherror">${esc(historyData.error||'Session history unavailable')} <button onclick="loadHistory(true)">retry</button></div>`;
+    more.hidden=true;return;
+  }
+  el.innerHTML=items.map(sessionResultRow).join('')+
+    (historyLoading?'<div class="ctxload">loading sessions…</div>':'')+
+    (!historyLoading&&!historyData.ok?`<div class="searchempty searcherror">✗ ${esc(historyData.error||'session history unavailable')} <button onclick="loadHistory(${items.length?'false':'true'})">retry</button></div>`:'');
+  more.hidden=historyLoading||historyData.next_cursor==null;
+  more.disabled=historyLoading;
+  const remaining=Math.min(100,Math.max(0,Number(historyData.total||0)-(historyData.items||[]).length));
+  more.textContent=historyLoading?'Loading more…':`Show ${remaining} more`;
+}
+async function runSessionSearch(reset){
+  clearTimeout(searchTimer);
+  if(searchAbort){searchAbort.abort();searchAbort=null;searchBusy=false;}
+  historyFilter=searchFilters.query;
+  historyProvider=searchFilters.provider||'all';
+  historyAccess=searchAccess;
+  const signature=historyParams(0);
+  // Revisiting the destination re-renders the cached list; only changed
+  // criteria refetch page 1, and only Show more loads the next 100 rows.
+  if(reset&&historyLoadedAt&&sessionSearchSignature===signature){renderSearchResults();return;}
+  sessionSearchSignature=signature;
+  await loadHistory(reset);
+}
 async function runSearch(reset=true){
   if(!$('#searchresults'))return;
   syncSearchControls();
+  if(searchFilters.kind==='session')return runSessionSearch(reset);
   clearTimeout(searchTimer);
   if(reset){searchCursor=0;searchItems=[];searchError='';if(searchAbort)searchAbort.abort();}
   if(reset&&!searchHasCriteria()){
