@@ -609,8 +609,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
 45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
     card uses the measured fixed frame `76px + preview_session_lines × 17.9px` on desktop and
-    `100px + lines × 17.9px` on mobile, where the meta rail folds under the content as a 24px
-    footer row (or zero preview rows when session peeks are disabled); the card
+    `100px + lines × 17.9px` on mobile, where the meta rail renders as a 24px inline status row
+    directly under the header (Console 10a — `.cmain{display:contents}` + flex `order`
+    interleave the one `.cmeta` node; never render it twice, which breaks strict-mode
+    locators) (or zero preview rows when session peeks are disabled); the card
     header itself opens Chat (invariant 63). Never put
     `.fixedpeek` on an open card, an explicitly expanded peek, or a card showing a pending request,
     error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
@@ -989,7 +991,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     same wrapper in Chat, Files, unselected Subagents, and Details. Desktop Files/Subagents splits
     persist separate browser-local widths, clamp the list to 220–520px while preserving at least
     320px for the reader, and expose a labelled keyboard-operable separator. Mobile remains list-first
-    and has no divider.
+    and has no divider; once a file is selected, a horizontal file-chip strip above the reader
+    (`#sfilechips`, Console 11e) switches files in place and replaces the back-to-list button —
+    browser Back and the edge swipe still clear the selection per invariant 36.
 
 71. **The browser app's ES modules share one global namespace on `globalThis`.** Shared mutable
     state is declared `globalThis.<name>=…` in its owning module — never a module-level `let`,

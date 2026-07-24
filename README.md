@@ -44,7 +44,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   lock-screen delivery and cadence.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
   Search, Workstreams, Insights, and Settings. At 390×844 and other narrow widths it becomes
-  a fixed bottom bar; Insights and Settings live under More. The URL hash preserves destinations
+  a fixed bottom bar (mono-caps labels, amber active destination and unread badge); Insights and
+  Settings live under More. Mobile session cards render their status — state, model, context,
+  quiet time, agent count — as an inline row directly under the card header. The URL hash preserves destinations
   across refresh and browser/native back gestures (legacy `#history` links land on Search
   TYPE=SESSION). Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
@@ -109,6 +111,8 @@ the provider's native control path. Built 2026-07-13; still evolving.
   contextual composer and one pending-request drawer serve the whole workspace at a stable height.
   On mobile, horizontal swipes move between adjacent sections without wrapping; a right swipe that
   starts at the left edge exits the workspace. Horizontally scrollable readers keep their own gesture.
+  On phones, once a file is open the Files section shows a horizontal file-chip strip above the
+  reader — tap a chip to switch files in place; browser back returns to the file list.
   Main-agent activity appears as the newest non-interactive Chat row. Closed
   sessions show explicit retained/unavailable states; eligible exact-session resumes use a
   text-only, idempotent first send, while external Codex threads remain view-only.
