@@ -1,0 +1,37 @@
+:root {
+  /* radii */
+  --radius-card: 10px;
+  --radius-option: 8px;      /* drawer answer options, event capsules */
+  --radius-control: 7px;     /* buttons, inputs, icon buttons, composer */
+  --radius-badge: 6px;       /* logo tile, small marks */
+  --radius-chip: 5px;        /* needs-attention chip */
+  --radius-bar: 2px;         /* usage bars, drawer grip, tab underline */
+
+  /* structure — fixed widths from the locked layout */
+  --w-rail: 136px;           /* left nav rail */
+  --w-meta-rail: 118px;      /* session-card meta rail (desktop only) */
+  --w-settings-rail: 210px;  /* settings section rail */
+  --w-workspace-min: 650px;  /* splitter bounds for the right pane */
+  --w-workspace-max: 1200px;
+
+  /* spacing scale (observed steps, not a strict grid) */
+  --space-1: 4px; --space-2: 8px; --space-3: 10px; --space-4: 12px;
+  --space-5: 14px; --space-6: 16px; --space-7: 20px; --space-8: 24px;
+  --pad-card: 14px 16px;
+  --pad-button: 8px 14px;
+  --pad-page: 20px;
+
+  /* fixed elements */
+  --dot-status: 7px;         /* section-header status dot */
+  --dot-inline: 6px;         /* inline card/daemon dot */
+  --bar-usage-h: 3px;
+  --icon-button: 30px;       /* ‹ ⤡ ✕ squares; 34px for composer ＋ */
+  --touch-min: 44px;         /* mobile hit target minimum */
+
+  /* borders: 1px hairlines everywhere; 2px only for tab underlines */
+  --hairline: 1px solid var(--line);
+
+  /* usage thresholds (documentation values) */
+  --usage-warn-at: 70;
+  --usage-critical-at: 90;
+}

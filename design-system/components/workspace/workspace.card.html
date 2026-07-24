@@ -1,0 +1,35 @@
+<!-- @dsCard group="Components" viewport="700x560" name="Workspace" subtitle="ChatMessage roles, QuestionDrawer, Composer" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="../../ds-preview.js"></script>
+</head><body style="margin:0;padding:16px"><div id="root"></div>
+<script type="text/plain" id="__jsx">
+const { ChatMessage, Composer, QuestionDrawer } = NS;
+function Demo() {
+  const [draft, setDraft] = React.useState('');
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:0,border:'1px solid var(--line)',borderRadius:10,overflow:'hidden'}}>
+      <div style={{padding:16,display:'flex',flexDirection:'column',gap:10,background:'#0B0A08'}}>
+        <ChatMessage role="user" receipt="delivered">Ship the release when the checks pass.</ChatMessage>
+        <ChatMessage role="tool">▸ ran test:gates — exit 0 · 41s</ChatMessage>
+        <ChatMessage role="agent">Checks are green. Before promoting, I need a decision on the deploy order.</ChatMessage>
+      </div>
+      <QuestionDrawer title="DEPLOY ORDER — WAITING ON YOU" page="1 OF 1" question="Which deployment target should the release script promote first?"
+        options={[{label:'Staging first',desc:'verify API identity, then production',rec:true},{label:'Production directly'},{label:'Hold the release'}]} />
+      <div style={{padding:'10px 14px',background:'#0B0A08',borderTop:'1px solid var(--line)'}}>
+        <Composer value={draft} onChange={setDraft} />
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+</script>
+<script>
+window.__dsReady.then(NS => {
+  const src = document.getElementById('__jsx').textContent;
+  const code = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  new Function('NS', 'React', 'ReactDOM', code)(NS, window.React, window.ReactDOM);
+});
+</script></body></html>

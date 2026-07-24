@@ -1,0 +1,86 @@
+/* Fleet Dash "Console" palette. Dark is the default theme; scope [data-theme="light"] for paper mode.
+   Status hues are load-bearing: amber = needs you / approaching limits, green = working/ok,
+   red = stalled/failed/limit-reached, purple = model names, blue = interactive/primary data. */
+:root {
+  /* base — surfaces & lines */
+  --bg: #0E0D0B;
+  --surface-card: #14120E;
+  --surface-input: #12100D;
+  --surface-raised: #1A1712;   /* user chat bubble */
+  --line: #262219;             /* default 1px hairline */
+  --line-soft: #2A261F;        /* bubble borders */
+  --line-input: #3A311E;       /* inputs, icon-button borders, drawer grip */
+  /* base — text */
+  --fg: #EDE8DF;
+  --fg-dim-1: #9A917F;         /* metadata, icon glyphs */
+  --fg-dim-2: #8F8878;         /* peek text, agent descriptions */
+  --fg-dim-3: #7E7666;         /* quiet time, section labels, rail items */
+  /* base — semantic accents */
+  --amber: #E5A83B;
+  --green: #6FBF5F;
+  --red: #E5604F;
+  --purple: #B99AE8;
+  --blue: #7FA9E0;
+  --surface-button: #17140F;    /* secondary buttons, menus */
+  --surface-hover: #1E1A13;     /* hover step for rows/menu items */
+  --surface-workspace: #0B0A08; /* right-pane background */
+  --fg-bright: #CFC8BA;         /* agent names, claude bubble text */
+  --needs-you-wash: linear-gradient(180deg,#1D170C,#171310); /* the ONLY gradient in the system */
+  /* tinted companions */
+  --amber-border: #4A3A1C;
+  --amber-surface: #151109;
+  --amber-tint: rgba(229,168,59,.07);
+  --green-border: #2E4A26;
+  --green-tint: rgba(111,191,95,.05);
+  --blue-border: #2A3547;
+
+  /* semantic aliases */
+  --status-needs-you: var(--amber);
+  --status-working: var(--green);
+  --status-problem: var(--red);       /* stalled, failed, limit reached */
+  --status-model: var(--purple);
+  --status-interactive: var(--blue);
+  --text-body: var(--fg);
+  --text-meta: var(--fg-dim-1);
+  --text-peek: var(--fg-dim-2);
+  --text-label: var(--fg-dim-3);
+  --surface-page: var(--bg);
+  --btn-primary-bg: var(--fg);        /* primary buttons are fg-on-bg inversions */
+  --btn-primary-fg: var(--bg);
+  --usage-warn: var(--amber);         /* ≥70% */
+  --usage-critical: var(--red);       /* ≥90% */
+}
+
+[data-theme="light"] {
+  --bg: #F5F2EB;
+  --surface-card: #FFFFFF;
+  --surface-input: #FFFFFF;
+  --surface-raised: #F0EDE4;   /* also the rail background in light */
+  --line: #E3DDD1;
+  --line-soft: #E3DDD1;
+  --line-input: #D9B36A;
+  --surface-button: #FFFFFF;
+  --surface-hover: #ECE7DC;
+  --surface-workspace: #EFEBE2;
+  --fg-bright: #3B362C;
+  --needs-you-wash: linear-gradient(180deg,#FBF3E2,#FFFFFF);
+  --fg: #1C1A16;
+  --fg-dim-1: #6E675C;
+  --fg-dim-2: #3B362C;
+  --fg-dim-3: #8A8272;
+  --amber: #B97F16;
+  --green: #3E7D33;
+  --red: #B23A2C;
+  --purple: #6D4FA8;
+  --blue: #2E66B0;
+  --amber-border: #D9B36A;
+  --amber-surface: #FBF3E2;
+  --amber-tint: rgba(185,127,22,.08);
+  --green-border: #A8CCA0;
+  --green-tint: rgba(62,125,51,.06);
+  --blue-border: #B9CBE4;
+  --red-border: #DFA69E;
+  --btn-primary-bg: #1C1A16;
+  --btn-primary-fg: #F5F2EB;
+}
+:root { --red-border: #5C2A22; }

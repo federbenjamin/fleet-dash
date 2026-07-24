@@ -1,0 +1,60 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Fleet Dash "Console" — design system</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body{margin:0;padding:28px 32px 60px;background:var(--bg)}
+  h1{font:600 22px 'Space Grotesk',sans-serif;color:var(--fg);margin:0 0 4px}
+  .sub{font:400 11px 'IBM Plex Mono',monospace;color:var(--fg-dim-2);margin:0 0 28px}
+  h2{font:600 10px 'IBM Plex Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--fg-dim-3);margin:34px 0 12px}
+  .grid{display:flex;flex-wrap:wrap;gap:16px}
+  .card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface-card)}
+  .card header{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+  .card header b{font:600 12px 'Space Grotesk',sans-serif;color:var(--fg)}
+  .card header span{font:400 9.5px 'IBM Plex Mono',monospace;color:var(--fg-dim-3)}
+  iframe{display:block;border:0;background:var(--bg)}
+  a.kit{font:500 11px 'IBM Plex Mono',monospace;letter-spacing:.06em}
+</style></head><body>
+<h1>Fleet Dash "Console" — design system</h1>
+<p class="sub">tokens: styles.css · guide: readme.md · components: components/ · interactive kit: <a class="kit" href="ui_kits/fleet-dash/index.html">ui_kits/fleet-dash</a></p>
+
+<h2>Colors</h2>
+<div class="grid">
+  <div class="card"><header><b>Surfaces &amp; hairlines</b></header><iframe src="guidelines/colors-surfaces.html" width="700" height="130"></iframe></div>
+  <div class="card"><header><b>Text steps</b></header><iframe src="guidelines/colors-text.html" width="700" height="120"></iframe></div>
+  <div class="card"><header><b>Semantic accents</b></header><iframe src="guidelines/colors-accents.html" width="700" height="130"></iframe></div>
+  <div class="card"><header><b>State tints &amp; borders</b></header><iframe src="guidelines/colors-tints.html" width="700" height="120"></iframe></div>
+  <div class="card"><header><b>Light theme</b><span>"paper"</span></header><iframe src="guidelines/colors-light.html" width="700" height="130"></iframe></div>
+</div>
+
+<h2>Type</h2>
+<div class="grid">
+  <div class="card"><header><b>Space Grotesk</b><span>human register</span></header><iframe src="guidelines/type-ui.html" width="700" height="170"></iframe></div>
+  <div class="card"><header><b>IBM Plex Mono</b><span>machine register</span></header><iframe src="guidelines/type-mono.html" width="700" height="170"></iframe></div>
+  <div class="card"><header><b>Casing semantics</b></header><iframe src="guidelines/type-casing.html" width="700" height="120"></iframe></div>
+</div>
+
+<h2>Spacing &amp; structure</h2>
+<div class="grid">
+  <div class="card"><header><b>Radius scale</b></header><iframe src="guidelines/spacing-radii.html" width="700" height="130"></iframe></div>
+  <div class="card"><header><b>Structural widths</b></header><iframe src="guidelines/spacing-structure.html" width="700" height="150"></iframe></div>
+</div>
+
+<h2>Status</h2>
+<div class="grid">
+  <div class="card"><header><b>Dots &amp; usage bars</b><span>amber ≥70 · red ≥90</span></header><iframe src="guidelines/status-dots-bars.html" width="700" height="140"></iframe></div>
+  <div class="card"><header><b>Section headers</b></header><iframe src="guidelines/status-sections.html" width="700" height="130"></iframe></div>
+</div>
+
+<h2>Brand</h2>
+<div class="grid">
+  <div class="card"><header><b>Mark &amp; wordmark</b><span>no drawn logo</span></header><iframe src="guidelines/brand-mark.html" width="700" height="120"></iframe></div>
+  <div class="card"><header><b>Icon glyphs</b><span>unicode, no icon set</span></header><iframe src="guidelines/brand-glyphs.html" width="700" height="130"></iframe></div>
+</div>
+
+<h2>Components</h2>
+<div class="grid">
+  <div class="card"><header><b>Core</b><span>Button · IconButton · Chip · SectionHeader · StatusDot · UsageBar · Tabs · Receipt</span></header><iframe src="components/core/core.card.html" width="700" height="300"></iframe></div>
+  <div class="card"><header><b>Session</b><span>SessionCard · AgentRow · QuestionCard · ApprovalCard</span></header><iframe src="components/session/session.card.html" width="700" height="630"></iframe></div>
+  <div class="card"><header><b>Workspace</b><span>ChatMessage · QuestionDrawer · Composer</span></header><iframe src="components/workspace/workspace.card.html" width="700" height="560"></iframe></div>
+  <div class="card"><header><b>Shell</b><span>NavRail · NotificationRow</span></header><iframe src="components/shell/shell.card.html" width="700" height="420"></iframe></div>
+</div>
+</body></html>

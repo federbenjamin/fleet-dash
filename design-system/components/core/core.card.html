@@ -1,0 +1,51 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Core" subtitle="Button, IconButton, Chip, SectionHeader, StatusDot, UsageBar, Tabs, Receipt" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="../../ds-preview.js"></script>
+</head><body style="margin:0;padding:16px"><div id="root"></div>
+<script type="text/plain" id="__jsx">
+const { Button, IconButton, Chip, SectionHeader, StatusDot, UsageBar, Tabs, Receipt } = NS;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <div style={{display:'flex',flexDirection:'column',gap:14}}>
+    <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+      <Button variant="primary">Spawn session</Button>
+      <Button>Open terminal</Button>
+      <Button small>Approve once</Button>
+      <Button variant="amber" small>Queue message</Button>
+      <Button variant="danger" small>Deny</Button>
+      <Button small disabled>Rebuild</Button>
+      <IconButton glyph="＋" size={34} />
+      <IconButton glyph="⋮" />
+      <IconButton glyph="⤡" active />
+      <IconButton glyph="✕" />
+    </div>
+    <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+      <Chip active>TYPE · SESSION ▾</Chip><Chip>PROVIDER ▾</Chip><Chip>PROJECT ▾</Chip>
+      <Chip active tone="purple">fable-5</Chip><Chip active>med effort</Chip><Chip>worktree off</Chip>
+    </div>
+    <div style={{display:'flex',gap:22,alignItems:'center',flexWrap:'wrap'}}>
+      <SectionHeader label="NEEDS YOU" count={2} tone="amber" />
+      <SectionHeader label="WORKING" count={3} tone="green" />
+      <SectionHeader label="AVAILABLE" count={0} tone="dim" />
+      <Tabs items={['CHAT','FILES','AGENTS','DETAILS']} active="CHAT" />
+    </div>
+    <div style={{display:'flex',gap:20,alignItems:'center'}}>
+      <div style={{flex:1}}><UsageBar pct={28} /></div>
+      <div style={{flex:1}}><UsageBar pct={75} /></div>
+      <div style={{flex:1}}><UsageBar pct={93} /></div>
+    </div>
+    <div style={{display:'flex',gap:20,flexWrap:'wrap'}}>
+      <Receipt state="delivered" /><Receipt state="sending" /><Receipt state="queued" /><Receipt state="offline" />
+    </div>
+  </div>
+);
+</script>
+<script>
+window.__dsReady.then(NS => {
+  const src = document.getElementById('__jsx').textContent;
+  const code = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  new Function('NS', 'React', 'ReactDOM', code)(NS, window.React, window.ReactDOM);
+});
+</script></body></html>

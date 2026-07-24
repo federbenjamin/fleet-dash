@@ -1,0 +1,32 @@
+<!-- @dsCard group="Components" viewport="700x630" name="Session" subtitle="SessionCard states, AgentRow tree, QuestionCard, ApprovalCard" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="../../ds-preview.js"></script>
+</head><body style="margin:0;padding:16px"><div id="root"></div>
+<script type="text/plain" id="__jsx">
+const { SessionCard, AgentRow, QuestionCard, ApprovalCard } = NS;
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <div style={{display:'flex',flexDirection:'column',gap:10}}>
+    <SessionCard title="Explain the three needs of judgments" repo="quirk · refactor/offset-op-lock" status="working" model="opus-4-8" ctx={28} quiet="7s" agentCount={2} peek="All gates green (type-check, format, lint 0 errors, test:gates exit 0). Committing C on the follow-up branch…">
+      <div style={{display:'flex',flexDirection:'column',gap:6,marginLeft:4,borderLeft:'1px solid var(--line-soft)',paddingLeft:12}}>
+        <AgentRow name="explore" desc="scanning fixture server routes" model="haiku · low">
+          <AgentRow name="reader" desc="codex_adapter.py §threads" model="haiku · low" />
+        </AgentRow>
+        <AgentRow name="test-runner" desc="test:gates on follow-up branch" model="sonnet · med" />
+      </div>
+    </SessionCard>
+    <SessionCard title="fixture-server benchmarks" repo="fleet-dash · perf/bench" status="stalled" model="fable-5" ctx={62} quiet="6m 12s" peek="Benchmarks queued. Long-running; pinned so it stays above the fold." pinned />
+    <QuestionCard session="design-probe — deploy order" meta="fleet-dash · main · claude" question="Which deployment target should the release script promote first?" optionCount={3} recommended="Staging first" quiet="quiet 2m" />
+    <ApprovalCard session="fixture-server" meta="fleet-dash · main" command="rm -rf node_modules && npm ci" quiet="quiet 40s" />
+  </div>
+);
+</script>
+<script>
+window.__dsReady.then(NS => {
+  const src = document.getElementById('__jsx').textContent;
+  const code = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  new Function('NS', 'React', 'ReactDOM', code)(NS, window.React, window.ReactDOM);
+});
+</script></body></html>
