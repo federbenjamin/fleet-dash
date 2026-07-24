@@ -581,5 +581,72 @@ class ScanAgentsTests(EngineFixture):
         self.assertEqual(agents[0]["state"], "ended")
 
 
+class ScanLockScopeTests(EngineFixture):
+    """scan_lock covers the Tail fold and nothing else.
+
+    Holding it for the whole scan made an /api/act freshness re-poll wait out
+    every unrelated phase — measured on production 2026-07-24 as 30.3 ms of Tail
+    folding inside a 723.6 ms scan.
+    """
+
+    def observe(self):
+        """Record whether scan_lock is held at three points in one scan."""
+        held = {}
+        engine = self.engine
+        real_drain, real_status = engine.drain_stats, engine.session_status_line
+        real_organize = engine.organize_session
+
+        def drain(tail):
+            held["fold"] = engine.scan_lock.locked()
+            return real_drain(tail)
+
+        def status_line(session, tail):
+            held["status_line"] = engine.scan_lock.locked()
+            return real_status(session, tail)
+
+        def organize(session, now):
+            held["after_fold"] = engine.scan_lock.locked()
+            held["serialized"] = engine.scan_serialize.locked()
+            return real_organize(session, now)
+
+        with mock.patch.object(engine, "drain_stats", drain), \
+                mock.patch.object(engine, "session_status_line", status_line), \
+                mock.patch.object(engine, "organize_session", organize):
+            engine.scan()
+        return held
+
+    def test_fold_is_locked_and_the_rest_is_not(self):
+        held = self.observe()
+        self.assertTrue(held["fold"], "the Tail fold must stay serialized")
+        self.assertTrue(held["status_line"], "the one later Tail read re-takes it")
+        self.assertFalse(held["after_fold"],
+                         "post-fold phases must not hold up an act() re-poll")
+        self.assertTrue(held["serialized"], "one _scan at a time is still enforced")
+
+    def test_an_act_repoll_does_not_wait_for_the_whole_scan(self):
+        """The lock is free while the scan does its non-Tail work."""
+        engine, acquired = self.engine, []
+        real_organize = engine.organize_session
+
+        def organize(session, now):
+            # stands in for the codex/operations/history phases: no Tail here
+            acquired.append(engine.scan_lock.acquire(timeout=0.5))
+            if acquired[-1]:
+                engine.scan_lock.release()
+            return real_organize(session, now)
+
+        with mock.patch.object(engine, "organize_session", organize):
+            engine.scan()
+        self.assertTrue(acquired and all(acquired))
+
+    def test_lock_hold_time_is_published_and_shorter_than_the_scan(self):
+        self.engine.scan()
+        diagnostics = self.engine.snapshot_cache["diagnostics"]
+        self.assertGreaterEqual(diagnostics["scan_wait_ms"], 0)
+        self.assertGreaterEqual(diagnostics["scan_lock_held_ms"], 0)
+        # the number this split exists to shrink: what an act() re-poll can wait
+        self.assertLessEqual(diagnostics["scan_lock_held_ms"], diagnostics["scan_ms"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -241,6 +241,16 @@ Also: give each `Tail` its own lock so the act path's freshness re-poll waits on
 rather than the fleet-wide `scan_lock` (541–911 ms). `_scan` must then acquire per-session locks in a
 fixed order.
 
+**SHIPPED 2026-07-24, and simpler than this — per-session locks were not needed.** Measuring the
+scan phases on production first showed the Tail fold is 30.3 ms of a 723.6 ms scan: the lock was
+held ~24× longer than anything it protects, because it wrapped the whole call. Narrowing it to the
+fold (`_scan_claude_sessions` locked, `_scan_after_fold` unlocked, one short re-acquire for the
+status-strip Tail read) took the act re-poll's worst case from the p95 1141 ms to 32.3 ms — 4.4%
+of the scan, measured live on 49 sessions. Per-session locks would take that 32 ms to ~1 ms for
+considerably more concurrency surface, so they stay unbuilt until something shows 32 ms matters.
+`Engine.scan_serialize` preserves the one-scan-at-a-time guarantee the wide lock gave for free, and
+`scan_lock_held_ms` is published in `/api/diagnostics` so the number stays visible.
+
 This *improves* invariant 66 rather than weakening it: today a dropped connection mid-fetch yields
 "delivery uncertain" with nothing durable behind it. A receipt survives reload, backgrounding,
 network loss and daemon restart.

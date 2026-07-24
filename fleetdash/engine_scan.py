@@ -641,12 +641,18 @@ class ScanOps:
 
     def scan(self):
         started = time.perf_counter()
-        with self.scan_lock:
-            acquired = time.perf_counter()
+        # `scan_serialize` keeps one _scan at a time — a guarantee scan_lock used
+        # to provide by covering the whole call. scan_lock itself is now taken
+        # only around Tail work inside _scan, so an /api/act freshness re-poll
+        # waits ~30 ms for the fold instead of ~600 ms for the whole scan
+        # (measured on production 2026-07-24: claude 30.3 ms of 723.6 ms, the
+        # rest being codex 448.1, operations 128.1, closed_history 67.1,
+        # live_ledger 42.4 — none of which touch a Tail).
+        with self.scan_serialize:
             fleet = self._scan()
         self._schedule_image_cleanup()
         elapsed = (time.perf_counter() - started) * 1000
-        wait_ms = (acquired - started) * 1000
+        wait_ms = self._scan_fold_wait_ms
         self.scan_timings_ms.append(elapsed)
         self.scan_wait_timings_ms.append(wait_ms)
         ordered = sorted(self.scan_timings_ms)
@@ -662,6 +668,7 @@ class ScanOps:
             "scan_p95_ms": round(percentile(.95), 3),
             "scan_wait_ms": round(wait_ms, 3),
             "scan_wait_p95_ms": round(wait_percentile(.95), 3),
+            "scan_lock_held_ms": round(self._scan_lock_held_ms, 3),
             "scan_samples": len(ordered),
             "state_journal_ms": round(self.last_state_journal_ms, 3),
             "phases_ms": phases,
@@ -693,6 +700,26 @@ class ScanOps:
         sessions = []
         claude_tails = {}
         live_claude_ids = set()
+        # Tails are stateful byte offsets: every fold, here and in act(), stays
+        # serialized by scan_lock. Only this loop folds them, so only this loop
+        # holds it (invariant 24/43); the phases after it touch no Tail.
+        fold_wait_started = time.perf_counter()
+        self.scan_lock.acquire()
+        held_started = time.perf_counter()
+        self._scan_fold_wait_ms = (held_started - fold_wait_started) * 1000
+        try:
+            self._scan_claude_sessions(sessions, claude_tails, live_claude_ids, now, cfg)
+        finally:
+            self.scan_lock.release()
+        # Published as `scan_lock_held_ms`: how long an act() re-poll could have
+        # been blocked by this scan. It is the number this split exists to shrink.
+        self._scan_lock_held_ms = (time.perf_counter() - held_started) * 1000
+        phase("claude")
+        return self._scan_after_fold(sessions, claude_tails, live_claude_ids,
+                                     now, cfg, phase, phases)
+
+    def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg):
+        """Fold every live Claude transcript. Runs under scan_lock."""
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
             live_claude_ids.add(sid)
@@ -931,7 +958,14 @@ class ScanOps:
                     "spawn_agent": True,
                     "relay_agent": True, "account_usage": True, "exact_cost": True},
             })
-        phase("claude")
+
+    def _scan_after_fold(self, sessions, claude_tails, live_claude_ids,
+                         now, cfg, phase, phases):
+        """Everything the scan does once no Tail is touched again.
+
+        Runs WITHOUT scan_lock. The single later Tail read — the status strip —
+        re-takes it below; nothing else here reads a Tail.
+        """
         self.registry_status_since = {
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
@@ -1017,9 +1051,18 @@ class ScanOps:
         sessions.extend(codex_sessions)
         phase("codex")
         muted = self.cfg.get("muted_sessions") or {}
+        # The only Tail read left in the scan. `status_metrics` reads folded
+        # counters without polling, but a concurrent act() fold would still tear
+        # them, so re-take scan_lock for exactly this pass.
+        status_started = time.perf_counter()
+        with self.scan_lock:
+            status_lines = {
+                id(session): self.session_status_line(
+                    session, claude_tails.get(session.get("session_id")))
+                for session in sessions}
+        self._scan_lock_held_ms += (time.perf_counter() - status_started) * 1000
         for session in sessions:
-            session["status_line"] = self.session_status_line(
-                session, claude_tails.get(session.get("session_id")))
+            session["status_line"] = status_lines[id(session)]
             session["muted"] = session["session_id"] in muted
             self.organize_session(session, now)
         group_order = {"needs_you": 0, "working": 1, "available": 2, "history": 3}

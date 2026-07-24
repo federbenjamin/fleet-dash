@@ -116,6 +116,12 @@ class Engine(StagingOps,
         self.lock = threading.Lock()
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time
+        # One _scan at a time. scan_lock used to give this for free by wrapping
+        # the whole call; it now covers only the Tail fold, so the serialization
+        # the scan itself relies on needs its own lock.
+        self.scan_serialize = threading.Lock()
+        self._scan_fold_wait_ms = 0.0
+        self._scan_lock_held_ms = 0.0
         self.snapshot_cache = {}
         # Read-only HTTP context/file requests consume immutable bounded
         # projections from the last completed scan. They must not wait behind
