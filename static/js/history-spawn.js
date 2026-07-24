@@ -1,8 +1,10 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,renderWorkstreams,renderQueue,toggleHistory,setHistoryFilter,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,queueHistoryFilter,historyItems,matchesHistoryFilter,filteredHistory,updateHistoryRows,filterChips,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,newSection,doSpawn,startSpawn,doScheduleNew,checkSpawn,historySection,historyCount,historyRows,historyRow,toggle,togglePeek,togglePeekFromTap,schedulePeekOverflow});
-globalThis.historyFilter=draftValue('filter:history');globalThis.historyAccess='all';globalThis.historyProvider='all';
+Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,workstreamLiveRow,renderWorkstreams,renderQueue,toggleHistory,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,historyItems,matchesHistoryFilter,filteredHistory,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewEffort,changeNewMode,changeNewPermission,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,renderNewSessionPane,newSection,spawnChips,newSessionFormHtml,persistQuickSpawns,quickSpawnKey,recordQuickSpawn,quickSpawnList,applyQuickSpawn,toggleQuickSpawnPin,doSpawn,startSpawn,doScheduleNew,checkSpawn,historyCount,historyRow,toggle,togglePeek,togglePeekFromTap,schedulePeekOverflow});
+// The flat session list is Search TYPE=SESSION; these globals feed it from the
+// search query/provider/access controls (runSessionSearch keeps them in step).
+globalThis.historyFilter='';globalThis.historyAccess='all';globalThis.historyProvider='all';
 globalThis.historyData={ok:true,items:[],next_cursor:0,total:0};;
-globalThis.historyLoading=false;globalThis.historyLoadedAt=0;globalThis.historyAbort=null;globalThis.historyFilterTimer=null;
+globalThis.historyLoading=false;globalThis.historyLoadedAt=0;globalThis.historyAbort=null;
 globalThis.closedIds=new Set();
 const closedMeta=new Map();
 const historyInfoOpen=new Set();
@@ -88,6 +90,17 @@ function workstreamSessionRow(session){
     <span class="worksessioncopy"><b>${esc(title)}</b><small>${esc(session.reason_label||'History')} · ${esc(session.provider||'claude')}${session.branch?` · ${esc(session.branch)}`:''}</small></span>
     <button class="historyaction" onclick="${closed?`openClosed(decodeURIComponent('${encoded}'))`:`primarySessionAction(decodeURIComponent('${encoded}'))`}">${esc(session.primary_action_label||'View')}</button></div>`;
 }
+function workstreamLiveRow(session){
+  const sid=String(session.session_id||''),encoded=enc(sid);
+  const title=session.title||session.name||session.project||'Session';
+  return`<div class="worklive" role="button" tabindex="0" onclick="primarySessionAction(decodeURIComponent('${encoded}'))"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+    <span class="workstate ${esc(session.ui_group||'working')}"></span>
+    <b>${esc(title)}</b>
+    ${session.branch?`<span class="worklivebranch">${esc(session.branch)}</span>`:''}
+    <span class="worklivemeta">${esc([session.provider||'claude',session.reason_label||''].filter(Boolean).join(' · '))}</span>
+  </div>`;
+}
 function renderWorkstreams(f){
   const el=$('#workstreams');if(!el)return;
   document.querySelectorAll('[data-work-filter]').forEach(button=>{
@@ -105,21 +118,36 @@ function renderWorkstreams(f){
   el.innerHTML=staleAlert+items.map(item=>{
     const id=enc(item.workstream_id),expanded=workstreamOpen.has(item.workstream_id),counts=item.counts||{};
     const summary=item.repo_summary||{},repository=item.repository||{};
-    const stateCounts=[['needs_you','needs you'],['working','working'],['available','available'],['history','history']]
-      .filter(([key])=>counts[key]).map(([key,label])=>`<span class="wcount ${key}"><b>${counts[key]}</b> ${label}</span>`).join('');
+    const live=(item.sessions||[]).filter(session=>(session.ui_group||'history')!=='history');
+    const liveBranches=new Map();
+    live.forEach(session=>{if(session.branch)liveBranches.set(session.branch,(liveBranches.get(session.branch)||0)+1);});
+    const otherBranches=(item.branches||[]).filter(branch=>!liveBranches.has(branch)).length;
+    const pills=[['needs_you','needs you'],['working','working'],['available','available'],['history','history']]
+      .filter(([key])=>counts[key]).map(([key,label])=>`<span class="workpill ${key}">${counts[key]} ${label}</span>`).join('');
     const cost=item.cost_scope==='unavailable'?'cost unavailable':
-      `${fmt$(item.cost)}${item.cost_scope==='partial'?' partial':''}`;
+      `${fmt$(item.cost)}${item.cost_scope==='partial'?' <i>partial</i>':''}`;
     const context=item.context_tokens==null?'context unavailable':`${fmtTok(item.context_tokens)} context now`;
     return`<section class="workstream ${item.missing?'missing':''}" data-workstream-id="${esc(item.workstream_id)}">
-      <button class="workhead" onclick="toggleWorkstream(decodeURIComponent('${id}'))">
-        <span class="workkind">${item.kind==='git'?'git':item.kind==='unknown'?'?':'dir'}</span><span class="worktitle"><b>${esc(item.title)}${item.missing?' · missing':''}${item.stale?' · stale':''}</b><small>${esc(item.root)}</small></span>
-        <span class="workcounts">${stateCounts||'<span class="wcount">no sessions</span>'}</span><span class="chev">${expanded?'⌃':'⌄'}</span></button>
-      <div class="worksummary"><span>${(item.providers||[]).map(esc).join(' · ')||'provider unavailable'}</span>
-        <span>${(item.branches||[]).map(branch=>`<code>${esc(branch)}</code>`).join(' ')||'branch unavailable'}</span>
-        <span>${esc(cost)} · ${esc(context)}</span></div>
-      <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
-      <div class="worksignals"><span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>${esc(String(item.budget_state||'not_configured').replaceAll('_',' '))}</b></span>
-        ${safeGithubUrl(repository.github_url)?`<a class="repoopen" href="${esc(safeGithubUrl(repository.github_url))}" target="_blank" rel="noopener">GitHub ↗</a>`:''}</div>
+      <div class="workheadrow">
+        <button class="workhead" aria-expanded="${expanded}" onclick="toggleWorkstream(decodeURIComponent('${id}'))">
+          <span class="workkind ${item.kind==='git'?'git':''}">${item.kind==='git'?'GIT':item.kind==='unknown'?'?':'DIR'}</span>
+          <span class="worktitle"><b>${esc(item.title)}${item.missing?' <i>· missing</i>':''}${item.stale?' <i>· stale</i>':''}</b>
+            <small>${esc(item.root)} · ${(item.providers||[]).map(esc).join(' · ')||'provider unavailable'}</small></span>
+        </button>
+        <span class="workheadside">${pills||'<span class="workpill">no sessions</span>'}
+          ${safeGithubUrl(repository.github_url)?`<a class="repoopen" href="${esc(safeGithubUrl(repository.github_url))}" target="_blank" rel="noopener">GitHub ↗</a>`:''}
+          <button class="workchev" aria-expanded="${expanded}" aria-label="${expanded?'collapse':'expand'} workstream detail" onclick="toggleWorkstream(decodeURIComponent('${id}'))">${expanded?'▴':'▾'}</button></span>
+      </div>
+      <div class="workbody">
+        <div class="workbranches">${[...liveBranches.entries()].map(([branch,count])=>
+            `<span class="workbranch"><code>${esc(branch)}</code> · ${count} session${count===1?'':'s'}</span>`).join('')}
+          ${otherBranches?`<span class="workbranchother">${otherBranches} other branch${otherBranches===1?'':'es'} only in history</span>`:
+            liveBranches.size?'':'<span class="workbranchother">branch unavailable</span>'}</div>
+        ${live.map(workstreamLiveRow).join('')}
+        <div class="workoutcome"><b>Latest</b><span>${esc(item.latest_outcome||'No outcome recorded')}</span></div>
+        <div class="worksignals"><span>${cost.startsWith('cost')?esc(cost):cost}</span><span>${esc(context)}</span>
+          <span>Changes <b>${esc(summary.changed_files||'not observed')}</b></span><span>Tests <b>${esc(String(summary.tests||'not observed').replaceAll('_',' '))}</b></span><span>PR <b>${esc(String(summary.pull_request||'not observed').replaceAll('_',' '))}</b></span><span>Budget <b>${esc(String(item.budget_state||'not_configured').replaceAll('_',' '))}</b></span></div>
+      </div>
       ${expanded?`<div class="workdetail"><div class="worktrees"><b>Worktrees</b>${(item.worktrees||[]).map(path=>`<code>${esc(path)}</code>`).join('')}</div>
         <div class="worksessions">${(item.sessions||[]).map(workstreamSessionRow).join('')}</div></div>`:''}</section>`;
   }).join('');
@@ -138,11 +166,7 @@ function renderQueue(el,list,title,subtitle,kind,keepEmpty=false){
 function toggleHistory(encoded){
   const sid=decodeURIComponent(encoded);
   historyInfoOpen.has(sid)?historyInfoOpen.delete(sid):historyInfoOpen.add(sid);
-  updateHistoryRows();
-}
-function setHistoryFilter(kind,value){
-  if(kind==='access')historyAccess=value;else historyProvider=value;
-  loadHistory(true);
+  render(last,true);   // pinned history rows live on the Now surface
 }
 function closedSession(sid){
   return ((last&&last.closed)||[]).find(item=>item.session_id===sid)||
@@ -157,12 +181,9 @@ function historyParams(cursor){
   return params.toString();
 }
 function renderHistoryDestination(){
-  const el=$('#history');if(!el||!last)return;
-  const focused=document.activeElement;
-  if(focused&&focused.tagName==='INPUT'&&el.contains(focused)){
-    updateHistoryRows();
-    const count=el.querySelector('.historycount');if(count)count.textContent=historyCount(last);
-  }else el.innerHTML=historySection(last);
+  // History is decommissioned: the flat session list renders inside Search
+  // under TYPE=SESSION (invariant 31/55 successor surface).
+  if(currentRoute==='search'&&searchFilters.kind==='session')renderSearchResults();
 }
 async function loadHistory(reset=false){
   if(reset&&historyAbort)historyAbort.abort();
@@ -187,10 +208,6 @@ async function loadHistory(reset=false){
     if(historyAbort===controller){historyAbort=null;historyLoading=false;renderHistoryDestination();}
   }
 }
-function queueHistoryFilter(value){
-  historyFilter=value;setDraft('filter:history',value);clearTimeout(historyFilterTimer);
-  historyFilterTimer=setTimeout(()=>loadHistory(true),180);
-}
 function historyItems(f){
   const live=(f.sessions||[]).filter(s=>s.ui_group==='history'&&!pinnedSessions.has(s.session_id));
   const closed=(historyData.items||[]).filter(s=>!pinnedSessions.has(s.session_id));
@@ -207,22 +224,49 @@ function matchesHistoryFilter(item){
 function filteredHistory(f){
   return historyItems(f).filter(matchesHistoryFilter);
 }
-function updateHistoryRows(){
-  const el=document.getElementById('historyrows');
-  if(el&&last)el.innerHTML=historyRows(filteredHistory(last));
-}
-function filterChips(kind,current,items){
-  return`<div class="filterline"><span class="filterlabel">${kind}</span>${items.map(([value,label])=>
-    `<button class="filterchip${current===value?' on':''}" aria-pressed="${current===value}"
-      onclick="setHistoryFilter('${kind.toLowerCase()}','${value}')">${label}</button>`).join('')}</div>`;
-}
 
 // ---- new session -----------------------------------------------------------
-// form state lives in globals: the 2s poll re-renders this section, so anything
-// held only in the DOM (typed path, status line) would be wiped mid-use
-globalThis.newOpen=false;globalThis.newProvider='claude';globalThis.newDir=draftValue('new:directory');globalThis.newModel='';globalThis.newEffort='';globalThis.newMode='plan';globalThis.newPermissionMode='default';globalThis.newWt=true;globalThis.newWtName=draftValue('new:worktree');globalThis.newMessage=draftValue('new:message');globalThis.spawnWait=null;globalThis.spawnMsg='';
+// The spawn form takes the session pane (mockup 8c): #newsess in Now keeps only
+// the entry button, and on spawn the pane becomes the provisional session's
+// chat. Form state lives in globals: the 2s poll re-renders the pane, so
+// anything held only in the DOM (typed path) would be wiped mid-use. There is
+// deliberately NO initial-message field (Console locked decision) — the first
+// message is typed into the live chat, or into the Schedule overlay.
+globalThis.newOpen=false;globalThis.newProvider='claude';globalThis.newDir=draftValue('new:directory');globalThis.newModel='';globalThis.newEffort='';globalThis.newMode='plan';globalThis.newPermissionMode='default';globalThis.newWt=true;globalThis.newWtName=draftValue('new:worktree');globalThis.spawnWait=null;globalThis.spawnMsg='';
 globalThis.spawnProvisional=null;
 const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
+// Quick-spawn recents: device-local, right-click (or long-press context menu)
+// pins a row. Only non-secret spawn configuration is stored.
+const QUICK_SPAWN_KEY='fleet.quickSpawns.v1';
+globalThis.quickSpawns=(()=>{try{const value=JSON.parse(localStorage.getItem(QUICK_SPAWN_KEY)||'[]');
+  return Array.isArray(value)?value.slice(0,12):[];}catch(_){return[];}})();
+function persistQuickSpawns(){try{localStorage.setItem(QUICK_SPAWN_KEY,JSON.stringify(quickSpawns.slice(0,12)));}catch(_){}}
+function quickSpawnKey(item){return`${item.provider}|${item.cwd}`;}
+function recordQuickSpawn(spec){
+  if(!spec?.cwd)return;
+  const key=`${spec.provider}|${spec.cwd}`;
+  const prior=quickSpawns.find(item=>quickSpawnKey(item)===key);
+  const entry={provider:spec.provider,cwd:spec.cwd,model:spec.model||'',effort:spec.effort||'',
+    mode:spec.mode||'',permission_mode:spec.permission_mode||'',worktree:Boolean(spec.worktree),
+    pinned:Boolean(prior?.pinned),at:Date.now()};
+  quickSpawns=[entry,...quickSpawns.filter(item=>quickSpawnKey(item)!==key)].slice(0,12);
+  persistQuickSpawns();
+}
+function quickSpawnList(){return[...quickSpawns].sort((a,b)=>(b.pinned-a.pinned)||(b.at-a.at)).slice(0,4);}
+function applyQuickSpawn(key){
+  const item=quickSpawns.find(row=>quickSpawnKey(row)===key);if(!item)return;
+  newProvider=item.provider==='codex'?'codex':'claude';newDir=item.cwd;
+  newMode=item.mode||'plan';newPermissionMode=item.permission_mode||'default';newWt=item.worktree!==false;
+  setDraft('new:directory',newDir);
+  const repaired=repairSpawnSelection({provider:newProvider,model:item.model||'',effort:item.effort||''});
+  newModel=repaired.model;newEffort=repaired.effort;
+  spawnForecast=null;queueSpawnForecast(0);renderNewSectionNow();
+}
+function toggleQuickSpawnPin(key,event){
+  event?.preventDefault();
+  const item=quickSpawns.find(row=>quickSpawnKey(row)===key);if(!item)return;
+  item.pinned=!item.pinned;persistQuickSpawns();renderNewSectionNow();
+}
 function spawnCatalog(provider){
   return ((((last||{}).models_by_provider||{})[provider])||[]).map(item=>
     typeof item==='string'?{id:item,name:item,efforts:[]}:
@@ -248,7 +292,7 @@ function spawnSnapshot(){
   return{provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
     permission_mode:newProvider==='claude'?newPermissionMode:'',
     worktree:newProvider==='claude'&&newWt,
-    worktree_name:newProvider==='claude'?newWtName:'',message:newMessage.trim()};
+    worktree_name:newProvider==='claude'?newWtName:'',message:''};
 }
 function provisionalSessionObject(){
   const p=spawnProvisional;if(!p)return null;
@@ -302,10 +346,11 @@ function restoreSpawnForm(){
   const p=spawnProvisional;if(!p)return;
   newProvider=p.spec.provider;newDir=p.spec.cwd;newModel=p.spec.model;newEffort=p.spec.effort;
   newMode=p.spec.mode;newPermissionMode=p.spec.permission_mode||'default';newWt=p.spec.worktree;
-  newWtName=p.spec.worktree_name;newMessage=p.spec.message;
-  setDraft('new:directory',newDir);setDraft('new:worktree',newWtName);setDraft('new:message',newMessage);
-  const sid=p.id;spawnProvisional=null;spawnWait=null;newOpen=true;spawnMsg='';
+  newWtName=p.spec.worktree_name;
+  setDraft('new:directory',newDir);setDraft('new:worktree',newWtName);
+  const sid=p.id;spawnProvisional=null;spawnWait=null;spawnMsg='';
   if(sessionView?.sid===sid)closeSession();
+  openNewSessionComposer();
   render(last,true);
 }
 function keepWaitingForSpawn(){
@@ -320,20 +365,63 @@ function retrySpawn(){
   startSpawn(spawnProvisional.spec,spawnProvisional);
 }
 function changeNewProvider(value){
-  newProvider=value;newModel='';newEffort='';spawnForecast=null;queueSpawnForecast(0);renderNewSectionNow();
+  newProvider=value==='codex'?'codex':'claude';newModel='';newEffort='';spawnForecast=null;queueSpawnForecast(0);renderNewSectionNow();
 }
 function changeNewDirectory(value){newDir=value;setDraft('new:directory',value);queueSpawnForecast(120);}
 function changeNewModel(value){newModel=value;if(newEffort&&!spawnEfforts(newProvider,newModel).includes(newEffort))newEffort='';queueSpawnForecast(0);renderNewSectionNow();}
+function changeNewEffort(value){newEffort=value;renderNewSectionNow();}
+function changeNewMode(value){newMode=value==='default'?'default':'plan';renderNewSectionNow();}
+function changeNewPermission(value){newPermissionMode=value;renderNewSectionNow();}
 function changeNewWorktree(value){newWt=value;renderNewSectionNow();}
-function renderNewSectionNow(){const root=$('#newsess');if(root)root.innerHTML=newSection();}
-function openNewSessionComposer(scroll=false){
+function renderNewSectionNow(){
+  if(sessionView?.newForm){renderNewSessionPane(true);return;}
+  const root=$('#newsess');if(root)root.innerHTML=newSection();
+}
+function openNewSessionComposer(){
+  // The spawn form fills the session pane (docked beside the queue on wide
+  // desktops, full-screen on mobile). Opening paints only the pane — never a
+  // synchronous full-fleet render (invariant 55).
+  const feedbackStarted=performance.now();
   newOpen=true;
-  // Opening one local form must not synchronously rebuild every session card.
-  // Commit the pressed/open state first; forecast work remains asynchronous.
-  renderNewSectionNow();
-  if(scroll)requestAnimationFrame(()=>$('#newsess')?.scrollIntoView({behavior:'smooth'}));
+  if(!sessionView?.newForm){
+    const returnHash=sessionView?.returnHash||(parseSessionHash()?'#now':(location.hash||'#now'));
+    sessionView={sid:null,newForm:true,section:'chat',returnHash,historyDepth:0};
+    agentView=null;viewerSid=null;viewerPath=null;
+  }
+  const view=$('#sview');
+  view.style.display='flex';view.classList.add('newform-view');
+  applyWorkspaceChrome();activateWorkspaceSection();syncVisualViewport();syncOverlayHistory();
+  renderNewSessionPane(true);
+  recordInputFeedback(feedbackStarted,'new_session');
+}
+function renderNewSessionPane(force=false){
+  if(!sessionView?.newForm)return;
+  const view=$('#sview');view.classList.add('newform-view');
+  $('#stitle2').innerHTML='<span class="sesstitle"><b>New session</b><small>exact provider spawn · opens in its own terminal</small></span>';
+  $('#sctrl').innerHTML='';$('#sactivity').innerHTML='';
+  $('#sfilecount').textContent='';$('#sagentcount').textContent='';
+  const ae=document.activeElement;
+  if(!force&&ae&&['INPUT','SELECT','TEXTAREA'].includes(ae.tagName)&&view.contains(ae))return;
+  const body=$('#sbody'),keepTop=body.scrollTop;
+  body.innerHTML=`<div class="newpane">${newSessionFormHtml()}</div>`;
+  body.scrollTop=keepTop;
+  delete body.dataset.renderKey;delete body.dataset.canonicalKey;
+  const act=$('#sact');
+  act.classList.remove('session-composer','composer-active','tools-open','question-present');
+  act.innerHTML='';
 }
 function newSection(){
+  return`<button class="newbtn" onclick="openNewSessionComposer()">+ new coding session</button>
+    ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
+    <div class="dsep"></div>`;
+}
+function spawnChips(label,options,current,handler){
+  return`<div class="nfgroup"><span class="nfglabel">${esc(label)}</span><div class="nfchips">${options.map(option=>{
+    const [value,text,cls]=option;
+    return`<button class="nfchip${current===value?' on':''}${cls?' '+cls:''}" aria-pressed="${current===value}"
+      onclick="${handler}(decodeURIComponent('${enc(value)}'))">${esc(text)}</button>`;}).join('')}</div></div>`;
+}
+function newSessionFormHtml(){
   const dirs=(last&&last.recent_dirs)||[];
   const staging=last?.instance?.mode==='staging',stagingSource=last?.instance?.source_root||'';
   if(staging&&stagingSource)newDir=stagingSource;
@@ -341,72 +429,45 @@ function newSection(){
   const catalog=spawnCatalog(newProvider);
   const models=catalog.length?catalog.map(m=>m.id):
     (newProvider==='claude'?((last&&last.models)||[]):[]);
-  const picked=catalog.find(m=>m.id===newModel);
   const efforts=spawnEfforts(newProvider,newModel);
   if(newOpen&&!spawnForecast&&!spawnForecastTimer)queueSpawnForecast();
-  if(!newOpen)
-    return`<button class="newbtn" onclick="openNewSessionComposer()">+ new coding session</button>
-      ${spawnMsg?`<div class="actmsg spawnbanner">${esc(spawnMsg)}</div>`:''}
-      <div class="dsep"></div>`;
   const cur=dirs.find(d=>d.path===newDir);
   const untrusted=!staging&&newDir&&(!cur||!cur.trusted);
+  const recents=quickSpawnList();
   return`<div class="newform">
-    <div class="nfhead">new session <button class="xbtn" onclick="newOpen=false;render(last,true)">✕</button></div>
-    <label class="nflab">provider</label>
-    <select class="nfsel" onchange="changeNewProvider(this.value)">
-      <option value="claude" ${newProvider==='claude'?'selected':''}>Claude Code</option>
-      <option value="codex" ${newProvider==='codex'?'selected':''}>Codex CLI</option>
-    </select>
+    ${recents.length?`<div class="nfgroup"><div class="nfglabelrow"><span class="nfglabel">Quick spawn · recents</span><span class="nfhint">right-click a row to pin it</span></div>
+      <div class="quickspawns">${recents.map(item=>{const key=enc(quickSpawnKey(item));
+        return`<button class="quickspawn${item.pinned?' pinned':''}" onclick="applyQuickSpawn(decodeURIComponent('${key}'))"
+          oncontextmenu="toggleQuickSpawnPin(decodeURIComponent('${key}'),event)">
+          ${item.pinned?'<span class="qspin">⌖</span>':''}<b>${esc(item.cwd.split('/').filter(Boolean).pop()||item.cwd)}</b>
+          <small>${esc([item.provider,item.model||'default model',item.effort,item.provider==='codex'?item.mode:item.permission_mode].filter(Boolean).join(' · '))}</small>
+          <span class="qsfill">Fill form →</span></button>`;}).join('')}</div></div><div class="nfsep"></div>`:''}
     ${staging?`<div class="nfwarn"><b>Isolated staging worktree</b><br>Fleet will create a new disposable branch and worktree from the staging checkout. Production sessions remain view only.</div>`:`
-    <label class="nflab">directory</label>
-    <select class="nfsel" onchange="changeNewDirectory(this.value)">
-      <option value="">— pick a recent directory —</option>
-      ${dirs.map(d=>`<option value="${esc(d.path)}" ${d.path===newDir?'selected':''}>${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠ untrusted'}</option>`).join('')}
-    </select>
-    <input class="nfin" data-draft-key="new:directory" placeholder="…or type a path (must be under ~)" value="${esc(dirs.some(d=>d.path===newDir)?'':newDir)}"
-      oninput="changeNewDirectory(this.value)" autocomplete="off">`}
+    <div class="nfgroup"><span class="nfglabel">Directory</span>
+      <input class="nfin nfdir" data-draft-key="new:directory" placeholder="type a path (must be under ~)" value="${esc(newDir)}"
+        oninput="changeNewDirectory(this.value)" autocomplete="off">
+      <div class="nfchips nfdirs">${dirs.slice(0,6).map(d=>`<button class="nfchip${d.path===newDir?' on':''}"
+        onclick="changeNewDirectory(decodeURIComponent('${enc(d.path)}'));renderNewSectionNow()">${esc(d.path.replace(/^\/Users\/[^/]+/,'~'))}${d.trusted?'':' ⚠'}</button>`).join('')}</div></div>`}
     ${newProvider==='claude'&&untrusted?`<div class="nfwarn">⚠ this folder isn't trusted yet — Claude Code will ask
       “do you trust the files in this folder?” at startup, and only your Mac can answer it.</div>`:''}
-    <div class="nfrow">
-      <div class="nfcol"><label class="nflab">model</label>
-        <select class="nfsel" onchange="changeNewModel(this.value)">
-          <option value="">default</option>
-          ${models.map(m=>`<option value="${m}" ${m===newModel?'selected':''}>${m}</option>`).join('')}
-        </select></div>
-      <div class="nfcol"><label class="nflab">effort</label>
-        <select class="nfsel" onchange="newEffort=this.value">
-          <option value="">default</option>
-          ${efforts.map(e=>`<option value="${e}" ${e===newEffort?'selected':''}>${e}</option>`).join('')}
-        </select></div>
-      ${newProvider==='codex'?`<div class="nfcol"><label class="nflab">mode</label>
-        <select class="nfsel" onchange="newMode=this.value">
-          <option value="plan" ${newMode==='plan'?'selected':''}>Plan</option>
-          <option value="default" ${newMode==='default'?'selected':''}>Default</option>
-        </select></div>`:''}
-      ${newProvider==='claude'?`<div class="nfcol"><label class="nflab">permission mode</label>
-        <select class="nfsel" onchange="newPermissionMode=this.value">
-          <option value="default" ${newPermissionMode==='default'?'selected':''}>Manual</option>
-          <option value="auto" ${newPermissionMode==='auto'?'selected':''}>Auto</option>
-          <option value="acceptEdits" ${newPermissionMode==='acceptEdits'?'selected':''}>Accept edits</option>
-          <option value="plan" ${newPermissionMode==='plan'?'selected':''}>Plan</option>
-          <optgroup label="Advanced"><option value="dontAsk" ${newPermissionMode==='dontAsk'?'selected':''}>Don't ask</option></optgroup>
-        </select></div>`:''}
-    </div>
-    ${newProvider==='claude'&&!staging?`<label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
-      onchange="changeNewWorktree(this.checked)"><span>new git worktree</span></label>
-    ${newWt?`<input class="nfin" data-draft-key="new:worktree" placeholder="worktree name (optional)" value="${esc(newWtName)}"
-      oninput="newWtName=this.value" autocomplete="off">`:''}`:''}
-    <label class="nflab">initial message <span style="text-transform:none;letter-spacing:0">(optional now, required to schedule)</span></label>
-    <textarea class="nfin nfmessage" data-draft-key="new:message" maxlength="2000" placeholder="What should this session work on?" oninput="newMessage=this.value">${esc(newMessage)}</textarea>
+    ${spawnChips('Provider',[['claude','claude'],['codex','codex']],newProvider,'changeNewProvider')}
+    ${spawnChips('Model',[['','default'],...models.map(m=>[m,m])],newModel,'changeNewModel')}
+    ${spawnChips('Effort',[['','default'],...efforts.map(e=>[e,e])],newEffort,'changeNewEffort')}
+    ${newProvider==='codex'?spawnChips('Mode',[['plan','Plan'],['default','Default']],newMode,'changeNewMode'):''}
+    ${newProvider==='claude'?spawnChips('Permission mode',[['default','Manual'],['auto','Auto'],['acceptEdits','Accept edits'],['plan','Plan'],['dontAsk',"Don't ask",'advanced']],newPermissionMode,'changeNewPermission'):''}
+    ${newProvider==='claude'&&!staging?`<div class="nfgroup"><span class="nfglabel">Worktree</span>
+      <label class="nfcheck"><input type="checkbox" ${newWt?'checked':''}
+        onchange="changeNewWorktree(this.checked)"><span>create linked git worktree</span></label>
+      ${newWt?`<input class="nfin" data-draft-key="new:worktree" placeholder="worktree name (optional)" value="${esc(newWtName)}"
+        oninput="newWtName=this.value" autocomplete="off">`:''}</div>`:''}
     ${spawnForecastHtml()}
-    <div class="nfactions"><button class="pbtn send nfgo" onclick="doSpawn()">start session ▸</button>
-      <button class="pbtn sendoption nfgo" onclick="doScheduleNew()">schedule session</button></div>
+    <div class="nfactions"><button class="pbtn send nfgo" onclick="doSpawn()">Spawn session</button>
+      <button class="pbtn sendoption nfgo" onclick="doScheduleNew()">Schedule session</button></div>
     ${spawnMsg?`<div class="actmsg">${esc(spawnMsg)}</div>`:''}
-  </div>
-  <div class="dsep"></div>`;
+  </div>`;
 }
 async function doSpawn(){
-  if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
+  if(!newDir){spawnMsg='✗ pick a directory first';renderNewSectionNow();return;}
   if(spawnProvisional){openSession(spawnProvisional.id);return;}
   const feedbackStarted=performance.now();
   const spec=spawnSnapshot();
@@ -429,7 +490,8 @@ async function startSpawn(spec,provisional){
     if(spawnProvisional!==provisional)return;
     if(!r.ok||!d.ok){provisional.status='failed';provisional.error=d.error||'Session could not be started';
       provisional.canRetry=true;render(last,true);return;}
-    clearDraft('new:directory','new:worktree','new:message');newMessage='';
+    clearDraft('new:directory','new:worktree');
+    recordQuickSpawn(spec);
     if(d.staging_workspace?.cwd)provisional.spec={...provisional.spec,cwd:d.staging_workspace.cwd,
       worktree:true,worktree_name:d.staging_workspace.worktree_name||''};
     provisional.serverSessionId=d.session_id;provisional.status='discovering';provisional.trustPrompt=!!d.trust_prompt;
@@ -441,12 +503,13 @@ async function startSpawn(spec,provisional){
     provisional.error='Fleet lost the startup response: '+String(e.message||e);provisional.canRetry=false;render(last,true);}}
 }
 function doScheduleNew(){
-  if(!newDir){spawnMsg='✗ pick a directory first';render(last,true);return;}
-  if(!newMessage.trim()){spawnMsg='✗ add the message this new session should receive';render(last,true);return;}
+  if(!newDir){spawnMsg='✗ pick a directory first';renderNewSectionNow();return;}
   const spec={provider:newProvider,cwd:newDir,model:newModel,effort:newEffort,mode:newMode,
     permission_mode:newProvider==='claude'?newPermissionMode:'',
     worktree:newProvider==='claude'&&newWt,worktree_name:newProvider==='claude'?newWtName:''};
-  openSchedule('',null,'',null,spec,newMessage);
+  // The scheduled message is typed in the Schedule overlay (the form has no
+  // initial-message field).
+  openSchedule('',null,'',null,spec,'');
 }
 // a spawned session only enters the fleet once it writes a transcript
 async function checkSpawn(f){
@@ -473,35 +536,11 @@ async function checkSpawn(f){
     if(!wasOpen)openSession(s.session_id);
   }
 }
-function historySection(f){
-  const items=historyItems(f);
-  if(!items.length&&!historyLoading&&historyData.ok&&historyData.next_cursor==null)
-    return'<div class="destinationempty"><span>↺</span><b>No session history</b><p>Inactive and closed sessions will appear here.</p></div>';
-  return`<div class="historybox">
-    <div class="historycount">${historyCount(f)}</div>
-    <div class="historytools">
-      <div class="freetext"><input data-draft-key="filter:history" placeholder="Filter by title, project, branch, provider, or state"
-        value="${esc(historyFilter)}" oninput="queueHistoryFilter(this.value)"></div>
-      ${filterChips('Access',historyAccess,[['all','All'],['continue','Continue'],['view','View only'],['reopen','Reopen']])}
-      ${filterChips('Provider',historyProvider,[['all','All'],['claude','Claude'],['codex','Codex']])}
-    </div>
-    <div id="historyrows">${historyRows(filteredHistory(f))}</div>
-  </div>`;
-}
 function historyCount(f){
   const live=(f.sessions||[]).filter(item=>item.ui_group==='history'&&
     !pinnedSessions.has(item.session_id)&&matchesHistoryFilter(item)).length;
   const total=live+Number(historyData.total||0);
   return`${total} session${total===1?'':'s'}`;
-}
-function historyRows(items){
-  if(!items.length&&!historyLoading)return`<div class="empty">${historyData.ok?'no matches':
-    `${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(true)">retry</button>`}</div>`;
-  return items.map(item=>historyRow(item)).join('')+
-    (historyLoading?'<div class="ctxload">loading history…</div>':'')+
-    (!historyLoading&&!historyData.ok?`<div class="ctxload searcherror">✗ ${esc(historyData.error||'history unavailable')} <button onclick="loadHistory(${items.length?'false':'true'})">retry</button></div>`:'')+
-    (!historyLoading&&historyData.next_cursor!=null?`<button class="newbtn" onclick="loadHistory(false)">
-      show ${Math.min(100,Math.max(0,historyData.total-(historyData.items||[]).length))} more</button>`:'');
 }
 function historyRow(item,pinnedView=false){
   const sid=String(item.session_id||''),encoded=enc(sid);

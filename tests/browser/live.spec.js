@@ -78,11 +78,11 @@ test('running Fleet Dash renders both providers without console or network failu
     await expect(codex.locator('select.modesel')).toHaveCount(0);
     await codex.locator('.shead').click();
   } else {
-    await goTo(page, 'history');
-    const history = page.locator('#history');
+    await goTo(page, 'search');
+    await page.locator('#searchkind').selectOption('session');
     const codexHistory = page.locator('[data-history-sid^="codex:"]').first();
     await expect(codexHistory).toBeVisible();
-    await codexHistory.locator('.historyaction').click();
+    await codexHistory.locator('.historyaction').first().click();
   }
   await expect(page.locator('#sview')).toBeVisible();
   await page.getByRole('button', { name: 'Why here?' }).click();
@@ -144,9 +144,9 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   await expect(page.locator('#budgets')).toContainText(/Budgets|No budgets configured/);
   await goTo(page, 'now');
   await page.getByRole('button', { name: '+ new coding session' }).click();
-  const dirs = page.locator('#newsess select').nth(1).locator('option');
-  if (await dirs.count() > 1) {
-    await page.locator('#newsess select').nth(1).selectOption({ index: 1 });
+  const dirChips = page.locator('.newform .nfdirs .nfchip');
+  if (await dirChips.count() > 0) {
+    await dirChips.first().click();
     await expect(page.locator('.spawnforecast')).toContainText(/history|confidence|currency unavailable/, { timeout: 10_000 });
   }
   await page.screenshot({ path: testInfo.outputPath('running-briefing-budgets.png'), fullPage: true });

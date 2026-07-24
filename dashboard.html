@@ -42,7 +42,6 @@
       <button data-route="notifications" onclick="navigateTo('notifications')"><span>Notifs</span><b id="nav-notification-count"></b></button>
       <button data-route="search" onclick="navigateTo('search')"><span>Search</span></button>
       <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>Workstreams</span></button>
-      <button data-route="history" onclick="navigateTo('history')"><span>History</span></button>
       <button data-route="insights" onclick="navigateTo('insights')"><span>Insights</span></button>
       <button data-route="settings" onclick="navigateTo('settings')"><span>Settings</span></button>
     </nav>
@@ -115,9 +114,15 @@
           <label><span>Provider</span><select id="searchprovider" onchange="setSearchFilter('provider',this.value)">
             <option value="">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
           <label><span>Type</span><select id="searchkind" onchange="setSearchFilter('kind',this.value)">
-            <option value="">All</option><option value="message">Messages</option><option value="reasoning">Reasoning</option>
+            <option value="">All</option><option value="session">Sessions</option><option value="message">Messages</option><option value="reasoning">Reasoning</option>
             <option value="tool">Tools</option><option value="event">Events</option><option value="artifact">Artifacts</option></select></label>
           <label><span>Project</span><select id="searchproject" onchange="setSearchFilter('project',this.value)"><option value="">All</option></select></label>
+        </div>
+        <div id="searchsessionchips" class="commandchips" aria-label="Session access filter" hidden>
+          <button data-search-access="all" onclick="setSearchAccess('all')">All</button>
+          <button data-search-access="continue" onclick="setSearchAccess('continue')">Continue</button>
+          <button data-search-access="view" onclick="setSearchAccess('view')">View only</button>
+          <button data-search-access="reopen" onclick="setSearchAccess('reopen')">Reopen</button>
         </div>
       </div>
       <div id="searchstatus" aria-live="polite"></div>
@@ -141,10 +146,6 @@
       </div>
       <div id="workstreams"></div>
     </section>
-    <section class="destination" id="route-history" data-destination="history" hidden>
-      <div class="desthead"><div><h1>History</h1><p>Inactive, external, reopenable, and closed sessions.</p></div></div>
-      <div id="history"></div>
-    </section>
     <section class="destination" id="route-insights" data-destination="insights" hidden>
       <div class="desthead"><div><h1>Insights</h1><p>Measured cost and token behavior.</p></div></div>
       <div id="budgets"></div>
@@ -160,7 +161,6 @@
   <button data-route="more" onclick="toggleMobileMore()"><span>•••</span><small>More</small></button>
 </nav>
 <div id="mobilemore" role="menu">
-  <button role="menuitem" onclick="navigateTo('history')">↺ <span>History</span></button>
   <button role="menuitem" onclick="navigateTo('insights')">⌁ <span>Insights</span></button>
   <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
 </div>

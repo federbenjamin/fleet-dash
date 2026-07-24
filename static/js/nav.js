@@ -38,7 +38,7 @@ function applyInstanceAuth(instance){
 const openCards=new Set();
 const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
-const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',history:'History',insights:'Insights',settings:'Settings'};
+const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',insights:'Insights',settings:'Settings'};
 const validRoutes=new Set(Object.keys(routeNames));
 const workspaceSections=new Set(['chat','files','subagents','details']);
 function parseSessionHash(){
@@ -55,7 +55,9 @@ function parseSessionHash(){
 }
 globalThis.pendingWorkspaceRoute=parseSessionHash();
 function hashDestination(){
-  const parts=location.hash.replace(/^#/,'').split('/'),route=parts[0];
+  const parts=location.hash.replace(/^#/,'').split('/');
+  // History is decommissioned into Search TYPE=SESSION; legacy deep links land there.
+  const route=parts[0]==='history'?'search':parts[0];
   let detail=null;
   if((route==='notifications'||route==='settings')&&parts[1]){
     try{detail=decodeURIComponent(parts.slice(1).join('/'));}catch(_){detail=null;}
@@ -101,7 +103,7 @@ function toggleMobileMore(){
 function applyRouteNav(route){
   document.querySelectorAll('[data-route]').forEach(button=>{
     const active=button.dataset.route===route||
-      (button.dataset.route==='more'&&(route==='history'||route==='insights'||route==='settings'));
+      (button.dataset.route==='more'&&(route==='insights'||route==='settings'));
     button.classList.toggle('active',active);
     if(button.dataset.route!=='more'){
       if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
@@ -115,6 +117,12 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
     applyRouteNav('settings');
     openSettings();
     return;
+  }
+  if(route==='history'){
+    // Decommissioned destination: session history lives in Search TYPE=SESSION.
+    searchFilters.kind='session';syncSearchControls();
+    if(location.hash==='#history')history.replaceState({fdRoute:'search'},'','#search');
+    route='search';
   }
   if(!validRoutes.has(route))route='now';
   // choosing a rail destination returns an expanded workspace to pane mode so
@@ -137,11 +145,10 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
   requestAnimationFrame(()=>{
     if(currentRoute!==route)return;
     if(route==='insights'){loadInsights();loadBudgets();}
+    // Revisiting Search TYPE=SESSION must not mean "load the next 100 rows".
+    // runSearch renders the cached session list; Show more owns pagination.
     else if(route==='search'){loadSearchStatus();runSearch(true);}
     else if(route==='workstreams')loadWorkstreams();
-    // Revisiting History must not mean "load the next 100 rows". The explicit
-    // Show more control owns pagination; navigation only seeds the first page.
-    else if(route==='history'&&!historyLoadedAt&&!historyLoading)loadHistory(true);
     else if(route==='notifications'){renderNotifications();loadNotifications(true);}
   });
   window.scrollTo({top:0,behavior:'auto'});

@@ -70,6 +70,13 @@ async function goTo(page, route) {
   else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
+// History is decommissioned: the flat session list is Search TYPE=SESSION.
+async function goToSessionList(page) {
+  await goTo(page, 'search');
+  await page.locator('#searchkind').selectOption('session');
+  await expect(page.locator('#searchsessionchips')).toBeVisible();
+}
+
 async function openSettingsSection(page, section) {
   await page.evaluate(value => selectSettingsSection(value), section);
   await expect(page).toHaveURL(new RegExp(`#settings/${section}$`));
@@ -116,8 +123,9 @@ test('staging is unmistakable and controls only staging-owned sessions', async (
   await expect(page.locator('#sact .composer')).toBeVisible();
   await page.locator('#sclose').click();
   await page.locator('.newbtn').click();
-  await expect(page.locator('#newsess')).toContainText('Isolated staging worktree');
-  await expect(page.locator('#newsess input[data-draft-key="new:directory"]')).toHaveCount(0);
+  // the spawn form fills the session pane (mockup 8c)
+  await expect(page.locator('#sview .newform')).toContainText('Isolated staging worktree');
+  await expect(page.locator('#sview .newform input[data-draft-key="new:directory"]')).toHaveCount(0);
 });
 
 test('responsive application shell routes, filters, and follows browser back', async ({ page }, testInfo) => {
@@ -141,8 +149,8 @@ test('responsive application shell routes, filters, and follows browser back', a
   await page.reload();
   await expect(page.locator('[data-destination="search"]')).toBeVisible();
   await goTo(page, 'workstreams');
-  await goTo(page, 'history');
-  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
+  await goToSessionList(page);
+  await expect(page.locator('#searchresults .sessionresult')).toHaveCount(1);
   await page.goBack();
   await expect(page.locator('[data-destination="workstreams"]')).toBeVisible();
 
@@ -457,7 +465,7 @@ test('full chat status strips are adaptive, provider-honest, and frozen for hist
   await expect(agentStrip.locator('.status-cache')).toHaveCount(0);
   await page.locator('#sclose').click();
 
-  await goTo(page,'history');
+  await goToSessionList(page);
   await page.locator('[data-history-sid="codex:closed"]').getByRole('button',{name:'View'}).click();
   const closedStrip=page.locator('#sact .statusstrip');
   await expect(closedStrip).toBeVisible();
@@ -867,10 +875,12 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
 
   await page.getByRole('button', { name: '+ new coding session' }).click();
   const form = page.locator('.newform');
-  await form.locator('select').first().selectOption('codex');
-  await expect(form).toContainText('mode');
-  await expect(form.locator('select').filter({ has: page.locator('option[value="plan"]') })).toHaveValue('plan');
+  const formGroup = label => form.locator('.nfgroup').filter({ has: page.locator('.nfglabel', { hasText: new RegExp(`^${label}$`, 'i') }) });
+  await formGroup('Provider').getByRole('button', { name: 'codex', exact: true }).click();
+  await expect(form).toContainText('Mode');
+  await expect(formGroup('Mode').locator('.nfchip.on')).toHaveText('Plan');
   await expect(form).toContainText('gpt-5.4');
+  await page.locator('#sclose').click();   // the form pane covers the queue on mobile
 
   await codex.locator('.shead').click();
   await page.locator('#stab-details').click();
@@ -1128,7 +1138,7 @@ test('large conversations load newest-first in bounded pages without losing olde
   await expect(page.locator('#abody')).toContainText('Subagent report 000');
   await page.locator('#sclose').click();
 
-  await goTo(page, 'history');
+  await goToSessionList(page);
   const closed = page.locator('[data-history-sid="closed-large"]');
   await closed.getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Closed report 204');
@@ -1224,10 +1234,9 @@ test('session cards remove More and list every running subagent', async ({ page 
 
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
-  await goTo(page, 'history');
-  const history = page.locator('#history');
-  await expect(history.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
-  await expect(history.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
+  await goToSessionList(page);
+  await expect(page.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
+  await expect(page.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
   await expect(page.locator('#headless')).toHaveCount(0);
   await expect(page.locator('#dormant')).toHaveCount(0);
 });
@@ -1579,9 +1588,9 @@ test('the shared workspace header keeps session controls across every section', 
   await page.locator('#confirm').getByRole('button', { name: 'stop and close' }).click();
   await expect(page.locator('#sview')).toBeHidden();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toHaveCount(0);
-  await goTo(page, 'history');
-  await expect(page.locator('#history')).toContainText('2 sessions');
-  await expect(page.locator('#history')).toContainText('Codex parity work');
+  await goToSessionList(page);
+  await expect(page.locator('#searchstatus')).toContainText('2 sessions');
+  await expect(page.locator('#searchresults')).toContainText('Codex parity work');
 });
 
 test('secondary-worktree close preserves by default and force removal lists Git-status changes', async ({ page }) => {
@@ -2410,28 +2419,26 @@ test('unsent text drafts survive rerenders and reloads until sent or manually de
   await page.locator('#sclose').click();
   await page.getByRole('button', { name: '+ new coding session' }).click();
   await page.locator('.newform input[data-draft-key="new:directory"]').fill('/Users/test/custom');
-  await page.locator('.newform textarea[data-draft-key="new:message"]').fill('persistent new-session draft');
   await page.reload();
   await page.getByRole('button', { name: '+ new coding session' }).click();
   await expect(page.locator('.newform input[data-draft-key="new:directory"]')).toHaveValue('/Users/test/custom');
-  await expect(page.locator('.newform textarea[data-draft-key="new:message"]')).toHaveValue('persistent new-session draft');
 });
 
 test('new-session, scheduled-spawn, and handoff model dependencies stay synchronized', async ({ page }) => {
   await reset(page,'base');
   await page.getByRole('button',{name:'+ new coding session'}).click();
   const form=page.locator('.newform');
-  await form.locator('.nfrow .nfcol').nth(0).locator('select').selectOption('sonnet');
-  await form.locator('.nfrow .nfcol').nth(1).locator('select').selectOption('low');
-  await form.locator('select').first().selectOption('codex');
-  await expect(form.locator('.nfrow .nfcol').nth(0).locator('select')).toHaveValue('');
-  await expect(form.locator('.nfrow .nfcol').nth(0).locator('select option[value="gpt-5.4"]')).toHaveCount(1);
-  await expect(form.locator('.nfrow .nfcol').nth(1).locator('select')).toHaveValue('');
-  await expect(form.locator('.nfrow .nfcol').nth(1).locator('select option[value="low"]')).toHaveCount(0);
+  const group=label=>form.locator('.nfgroup').filter({has:page.locator('.nfglabel',{hasText:new RegExp(`^${label}$`,'i')})});
+  await group('Model').getByRole('button',{name:'sonnet',exact:true}).click();
+  await group('Effort').getByRole('button',{name:'low',exact:true}).click();
+  await group('Provider').getByRole('button',{name:'codex',exact:true}).click();
+  await expect(group('Model').locator('.nfchip.on')).toHaveText('default');
+  await expect(group('Model').getByRole('button',{name:'gpt-5.4',exact:true})).toHaveCount(1);
+  await expect(group('Effort').locator('.nfchip.on')).toHaveText('default');
+  await expect(group('Effort').getByRole('button',{name:'low',exact:true})).toHaveCount(0);
 
-  await form.locator('select').first().selectOption('claude');
-  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
-  await form.locator('textarea').fill('Run this scheduled dependency check');
+  await group('Provider').getByRole('button',{name:'claude',exact:true}).click();
+  await form.getByRole('button',{name:'~/fleet-dash',exact:true}).click();
   await form.getByRole('button',{name:'schedule session'}).click();
   const schedule=page.locator('#scheduleview');
   await schedule.locator('select').first().selectOption('codex');
@@ -2472,17 +2479,18 @@ test('new sessions open a provisional card and chat before native startup return
   await reset(page, 'spawn-slow');
   await page.getByRole('button', { name: '+ new coding session' }).click();
   const form = page.locator('.newform');
-  const permission = form.locator('select').filter({ has: page.locator('option[value="dontAsk"]') });
-  await expect(permission).toHaveValue('default');
-  await expect(permission.locator('option[value="auto"]')).toHaveCount(1);
-  await expect(permission.locator('option[value="dontAsk"]')).toHaveText("Don't ask");
-  await form.locator('select').first().selectOption('codex');
-  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
-  await form.locator('textarea.nfmessage').fill('Start with immediate feedback');
-  await form.getByRole('button', { name: /start session/ }).click();
+  const group = label => form.locator('.nfgroup').filter({ has: page.locator('.nfglabel', { hasText: new RegExp(`^${label}$`, 'i') }) });
+  // the form has NO initial-message field — the first message is typed in chat
+  await expect(form.locator('textarea')).toHaveCount(0);
+  const permission = group('Permission mode');
+  await expect(permission.locator('.nfchip.on')).toHaveText('Manual');
+  await expect(permission.getByRole('button', { name: 'Auto', exact: true })).toHaveCount(1);
+  await expect(permission.locator('.nfchip.advanced')).toHaveText("Don't ask");
+  await group('Provider').getByRole('button', { name: 'codex', exact: true }).click();
+  await form.getByRole('button', { name: '~/fleet-dash', exact: true }).click();
+  await form.getByRole('button', { name: /Spawn session/ }).click();
 
   await expect(page.locator('#sview')).toBeVisible();
-  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
   await expect(page.locator('#sbody')).toContainText('Starting session');
   await expect(page.locator('[data-sid^="spawn-"]')).toBeVisible();
   await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 1');
@@ -2491,7 +2499,6 @@ test('new sessions open a provisional card and chat before native startup return
 
   await expect(page.locator('[data-sid="codex:new"]')).toBeVisible({ timeout: 5_000 });
   await expect(page.locator('#sview')).toBeVisible();
-  await expect(page.locator('#sbody')).toContainText('Start with immediate feedback');
   expect((await fixtureState(page)).actions.filter(item => item.type === 'spawn')).toHaveLength(1);
 });
 
@@ -2499,11 +2506,11 @@ test('new-session forecast ignores stale model results and rejected startup rest
   await reset(page, 'forecast-race');
   await page.getByRole('button', { name: '+ new coding session' }).click();
   let form = page.locator('.newform');
-  await form.locator('select').first().selectOption('codex');
-  const model = form.locator('select').filter({ has: page.locator('option[value="gpt-5.4"]') });
-  await model.selectOption('gpt-5.4');
+  const group = label => form.locator('.nfgroup').filter({ has: page.locator('.nfglabel', { hasText: new RegExp(`^${label}$`, 'i') }) });
+  await group('Provider').getByRole('button', { name: 'codex', exact: true }).click();
+  await group('Model').getByRole('button', { name: 'gpt-5.4', exact: true }).click();
   await expect(form.locator('.spawnforecast')).toContainText('Updating forecast');
-  await model.selectOption('gpt-5.3-codex');
+  await group('Model').getByRole('button', { name: 'gpt-5.3-codex', exact: true }).click();
   await expect(form.locator('.spawnforecast')).toContainText('53k tokens');
   await expect(form.locator('.spawnforecast')).not.toContainText('54k tokens');
 
@@ -2511,12 +2518,11 @@ test('new-session forecast ignores stale model results and rejected startup rest
   await page.reload();
   await page.getByRole('button', { name: '+ new coding session' }).click();
   form = page.locator('.newform');
-  await form.locator('select').nth(1).selectOption('/Users/test/fleet-dash');
-  await form.locator('textarea.nfmessage').fill('Keep this exact startup message');
-  await form.getByRole('button', { name: /start session/ }).click();
+  await form.getByRole('button', { name: '~/fleet-dash', exact: true }).click();
+  await form.getByRole('button', { name: /Spawn session/ }).click();
   await expect(page.locator('#sbody')).toContainText('fixture startup rejected');
   await page.locator('#sact').getByRole('button', { name: 'restore setup' }).click();
-  await expect(page.locator('.newform textarea.nfmessage')).toHaveValue('Keep this exact startup message');
+  await expect(page.locator('.newform input[data-draft-key="new:directory"]')).toHaveValue('/Users/test/fleet-dash');
 });
 
 test('fleet cards show submitting, submitted, and failed quick-response feedback', async ({ page }) => {
@@ -2624,7 +2630,7 @@ test('mute persistence, native commands, skills, and parent-routed subagents', a
 
 test('closed, external view-only, stale, unavailable, and read-only states', async ({ page }, testInfo) => {
   await reset(page);
-  await goTo(page, 'history');
+  await goToSessionList(page);
   await page.locator('[data-history-sid="codex:closed"]').getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Durable closed conversation');
   await page.locator('#sclose').click();
@@ -2632,8 +2638,7 @@ test('closed, external view-only, stale, unavailable, and read-only states', asy
   await page.request.post('/test/reset', { data: { scenario: 'reopenable' } });
   await page.reload();
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
-  await goTo(page, 'history');
-  const history = page.locator('#history');
+  await goToSessionList(page);
   const external = page.locator('[data-history-sid="codex:thread-one"]');
   await expect(external).toContainText('External');
   await expect(external).toContainText('View');
@@ -2687,7 +2692,7 @@ test('Codex runtime migration warning keeps Claude available and leaks no runtim
 
 test('backfilled Claude history supports both view and reopen', async ({ page }) => {
   await reset(page, 'claude-archive');
-  await goTo(page, 'history');
+  await goToSessionList(page);
   const row = page.locator('[data-history-sid="11111111-2222-3333-4444-555555555555"]');
   await expect(row).toContainText('Historical Claude review');
   await expect(row.getByRole('button', { name: 'View' })).toBeVisible();
@@ -2712,9 +2717,8 @@ test('large transcript archives page history without hiding older rows', async (
   expect(fleetPayload.closed_total).toBe(206);
   expect(fleetPayload.closed).toHaveLength(0);
   expect(fleetPayload.closed_ids).toHaveLength(206);
-  await goTo(page, 'history');
-  const providerFilters = page.locator('.filterline').filter({ hasText: 'Provider' });
-  await providerFilters.getByRole('button', { name: 'Claude' }).click();
+  await goToSessionList(page);
+  await page.locator('#searchprovider').selectOption('claude');
   await expect(page.locator('[data-history-sid]')).toHaveCount(100);
   const firstMore = page.getByRole('button', { name: 'show 100 more' });
   await expect(firstMore).toBeVisible();
@@ -2725,7 +2729,7 @@ test('large transcript archives page history without hiding older rows', async (
   await expect(page.getByText('Archived Claude session 204')).toBeVisible();
 });
 
-test('available stays visible while inactive lifecycles live in the History destination', async ({ page }, testInfo) => {
+test('available stays visible while inactive lifecycles live in Search TYPE=SESSION', async ({ page }, testInfo) => {
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
@@ -2734,9 +2738,8 @@ test('available stays visible while inactive lifecycles live in the History dest
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
   await expect(page.locator('[data-history-sid="codex:thread-one"]')).toBeHidden();
-  await goTo(page, 'history');
-  const history = page.locator('#history');
-  await expect(history).toContainText('3 sessions');
+  await goToSessionList(page);
+  await expect(page.locator('#searchstatus')).toContainText('3 sessions');
   await expect(page.locator('[data-history-sid="codex:thread-one"]')).toContainText('External');
   await expect(page.locator('[data-history-sid="claude-dormant"]')).toContainText('Inactive');
   await expect(page.locator('[data-history-sid="codex:closed"]')).toContainText('Closed');
@@ -2995,11 +2998,12 @@ test('usage-reset and scheduled-new-session forms keep full target configuration
   await page.locator('#sclose').click();
 
   await page.getByRole('button', { name: '+ new coding session' }).click();
-  await page.locator('#newsess select').nth(1).selectOption('/Users/test/fleet-dash');
-  await page.locator('#newsess textarea').fill('Audit the scheduled release workflow');
+  await page.locator('.newform').getByRole('button', { name: '~/fleet-dash', exact: true }).click();
   await page.getByRole('button', { name: 'schedule session' }).click();
   await expect(page.locator('#scheduleview')).toBeVisible();
   await expect(page.locator('#scheduleview')).toContainText('Schedule new coding session');
+  // the scheduled message is typed in the Schedule overlay (no form field)
+  await page.locator('#scheduleview textarea').fill('Audit the scheduled release workflow');
   await page.locator('#scheduleview').getByRole('button', { name: 'Schedule', exact: true }).click();
   await expect.poll(async () => (await fixtureState(page)).outbox.length).toBe(2);
   const item = (await fixtureState(page)).outbox[1];
@@ -3037,7 +3041,12 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
   await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 1');
   await expect(page.getByRole('button', { name: /^Problems/ })).toContainText('· 3');
 
-  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  // Tapping a row grows its actions sub-card; canonical detail is behind Details.
+  const questionRow = page.locator('.notificationrow', { hasText: 'Choose a release target' });
+  await questionRow.click();
+  await expect(questionRow.locator('.notificationsubcard')).toBeVisible();
+  await expect(questionRow.locator('.notificationcue')).toBeVisible();
+  await questionRow.getByRole('button', { name: 'Details' }).click();
   await expect(page).toHaveURL(/#notifications\/evt-6-question$/);
   await expect(page.locator('#notificationdetail')).toContainText('Claude needs one answer');
   await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
@@ -3048,7 +3057,7 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
   await expect.poll(async () => (await fixtureState(page)).notification_read_cursors).not.toEqual({});
   await expect(page.locator('#notificationstatus')).toContainText('0 unread');
 
-  await page.getByRole('button', { name: 'Snooze 15m' }).click();
+  await page.getByRole('button', { name: 'Snooze 15m', exact: true }).click();
   await expect(page.locator('#notificationdetail')).toContainText('Snoozed until');
   await expect(page.getByRole('button', { name: /^Snoozed/ })).toContainText('· 2');
   await page.getByRole('button', { name: 'Wake now' }).click();
@@ -3081,7 +3090,9 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
 
   await reset(page, 'notification-request');
   await goTo(page, 'notifications');
-  await page.getByRole('button', { name: /Choose a release target/ }).click();
+  const requestRow = page.locator('.notificationrow', { hasText: 'Choose a release target' });
+  await requestRow.click();
+  await requestRow.getByRole('button', { name: 'Details' }).click();
   await expect(page.locator('#notificationdetail')).toContainText('Respond here');
   await expect(page.locator('#notificationdetail')).toContainText('Which release target should Fleet use?');
   await page.locator('#notificationdetail').getByRole('button', { name: /Staging/ }).click();
@@ -3091,7 +3102,10 @@ test('Notification Center keeps durable state, exact detail routes, and delivery
 
 test('notification actions are event-scoped, reject double taps, and cannot leak across detail races', async ({ page }) => {
   await reset(page,'base');await goTo(page,'notifications');
-  await page.getByRole('button',{name:/Choose a release target/}).click();
+  const questionRow=page.locator('.notificationrow',{hasText:'Choose a release target'});
+  await questionRow.click();
+  await questionRow.getByRole('button',{name:'Details'}).click();
+  await expect(page.locator('#notificationdetail')).toHaveClass(/open/);
   await page.evaluate(()=>{
     const realFetch=window.fetch.bind(window);let release;
     globalThis.__notificationSnoozeCalls=0;
@@ -3102,7 +3116,7 @@ test('notification actions are event-scoped, reject double taps, and cannot leak
     snoozeNotification('evt-6-question','rev-6','quarter');
     snoozeNotification('evt-6-question','rev-6','quarter');
   });
-  await expect(page.getByRole('button',{name:'Snooze 15m'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Snooze 15m',exact:true})).toBeDisabled();
   expect(await page.evaluate(()=>globalThis.__notificationSnoozeCalls)).toBe(1);
 
   await page.evaluate(()=>openNotification('evt-5-failure'));
@@ -3491,8 +3505,10 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
 
   await goTo(page, 'now');
   await page.getByRole('button', { name: '+ new coding session' }).click();
-  await page.locator('#newsess select').first().selectOption('codex');
-  await page.locator('#newsess select').nth(1).selectOption('/Users/test/fleet-dash');
+  const spawnForm = page.locator('.newform');
+  await spawnForm.locator('.nfgroup').filter({ has: page.locator('.nfglabel', { hasText: 'Provider' }) })
+    .getByRole('button', { name: 'codex', exact: true }).click();
+  await spawnForm.getByRole('button', { name: '~/fleet-dash', exact: true }).click();
   await expect(page.locator('.spawnforecast')).toContainText('currency unavailable');
   await expect(page.locator('.spawnforecast')).toContainText('medium confidence');
   await expect(page.locator('.spawnforecast')).toContainText('Budget:');
@@ -3574,27 +3590,28 @@ test('pins persist and relocate sessions above the needs-you queue', async ({ pa
   await page.unroute('**/api/settings');
 });
 
-test('session history text and access/provider chips filter one flat list', async ({ page }) => {
+test('session history text and access/provider filters shape one flat list in Search', async ({ page }) => {
   await reset(page, 'organization');
-  await goTo(page, 'history');
-  const history = page.locator('#history');
-  await expect(page.locator('#historyrows .historyrow')).toHaveCount(3);
+  await goToSessionList(page);
+  const results = page.locator('#searchresults');
+  await expect(results.locator('.sessionresult')).toHaveCount(3);
+  await expect(page.locator('#searchstatus')).toContainText('chronological');
 
-  const input = history.getByPlaceholder(/Filter by title/);
+  const input = page.locator('#searchquery');
   await input.fill('migration');
-  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
-  await expect(page.locator('#historyrows')).toContainText('Dormant migration');
+  await expect(results.locator('.sessionresult')).toHaveCount(1);
+  await expect(results).toContainText('Dormant migration');
+  await expect(page.locator('#searchstatus')).toContainText('filtered');
   await input.fill('');
 
-  const access = history.locator('.filterline').nth(0);
+  const access = page.locator('#searchsessionchips');
   await access.getByRole('button', { name: 'Continue' }).click();
-  await expect(page.locator('#historyrows .historyrow')).toHaveCount(1);
-  await expect(page.locator('#historyrows')).toContainText('Inactive');
+  await expect(results.locator('.sessionresult')).toHaveCount(1);
+  await expect(results).toContainText('Inactive');
   await access.getByRole('button', { name: 'All' }).click();
 
-  const provider = history.locator('.filterline').nth(1);
-  await provider.getByRole('button', { name: 'Codex' }).click();
-  await expect(page.locator('#historyrows .historyrow')).toHaveCount(2);
-  await expect(page.locator('#historyrows')).toContainText('External');
-  await expect(page.locator('#historyrows')).toContainText('Closed');
+  await page.locator('#searchprovider').selectOption('codex');
+  await expect(results.locator('.sessionresult')).toHaveCount(2);
+  await expect(results).toContainText('External');
+  await expect(results).toContainText('Closed');
 });

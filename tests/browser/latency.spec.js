@@ -32,7 +32,8 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       }
       else if (flow === 'session_lifecycle') document.querySelector('#newsess .newbtn')?.click();
       else if (flow === 'subagents') document.querySelector('[data-now-filter="subagents"]')?.click();
-      else if (flow === 'search_history') document.querySelector('[data-route="history"]:not([hidden])')?.click();
+      // History is decommissioned: the flat session list is Search TYPE=SESSION
+      else if (flow === 'search_history') { searchFilters.kind = 'session'; document.querySelector('[data-route="search"]:not([hidden])')?.click(); }
       else if (flow === 'workstreams_repository') document.querySelector('[data-route="workstreams"]:not([hidden])')?.click();
       else if (flow === 'insights_usage') (document.querySelector('#railusage')?.offsetParent
         ? document.querySelector('#railusage') : document.querySelector('#usagechip'))?.click();
@@ -67,7 +68,10 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
         }
       }
 
-      if (flow === 'navigation' || flow === 'notifications' || flow === 'search_history' || flow === 'workstreams_repository') navigateTo('now', false);
+      if (flow === 'navigation' || flow === 'notifications' || flow === 'search_history' || flow === 'workstreams_repository') {
+        if (flow === 'search_history') searchFilters.kind = '';
+        navigateTo('now', false);
+      }
       else if (flow === 'notification_detail') {
         notificationDetailId = null; notificationDetail = null; notificationDetailError = '';
         navigateTo('now', false);
@@ -77,7 +81,7 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       else if (flow === 'native_requests') {
         terminalActions.delete('claude-one');
         render(last, true);
-      } else if (flow === 'session_lifecycle') { newOpen = false; render(last, true); }
+      } else if (flow === 'session_lifecycle') closeSession();
       else if (flow === 'insights_usage') closeUsage();
       else if (flow === 'settings') closeSettings();
       else if (flow === 'outbox_handoff') closeOutbox();
