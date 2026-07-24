@@ -175,7 +175,7 @@ function eventRow(m,provider='claude'){
     const rows=(m.qa||[]).map(q=>`<div class="qarow">
       <div class="qaq">${q.header?`<span class="qah">${esc(q.header)}</span>`:''}${esc(q.q)}</div>
       <div class="qaa">${esc(q.a||'—')}</div></div>`).join('');
-    return`<div class="cevt info"><div class="evline"><span class="evi">☑</span> <b>You answered ${esc(provider)}'s questions</b></div>
+    return`<div class="cevt info qa"><div class="evline"><span class="evi">☑</span> <b>You answered ${esc(provider)}'s questions</b></div>
       <div class="qawrap">${rows}</div></div>`;
   }
   return`<div class="cevt ${m.level||'info'}">
@@ -466,8 +466,8 @@ function optimisticItemHtml(item){
     item.status==='uncertain'?`<span class="delivery failed" aria-hidden="true">!</span><span class="deliverylabel" role="status">${esc(item.error||'Delivery uncertain — check terminal')}</span><button class="deliveryresolve" aria-label="dismiss uncertain message receipt" onclick="dismissOptimistic('${item.sid}',${item.id})">dismiss</button>`:
     item.status==='failed'?`<span class="delivery failed" aria-hidden="true">!</span><span class="deliverylabel" role="status">${esc(item.error||'Send failed')}</span><span class="deliveryactions"><button aria-label="send failed; restore message" onclick="restoreOptimistic('${item.sid}',${item.id})">restore</button><button aria-label="dismiss failed message receipt" onclick="dismissOptimistic('${item.sid}',${item.id})">dismiss</button></span>`:'';
   return`<div class="cmsg user optimistic" data-optimistic-id="${item.id}" data-delivery-status="${esc(item.status)}">
-    <span class="crole">you</span>${delivery}
-    <div class="cbody">${item.imageCount?`<div class="image-receipt">🖼 ${item.imageCount} image${item.imageCount===1?'':'s'}</div>`:''}<p>${esc(item.text).replace(/\n/g,'<br>')}</p></div></div>`;
+    <div class="cbody">${item.imageCount?`<div class="image-receipt">🖼 ${item.imageCount} image${item.imageCount===1?'':'s'}</div>`:''}<p>${esc(item.text).replace(/\n/g,'<br>')}</p></div>
+    <div class="receiptline">${delivery}</div></div>`;
 }
 function optimisticHtml(sid,messages){
   return visibleOptimistic(sid,messages).map(item=>optimisticItemHtml(item)).join('');
@@ -535,7 +535,7 @@ function convoMsgs(c,sid,includeOptimistic=true,scope='session',aid=''){
       if(m.name==='SendUserFile')
         return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
           ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
-      return`<div class="ctool"><div class="tline"><span class="tdot">●</span> <b>${esc(m.name)}</b>(${esc(m.arg||'')})</div></div>`;
+      return`<div class="ctool"><div class="tline"><span class="tdot">⚒</span> <b>${esc(m.name)}</b><span class="targ">${esc(m.arg||'')}</span></div></div>`;
     }
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;

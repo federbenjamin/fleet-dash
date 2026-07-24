@@ -1,6 +1,69 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
+Object.assign(globalThis,{workspaceDockable,workspaceDocked,paneSplitBounds,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
 globalThis.sessionView=null;            // one session workspace: section + optional file/agent selection
+// Console two-pane shell: on wide desktops the workspace docks as a persistent
+// right pane beside the queue (never a modal there); ⤢ expands it to the full
+// width right of the rail; below the threshold it stays the full-screen overlay.
+const PANE_SPLIT_KEY='fleet.paneSplit.v1',PANE_EXPANDED_KEY='fleet.paneExpanded.v1';
+globalThis.workspacePaneWidth=(()=>{try{const value=Number(localStorage.getItem(PANE_SPLIT_KEY));
+  return Number.isFinite(value)&&value>0?value:720;}catch(_){return 720;}})();
+globalThis.workspaceExpanded=(()=>{try{return localStorage.getItem(PANE_EXPANDED_KEY)==='1';}catch(_){return false;}})();
+function workspaceDockable(){return matchMedia('(min-width:1200px)').matches;}
+function workspaceDocked(){return Boolean(sessionView)&&workspaceDockable();}
+function paneSplitBounds(){
+  const rail=$('#sidenav')?.getBoundingClientRect().width||136;
+  return{min:650,max:Math.max(650,Math.min(1200,Math.round(innerWidth-rail-420)))};
+}
+function setPaneSplit(width,persist=false){
+  const bounds=paneSplitBounds();
+  workspacePaneWidth=Math.round(Math.max(bounds.min,Math.min(bounds.max,Number(width)||720)));
+  document.documentElement.style.setProperty('--fleet-pane-width',workspacePaneWidth+'px');
+  const splitter=$('#ssplit');
+  if(splitter){splitter.setAttribute('aria-valuemin',String(bounds.min));
+    splitter.setAttribute('aria-valuemax',String(bounds.max));
+    splitter.setAttribute('aria-valuenow',String(workspacePaneWidth));}
+  if(persist)try{localStorage.setItem(PANE_SPLIT_KEY,String(workspacePaneWidth));}catch(_){}
+}
+function startPaneSplit(event){
+  if(event.pointerType==='mouse'&&event.button!==0)return;
+  event.preventDefault();
+  const splitter=event.currentTarget,pointerId=event.pointerId;
+  splitter.classList.add('resizing');splitter.setPointerCapture?.(pointerId);
+  const move=moveEvent=>{if(moveEvent.pointerId!==pointerId)return;moveEvent.preventDefault();
+    setPaneSplit(innerWidth-moveEvent.clientX);};
+  const end=endEvent=>{if(endEvent.pointerId!==pointerId)return;splitter.classList.remove('resizing');
+    splitter.removeEventListener('pointermove',move);splitter.removeEventListener('pointerup',end);
+    splitter.removeEventListener('pointercancel',end);setPaneSplit(workspacePaneWidth,true);};
+  splitter.addEventListener('pointermove',move);splitter.addEventListener('pointerup',end);
+  splitter.addEventListener('pointercancel',end);
+}
+function paneSplitKey(event){
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  event.preventDefault();const bounds=paneSplitBounds();
+  const next=event.key==='Home'?bounds.min:event.key==='End'?bounds.max:
+    workspacePaneWidth+(event.key==='ArrowLeft'?16:-16);   // left edge: left = wider pane
+  setPaneSplit(next,true);
+}
+function applyWorkspaceChrome(){
+  const docked=workspaceDocked(),expanded=docked&&workspaceExpanded;
+  const root=document.documentElement,view=$('#sview');
+  root.classList.toggle('fd-pane',docked&&!expanded);
+  root.classList.toggle('fd-expanded',expanded);
+  view.classList.toggle('docked',docked);
+  view.setAttribute('aria-modal',docked?'false':'true');
+  if(docked&&!expanded)setPaneSplit(workspacePaneWidth);
+  const expand=$('#sexpand');
+  if(expand){expand.hidden=!docked;expand.textContent=expanded?'⤡':'⤢';
+    expand.title=expanded?'collapse to pane':'expand to full width';
+    expand.setAttribute('aria-label',expanded?'collapse workspace to pane':'expand workspace to full width');}
+  syncModalStack();
+}
+function toggleWorkspaceExpand(){
+  workspaceExpanded=!workspaceExpanded;
+  try{localStorage.setItem(PANE_EXPANDED_KEY,workspaceExpanded?'1':'0');}catch(_){}
+  applyWorkspaceChrome();renderSession(true);
+}
+window.addEventListener('resize',()=>{if(sessionView)applyWorkspaceChrome();});
 const workspaceScrolls=new Map();
 const LAST_FILE_STORE_KEY='fleet.lastSessionFile.v1';
 globalThis.lastSessionFiles=(()=>{try{const value=JSON.parse(localStorage.getItem(LAST_FILE_STORE_KEY)||'{}');
@@ -81,7 +144,8 @@ function startQuestionResize(event,encodedSid,encodedNonce){
   const sid=decodeURIComponent(encodedSid),nonce=decodeURIComponent(encodedNonce);
   const drawer=event.currentTarget.closest('.question-drawer'),state=questionPanelState(sid,nonce);
   if(!drawer||state.collapsed)return;
-  event.preventDefault();const startY=event.clientY,startHeight=drawer.getBoundingClientRect().height;
+  event.preventDefault();drawer.style.maxHeight='none';   // content-fit sizing yields to the explicit drag
+  const startY=event.clientY,startHeight=drawer.getBoundingClientRect().height;
   const max=questionPanelMaxHeight(),pointerId=event.pointerId;
   questionResizeActive={sid,nonce,pointerId};drawer.classList.add('resizing');
   event.currentTarget.setPointerCapture?.(pointerId);
@@ -116,10 +180,13 @@ function startQuestionResize(event,encodedSid,encodedNonce){
 function questionDrawerHtml(s,p,pre){
   const sid=s.session_id,state=questionPanelState(sid,p.nonce),collapsed=state.collapsed;
   const height=questionPanelHeight(sid,p.nonce),scrollKey=questionScrollKey(sid,p);
-  const label=p.questions.length>1?`Multi-part question · ${(mqSel[sid]?.qi||0)+1} of ${p.questions.length}`:
-    `${p.questions[0].header||'Question'} · waiting on you`;
+  const label=p.questions.length>1?`Multi-part question · ${(mqSel[sid]?.qi||0)+1} of ${p.questions.length} — ${nativePromptLabel(s)}`:
+    `${p.questions[0].header||'Question'} — ${nativePromptLabel(s)}`;
+  // A drawer the user never resized hugs its content (max-height); an explicit
+  // resize switches to the persisted fixed height (invariant 60 mechanics).
+  const sizing=state.height?`style="height:${height}px"`:`style="max-height:${height}px"`;
   return`<section class="question-drawer${collapsed?' collapsed':''}" data-question-key="${esc(questionPanelKey(sid,p.nonce))}"
-      ${collapsed?'':`style="height:${height}px"`}>
+      ${collapsed?'':sizing}>
     <div class="question-resizer" role="separator" tabindex="0" aria-label="Resize question panel"
       title="Drag to resize · Home collapses · End expands" aria-orientation="horizontal" aria-valuemin="0"
       aria-valuemax="${questionPanelMaxHeight()}" aria-valuenow="${collapsed?0:height}"
@@ -325,7 +392,7 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
     sessionEvidenceOpen=false;$('#sbody').innerHTML='<div class="ctxload">loading conversation…</div>';
     $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
     delete $('#sbody').dataset.renderKey;delete $('#sbody').dataset.canonicalKey;}
-  $('#sview').style.display='flex';activateWorkspaceSection();syncVisualViewport();
+  $('#sview').style.display='flex';applyWorkspaceChrome();activateWorkspaceSection();syncVisualViewport();
   const routeState={fdWorkspace:1,sid,section,item,returnHash,depth:historyDepth};
   // Switching from one session to another replaces the open workspace route.
   // Otherwise closing the second chat exposes the first (often already-closed)
@@ -336,7 +403,8 @@ function openSessionWorkspace(sid,section='chat',item=null,push=true){
   }
   else if(!push&&location.hash!==target)history.replaceState(routeState,'',target);
   if(closed&&!closedSession(sid))loadClosedMeta(sid);
-  requestAnimationFrame(()=>{if(sessionView?.sid===sid){renderSession(true);restoreWorkspaceScroll();}});
+  requestAnimationFrame(()=>{if(sessionView?.sid===sid){renderSession(true);restoreWorkspaceScroll();
+    if(workspaceDocked()&&last)render(last,true);}});   // repaint cards: pane selection highlight
 }
 function applyWorkspaceRoute(route){
   pendingWorkspaceRoute=null;openSessionWorkspace(route.sid,route.section,route.item,false);
@@ -434,7 +502,8 @@ function closeSession(){
   sessionEvidenceOpen=false;slashClose();
   sessionTailObserver?.disconnect();sessionTailObserver=null;
   closeComposerMenus();
-  $('#sview').style.display='none';$('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
+  $('#sview').style.display='none';applyWorkspaceChrome();
+  $('#sbody').innerHTML='';delete $('#sbody').dataset.renderKey;
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sctrl').innerHTML='';$('#sdetails').innerHTML='';$('#sfilelist').innerHTML='';
@@ -463,8 +532,13 @@ function workspaceAgents(s,c){return[...((s&&s.agents)||(c&&c.agents)||[])];}
 function renderWorkspaceChrome(s,c){
   if(!sessionView)return;
   const files=(c&&c.files)||[],agents=workspaceAgents(s,c);
-  $('#stitle2').innerHTML=`${sessTitleBlock(s)}${sessionView.closed?'<small class="closedbadge">Closed · saved workspace</small>':''}`;
-  $('#sctrl').innerHTML=terminalButton(s)+overflowMenu('session',s,sessionView.closed?'closed':'session');
+  $('#stitle2').innerHTML=`${sessTitleBlock(s)}
+    ${!sessionView.closed&&s.ui_group==='needs_you'?'<span class="chip needs_you">Needs you</span>':''}
+    ${sessionView.closed?'<small class="closedbadge">Closed · saved workspace</small>':''}`;
+  // Terminal lives behind the ⋮ menu (Console locked decision); only Codex's
+  // narrowly proved exact-terminal Open stays as a button left of ⋮ (invariant 30).
+  $('#sctrl').innerHTML=(s.provider==='codex'?terminalButton(s):'')+
+    overflowMenu('session',s,sessionView.closed?'closed':'session');
   $('#sfilecount').textContent=files.length?String(files.length):'';
   const activeAgents=agents.filter(agent=>!terminalAgentStates.has(agent.state));
   $('#sagentcount').textContent=activeAgents.length?String(activeAgents.length):'';

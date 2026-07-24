@@ -92,7 +92,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
   token protected because it exposes unmanaged local transcripts.
 - **One session workspace:** every live or historical session opens at a stable
   `#session/<sid>/chat` route with persistent **Chat**, **Files**, **Subagents**, and **Details**
-  sections. Files and agents have opaque, directly reloadable selection routes; local paths never
+  sections. On wide desktops (≥1200px) the workspace is a persistent **docked right pane** beside
+  the queue — tapping any session opens it there without covering Now; the splitter between the
+  panes drags (650–1200px, persisted), and ⤢/⤡ toggles an expanded view that keeps the nav rail
+  and centers the chat column. Narrow windows and phones keep the full-screen workspace. Files and agents have opaque, directly reloadable selection routes; local paths never
   appear in the URL or context response. The Subagents section starts with **Active** enabled on
   every initial open, preserves spawn order and required ancestors, and offers **All** for terminal
   agents; its tab count includes active agents only. On desktop the Files and Subagents list dividers
@@ -335,8 +338,9 @@ the provider without affecting Claude sessions.
   its registry catches up with a just-started turn, so they cannot land in the wrong terminal state.
 - A Claude or Codex card's whole header opens Fleet chat, so live cards do not duplicate conversation
   navigation with **Open**, **Continue**, or **View** buttons. Explicit **Respond** and **Review**
-  controls remain when the label carries action meaning beyond navigation. **Terminal**
-  (desktop only) brings that Claude iTerm tab to the front; for a Claude background job it starts the
+  controls remain when the label carries action meaning beyond navigation. **Open in Terminal**
+  (desktop only, behind the workspace ⋮ menu) brings that Claude iTerm tab to the front; for a
+  Claude background job it starts the
   official `claude attach` client. Codex shows **Open** only when Fleet proves that the exact thread
   already has one live terminal on the managed socket. Fleet never creates a Codex terminal from the
   dashboard, and it renders no disabled terminal placeholder for active, starting, or view-only Codex

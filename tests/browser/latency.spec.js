@@ -24,7 +24,12 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       else if (flow === 'notification_action') snoozeNotification('evt-6-question', 'rev-6', 'quarter');
       else if (flow === 'now') document.querySelector('[data-now-filter="needs_you"]')?.click();
       else if (flow === 'session_chat') document.querySelector('[data-sid="claude-one"] .shead')?.click();
-      else if (flow === 'native_requests') document.querySelector('#sctrl > .termbtn')?.click();
+      else if (flow === 'native_requests') {
+        // Console: Claude terminal focus lives behind the workspace ⋮ menu
+        document.querySelector('#sctrl .ovbtn')?.click();
+        [...document.querySelectorAll('#sctrl .ovmenu .ovitem')]
+          .find(item => item.textContent.includes('Open in Terminal'))?.click();
+      }
       else if (flow === 'session_lifecycle') document.querySelector('#newsess .newbtn')?.click();
       else if (flow === 'subagents') document.querySelector('[data-now-filter="subagents"]')?.click();
       else if (flow === 'search_history') document.querySelector('[data-route="history"]:not([hidden])')?.click();

@@ -100,7 +100,7 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 - Notifications & Web Push: 2, 8, 44, 46–48
 - Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68
 - Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45, 71,
-  51, 53, 55, 57–60, 62, 63, 67, 70
+  51, 53, 55, 57–60, 62, 63, 67, 70, 72
 - HTTP routing gotcha: 6
 
 1. **Pending questions NEVER come from the transcript.** The CLI flushes AskUserQuestion
@@ -325,9 +325,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     real multi-question ask before shipping.
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
-    command. `act` type `focus` powers the **Terminal** button in the session workspace header
-    (`#sctrl`; Console locked decision: never a card button — terminal access lives in the
-    workspace header/⋮, and focusing a Mac tab from a phone is meaningless). This path is only for a
+    command. `act` type `focus` powers the **Open in Terminal** item in the session workspace's ⋮
+    overflow menu (Console locked decision: never a card button and never a standalone header
+    button — Claude terminal access lives only behind ⋮; only Codex's narrowly proved exact-terminal
+    **Open** keeps a `#sctrl` button per invariant 30, and focusing a Mac tab from a phone is
+    meaningless). This path is only for a
     foreground Claude process whose exact PID/tty maps to an iTerm session. A `kind:bg` registry row
     has no iTerm route: `ClaudeBackgroundTransport` validates its eight-hex job id, starts the
     official fixed-argv `claude attach <job>` client in a private PTY, writes only Engine-composed
@@ -508,7 +510,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     bounded 800-character payload. Full-chat conversation text is never clipped: `_convo_add`
     retains complete rows and complete consecutive-assistant merges.
 36. **Session workspace state is unified and route-owned.** Chat, Files, Subagents, and Details are
-    panels of one `#sview` shell with one contextual composer and one pending-request drawer. Stable
+    panels of one `#sview` shell with one contextual composer and one pending-request drawer; the
+    desktop docked-pane vs full-screen presentation (invariant 72) changes only chrome, never
+    routes, section state, or composer/drawer ownership. Stable
     routes use `#session/<sid>/<section>` plus opaque file IDs or hard-validated agent IDs; neither
     routes nor context payloads expose local paths. Browser Back clears a selected file or agent,
     then returns to the prior section, then exits the workspace. Preserve per-section scroll,
@@ -568,7 +572,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     fetches or blocks an HTTP/render path. Main cost is the session tree with a bounded breakdown;
     subagent cost is child-only. Unknown Codex/starting fields are omitted, never rendered as zero.
     `session_runs.status_line_json` freezes the final bounded payload for closed sessions; completed
-    child payloads freeze with the child. Full-chat headers contain the title and controls only.
+    child payloads freeze with the child. Full-chat headers carry the title, one quiet identity line
+    (project · branch · provider · access), and controls — operational metadata (git state, model,
+    context, cost) still renders only in this status strip, never in the header.
 43. **Routine Claude conversation reads never wait for the fleet-wide Tail fold.** `_scan` publishes
     immutable bounded main snapshots keyed by session and subagent snapshots keyed by
     `(parent_session_id, agent_id)`; `/api/context`, `/api/agent_context`, and `/api/file` read those
@@ -803,7 +809,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     Pointer Events with `touch-action:none`: dragging upward clamps below the title bar while leaving
     the composer visible; dragging below the snap threshold collapses to a waiting bar. Keyboard
     Up/Down resizes, Home collapses, and End expands. Persist height/collapsed state per nonce in
-    bounded localStorage and clamp it after viewport/orientation changes. Changing question pages
+    bounded localStorage and clamp it after viewport/orientation changes. A drawer the user never
+    resized hugs its content via `max-height` (no dead space under short questions); the first
+    explicit resize clears that cap and switches to the persisted fixed height. The pend's own
+    ✕ dismiss button is CSS-repositioned into the drawer header row (its `.ptlabel` is hidden there
+    as a duplicate of the drawer title, which carries `nativePromptLabel` honesty) — it stays the
+    single `.xbtn` dismiss control. Changing question pages
     gets a distinct scroll key; unrelated refreshes must never return the current page to its top.
 61. **Ordinary Send is one server-owned send-now-or-queue decision.** The browser sends normal text/photos
     as `send_message` with an idempotent `client_request_id`; slash commands and skills keep their
@@ -833,9 +844,14 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     retain the last-good in-memory/device cache. Conversation revision refreshes merge the current
     tail into older loaded pages and preserve the reader's scroll anchor.
 
-63. **Full-screen overlays are stack-aware modals.** File/session/subagent/Settings/Search/Handoff/
-    Outbox/Schedule/Confirm surfaces have dialog semantics, an accessible name, focus entry/trap,
-    inert lower layers, and opener restoration. The highest visible z-index owns focus. Every one of
+63. **Full-screen overlays are stack-aware modals — except the desktop-docked session pane.**
+    Settings/Search/Handoff/Outbox/Schedule/Confirm surfaces, and the session workspace whenever it
+    presents full-screen (mobile and viewports below the invariant-72 dock threshold), have dialog
+    semantics, an accessible name, focus entry/trap, inert lower layers, and opener restoration. The
+    highest visible z-index owns focus. When the workspace is DOCKED (`#sview.docked`) it is
+    deliberately not a modal: `aria-modal="false"`, it never joins the modal stack, never inerts the
+    shell, and never traps Tab — the queue stays interactive beside it — but it still goes inert
+    beneath any real stacked modal above it. Every one of
     those surfaces uses the shared visual viewport on phones; focused fields scroll into the
     remaining viewport instead of exposing the screen beneath the keyboard. The labelled, focusable
     card header opens Chat by pointer or keyboard; live Claude and Codex cards must not duplicate
@@ -963,6 +979,22 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     property. A new module joins four lists: `dashboard.html` modulepreload, `sw.js`
     `SHELL_ASSETS` (+ cache bump), `server.py` `APP_MODULES`, and the browser fixture server.
     Full contract and module roster: the `static/js/` file-map bullet.
+
+72. **The Console two-pane shell: on wide desktops the session workspace is a persistent docked
+    right pane.** On viewports ≥1200px CSS-wide, an open `#sview` docks (`html.fd-pane` +
+    `#sview.docked`) beside the left destination column instead of covering it; below that
+    threshold and on mobile it remains the full-screen surface, and a window resize converts
+    in place (`applyWorkspaceChrome`). The splitter (`#ssplit`, the pane's left edge) resizes the
+    PANE width, clamped to [650, min(1200, viewport − rail − 420)] px and persisted in
+    `fleet.paneSplit.v1`; it is keyboard-operable (arrows/Home/End) with ARIA values. ⤢/⤡
+    (`#sexpand`) toggles pane ↔ expanded (`html.fd-expanded`): expanded keeps the nav rail, fills
+    everything right of it, hides the covered `#appmain`, and centers chat at ~820px; the state
+    persists in `fleet.paneExpanded.v1`, and choosing a rail destination returns an expanded
+    workspace to pane mode so the destination is visible beside it. The docked pane is NOT a modal
+    (invariant 63); route ownership, sections, and Back behavior are unchanged (invariant 36). The
+    card open in the pane carries `.paneopen`; needs-you question cards flip their cue to
+    `ANSWER IN PANE →` exactly when docking is available (`workspaceDockable()`), staying
+    `ANSWER IN CHAT →` otherwise.
 
 ## Dev workflow
 

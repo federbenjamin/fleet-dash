@@ -344,7 +344,8 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
     }
     const frame=cardFrame(s);
     card.className='card'+(cardCls(s)?' '+cardCls(s):'')+
-      (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'');
+      (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'')+
+      (sessionView?.sid===s.session_id&&workspaceDocked()?' paneopen':'');
     card.style.setProperty('--session-card-lines',String(frame.lines));
     const top=card.querySelector('.ctop'),focusAnchor=cardTopFocusAnchor(top);
     top.innerHTML=cardTop(s);restoreCardTopFocus(top,focusAnchor);
