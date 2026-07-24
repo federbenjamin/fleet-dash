@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,cardDetail,detailSig,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -193,9 +193,16 @@ function cardTop(s){
   if(s.provisional)return provisionalCardTop(s);
   const navigationOnly=!s.primary_action||['open','continue','view'].includes(s.primary_action);
   const showPrimary=s.ui_group!=='needs_you'&&!(navigationOnly&&['claude','codex'].includes(s.provider));
-  // delivered-file chips + the session peek both need the context cache; the
-  // conversation itself now lives only in the full view
-  if(previewSessions()&&s.last_msg)ensureCtx(s.session_id,ctxVersion(s));
+  // A card needs the conversation for exactly one thing: confirming an
+  // outstanding optimistic receipt (invariant 34). The peek is `s.last_msg` from
+  // the poll, and the file/agent folds this used to feed are gone — so a card
+  // with nothing in flight fetches nothing. Measured on production: 49 of 49
+  // sessions fetched /api/context every time their conversation moved, and none
+  // of them needed it.
+  // A card WITH a pending request keeps fetching, because answering it inline
+  // creates a receipt whose baseCount must be computed against real messages —
+  // from an empty cache an identical earlier answer would confirm it instantly.
+  if(s.pending||optimisticList(s.session_id).length)ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
   const questionCard=cardCls(s)==='needs'&&s.pending&&s.pending.kind!=='permission';
   const headRight=questionCard?
@@ -232,72 +239,11 @@ function cardAgentList(s){
   if(!running.length)return'';
   return`<div class="agents" aria-label="Active subagents">${agentListHtml(running,cardAgentTapAttr)}</div>`;
 }
-// The card tail ("more"): reference material with native <details> folds. It is
-// rebuilt ONLY when detailSig changes (not every poll), so its open dropdowns
-// don't remount every tick — that remount was the "blinking".
-function cardDetail(s){
-  const done=s.agents.filter(a=>['done','ended'].includes(a.state));
-  const ctxFiles=((ctxCache[s.session_id]||{}).files)||[];
-  return`<div class="detail">
-      <div class="mutebox">
-        <button class="bell ${s.muted?'muted':''}"
-          onclick="event.stopPropagation();toggleMute('${s.session_id}',${s.muted?'false':'true'})">${s.muted?'🔕':'🔔'}</button>
-        <span>${s.muted?'push notifications muted for this session':'notify me about this session'}</span>
-      </div>
-      <div class="actmsg" id="msg-${s.session_id}"></div>
-      ${handoffLinksHtml(s)}
-      <details class="dfold statewhy" ${stateInfoOpen.has(s.session_id)?'open':''}
-        ontoggle="stateInfoOpen[this.open?'add':'delete']('${s.session_id}')">
-        <summary>why this is ${esc((s.reason_label||s.ui_group||'here').toLowerCase())}</summary>
-        <div class="statewhybody"><div class="evidencerule"><span>Winning rule</span><code>${esc(s.winning_rule||'placement.unknown')}</code></div>
-          ${evidenceFactsHtml(s)}</div>
-      </details>
-      <details class="dfold" ${infoOpen.has(s.session_id)?'open':''}
-        ontoggle="infoOpen[this.open?'add':'delete']('${s.session_id}')">
-        <summary>session info</summary>
-        <div class="kv">
-          <span>session</span>${cpb(s.session_id)}
-          <span>provider</span><b>${esc(s.provider||'claude')}</b>
-          <span>pid</span><b>${s.pid}</b>
-          <span>cwd</span>${cpb(s.cwd)}
-          <span>model</span><b>${esc(s.model||'?')}${s.effort?` · ${esc(s.effort)}`:''}</b>
-          ${s.provider==='codex'?`<span>mode</span><b>${esc(s.collaboration_mode||'default')}</b>`:''}
-          ${s.provider==='claude'?`<span>permission mode</span><span class="permissiondetail">
-            <b>${esc(claudePermissionLabel(s.permission_mode))}</b>${claudePermissionSelect(s,'msg')}</span>`:''}
-          <span>started</span><b>${s.started_ms?fmtAge(Math.round(Date.now()/1000-s.started_ms/1000))+' ago':'?'}</b>
-          <span>cli status</span><b>${esc(s.reg_status||'—')}</b>
-          <span>tokens in ctx</span><b>${fmtTok(s.ctx_tokens)}</b>
-          <span>spend</span><b>${s.cost_source==='unavailable'?'unavailable — App Server reports tokens, not currency':`${fmt$(s.cost)} session + ${fmt$(s.agent_cost)} agents = ${fmt$(s.cost+s.agent_cost)}`}</b>
-          ${s.error?`<span>provider error</span><b>${esc(s.error)}</b>`:''}
-        </div>
-      </details>
-      <details class="dfold" ${filesOpen.has(s.session_id)?'open':''}
-        ontoggle="filesOpen[this.open?'add':'delete']('${s.session_id}')">
-        <summary>${s.provider==='codex'?'changed / generated':'delivered'} files (${ctxFiles.length})</summary>
-        <div class="foldscroll">${ctxFiles.length?ctxFiles.map(f=>`<div class="frow">${fchip(s.session_id,f,f.caption)}
-          <span class="fmeta">${esc(f.caption||'')}</span>
-          <span class="anum">${f.ts?fmtAge(Math.max(0,Math.round((Date.now()-Date.parse(f.ts))/1000)))+' ago':''}</span>
-        </div>`).join(''):'<div class="dhead">none yet</div>'}</div>
-      </details>
-      <details class="dfold" ${doneOpen.has(s.session_id)?'open':''}
-        ontoggle="doneOpen[this.open?'add':'delete']('${s.session_id}')">
-        <summary>completed agents (${done.length})</summary>
-        <div class="foldscroll">${done.length?agentListHtml(done):'<div class="dhead">none yet</div>'}</div>
-      </details>
-      ${s.bridge_url?`<div><a class="jump" href="${s.bridge_url}" target="_blank">open in claude.ai ↗</a></div>`:''}
-    </div>`;
-}
-// what the tail depends on, EXCLUDING per-second time (started/delivered ages) so
-// the panel isn't rebuilt every poll just because a clock ticked
-function detailSig(s){
-  const done=s.agents.filter(a=>['done','ended'].includes(a.state)).length;
-  const files=((ctxCache[s.session_id]||{}).files||[]).length;
-  return[s.muted,s.pid,s.model,s.effort,s.collaboration_mode,s.permission_mode,
-    (s.permission_modes||[]).join(','),Boolean(s.capabilities?.change_permission_mode),s.reg_status,s.ctx_tokens,
-    s.cost==null?'na':Math.round(((s.cost||0)+(s.agent_cost||0))*100),s.error||'',done,files,
-    s.winning_rule||'',s.state_confidence||'',s.provider_stale?'stale':'fresh',
-    (s.handoff_links||[]).map(link=>[link.direction,link.session_id,link.status].join(':')).join(',')].join('|');
-}
+// The old card "more" tail (cardDetail/detailSig) is gone: the Console
+// redesign moved every fold it held — mute, handoff links, state evidence,
+// delivered files, completed agents — into the session workspace. It had
+// been unreachable since, and was the only reason a card read the
+// conversation cache.
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
   const frame=cardFrame(s);
@@ -326,12 +272,11 @@ function restoreCardTopFocus(top,anchor){
   if(target&&!target.disabled&&!target.closest('[inert]')&&target.getClientRects().length)
     target.focus({preventScroll:true});
 }
-// Reconcile #sessions in place: persist each card node, rebuild only the volatile
-// top every poll, and rebuild the tail only when detailSig changes. This keeps an
-// expanded card's open <details> from remounting (and flashing) every tick. A
-// focused header control is semantically restored because innerHTML necessarily
-// replaces that node; otherwise a poll immediately after closing chat drops
-// keyboard focus onto <body>.
+// Reconcile #sessions in place: persist each card node and rebuild only its
+// volatile top every poll, so a card is never torn down and remounted (which is
+// what used to flash). A focused header control is semantically restored because
+// innerHTML necessarily replaces that node; otherwise a poll immediately after
+// closing chat drops keyboard focus onto <body>.
 function reconcileCards(container,list,emptyMessage='no live sessions'){
   if(!list.length){container.innerHTML=emptyMessage?`<div class="empty">${esc(emptyMessage)}</div>`:'';return;}
   if(container.querySelector('.empty'))container.innerHTML='';
@@ -351,7 +296,6 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
     card.style.setProperty('--session-card-lines',String(frame.lines));
     const top=card.querySelector('.ctop'),focusAnchor=cardTopFocusAnchor(top);
     top.innerHTML=cardTop(s);restoreCardTopFocus(top,focusAnchor);
-    const detail=card.querySelector(':scope > .detail');if(detail)detail.remove();delete card.dataset.dsig;
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
   list.forEach((s,i)=>{

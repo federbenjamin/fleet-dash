@@ -1317,14 +1317,20 @@ because they are also spawned directly as scripts by absolute path.
   install identity, root-scoped network/private-data boundary, cached last-fleet offline view, and
   regular/maskable PWA artwork. Bump the service-worker cache name when changing its shell contract.
   **`#sessions` is reconciled in place, NOT innerHTML-replaced** (`reconcileCards`): each
-  `.card[data-sid]` node persists across polls. A card is split into `cardTop(s)` (volatile —
-  header/meta/peek/pending/running-agents/more-btn, in a `.ctop` wrapper rebuilt every poll,
-  no `<details>` so replacing it can't flash) and `cardDetail(s)` (the `.detail` "more" tail
-  with the native `<details>` folds). The tail is rebuilt ONLY when `detailSig(s)` changes —
-  a signature that EXCLUDES per-second time fields (started/delivered ages) so a ticking clock
-  never remounts it. That is what stops an expanded card's open dropdown from blinking every
-  2s. Trade-off: completed-agent/spend text in an open panel can be up to a few seconds stale
-  until a material field changes. The viewer's docked
+  `.card[data-sid]` node persists across polls, and only its volatile `.ctop` wrapper
+  (`cardTop(s)` — header/meta/peek/pending/running-agents) is rebuilt each tick, so a card is
+  never torn down and remounted. The old `.detail` "more" tail (`cardDetail`/`detailSig`) is
+  GONE: the Console redesign moved every fold it held — mute, handoff links, state evidence,
+  delivered files, completed agents — into the session workspace, leaving those two functions
+  unreachable. They were also the only reason a card read the conversation cache.
+  **A card fetches `/api/context` only when it has an outstanding optimistic receipt to
+  confirm (invariant 34) or a pending request it can answer inline** — a pinned needs-you
+  session, since an unpinned one is an Action Inbox row that opens the pane to answer. The
+  peek is `s.last_msg` from the poll and never needed the cache. Measured on production: 49 of
+  49 cards fetched a conversation every time it moved and none of them used it. The trade
+  (operator decision D4) is that the FIRST open of a session on a device shows
+  `loading conversation…` briefly; `fleet.contextCache.v1` covers every later open. Two browser
+  specs measured layout before the conversation landed and now wait for it. The viewer's docked
   action bar (`renderViewerBar`, rebuilt each render tick for `viewerSid`) duplicates the card's
   act controls — its element ids are `vft-`/`vmsg-` (never `ft-`/`msg-`: the card's ids coexist
   in the DOM and getElementById would hit the wrong one). The bar owns its expandable `.vconvo`

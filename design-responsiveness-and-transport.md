@@ -307,6 +307,24 @@ incompatible with invariant 71's inline-`onclick` contract.
 
 ### W4 — Stop fetching context for collapsed cards (D4)
 
+**SHIPPED 2026-07-24, and no payload change was needed.** The audit found that `cardDetail` and
+`detailSig` — the only card code that read the conversation cache for files and agent counts — had
+been UNREACHABLE since the Console redesign moved those folds into the session workspace. So the
+plan's "add `files_n` plus the newest few file chips to the session payload" bought nothing: the
+consumer no longer exists. Both dead functions are deleted.
+
+What a card genuinely needs the conversation for is confirming an outstanding optimistic receipt
+(invariant 34), so that is the gate: an outstanding receipt, or a pending request the card can
+answer inline. That second clause is narrower than it looks — an unpinned needs-you session renders
+as an Action Inbox row and opens the pane to answer, so only a PINNED one answers from a card.
+Measured on production: 49 of 49 sessions fetched `/api/context` whenever their conversation moved,
+and none of them used it; after the change, none fetch.
+
+Accepted cost: the first open of a session on a device now shows `loading conversation…` briefly
+instead of being pre-warmed. `fleet.contextCache.v1` covers every later open. Two browser specs were
+measuring layout before the conversation landed and now wait for it — which was the change surfacing
+a real ordering assumption, not flakiness.
+
 A collapsed card needs `last_msg` (already present, capped at 800 chars by invariant 35) and a file
 count. Add `files_n` plus the newest few file chips to the session payload, delete the `ensureCtx`
 call at `static/js/cards.js:198`, and fetch `/api/context` only for the open pane. Move any remaining
