@@ -611,12 +611,21 @@ function renderParentWorkspaceAction(s,c,{pending=true,showFiles=false,note=''}=
   act.classList.remove('tools-open');act.classList.toggle('session-composer',canCompose(s));
   act.classList.toggle('question-present',Boolean(hasQ));
   if(!canCompose(s))act.classList.remove('composer-active');
-  keepSessionActionScroll(act,()=>{act.innerHTML=`<div class="session-context">${qHtml}
+  const html=`<div class="session-context">${qHtml}
       ${note?`<div class="relaynote">${note}</div>`:''}
       <div class="session-extras">${handoffLinksHtml(s)}
         ${s.read_only?`<div class="relaynote"><b>view only</b> — ${esc(s.read_only_reason||'this thread is owned by another Codex runtime')}</div>`:''}
       ${sessionSurfaceBar(s,showFiles?(c&&c.files)||[]:[])}</div></div>
-    ${renderComposer(s,'session')}`;});
+    ${renderComposer(s,'session')}`;
+  // Rewriting identical HTML detaches every live node in the dock — the question
+  // drawer the user is resizing, the composer, the status strip — twice a second
+  // for no change at all. Skipping an unchanged write keeps them, and is the
+  // difference between a drawer that survives a poll and one that is rebuilt
+  // under the pointer (invariant 60).
+  if(act.__actionHtml!==html){
+    act.__actionHtml=html;
+    keepSessionActionScroll(act,()=>{act.innerHTML=html;});
+  }
   if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
 }
 function chosenWorkspaceFile(files){

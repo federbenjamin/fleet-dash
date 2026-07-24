@@ -11,6 +11,36 @@ from .config import cwd_to_project_dir
 class ActOps:
 
     def act(self, action, _claude_locked=False):
+        """Public entry point: bind a durable receipt, then dispatch.
+
+        Only the OUTERMOST call owns a receipt. `act` re-enters itself under the
+        per-session Claude mutation lock, and `_send_now_or_queue` forwards the
+        same `client_request_id` to a nested direct send — both would otherwise
+        collide with the receipt the outer call already claimed and refuse the
+        very action they are performing. Depth is thread-local rather than a
+        field on `action`, because every client-supplied key is untrusted.
+        """
+        if getattr(self._act_depth, "value", 0):
+            return self._act_dispatch(action, _claude_locked)
+        self._act_depth.value = 1
+        try:
+            receipt_id, replay = (self.begin_act_receipt(action)
+                                  if isinstance(action, dict) else (None, None))
+            if replay is not None:
+                return replay
+            try:
+                result = self._act_dispatch(action, _claude_locked)
+            except Exception:
+                # The dispatcher raised after possibly writing keys. Uncertainty
+                # is the honest record (invariant 66); the error still propagates.
+                self.resolve_act_receipt(receipt_id, {"ok": False, "code": "action_raised",
+                                                      "error": "the action failed partway"})
+                raise
+            return self.resolve_act_receipt(receipt_id, result) if receipt_id else result
+        finally:
+            self._act_depth.value = 0
+
+    def _act_dispatch(self, action, _claude_locked=False):
         """Inject an answer into the owning iTerm session. action:
         {type:'option', session_id, nonce, digits:[1,..], n_options, other:'...'} |
         {type:'multiq', session_id, nonce,

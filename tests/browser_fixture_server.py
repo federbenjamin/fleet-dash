@@ -237,7 +237,7 @@ def fresh_state():
         fixture_notification(1, "notification", "resolved", "Push delivery recovered",
             "The test device accepted its next delivery.", "claude")]
     return {"sessions": [claude, codex], "closed": [], "actions": [], "uploads": [],
-            "hidden_action_sessions": [],
+            "hidden_action_sessions": [], "act_receipts": {},
             "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
@@ -1303,6 +1303,16 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True, "session_id": sid, "transport": "tmux",
                     "truncated": False, "captured_at": time.time(),
                     "lines": ["❯ 1. [ ] Red", "  2. [ ] Green", "  <script>x</script>"]})
+            if route == "/api/act-receipt":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                rid = (query.get("rid") or [""])[0]
+                receipt = STATE.setdefault("act_receipts", {}).get(rid)
+                if not receipt:
+                    return self.json_reply({"ok": True, "found": False,
+                        "reason": "no receipt: the request never reached Fleet, or it "
+                                  "is older than 24 hours"})
+                return self.json_reply({"ok": True, "found": True, "receipt": receipt})
             if route == "/api/commands":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
@@ -1417,6 +1427,21 @@ class Handler(BaseHTTPRequestHandler):
                     decide_approval=waiting,
                     answer_reason="" if waiting else
                         "Waiting for Claude's native prompt state")
+                return self.json_reply({"ok": True})
+            if route == "/test/act-receipt":
+                # Stand in for the durable receipt an act() left behind
+                # (invariant 76) so a spec can replay the reconnect path.
+                rid = str(payload.get("client_request_id") or "")
+                if not rid:
+                    return self.json_reply({"ok": False, "error": "rid required"}, 400)
+                STATE.setdefault("act_receipts", {})[rid] = {
+                    "receipt_id": f"rcpt-{rid}", "client_request_id": rid,
+                    "session_id": str(payload.get("session_id") or ""),
+                    "action_type": str(payload.get("action_type") or "text"),
+                    "state": str(payload.get("state") or "delivered"),
+                    "code": str(payload.get("code") or ""),
+                    "error": str(payload.get("error") or ""),
+                    "created_at": time.time(), "updated_at": time.time()}
                 return self.json_reply({"ok": True})
             if route == "/test/prompt-identity":
                 # A prompt's nonce flips when its evidence source changes (hook

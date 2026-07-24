@@ -982,6 +982,7 @@ class ScanOps:
             sid: value for sid, value in self.registry_status_since.items()
             if sid in live_claude_ids
         }
+        self.prune_act_receipts(now)     # rate-limited internally (invariant 76)
         with self.config_lock:
             control_overrides = {
                 sid: value for sid, value in self._claude_control_overrides.items()

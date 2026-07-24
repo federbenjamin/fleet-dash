@@ -35,6 +35,7 @@ from .engine_ledger import LedgerOps
 from .engine_context import ContextOps
 from .engine_worktree import WorktreeOps
 from .engine_tmux import TmuxOps
+from .engine_receipts import ReceiptOps
 from .engine_transport import TransportOps
 from .engine_notify import NotifyOps
 from .engine_act import ActOps
@@ -48,6 +49,7 @@ class Engine(StagingOps,
              ContextOps,
              WorktreeOps,
              TmuxOps,
+             ReceiptOps,
              TransportOps,
              NotifyOps,
              ActOps,
@@ -119,6 +121,10 @@ class Engine(StagingOps,
         self._request_ids = {}          # sid -> identity record
         self._answered_requests = {}    # sid -> {request_id, at}
         self._request_identity_guard = threading.Lock()
+        self._act_receipt_prune_due = 0.0
+        # Receipt ownership is per-call-stack: only the outermost act()
+        # binds one (engine_act.act), and nesting is a thread fact.
+        self._act_depth = threading.local()
         self.lock = threading.Lock()
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time

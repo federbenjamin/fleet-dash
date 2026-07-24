@@ -1,9 +1,11 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{persistWorkspaceSplits,draftValue,persistDrafts,setDraft,clearDraft,clearDraftPrefix,persistOfflineMessages,offlineMessageId,persistOutboxReceipts,rememberOutboxReceipt,forgetOutboxReceipt,persistResolvedOutboxReceipts,resolveOutboxReceipt,savedConversation,persistConversation,persistImageDrafts,setImageDraftIds,restoreImageDraftIds,imageDb,imageStoreRequest,deleteImages,pruneImages});
+Object.assign(globalThis,{persistActReceipts,rememberActReceipt,forgetActReceipt,actRequestId,persistWorkspaceSplits,draftValue,persistDrafts,setDraft,clearDraft,clearDraftPrefix,persistOfflineMessages,offlineMessageId,persistOutboxReceipts,rememberOutboxReceipt,forgetOutboxReceipt,persistResolvedOutboxReceipts,resolveOutboxReceipt,savedConversation,persistConversation,persistImageDrafts,setImageDraftIds,restoreImageDraftIds,imageDb,imageStoreRequest,deleteImages,pruneImages});
 const $=q=>document.querySelector(q);
 const DRAFT_STORE_KEY='fleet.drafts.v1';
 const OFFLINE_MESSAGE_STORE_KEY='fleet.offlineMessages.v1';
 const OUTBOX_RECEIPT_STORE_KEY='fleet.outboxReceipts.v1';
+const ACT_RECEIPT_STORE_KEY='fleet.actReceipts.v1';
+const ACT_RECEIPT_MAX=50;
 const OUTBOX_RESOLVED_STORE_KEY='fleet.outboxResolved.v1';
 const CONTEXT_STORE_KEY='fleet.contextCache.v1';
 const IMAGE_DRAFT_STORE_KEY='fleet.imageDrafts.v1';
@@ -74,6 +76,40 @@ function offlineMessageId(){
   if(crypto?.randomUUID)return crypto.randomUUID().replace(/-/g,'');
   return`${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`.slice(0,100);
 }
+// Actions whose response was lost in flight (invariant 76). Non-secret: an
+// opaque request id, the session it targeted, and the action type — never text.
+globalThis.actReceipts=(()=>{try{
+  const value=JSON.parse(localStorage.getItem(ACT_RECEIPT_STORE_KEY)||'[]');
+  return(Array.isArray(value)?value:[]).filter(item=>item&&
+    /^[A-Za-z0-9_.:-]{8,128}$/.test(String(item.rid||''))&&
+    typeof item.sid==='string'&&item.sid.length>0&&item.sid.length<=200&&
+    /^[a-z_]{1,40}$/.test(String(item.type||''))&&
+    Number.isFinite(Number(item.created))).slice(-ACT_RECEIPT_MAX).map(item=>({
+      rid:String(item.rid),sid:item.sid,type:String(item.type),created:Number(item.created),
+      optimisticId:Number.isFinite(Number(item.optimisticId))?Number(item.optimisticId):null}));
+}catch(_){return [];}})();
+function persistActReceipts(){
+  try{
+    if(actReceipts.length)localStorage.setItem(ACT_RECEIPT_STORE_KEY,JSON.stringify(actReceipts));
+    else localStorage.removeItem(ACT_RECEIPT_STORE_KEY);
+  }catch(error){console.warn('Fleet could not persist pending action receipts',error);}
+}
+function rememberActReceipt(entry){
+  if(!entry||!entry.rid)return;
+  forgetActReceipt(entry.rid);
+  actReceipts.push({rid:String(entry.rid),sid:String(entry.sid||''),type:String(entry.type||''),
+    created:Date.now(),optimisticId:entry.optimisticId==null?null:Number(entry.optimisticId)});
+  actReceipts.splice(0,Math.max(0,actReceipts.length-ACT_RECEIPT_MAX));
+  persistActReceipts();
+}
+function forgetActReceipt(rid){
+  const index=actReceipts.findIndex(item=>item.rid===rid);
+  if(index<0)return false;
+  actReceipts.splice(index,1);persistActReceipts();return true;
+}
+// One id per action, minted BEFORE the request: the failure this exists for is
+// losing the response, so a server-generated id would arrive too late to help.
+function actRequestId(){return`act-${offlineMessageId()}`;}
 globalThis.outboxReceipts=(()=>{try{
   const value=JSON.parse(localStorage.getItem(OUTBOX_RECEIPT_STORE_KEY)||'{}');
   if(!value||typeof value!=='object'||Array.isArray(value))return{};

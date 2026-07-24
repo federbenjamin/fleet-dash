@@ -180,7 +180,7 @@ async function tick(force=false){
     if(currentRoute==='insights')loadBudgets();
     if(currentRoute==='search'&&searchFilters.kind==='session'&&
       Date.now()-historyLoadedAt>5000&&!historyLoading)loadHistory(true);
-    if(!fleetOffline)void flushOfflineMessages();
+    if(!fleetOffline){void flushOfflineMessages();void resolvePendingReceipts();}
   }catch(e){if(sequence===pollSequence&&(e.name!=='AbortError'||timedOut)){
     if(timedOut)console.warn('Fleet poll timed out; keeping the last usable screen');
     else if(e instanceof TypeError&&/fetch|network/i.test(String(e.message||e)))

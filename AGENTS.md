@@ -17,6 +17,7 @@ fleetdash/                everything server.py imports
   engine_scan.py            registry scan, session organization, status, control state
   engine_act.py             act(): the injection dispatcher
   engine_context.py         conversation/file projections, hook pending, prompt identity, effort
+  engine_receipts.py        durable act receipts + idempotent replay
   engine_ledger.py          spend ledger, closed sessions, history, handoffs
   engine_notify.py          notifications, Web Push, Outbox actions
   engine_spawn.py           spawn/handoff, iTerm applet exchange, settings
@@ -107,7 +108,7 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 - Security boundaries (files, spawn, trust, uploads, staging, closed sessions):
   10, 19–21, 23, 41, 54, 56, 74
 - Notifications & Web Push: 2, 8, 44, 46–48
-- Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68
+- Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68, 76
 - Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45, 71,
   51, 53, 55, 57–60, 62, 63, 67, 70, 72
 - HTTP routing gotcha: 6
@@ -1156,6 +1157,39 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     never fenced: without a record there is no identity, and refusing on a guess would strand a
     genuinely open prompt.
 
+76. **A native action carries a durable receipt, and the same request id never types twice.**
+    `/api/act` reaching Claude's terminal is not repeatable, so invariant 66 makes Fleet say
+    "delivery uncertain" and stop — correct, but until now nothing durable recorded what actually
+    happened, and a phone that lost its connection mid-answer could never find out. The browser
+    mints a `client_request_id` BEFORE the request (the failure this exists for is losing the
+    RESPONSE, so a server-generated id would arrive too late), `Engine.begin_act_receipt`
+    (`engine_receipts.py`) binds one `act_receipts` row to it, and `resolve_act_receipt` writes the
+    outcome. Replaying the same id returns the recorded result — `ok`/`replayed` when it was
+    delivered, the recorded failure otherwise, `in_flight` while it is still running — and NEVER
+    writes a second set of keys. Only the OUTERMOST `act()` binds a receipt: `act` re-enters itself
+    under the per-session Claude mutation lock and `_send_now_or_queue` forwards the same
+    `client_request_id` to a nested direct send, so nesting is tracked by a thread-local depth
+    counter rather than a field on the action, which is client-supplied and untrusted.
+    **The verdict comes from act(), not from the transport classifier**: act already labels a
+    possibly-delivered failure `delivery_uncertain`/`control_delivery_uncertain`, and every other
+    refusal (empty text, stale nonce, capability gate) is one it made before touching the transport
+    — re-deriving the state with `_native_write_failed_before_delivery` would mislabel all of those
+    as uncertain and send the user to check a terminal that received nothing.
+    Receipts are internal, never projected into `/api/fleet`, and pruned after
+    `ACT_RECEIPT_TTL_SECONDS` (24h, operator decision 2026-07-24). Read-only probes (`ping`, `noop`,
+    `focus`) are excluded because replaying one costs nothing. A storage failure must never block an
+    action: `begin_act_receipt` returns no receipt and the action proceeds exactly as before.
+    Token-gated `GET /api/act-receipt?rid=` is how a reconnected browser asks. **A missing receipt
+    is ambiguous, not a verdict** — the request may never have arrived, its receipt may have been
+    pruned, or the ledger may have refused the write while the keys still landed — so the client
+    stops tracking it and leaves whatever the user was already shown. A `delivered` receipt returns
+    the optimistic row to WAITING, not confirmed: canonical transcript confirmation still owns the
+    final state (invariant 34).
+    This is deliberately not the async worker the design document proposed. Measured on staging
+    2026-07-24, a full `noop` act costs a median 3.0 ms through tmux against 296.1 ms through the
+    applet, so "return in ~10 ms and poll a receipt" buys nothing once the terminal switch lands.
+    Durability was the other half of that plan and stands on its own.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1197,6 +1231,18 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
   layout), arm a background until-loop watcher on the pending file, then `contents of session`
   via osascript from an iTerm-child shell (TCC auto-allowed there, unlike the daemon).
 - Applet rebuild: README recipe; ad-hoc re-sign may re-prompt the automation grant once.
+- **Browser specs: the service worker is OFF by default.** `reset()` in `tests/browser/fleet.spec.js`
+  stubs `navigator.serviceWorker.register` unless a spec passes `{serviceWorker:true}`. A registered
+  worker intercepts fetches BEFORE Playwright's `page.route` sees them and can win registration
+  during the setup idle callback, so a spec mocking an API endpoint intermittently exercised the real
+  fixture instead of its mock — proven 2026-07-24: an `/api/act` mocked to fail was answered for real
+  and the prompt vanished for good. Four specs genuinely test the PWA and opt back in. The stub must
+  stay inside a try/catch: init scripts run in EVERY frame, and merely READING
+  `navigator.serviceWorker` throws `SecurityError` in the sandboxed artifact iframe.
+- **Never measure a poll-rebuilt node through a handle.** `#sact`, `#sctrl` and the card tails are
+  replaced on a 2s tick, so `locator.boundingBox()` or `el.evaluate(el=>el.nextElementSibling…)` can
+  resolve an element that is detached before it is read — a null with no error. Use `stableBox()`
+  (retries) or express the relationship as a locator (`'#sctrl > .termbtn + .ovwrap'`).
 - Headless page test: `chrome --headless=new --dump-dom http://127.0.0.1:8377/` renders with
   JS executed; grep for `class="pend"` etc.
 - The building session's own Bash runs sandboxed — anything probing PIDs (`os.kill`) or writing
@@ -1236,6 +1282,7 @@ because they are also spawned directly as scripts by absolute path.
   (conversation/file/context projections, hook pending, prompt request identity +
   the answered fence, screen observation, effort, commands),
   `engine_worktree` (cleanup tickets), `engine_tmux` (the tmux transport),
+  `engine_receipts` (durable act receipts, idempotent replay, retention),
   `engine_transport` (tty/process resolution,
   codex terminal routes, the `_terminal_write`/`_terminal_spawn` transport dispatcher,
   background attach), `engine_notify` (notifications/Web
@@ -1299,6 +1346,7 @@ because they are also spawned directly as scripts by absolute path.
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk)
   + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74),
+  + token-gated `/api/act-receipt?rid=` (durable action receipts, invariant 76),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
   `/api/notification-policy`, `/api/push/config`, and `/api/push/devices`; POST `/api/act` +
   `/api/upload-image` + `/api/settings` + `/api/notification-policy` +
