@@ -1,0 +1,37 @@
+<!-- @dsCard group="Components" viewport="700x420" name="Shell" subtitle="NavRail with usage footer, NotificationRow + actions sub-card" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="../../ds-preview.js"></script>
+</head><body style="margin:0;padding:16px"><div id="root"></div>
+<script type="text/plain" id="__jsx">
+const { NavRail, NotificationRow } = NS;
+function Demo() {
+  const [open, setOpen] = React.useState(0);
+  return (
+    <div style={{display:'flex',gap:16,height:388}}>
+      <div style={{border:'1px solid var(--line)',borderRadius:10,overflow:'hidden',display:'flex'}}>
+        <NavRail active="NOW"
+          items={[{label:'NOW',badge:2},{label:'NOTIFICATIONS',badge:5},{label:'SEARCH'},{label:'WORKSTREAMS'},{label:'INSIGHTS'},{label:'SETTINGS'},{label:'＋ NEW SESSION'}]}
+          usage={[{label:'CLAUDE 5H',pct:75},{label:'CLAUDE WK',pct:41},{label:'CODEX 5H',pct:1}]}
+          user="jordan" daemonOk />
+      </div>
+      <div style={{flex:1,display:'flex',flexDirection:'column',gap:8}}>
+        <NotificationRow title="design-probe asked a question" meta="2m" tone="amber" unread open={open===0} onTap={()=>setOpen(0)} />
+        <NotificationRow title="quirk finished test:gates" meta="14m" tone="green" unread open={open===1} onTap={()=>setOpen(1)} />
+        <NotificationRow title="fixture-server stalled · quiet 6m" meta="22m" tone="red" open={open===2} onTap={()=>setOpen(2)} />
+        <NotificationRow title="rate-limit warning · CLAUDE 5H at 75%" meta="1h" open={open===3} onTap={()=>setOpen(3)} />
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+</script>
+<script>
+window.__dsReady.then(NS => {
+  const src = document.getElementById('__jsx').textContent;
+  const code = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  new Function('NS', 'React', 'ReactDOM', code)(NS, window.React, window.ReactDOM);
+});
+</script></body></html>

@@ -1,0 +1,96 @@
+<!-- @dsCard group="Fleet Dash" viewport="1440x900" subtitle="Interactive Now screen — queue + persistent session workspace" -->
+<!-- @startingPoint section="Fleet Dash" subtitle="Now screen: rail + queue + workspace with question drawer" viewport="1440x900" -->
+<!doctype html><html><head><meta charset="utf-8"><title>Fleet Dash — Now</title><link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="../../ds-preview.js"></script>
+<style>html,body{height:100%}*{box-sizing:border-box}</style>
+</head><body style="margin:0"><div id="root" style="height:100%"></div>
+<script type="text/plain" id="__jsx">
+const { NavRail, SessionCard, QuestionCard, ApprovalCard, AgentRow, SectionHeader, Tabs, ChatMessage, Composer, QuestionDrawer, IconButton, Receipt } = NS;
+
+function App() {
+  const [selected, setSelected] = React.useState('probe');
+  const [tab, setTab] = React.useState('CHAT');
+  const [answered, setAnswered] = React.useState(null);
+  const [draft, setDraft] = React.useState('');
+  const [msgs, setMsgs] = React.useState([
+    { role: 'user', text: 'Ship the release when the checks pass.', receipt: 'delivered' },
+    { role: 'tool', text: '▸ ran test:gates — exit 0 · 41s' },
+    { role: 'agent', text: 'Checks are green. Before promoting, I need a decision on the deploy order.' },
+  ]);
+  const send = () => { if (!draft.trim()) return; setMsgs(m => [...m, { role: 'user', text: draft, receipt: 'sending' }]); setDraft(''); };
+  return (
+    <div style={{ display: 'flex', height: '100%', background: 'var(--bg)', overflow: 'hidden' }}>
+      <NavRail active="NOW"
+        items={[{label:'NOW',badge:2},{label:'NOTIFICATIONS',badge:5},{label:'SEARCH'},{label:'WORKSTREAMS'},{label:'INSIGHTS'},{label:'SETTINGS'},{label:'＋ NEW SESSION'}]}
+        usage={[{label:'CLAUDE 5H',pct:75},{label:'CLAUDE WK',pct:41},{label:'CODEX 5H',pct:1}]}
+        user="jordan" daemonOk />
+      <div style={{ width: 560, flex: 'none', borderRight: '1px solid var(--line)', overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ font: 'var(--text-page-title)' }}>Now</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <SectionHeader label="NEEDS YOU" count={2} tone="amber" />
+          <QuestionCard session="design-probe — deploy order" meta="fleet-dash · main · claude"
+            question="Which deployment target should the release script promote first?"
+            optionCount={3} recommended="Staging first" quiet="quiet 2m" onOpen={() => { setSelected('probe'); setTab('CHAT'); }} />
+          <ApprovalCard session="fixture-server" meta="fleet-dash · main" command="rm -rf node_modules && npm ci" quiet="quiet 40s" />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <SectionHeader label="WORKING" count={2} tone="green" />
+          <SessionCard title="Explain the three needs of judgments" repo="quirk · refactor/offset-op-lock"
+            status="working" model="opus-4-8" ctx={28} quiet="7s" agentCount={2} selected={selected==='quirk'}
+            peek="All gates green (type-check, format, lint 0 errors, test:gates exit 0). Committing C on the follow-up branch…"
+            onClick={() => setSelected('quirk')}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 4, borderLeft: '1px solid var(--line-soft)', paddingLeft: 12 }}>
+              <AgentRow name="explore" desc="scanning fixture server routes" model="haiku · low" />
+              <AgentRow name="test-runner" desc="test:gates on follow-up branch" model="sonnet · med" />
+            </div>
+          </SessionCard>
+          <SessionCard title="Get repo into Claude for full redesign" repo="fleet-dash · main"
+            status="working" model="fable-5" ctx={14} quiet="10s" agentCount={2} selected={selected==='repo'}
+            peek="Probe is live in Needs-you. Capturing the question surfaces now." onClick={() => setSelected('repo')} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <SectionHeader label="AVAILABLE" count={0} tone="dim" />
+          <div style={{ border: '1px dashed var(--line)', borderRadius: 10, padding: 14, textAlign: 'center', color: 'var(--fg-dim-3)', font: 'var(--text-micro)' }}>no sessions ready · ＋ new coding session</div>
+        </div>
+      </div>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0B0A08', minWidth: 0 }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ font: "600 15px 'Space Grotesk', sans-serif" }}>{selected === 'probe' ? 'design-probe' : selected === 'quirk' ? 'Explain the three needs of judgments' : 'Get repo into Claude for full redesign'}</div>
+            {selected === 'probe' && !answered && <div style={{ font: "400 10px 'IBM Plex Mono', monospace", color: 'var(--amber)', border: '1px solid var(--amber-border)', borderRadius: 5, padding: '2px 7px', letterSpacing: '.1em' }}>NEEDS YOU</div>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Tabs items={['CHAT','FILES','AGENTS','DETAILS']} active={tab} onSelect={setTab} />
+            <IconButton glyph="⤡" size={28} />
+            <IconButton glyph="⋮" size={28} />
+          </div>
+        </div>
+        <div style={{ flex: 1, padding: 20, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
+          {tab === 'CHAT' ? msgs.map((m, i) => <ChatMessage key={i} role={m.role} receipt={m.receipt}>{m.text}</ChatMessage>)
+            : <div style={{ margin: 'auto', font: 'var(--text-micro)', color: 'var(--fg-dim-3)' }}>{tab.toLowerCase()} — see the full mockups for this section</div>}
+        </div>
+        {selected === 'probe' && tab === 'CHAT' && (
+          <QuestionDrawer title="DEPLOY ORDER — WAITING ON YOU" page="1 OF 1"
+            question="Which deployment target should the release script promote first?"
+            options={[{label:'Staging first',desc:'verify API identity, then production',rec:true},{label:'Production directly',desc:'skip staging'},{label:'Hold the release',desc:'wait on open bug'}]}
+            answered={answered} onPick={o => setAnswered(o.label)} />
+        )}
+        <div style={{ padding: '10px 20px 14px', borderTop: '1px solid var(--line)' }}>
+          <Composer value={draft} onChange={setDraft} onSend={send} />
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+<script>
+window.__dsReady.then(NS => {
+  const src = document.getElementById('__jsx').textContent;
+  const code = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  new Function('NS', 'React', 'ReactDOM', code)(NS, window.React, window.ReactDOM);
+});
+</script></body></html>
