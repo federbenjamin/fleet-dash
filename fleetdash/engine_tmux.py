@@ -30,6 +30,7 @@ from . import paths as pathcfg
 _PANE_TTY = re.compile(r"/dev/ttys[0-9A-Za-z]{1,16}\Z")
 _PANE_ID = re.compile(r"%[0-9]{1,9}\Z")
 _APP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}\Z")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _TMUX_NAME = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
 # pane_id, pane_tty, session_name, session_attached, pane_dead
 _PANE_FORMAT = ("#{pane_id}\t#{pane_tty}\t#{session_name}"
@@ -194,6 +195,29 @@ class TmuxOps:
             if index + 1 < len(steps) and delay:
                 time.sleep(delay)
         return {"ok": True, "transport": "tmux"}
+
+    # ------------------------------------------------------------ observation
+    def _tmux_capture(self, pane, max_rows=200, max_columns=400):
+        """Read one pane's visible screen as bounded plain text.
+
+        Strictly read-only — no keys are sent, so a capture cannot disturb the
+        session. `-p` prints the rendered screen without escape sequences (`-e`
+        would keep them), but a pane can render anything, so the result is still
+        control-character scrubbed and bounded on both axes.
+        """
+        if not self._tmux_command():
+            return {"ok": False, "error": "tmux is not installed"}
+        result = self._tmux_run(
+            pane["socket"], ["capture-pane", "-p", "-t", pane["pane_id"]])
+        if result is None or result.returncode:
+            return {"ok": False,
+                    "error": self._tmux_detail(result, "tmux could not read this pane")}
+        rows = (result.stdout or "").splitlines()
+        truncated = len(rows) > max_rows
+        lines = [_CONTROL.sub(" ", row).rstrip()[:max_columns] for row in rows[-max_rows:]]
+        while lines and not lines[-1]:
+            lines.pop()             # trailing blanks are unused screen, not content
+        return {"ok": True, "lines": lines, "truncated": truncated}
 
     def _tmux_focus_pane(self, pane):
         """Select the pane, then raise the terminal application generically.

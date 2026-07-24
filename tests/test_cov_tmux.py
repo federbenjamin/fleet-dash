@@ -267,6 +267,49 @@ class WriteTests(unittest.TestCase):
         self.assertFalse(TransportOps._native_write_failed_before_delivery(out))
 
 
+class CaptureTests(unittest.TestCase):
+    """`_tmux_capture`: read-only, bounded, and control-character scrubbed."""
+
+    def setUp(self):
+        self.stub = TmuxStub()
+
+    def test_visible_screen_is_returned_as_lines(self):
+        self.stub.results = [result(stdout="❯ 1. Red   \n  2. Green\n\n\n")]
+        out = self.stub._tmux_capture(PANE)
+        self.assertEqual(out, {"ok": True, "lines": ["❯ 1. Red", "  2. Green"],
+                               "truncated": False})
+        self.assertEqual(self.stub.calls[0][1],
+                         ["capture-pane", "-p", "-t", "%3"])
+
+    def test_no_keys_are_ever_sent(self):
+        self.stub.results = [result(stdout="x\n")]
+        self.stub._tmux_capture(PANE)
+        self.assertNotIn("send-keys", [args[0] for _, args in self.stub.calls])
+
+    def test_control_characters_are_scrubbed(self):
+        self.stub.results = [result(stdout="a\x1b[31mb\x00c\x07d\te\n")]
+        self.assertEqual(self.stub._tmux_capture(PANE)["lines"], ["a [31mb c d\te"])
+
+    def test_rows_and_columns_are_bounded(self):
+        self.stub.results = [result(stdout="\n".join(f"row{index}" for index in range(9)))]
+        out = self.stub._tmux_capture(PANE, max_rows=4)
+        self.assertEqual(out["lines"], ["row5", "row6", "row7", "row8"])
+        self.assertTrue(out["truncated"])
+
+        self.stub.results = [result(stdout="y" * 900)]
+        self.assertEqual(len(self.stub._tmux_capture(PANE, max_columns=40)["lines"][0]), 40)
+
+    def test_blank_screen_and_failures(self):
+        self.stub.results = [result(stdout="\n\n\n")]
+        self.assertEqual(self.stub._tmux_capture(PANE), {"ok": True, "lines": [],
+                                                         "truncated": False})
+        self.stub.results = [result(returncode=1, stderr="can't find pane")]
+        self.assertEqual(self.stub._tmux_capture(PANE)["ok"], False)
+        self.stub.results = [None]
+        self.assertFalse(self.stub._tmux_capture(PANE)["ok"])
+        self.assertFalse(TmuxStub(executable="")._tmux_capture(PANE)["ok"])
+
+
 class FocusTests(unittest.TestCase):
     def setUp(self):
         self.stub = TmuxStub({"terminal_app": "Ghostty"})

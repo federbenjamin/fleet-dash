@@ -1275,6 +1275,19 @@ class Handler(BaseHTTPRequestHandler):
                         "can_resume_and_send": False,
                         "resume_disabled_reason": "Fixture session is view only",
                         "status_line": fixture_status_line("claude", frozen=True)}})
+            if route == "/api/screen":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                sid = (query.get("sid") or [""])[0]
+                if not sid.startswith("claude"):
+                    return self.json_reply({
+                        "ok": False, "code": "screen_unavailable",
+                        "error": "this session is not running in a tmux pane — only "
+                                 "the tmux transport can read a terminal screen"})
+                return self.json_reply({
+                    "ok": True, "session_id": sid, "transport": "tmux",
+                    "truncated": False, "captured_at": time.time(),
+                    "lines": ["❯ 1. [ ] Red", "  2. [ ] Green", "  <script>x</script>"]})
             if route == "/api/commands":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)

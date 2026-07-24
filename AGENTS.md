@@ -93,12 +93,12 @@ Numbers are stable identifiers (code comments cite "invariant N") — never renu
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
 - Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68
-- Applet, transports & click latency: 3, 24, 25, 73
+- Applet, transports & click latency: 3, 24, 25, 73, 74
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
 - Codex runtime & ownership: 30, 38, 49, 65, 69
 - Security boundaries (files, spawn, trust, uploads, staging, closed sessions):
-  10, 19–21, 23, 41, 54, 56
+  10, 19–21, 23, 41, 54, 56, 74
 - Notifications & Web Push: 2, 8, 44, 46–48
 - Sends, Outbox & delivery certainty: 34, 38, 39, 50, 52, 61, 64, 66, 68
 - Browser UI (cards, overlays, composer, workspace): 13, 26–29, 35–37, 39, 45, 71,
@@ -1098,6 +1098,23 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     own tmux server: `paths.TMUX_SOCKETS` is the patch point and the shared fixtures pin
     `terminal_transport: "applet"`.
 
+74. **Screen observation is read-only, and its refusals are the design.** `Engine.session_screen`
+    (`engine_context.py`) plus token-gated `GET /api/screen` return the text a live session's tmux
+    pane is rendering — the first time Fleet has been able to see a terminal rather than infer one
+    from the registry word, the hook capture and the transcript fold. `_tmux_capture` sends no
+    keys, so a capture can never disturb a session; it uses `capture-pane -p` (never `-e`, which
+    would keep escape sequences), scrubs control characters, and bounds the result to 200 rows ×
+    400 columns. It runs only on request — never on the scan path (invariant 73) — and the result
+    is never cached, logged, or snapshotted. Screen bytes are the most untrusted input in the app:
+    the client renders them inside a `<pre>` through `esc()` and nowhere else.
+    **Four refusals, each enforcing an existing boundary rather than a missing feature:** a
+    background Claude job (its private PTY bytes are readiness evidence that must never cross an
+    API — invariant 25), any Codex thread (its terminal route enables exactly text, image-path
+    text, and focus — invariant 30), a production session read from staging (a live terminal read
+    is a capability, and staging holds none over sessions it did not start — invariant 56), and a
+    session that is not in a tmux pane (the applet has no read verb at all). Adding a fifth
+    consumer of the capture is fine; widening any of these four is a boundary change.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1184,9 +1201,10 @@ because they are also spawned directly as scripts by absolute path.
   `engine_spawn` (spawn/handoff, iTerm applet exchange, settings).
 - `fleetdash/engine_tmux.py` — `TmuxOps`: bounded tmux-socket enumeration under
   `paths.TMUX_SOCKETS`, the cached tty→pane map, per-key `send-keys -l` delivery,
-  detached spawn, and pane focus. Selection and failure semantics are invariant 73
-  and invariant 66; the module header records exactly what was verified against
-  tmux 3.7b, so the encoding does not have to be re-derived.
+  spawn into the operator's session, pane focus, and the read-only `capture-pane`
+  screen read (`_tmux_capture`, invariant 74). Selection and failure semantics are
+  invariant 73 and invariant 66; the module header records exactly what was verified
+  against tmux 3.7b, so the encoding does not have to be re-derived.
 - `fleetdash/web_push.py` + `fleetdash/web_push_worker.js` — private key store, asynchronous
   durable-lease supervisor, bounded helper protocol, Web Push encryption/request
   construction, endpoint/DNS confinement, and
@@ -1230,7 +1248,8 @@ because they are also spawned directly as scripts by absolute path.
   new routes are added to those tables, never as new `if` branches.
   GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
-  + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk),
+  + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk)
+  + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
   `/api/notification-policy`, `/api/push/config`, and `/api/push/devices`; POST `/api/act` +
   `/api/upload-image` + `/api/settings` + `/api/notification-policy` +
@@ -1356,12 +1375,14 @@ TCC Automation grant (injector→iTerm2; the applet transport only).
 
 - Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
   per variant; deny=Esc chosen because it cancels every variant).
-- Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
-  Now cheap on the tmux transport: `capture-pane -p` is a read the daemon can finally perform.
-  That is W5-T2a of [`design-responsiveness-and-transport.md`](design-responsiveness-and-transport.md),
-  along with observed ghost-question/stall/compaction/trust state; T2b (settle detection and
-  pre-flight verification replacing the fixed inter-key delay) is gated on that document's drive
-  allowlist, open question 6.
+- Screen peek is BUILT (invariant 74): the workspace Details section reads a tmux session's live
+  pane on demand, which is what a stalled session's tool output looks like when the transcript
+  cannot say. Still open from W5-T2a of
+  [`design-responsiveness-and-transport.md`](design-responsiveness-and-transport.md): feeding that
+  same capture back into state — observed ghost-question detection (replacing invariant 5's
+  registry-status proxy), stall diagnosis, compaction without a PreCompact hook, trust-prompt
+  confirmation, and Codex tty disambiguation. T2b (settle detection and pre-flight verification
+  replacing the fixed inter-key delay) is gated on that document's drive allowlist, open question 6.
 - A session started in a plain terminal tab cannot be migrated into tmux, so the applet stays
   until the last such session turns over. It is on a countdown, not maintained in parallel: the
   operator is moving off iTerm2 and every iTerm-bound path dies with that move.

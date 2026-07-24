@@ -1145,6 +1145,14 @@ html.keyboard-open body::after{content:"";position:fixed;inset:0;z-index:49;poin
 .evidenceempty,.evidenceerror{color:var(--faint);font-size:11px;line-height:1.5;padding:9px}
 .evidenceerror{color:var(--red);border:1px solid rgba(248,81,73,.35);border-radius:8px}
 .evidenceolder{width:100%;margin-top:4px}.statewhybody{padding:0 10px 10px}
+/* terminal screen peek: a rendered pane is fixed-width art, so it scrolls
+   inside its own box rather than widening the details column */
+.screenhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.screenhead small{color:var(--faint);font-size:10px}
+.screenpeek{font:11px/1.35 var(--font-mono);color:var(--dim);background:var(--surface-input);
+  border:1px solid var(--line);border-radius:var(--radius-option);padding:9px 10px;margin:0;
+  max-height:340px;overflow:auto;white-space:pre;tab-size:4}
+.light .screenpeek{background:#F5F2EB;color:#1C1A16;border-color:#E3DDD1}
 #sevidence.light{background:#F5F2EB;color:#1C1A16}
 #sevidence.light .evidencehead{background:rgba(247,248,250,.96)}
 #sevidence.light .evidencefact{background:#fff;border-color:#E3DDD1}

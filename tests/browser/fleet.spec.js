@@ -921,6 +921,38 @@ test('session placement evidence lives in the Details section', async ({ page },
   await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
 });
 
+test('the Details terminal screen reads on demand and stays read-only text', async ({ page }, testInfo) => {
+  await reset(page);
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.locator('#stab-details').click();
+  const screen = page.locator('#detail-terminal');
+  await expect(screen).toBeVisible();
+  await expect(page.locator('#sdetailindex')).toContainText('Terminal');
+
+  // nothing is captured until asked: a screen read is a subprocess, not a poll
+  await expect(screen.locator('.screenpeek')).toHaveCount(0);
+  await expect(screen).toContainText('Read-only — no keys are sent.');
+  await screen.getByRole('button', { name: 'Read screen' }).click();
+  const pre = screen.locator('.screenpeek');
+  await expect(pre).toBeVisible();
+  await expect(pre).toContainText('1. [ ] Red');
+  await expect(screen).toContainText('captured');
+  await expect(screen.getByRole('button', { name: 'Refresh' })).toBeVisible();
+
+  // pane bytes are untrusted: they render as text, never as markup
+  await expect(pre).toContainText('<script>x</script>');
+  expect(await pre.locator('script').count()).toBe(0);
+  expect(await page.evaluate(() =>
+    getComputedStyle(document.querySelector('.screenpeek')).whiteSpace)).toBe('pre');
+
+  // a closed session has no process, so the block is absent entirely
+  await page.locator('#sclose').click();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#detail-terminal')).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath(`screen-peek-${testInfo.project.name}.png`) });
+});
+
 test('workspace uses active agent counts, persistent desktop splits, and one parent composer height', async ({ page }, testInfo) => {
   await reset(page, 'subagent');
   await page.evaluate(() => {

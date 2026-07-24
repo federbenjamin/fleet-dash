@@ -100,7 +100,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   token protected because it exposes unmanaged local transcripts.
 - **One session workspace:** every live or historical session opens at a stable
   `#session/<sid>/chat` route with persistent **Chat**, **Files**, **Subagents**, and **Details**
-  sections. On wide desktops (≥1200px) the workspace is a persistent **docked right pane** beside
+  sections. Details also carries a read-only
+  [terminal screen peek](#seeing-the-terminal-screen-peek) for a live tmux session.
+  On wide desktops (≥1200px) the workspace is a persistent **docked right pane** beside
   the queue — tapping any session **always opens it split** there, never full-width. The splitter
   between the panes drags (650–1200px); its position moves only when you drag it — route changes,
   window quirks, and scrollbars never nudge it, and a transiently narrow window clamps the shown
@@ -766,6 +768,31 @@ fixtures. Playwright runs the same provider/UI matrix at desktop and 390×844 mo
 named `tests/live_*_smoke.py` are opt-in checks against the running daemon; paid-turn scripts say so
 in their docstring and archive threads they create. `tests/search_benchmark.py` creates a disposable
 100k-message/2k-source corpus and enforces the warm, cold, and append-lag search gates.
+
+## Seeing the terminal (screen peek)
+
+A session's **Details** section has a **Terminal screen** block: press *Read screen* and Fleet shows
+you what that Claude session is rendering right now, from your phone. This is the answer to "it says
+stalled — stalled on *what*", because a frozen mid-tool session shows its live tool output on screen
+and nowhere in the transcript. It also shows you the things the transcript never gets: a folder-trust
+dialog, a compaction progress bar, a permission prompt variant.
+
+It reads and nothing else — no keys are ever sent, so looking cannot disturb a session. Nothing is
+captured until you ask, and the capture is not refreshed by the poll; press *Refresh* for a newer
+one, and the block tells you how old the one you are looking at is.
+
+Four cases show a reason instead of a screen, all deliberate:
+
+- **The session is not in a tmux pane.** Only the tmux transport can read a screen; the applet has
+  no read verb at all.
+- **It is a background Claude job.** Its only channel is a private terminal whose bytes Fleet uses
+  as readiness evidence and never exposes.
+- **It is a Codex thread.** Fleet's attached-Codex-terminal route is proved narrowly and permits
+  text and focus only; reading its screen is not on that list.
+- **It is a production session and you are on staging.** Staging holds no capability over sessions
+  it did not start, and a live terminal read is a capability.
+
+The route (`/api/screen`) needs the device token, like `/api/file`.
 
 ## Terminal transport (tmux and the legacy applet)
 

@@ -1,6 +1,6 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W5-T1 shipped 2026-07-24; everything else proposed.** Written 2026-07-24 after a
+Status: **W5-T1 and the first half of W5-T2a shipped 2026-07-24; everything else proposed.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -368,6 +368,11 @@ Per D11, T1 must also replace the non-delivery verbs:
 
 After T1 the applet retains no responsibility that tmux cannot serve, so it can be removed on the
 terminal switch rather than maintained in parallel forever.
+
+**T2a — read-only observation. Screen peek SHIPPED 2026-07-24** (`_tmux_capture`,
+`Engine.session_screen`, token-gated `GET /api/screen`, the workspace Details block, AGENTS.md
+invariant 74). The remaining five bullets — feeding the same capture back into Fleet's own state —
+are still open, and they are the ones that remove guesses rather than add a view.
 
 **T2a — read-only observation. Unblocked, and cheaper than anything else here.**
 
