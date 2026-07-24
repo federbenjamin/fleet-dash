@@ -56,7 +56,7 @@ function render(f,force){
   const nowCounts={needs_you:(t.needs_me||0)+(provisional?.ui_group==='needs_you'?1:0),
     working:(t.busy||0)+(provisional?.ui_group==='working'?1:0),available:t.available||0,
     subagents:activeAgentCount};
-  const nowLabels={all:'All',needs_you:'Needs you',working:'Working',available:'Available',subagents:'Subagents'};
+  const nowLabels={all:'All',needs_you:'Needs you',working:'Working',available:'Avail',subagents:'Subagents'};
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
     const active=button.dataset.nowFilter===nowState;
     button.classList.toggle('active',active);

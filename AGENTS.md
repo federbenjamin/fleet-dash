@@ -38,6 +38,9 @@ fleetdash/                everything server.py imports
   search_index.py           search worker (stdlib-only, spawned as a script)
   web_push.py + web_push_worker.js   Web Push supervisor + Node helper
 static/                   the whole browser app (js/*.js ES modules, fleet.css, sw.js — no build step)
+  fonts/                    self-hosted Console webfonts (Space Grotesk var + IBM Plex Mono ×3)
+design-system/            the "Console" design system (tokens, component specs, guidelines) —
+                          the visual contract every new surface matches; see its HANDOFF.md
 dashboard.html            application shell
 hooks/pending-capture.py  Claude hook: pending-question capture → fleet-dash-capture
 scripts/                  build-injector.sh, deploy-production.sh, coverage.sh
@@ -217,10 +220,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
     rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place result
     mutation must still bump `convo_v` or clients never refetch.
-13. **`.card` must stay `overflow:clip`, never `hidden`.** The sticky card header
-    (`position:sticky` on `.shead`) sticks to the *viewport* only while no ancestor is a
-    scroll container; `overflow:hidden` makes the card one and silently kills the pinning.
-    `clip` keeps the border-radius clipping without creating a scroll container.
+13. **`.card` must stay `overflow:clip`, never `hidden`.** `clip` keeps the border-radius
+    clipping without turning the card into a scroll container — `hidden` would create one,
+    which breaks any viewport-sticky descendant and silently changes hit-testing/scroll
+    behavior inside the card. (The Console redesign dropped the sticky `.shead`, but the
+    clip-not-hidden rule still stands for the radius clipping.)
 14. **Answer suppression is client-side and nonce-keyed:** a sent answer records
     `answered[sid]=nonce` and the selector hides immediately (the engine's pending clears a
     poll or two later). Never suppress by sid alone — the next ask (new nonce) must render.
@@ -321,8 +325,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     real multi-question ask before shipping.
 25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
-    command. `act` type `focus` powers the Claude card's desktop-only **Terminal** button (`.deskonly`, hidden
-    on `pointer:coarse` — focusing a Mac tab from a phone is meaningless). This path is only for a
+    command. `act` type `focus` powers the **Terminal** button in the session workspace header
+    (`#sctrl`; Console locked decision: never a card button — terminal access lives in the
+    workspace header/⋮, and focusing a Mac tab from a phone is meaningless). This path is only for a
     foreground Claude process whose exact PID/tty maps to an iTerm session. A `kind:bg` registry row
     has no iTerm route: `ClaudeBackgroundTransport` validates its eight-hex job id, starts the
     official fixed-argv `claude attach <job>` client in a private PTY, writes only Engine-composed
@@ -338,9 +343,11 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     weekly/Fable-weekly quota percentages and resets, and last-update time. The same profile objects
     also contain session keys and credential
     JSON: never return, log, cache, or snapshot the raw objects. Multi-profile mode renders every
-    selected account and its active marker. The Now-header button summarizes the active Claude
-    profile's 5-hour/weekly percentages plus the highest active non-Spark Codex bucket as
-    `Usage · Claude X/Y · Codex Z`. Only the active Claude profile (falling back to the first selected
+    selected account and its active marker. The usage entry point summarizes the active Claude
+    profile's 5-hour/weekly percentages plus the highest active non-Spark Codex bucket: on
+    desktop the nav-rail footer renders per-window bars (`#railusage`, green <70 / amber ≥70 /
+    red ≥90) that open the accounts flyout pinned beside the rail; on mobile the Now-header
+    chip keeps the `Usage · Claude X/Y · Codex Z` summary. Only the active Claude profile (falling back to the first selected
     profile when the active marker is missing) and active Codex windows drive amber at 70% and red at
     90%. Inactive Claude profiles retain their own gauge colors in the full popover/sheet but never
     color the summary button. If the app is absent/unreadable, fall back to the Claude
@@ -361,8 +368,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     `pin_session` + `pinned` through `/api/settings`. `renderPinned` fills `#pinned` (directly below
     Fleet Briefing) in persisted insertion order. Fleet urgency/activity changes never reorder it; a
     new pin appends at the bottom. Pinned cards are relocated, never duplicated.
-    Desktop and mobile expose `.spin` 📌 buttons in session headers and Action Inbox rows. Mobile
-    also supports long-pressing a session header; the hold paints immediately and `sessionTap`
+    Console redesign (locked decision): pin/unpin is right-click on the session header
+    (desktop, via `oncontextmenu`) or long-press (mobile); cards carry no pin button — the
+    `⌖ pinned` marker + blue border show pinned state. Action Inbox rows keep their `.spin`
+    buttons. The long-press hold paints immediately and `sessionTap`
     swallows the following click so pinning does not also open the chat. `pinActions` suppresses
     duplicate writes; failure restores the exact prior
     order and renders inline retry instead of a blocking alert.
@@ -584,13 +593,14 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     `SHELL_CACHE` for structural shell changes. All other `/api/*` responses—including actions,
     conversation detail, notifications, settings, search, and token-bearing URLs—remain network-only.
 45. **The session-peek line setting also owns ordinary collapsed-card height.** A `.fixedpeek`
-    card uses the measured fixed frame `97px + preview_session_lines × 17.4px` (or zero preview
-    rows when session peeks are disabled); its collapsed More button is hidden because the card
+    card uses the measured fixed frame `76px + preview_session_lines × 17.9px` on desktop and
+    `100px + lines × 17.9px` on mobile, where the meta rail folds under the content as a 24px
+    footer row (or zero preview rows when session peeks are disabled); the card
     header itself opens Chat (invariant 63). Never put
     `.fixedpeek` on an open card, an explicitly expanded peek, or a card showing a pending request,
     error, reply request, inline delivery/pin feedback, or running subagents: those cards must grow
-    to keep every action visible. Keep the height inputs synchronized with the header/meta/peek/
-    More CSS measurements if their typography or padding changes.
+    to keep every action visible. Keep the height inputs synchronized with the header/peek/meta
+    CSS measurements if their typography or padding changes.
 46. **Web Push delivery is isolated, durable, and secret-redacted.** VAPID/action material exists
     only in ignored `push-secrets.json`: it must be a same-owner regular file with mode 0600, and
     malformed or weak-permission content disables delivery instead of regenerating keys. The Python

@@ -206,7 +206,8 @@ function dismissOverlay(){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')dismissOverlay();});
 document.addEventListener('click',e=>{
-  if(usageOpen&&!e.target.closest('#usagepanel')&&!e.target.closest('#usagechip'))closeUsage();
+  if(usageOpen&&!e.target.closest('#usagepanel')&&!e.target.closest('#usagechip')&&
+    !e.target.closest('#railusage'))closeUsage();
   if(overflowOpen&&!e.target.closest('.ovwrap'))closeOverflow();
   if(!e.target.closest('.composertools'))closeComposerMenus();
   if($('#mobilemore').classList.contains('open')&&!e.target.closest('#mobilemore')&&!e.target.closest('[data-route="more"]'))closeMobileMore();

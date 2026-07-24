@@ -40,10 +40,13 @@ class PwaContractTest(unittest.TestCase):
         self.assertIn("if (url.pathname.startsWith('/api/')) return;", worker)
         self.assertIn("request.mode === 'navigate'", worker)
         self.assertIn("catch(async () => (await caches.match('/')) || caches.match('/static/offline.html'))", worker)
-        self.assertIn("const SHELL_CACHE = 'fleet-shell-n7-v1'", worker)
+        self.assertIn("const SHELL_CACHE = 'fleet-shell-n8-v1'", worker)
         shell_assets = worker.split("const SHELL_ASSETS", 1)[1].split("];", 1)[0]
         for module in ("main.js", "state-store.js", "cards.js", "workspace.js"):
             self.assertIn(f"'/static/js/{module}'", shell_assets)
+        for font in ("SpaceGrotesk-var.woff2", "IBMPlexMono-Regular.woff2",
+                     "IBMPlexMono-Medium.woff2", "IBMPlexMono-SemiBold.woff2"):
+            self.assertIn(f"'/static/fonts/{font}'", shell_assets)
         self.assertNotIn("'/static/app.js'", shell_assets)
         self.assertIn("const RUNTIME_CACHE = 'fleet-runtime-n6-v1'", worker)
         self.assertIn("fetch(request).then(response =>", worker)
@@ -56,7 +59,7 @@ class PwaContractTest(unittest.TestCase):
     def test_dashboard_declares_manifest_theme_and_touch_icon(self):
         dashboard = self.read("dashboard.html")
         self.assertIn('rel="manifest" href="/static/manifest.webmanifest"', dashboard)
-        self.assertIn('name="theme-color" content="#0a0e14"', dashboard)
+        self.assertIn('name="theme-color" content="#0E0D0B"', dashboard)
         self.assertIn('rel="apple-touch-icon" href="/static/icons/fleet-192.png"', dashboard)
 
 

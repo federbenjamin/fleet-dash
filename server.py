@@ -37,8 +37,16 @@ APP_MODULES = [
     "settings-actions.js", "history-spawn.js", "insights.js",
 ]
 
+# Self-hosted Console webfonts (design-system): immutable binaries, long cache.
+APP_FONTS = [
+    "SpaceGrotesk-var.woff2", "IBMPlexMono-Regular.woff2",
+    "IBMPlexMono-Medium.woff2", "IBMPlexMono-SemiBold.woff2",
+]
+
 STATIC_FILES = {
     "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8", "no-cache", {}),
+    **{f"/static/fonts/{name}": (f"static/fonts/{name}",
+        "font/woff2", "public, max-age=31536000, immutable", {}) for name in APP_FONTS},
     **{f"/static/js/{name}": (f"static/js/{name}",
         "text/javascript; charset=utf-8", "no-cache", {}) for name in APP_MODULES},
     "/static/manifest.webmanifest": ("static/manifest.webmanifest",

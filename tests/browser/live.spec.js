@@ -53,7 +53,7 @@ test('running Fleet Dash renders both providers without console or network failu
   });
   recordUnexpectedRequestFailures(page, failures);
   await page.goto(liveURL, { waitUntil: 'domcontentloaded' });
-  await page.locator('#usagechip').click();
+  await page.locator('#railusage:visible, #usagechip:visible').click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('Claude Code');
   await expect(page.locator('#usagebody')).toContainText('Codex CLI');
