@@ -20,8 +20,7 @@ async function goTo(page, route) {
     control = page.locator(`#mobilemore button[onclick*="'${route}'"]:visible`);
   }
   await control.click();
-  if (route === 'settings') await expect(page.locator('#settingsview')).toBeVisible();
-  else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
+  await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
 function recordUnexpectedRequestFailures(page, failures) {
@@ -65,10 +64,10 @@ test('running Fleet Dash renders both providers without console or network failu
   await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await goTo(page, 'settings');
-  await expect(page.locator('#settingsview')).toBeVisible();
-  await expect(page.locator('#settitle')).toHaveText('Settings');
+  await expect(page.locator('#route-settings')).toBeVisible();
+  await expect(page.locator('#route-settings .settingsapp')).toBeVisible();
   await page.evaluate(() => history.back());
-  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('#route-settings')).toBeHidden();
   await goTo(page, 'workstreams');
   await expect(page.locator('#workstreams .workstream').first()).toBeVisible();
   await expect(page.locator('#workstreams')).toContainText(/not observed|not configured/);
@@ -139,7 +138,6 @@ test('running Fleet Dash reads briefings, budgets, digest settings, and spawn fo
   await expect(page.locator('.policyanswer')).toContainText(/Push (on|off)/);
   await page.evaluate(() => selectSettingsSection('budgets'));
   await expect(page.locator('.budgetsettings')).toBeVisible();
-  await page.locator('#setclose').click();
   await goTo(page, 'insights');
   await expect(page.locator('#budgets')).toContainText(/Budgets|No budgets configured/);
   await goTo(page, 'now');

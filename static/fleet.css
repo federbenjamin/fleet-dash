@@ -10,6 +10,8 @@
 @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:600;font-display:swap;
   src:url(/static/fonts/IBMPlexMono-SemiBold.woff2) format('woff2')}
 :root{
+  /* mobile sticky-head height incl. the iOS status-bar inset (0 on desktop) */
+  --mobile-head-h:calc(52px + env(safe-area-inset-top));
   /* Console palette — surfaces & hairlines */
   --bg:#0E0D0B; --surface-card:#14120E; --surface-input:#12100D; --surface-raised:#1A1712;
   --surface-button:#17140F; --surface-hover:#1E1A13; --surface-workspace:#0B0A08;
@@ -45,6 +47,10 @@
    ::-webkit-scrollbar styling, so never mix the two. */
 *{scrollbar-width:thin;scrollbar-color:transparent transparent}
 .scrolling{scrollbar-color:#3A311E transparent}
+/* Reserve the viewport scrollbar gutter permanently: with classic (non-overlay)
+   scrollbars, a tab whose content overflows would otherwise shrink the viewport
+   and shift the fixed docked pane + its divider sideways on every route change. */
+html{scrollbar-gutter:stable}
 body{background:var(--bg);color:var(--fg);font:400 13.5px/1.5 var(--font-ui);
   font-variant-numeric:tabular-nums;min-height:100vh}
 #appshell{min-height:100vh;display:grid;grid-template-columns:var(--w-rail) minmax(0,1fr)}
@@ -92,6 +98,8 @@ html[data-nav-side="right"] #sidenav{grid-column:2;grid-row:1;border-right:0;bor
 html[data-nav-side="right"] #appmain{grid-column:1;grid-row:1}
 .destination{width:min(100%,960px);margin-inline:auto}
 .destination[hidden]{display:none!important}
+/* Settings carries its own 210px section rail beside ~860px content */
+#route-settings{width:min(100%,1140px)}
 .desthead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:0 0 14px;padding:0 2px}
 .desthead h1{font:600 22px/1.2 var(--font-ui);letter-spacing:0}
 .desthead p{font:400 11px var(--font-mono);color:var(--fg-dim-3);margin-top:3px}
@@ -218,7 +226,6 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .pagetitle{font-size:22px;font-weight:700;padding:4px 2px 2px;display:flex;align-items:center}
 .pagetitle span{flex:1}
 #gear{background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer;padding:2px 6px}
-.setpanel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:10px}
 .setrow{display:block;font-size:13px;color:var(--fg);padding:5px 0;cursor:pointer}
 .setrow input[type=checkbox]{margin-right:8px;accent-color:var(--blue)}
 .setnum{color:var(--dim)}
@@ -250,24 +257,18 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .pushswitch{display:flex;align-items:center;min-height:32px;color:var(--dim);font-size:10.5px;white-space:nowrap}.pushswitch input{accent-color:var(--blue);margin-right:6px}
 .pusherror{margin-top:9px;border:1px solid var(--red-border);border-radius:var(--radius-control);background:rgba(229,96,79,.07);color:var(--red);padding:8px 9px;font:400 10.5px var(--font-mono)}
 .pushnotice{margin-top:9px;border:1px solid var(--green-border);border-radius:var(--radius-control);background:var(--green-tint);color:var(--green);padding:8px 9px;font:400 10.5px var(--font-mono)}
-#settingsview{display:none;position:fixed;inset:0;background:var(--bg);z-index:58;flex-direction:column}
-#sethead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);
-  padding-top:calc(10px + env(safe-area-inset-top));position:relative;z-index:20}
-#setclose{flex:0 0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
-  color:var(--fg);font:inherit;font-size:18px;line-height:1;padding:7px 12px;cursor:pointer}
-#settitle{font-size:16px;font-weight:700}
-#settings{flex:1;overflow:auto;padding:14px 14px calc(18px + env(safe-area-inset-bottom));
-  overscroll-behavior:contain}
-#settings>.setpanel{width:min(100%,760px);margin-inline:auto}
-.settingsapp{width:min(100%,1120px);min-height:100%;margin-inline:auto;display:grid;
+/* Settings is a left-column DESTINATION (#route-settings) — it renders beside
+   a docked session pane like Search or Notifications, never over it. The page
+   is the scroll container; the section rail sticks within it. */
+.settingsapp{width:100%;display:grid;
   grid-template-columns:var(--w-settings-rail) minmax(0,1fr);gap:22px;align-items:start}
-.settingsrail{position:sticky;top:0;display:flex;flex-direction:column;gap:2px;padding:8px 0}
+.settingsrail{position:sticky;top:12px;display:flex;flex-direction:column;gap:2px;padding:8px 0}
 .settingsrail button{min-height:36px;border:1px solid transparent;border-radius:var(--radius-control);background:transparent;
   color:var(--fg-dim-3);padding:0 10px;text-align:left;font:500 11px var(--font-mono);
   letter-spacing:.06em;text-transform:uppercase;cursor:pointer}
 .settingsrail button:hover{color:var(--fg)}
 .settingsrail button.active{background:#1C1811;border-color:var(--line-input);color:var(--fg)}
-.settingsmobile{display:none}.settingscontent{min-width:0;max-width:860px;padding:8px 0 28px}
+.settingsmobile{display:none}.settingscontent{min-width:0;max-width:860px;padding:8px 0 28px;container-type:inline-size}
 .settingscontent>header{margin:2px 0 14px}.settingscontent h2{margin:0;color:var(--fg);font:600 17px var(--font-ui)}
 .settingscontent>header p{margin:4px 0 0;color:var(--fg-dim-1);font:400 11px var(--font-mono);line-height:1.45}
 .settingscard{margin-bottom:12px;padding:5px 16px;border:1px solid var(--line);border-radius:var(--radius-card);background:var(--surface-card)}
@@ -320,11 +321,24 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .settingscard .settingssubhead{margin:12px 0 8px}.settingscard .pushactions{margin:4px 0 12px}
 .settingscard>.pusherror,.settingscard>.pushnotice{margin:0 0 12px}
 .budgetsection .budgetsettings{margin:0}.budgetsection{padding:14px 16px}
+/* The settings COLUMN can be narrow on a wide viewport (destination beside the
+   docked pane), so dense rows respond to the container, not the viewport.
+   Must come AFTER the base grid rules above — equal specificity, order wins. */
+@container (max-width:720px){
+  .quietgrid,.policycontrols,.severityladder{grid-template-columns:1fr}
+  .policyrule summary{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center}
+  .policyrule summary .polkind{flex:1 1 100%}
+  .polchips{flex-wrap:wrap}
+  .polnote{flex:1;text-align:left}
+  .devicecard:not(.current){align-items:flex-start;flex-wrap:wrap}
+  .devicecard:not(.current)>.deviceidentity{min-width:calc(100% - 30px)}
+  .devicecontrols{flex-basis:100%;grid-template-columns:1fr 1fr 1fr}
+  .devicecontrols input{grid-column:1/-1}
+}
 @media(max-width:600px){.pushrail{grid-template-columns:1fr}.pushrail>span{border-left:0;border-top:1px solid var(--line)}.pushrail>span:first-child{border-top:0}.pushdevice{grid-template-columns:1fr}.pushswitch{min-height:28px}.pushdevice button{justify-self:start}}
 @media(max-width:700px){
-  #settings{padding:0 10px calc(18px + env(safe-area-inset-bottom))}
-  .settingsapp{display:block}.settingsrail{display:none}.settingsmobile{display:block;position:sticky;top:0;z-index:4;
-    margin:0 -10px 12px;padding:8px 10px;background:rgba(14,13,11,.97);border-bottom:1px solid var(--line)}
+  .settingsapp{display:block}.settingsrail{display:none}.settingsmobile{display:block;position:sticky;top:var(--mobile-head-h,52px);z-index:4;
+    margin:0 -12px 12px;padding:8px 12px;background:rgba(14,13,11,.97);border-bottom:1px solid var(--line)}
   .settingsmobile label{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--fg-dim-3);font:500 10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
   .settingsmobile select{flex:1;min-height:40px;border:1px solid var(--line-input);border-radius:var(--radius-control);background:var(--surface-card);color:var(--fg);padding:0 9px;font:500 12px var(--font-mono);text-transform:none;letter-spacing:0}
   .settingscontent>header{margin-top:0}
@@ -429,9 +443,9 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 #instancebanner{position:sticky;top:0;z-index:30;background:#6e40c9;color:#fff;padding:8px 16px;
   font-size:12px;font-weight:700;letter-spacing:.02em;text-align:center;box-shadow:0 1px 0 rgba(255,255,255,.16)}
 #instancebanner[hidden]{display:none}
-html[data-instance="staging"] :is(#viewer,#sview,#aview,#searchview,#settingsview,#handoffview,#outboxview,#scheduleview){
+html[data-instance="staging"] :is(#viewer,#sview,#aview,#searchview,#handoffview,#outboxview,#scheduleview){
   box-shadow:inset 0 4px 0 #6e40c9}
-html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#sethead,#handoffhead,#outboxhead,#schedulehead){
+html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoffhead,#outboxhead,#schedulehead){
   border-top:4px solid #6e40c9}
 .stagingreadonly{border-color:#6e40c9;background:rgba(110,64,201,.1)}
 .stagingreadonly .ptlabel{color:#c7a7ff}
@@ -1686,8 +1700,12 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   #sidenav{display:none}
   #appmain{padding:0 12px calc(82px + env(safe-area-inset-bottom))}
   .destination{width:100%}
-  .mobilehead{height:52px;display:flex;position:sticky;top:0;z-index:14;align-items:center;gap:9px;
-    margin:0 -12px 12px;padding:0 12px;background:rgba(14,13,11,.97);backdrop-filter:blur(14px);
+  /* the installed PWA draws under the iOS status bar (viewport-fit=cover):
+     the sticky head absorbs the notch inset so content is never cut off.
+     env(safe-area-inset-top) is 0 in desktop browsers, so narrow desktop
+     windows are untouched. */
+  .mobilehead{height:var(--mobile-head-h,52px);display:flex;position:sticky;top:0;z-index:14;align-items:center;gap:9px;
+    margin:0 -12px 12px;padding:env(safe-area-inset-top) 12px 0;background:rgba(14,13,11,.97);backdrop-filter:blur(14px);
     border-bottom:1px solid var(--line)}
   .mobilehead .brandmark{width:25px;height:25px;font-size:11px}
   #mobiletitle{flex:1;font:600 14px var(--font-ui)}
@@ -1718,18 +1736,18 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .cmeta.alert{background:transparent}
   .card.fixedpeek{height:calc(100px + var(--session-card-lines,2) * 17.9px)}
   .headprimary{padding:7px 10px}
-  .commandbar{top:52px;margin-left:-1px;margin-right:-1px}
-  .searchbar{top:52px;margin-left:-1px;margin-right:-1px}
-  .notificationbar{top:52px;margin-left:-1px;margin-right:-1px}
+  .commandbar{top:var(--mobile-head-h);margin-left:-1px;margin-right:-1px}
+  .searchbar{top:var(--mobile-head-h);margin-left:-1px;margin-right:-1px}
+  .notificationbar{top:var(--mobile-head-h);margin-left:-1px;margin-right:-1px}
   #notificationlayout,#notificationlayout.detail-open{display:block}
   .notificationrow{padding:11px 13px;gap:5px}
   .notificationsubcard{gap:6px;padding:8px 13px;font-size:9px}
   #notificationlayout:not(.detail-open) #notificationdetail{display:none}
-  #notificationdetail{display:none;position:fixed;inset:52px 0 calc(60px + env(safe-area-inset-bottom));z-index:39;
+  #notificationdetail{display:none;position:fixed;inset:var(--mobile-head-h) 0 calc(60px + env(safe-area-inset-bottom));z-index:39;
     min-height:0;border-width:1px 0 0;border-radius:0;background:var(--bg);overflow-y:auto;overscroll-behavior:contain;
     box-shadow:0 -12px 50px rgba(0,0,0,.5)}
   #notificationdetail.open{display:block}
-  .notificationdetailstate{min-height:calc(100dvh - 112px - env(safe-area-inset-bottom))}
+  .notificationdetailstate{min-height:calc(100dvh - 112px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
   .notificationdetailhead{padding:18px 15px 15px}.notificationfacts{padding:13px 15px}
   .notificationactions{padding:3px 15px 18px}.notificationrequest,.notificationactionmsg,.notificationreadonly{margin-left:15px;margin-right:15px}
   #bottomnav button{position:relative}

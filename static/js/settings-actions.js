@@ -1,9 +1,9 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{uiRefresh,loadNotificationPolicy,selectSettingsSection,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
+Object.assign(globalThis,{uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
 const SETTINGS_SECTIONS=['notifications','devices','sessions','appearance','budgets','advanced'];
 const SETTINGS_LABELS={notifications:'Notifications',devices:'Devices & delivery',sessions:'Sessions',
   appearance:'Appearance',budgets:'Budgets & spawning',advanced:'Advanced'};
-globalThis.settingsOpen=false;globalThis.budgetSettingsOpen=false;globalThis.settingsReturnState=null;globalThis.settingsRenderFrame=0;
+globalThis.settingsOpen=false;globalThis.budgetSettingsOpen=false;globalThis.settingsRenderFrame=0;
 globalThis.settingsRendering=false;globalThis.settingsRerenderPending=false;globalThis.settingsFocusPending=false;
 globalThis.settingsMessage='';
 globalThis.settingsSection=(initialDestination.route==='settings'&&SETTINGS_SECTIONS.includes(initialDestination.detail))?
@@ -30,47 +30,47 @@ function selectSettingsSection(section){
   settingsMessage='';
   if(section!==settingsSection){settingsSection=section;settingsSectionDepth++;
     history.pushState({fdSettingsSection:section},'',`#settings/${section}`);}
-  $('#settings').scrollTop=0;renderSettings(true);
+  window.scrollTo({top:0,behavior:'auto'});renderSettings(true);
   if(section==='notifications')loadNotificationPolicy();
   if(section==='devices')loadPushState(true);
   if(section==='budgets')loadBudgets();
 }
-function openSettings(section=settingsSection){
-  if(settingsOpen)return;
-  if(SETTINGS_SECTIONS.includes(section))settingsSection=section;settingsSectionDepth=0;
-  const stacked=anyOverlay();
-  settingsReturnState=sessionView?{sid:sessionView.sid,closed:sessionView.closed,
-    scrollTop:$('#sbody')?.scrollTop||0,evidenceOpen:sessionEvidenceOpen}:null;
+// Settings is an ordinary left-column DESTINATION (operator decision
+// 2026-07-24): it renders beside a docked session pane like Search or
+// Notifications and never covers it. enterSettingsRoute is navigateTo's
+// route-specific setup; leaveSettingsRoute runs when navigation leaves.
+function enterSettingsRoute(fromNavigation=true){
+  const wasOpen=settingsOpen;
   settingsOpen=true;settingsMessage='';
-  $('#settingsview').style.display='flex';
-  $('#settings').scrollTop=0;
-  $('#settings').innerHTML='<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> loading settings…</div>';
-  cancelAnimationFrame(settingsRenderFrame);
-  settingsRenderFrame=requestAnimationFrame(()=>{
-    settingsRenderFrame=0;if(settingsOpen)renderSettings(true);
-  });
-  loadPushState(true);
-  loadNotificationPolicy(true);
-  loadBudgets();
-  loadWorkstreams();
-  if(stacked){settingsPushed=true;history.pushState({fdSettings:1},'');}
-  else syncOverlayHistory();
-  history.replaceState(history.state,'',`#settings/${settingsSection}`);
+  if(!fromNavigation){
+    const destination=hashDestination();
+    if(destination.route==='settings'&&SETTINGS_SECTIONS.includes(destination.detail))
+      settingsSection=destination.detail;
+  }else if(!location.hash.startsWith('#settings/'))
+    history.replaceState({fdRoute:'settings'},'',`#settings/${settingsSection}`);
+  if(!wasOpen){
+    $('#settings').innerHTML='<div class="ctxload"><span class="delivery sending" aria-hidden="true">◌</span> loading settings…</div>';
+    cancelAnimationFrame(settingsRenderFrame);
+    settingsRenderFrame=requestAnimationFrame(()=>{
+      settingsRenderFrame=0;if(settingsOpen)renderSettings(true);
+    });
+    loadPushState(true);
+    loadNotificationPolicy(true);
+    loadBudgets();
+    loadWorkstreams();
+  }else renderSettings(true);
 }
-function closeSettings(){
-  const restore=settingsReturnState;settingsReturnState=null;
+function leaveSettingsRoute(){
   cancelAnimationFrame(settingsRenderFrame);settingsRenderFrame=0;
   settingsOpen=false;settingsSectionDepth=0;
-  $('#settingsview').style.display='none';
-  $('#settings').innerHTML='';
-  applyRouteNav(currentRoute);
-  if(restore&&sessionView&&sessionView.sid===restore.sid&&sessionView.closed===restore.closed){
-    sessionEvidenceOpen=restore.evidenceOpen;
-    const body=$('#sbody');if(body)body.scrollTop=restore.scrollTop;
-    requestAnimationFrame(()=>{if(sessionView&&sessionView.sid===restore.sid){
-      const current=$('#sbody');if(current)current.scrollTop=restore.scrollTop;
-    }});
-  }
+}
+function openSettings(section=settingsSection){
+  if(SETTINGS_SECTIONS.includes(section))settingsSection=section;
+  navigateTo('settings');
+}
+function closeSettings(){
+  if(currentRoute==='settings')navigateTo('now');
+  else leaveSettingsRoute();
 }
 function settingsHasEditableFocus(){const active=document.activeElement;
   if(!active||!$('#settings')?.contains(active))return false;
@@ -140,7 +140,7 @@ function notificationPolicySettingsHtml(){
     <div class="settingscard"><label class="settingsswitch"><span><b>External push notifications</b><small>Turn automatic Web Push on or off for every enabled device. In-app events stay visible.</small></span><input type="checkbox" ${global.enabled?'checked':''} ${globalDisabled} onchange="saveGlobalPolicy({enabled:this.checked})"></label>
       <label class="settingsswitch"><span><b>Quiet hours</b><small>Hold external pushes during this window and send at most one held push per event afterward.</small></span><input type="checkbox" ${global.quiet_hours_enabled?'checked':''} ${globalDisabled} onchange="saveGlobalPolicy({quiet_hours_enabled:this.checked})"></label>
       ${global.quiet_hours_enabled?`<div class="quietgrid"><label>Starts<input aria-label="Starts" type="time" value="${timeValue(global.quiet_start_minute)}" ${globalDisabled} onchange="saveGlobalPolicy({quiet_start_minute:timeMinutes(this.value)})"><small class="settinghelp">The local time when Fleet starts holding pushes.</small></label><label>Ends<input aria-label="Ends" type="time" value="${timeValue(global.quiet_end_minute)}" ${globalDisabled} onchange="saveGlobalPolicy({quiet_end_minute:timeMinutes(this.value)})"><small class="settinghelp">The local time when held events may push again.</small></label><label>Timezone<input aria-label="Timezone" value="${esc(global.timezone)}" list="fleet-timezones" ${globalDisabled} onchange="saveGlobalPolicy({timezone:this.value})"><datalist id="fleet-timezones"><option value="${esc(Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC')}"><option value="UTC"></datalist><small class="settinghelp">Interprets start and end times, including daylight-saving changes.</small></label></div>`:''}${globalPolicyStatus?`<div class="setsavestate" role="status">${esc(globalPolicyStatus)}</div>`:''}</div>
-    <div class="settingssubhead"><span><b>Event rules</b><small>One global policy applies to every enabled device.</small></span><button onclick="dismissOverlay();setTimeout(()=>navigateTo('notifications'),0)">View delivery history</button></div>
+    <div class="settingssubhead"><span><b>Event rules</b><small>One global policy applies to every enabled device.</small></span><button onclick="navigateTo('notifications')">View delivery history</button></div>
     <div class="policyrules">${notificationPolicy.kinds.map(policyRuleHtml).join('')}</div>`;
 }
 function policyRuleHtml(rule){const open=policyRuleOpen.has(rule.kind),saving=policySaving.get(rule.kind)||'',locked=saving==='saving…',disabled=locked?'disabled':'';
@@ -189,8 +189,8 @@ function setSessionMuteQuery(value){sessionMuteQuery=String(value||'');localStor
   const empty=document.querySelector('.mutelist .mute-search-empty');if(empty){empty.hidden=shown>0;empty.textContent=rows.length?'No muted sessions match.':'No sessions are muted.';}}
 function sessionSettingsHtml(){const st=(last&&last.settings)||{},muted=notificationPolicy.muted_sessions||[],query=sessionMuteQuery.trim().toLowerCase();
   const pins=[...pinnedSessions];
-  return`<div class="settingscard"><label class="settingsswitch"><span><b>Session conversation peek</b><small>Collapsed cards keep a fixed height derived from the line count below.</small></span><input type="checkbox" ${st.preview_sessions!==false?'checked':''} onchange="setBool('preview_sessions',this.checked)"></label>
-    <label class="settingsfield"><span><b>Session peek height</b><small>Collapsed conversation rows.</small></span><span>${settingNumber(st,'preview_session_lines',1,1)} lines</span></label>
+  return`<div class="settingscard"><label class="settingsswitch"><span><b>Session conversation peek</b><small>Collapsed cards size to the last message, up to the line cap below.</small></span><input type="checkbox" ${st.preview_sessions!==false?'checked':''} onchange="setBool('preview_sessions',this.checked)"></label>
+    <label class="settingsfield"><span><b>Session peek height</b><small>Maximum collapsed conversation rows; shorter messages shrink the card.</small></span><span>${settingNumber(st,'preview_session_lines',1,1)} lines</span></label>
     <label class="settingsswitch"><span><b>Subagent conversation peek</b><small>Show a short latest-message preview on subagent rows.</small></span><input type="checkbox" ${st.preview_agents?'checked':''} onchange="setBool('preview_agents',this.checked)"></label>
     <label class="settingsfield"><span><b>Subagent peek height</b></span><span>${settingNumber(st,'preview_agent_lines',1,1)} lines</span></label></div>
     <div class="settingscard"><label class="settingsfield"><span><b>Stalled-session threshold</b><small>How long a working session can show no progress before Fleet marks it stalled.</small></span><span>${settingNumber(st,'stall_seconds',30,30)} seconds</span></label></div>

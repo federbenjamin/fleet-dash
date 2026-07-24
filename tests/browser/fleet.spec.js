@@ -66,8 +66,7 @@ async function goTo(page, route) {
     control = page.locator(`#mobilemore button[onclick*="'${route}'"]:visible`);
   }
   await control.click();
-  if (route === 'settings') await expect(page.locator('#settingsview')).toBeVisible();
-  else await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
+  await expect(page.locator(`[data-destination="${route}"]`)).toBeVisible();
 }
 
 // History is decommissioned: the flat session list is Search TYPE=SESSION.
@@ -156,7 +155,7 @@ test('responsive application shell routes, filters, and follows browser back', a
 
   await goTo(page, 'settings');
   await page.goBack();
-  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('[data-destination="settings"]')).toBeHidden();
   await expect(page.locator('[data-destination="workstreams"]')).toBeVisible();
 
   await goTo(page, 'insights');
@@ -579,9 +578,10 @@ test('desktop navigation side and nested Settings preserve the full chat state',
   await expect(page.locator('#spanel-details')).toBeVisible();
   await expect(page.locator('#detail-placement')).toContainText('Available');
   await page.evaluate(() => navigateTo('settings'));
-  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page.locator('#route-settings')).toBeVisible();
   await page.goBack();
-  await expect(page.locator('#settingsview')).toBeHidden();
+  // Back returns the hash to the session; like any destination, Settings stays
+  // the visible left column beside the (untouched) workspace
   await expect(page.locator('#sview')).toBeVisible();
   await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
   await page.locator('#stab-chat').click();
@@ -1027,17 +1027,15 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   expect(Math.abs(fit.width - fit.available)).toBeLessThan(2);
   await page.locator('#sclose').click();
 
+  // Settings is a left-column destination (never a full-screen overlay): it
+  // participates in route navigation like Search or Notifications.
   await goTo(page, 'settings');
-  const settingsPage = page.locator('#settingsview');
+  const settingsPage = page.locator('#route-settings');
   await expect(settingsPage).toBeVisible();
-  await expect(settingsPage.locator('#settitle')).toHaveText('Settings');
-  await expect(settingsPage.getByRole('button', { name: 'back to fleet' })).toBeVisible();
-  expect(await settingsPage.evaluate(el => getComputedStyle(el).position)).toBe('fixed');
+  await expect(settingsPage.locator('.settingsapp')).toBeVisible();
+  expect(await settingsPage.evaluate(el => getComputedStyle(el).position)).not.toBe('fixed');
   await page.screenshot({ path: testInfo.outputPath('settings-page.png'), fullPage: true });
-  await settingsPage.getByRole('button', { name: 'back to fleet' }).click();
-  await expect(settingsPage).toBeHidden();
 
-  await goTo(page, 'settings');
   await page.evaluate(() => history.back());
   await expect(settingsPage).toBeHidden();
   await expect(page.locator('[data-sid="codex:thread-one"]')).toBeVisible();
@@ -1051,9 +1049,9 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-reader-width', 'centered');
-  await expect(page.locator('#settingsview')).toBeVisible();
-  await page.locator('#setclose').click();
-  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('#route-settings')).toBeVisible();
+  await page.evaluate(() => navigateTo('now'));
+  await expect(page.locator('#route-settings')).toBeHidden();
 
   card = page.locator('[data-sid="codex:thread-one"]');
   await card.locator('.shead').click();
@@ -1088,6 +1086,12 @@ test('a fully visible collapsed peek has no expansion action', async ({ page }) 
   await peek.locator('.peekmd').click({ position: { x: 4, y: 4 } });
   await expect(peek).not.toHaveClass(/truncated|expanded/);
   await expect(peek.getByRole('button', { name: 'collapse latest message' })).toHaveCount(0);
+  // the configured line count is a MAXIMUM: a short last message shrinks the
+  // card to its measured content instead of reserving empty preview rows
+  await page.evaluate(() => setNum('preview_session_lines', 5));
+  await expect.poll(() => page.evaluate(() =>
+    Number(document.querySelector('[data-sid="codex:thread-one"]')
+      .style.getPropertyValue('--session-card-lines')))).toBeLessThan(5);
 });
 
 test('full chat renders a large message without discarding text', async ({ page }) => {
@@ -1215,7 +1219,10 @@ test('session cards remove More and list every running subagent', async ({ page 
     return {peekHeight: peekRect.height,
       bodyBottomGap: peekRect.bottom - body.getBoundingClientRect().bottom};
   });
-  expect(peekFrame.peekHeight).toBeGreaterThan(40);
+  // content-hugging peek: this one-line message renders one line (~27px),
+  // not the configured 2-line area — the setting is a maximum, not a floor
+  expect(peekFrame.peekHeight).toBeGreaterThan(20);
+  expect(peekFrame.peekHeight).toBeLessThan(40);
   expect(peekFrame.bodyBottomGap).toBeLessThan(8);
   await expect(idle.locator('.morebtn,.detail,.agents')).toHaveCount(0);
 
@@ -3209,9 +3216,8 @@ test('all full-screen forms fit the visual viewport while editing', async ({ pag
     const box=await page.locator(selector).evaluate(element=>{const rect=element.getBoundingClientRect();return{top:rect.top,height:rect.height,bottom:rect.bottom};});
     expect(box.top).toBe(12);expect(box.height).toBe(500);expect(box.bottom).toBe(512);
   };
-  await page.evaluate(()=>openSettings('sessions'));await expect(page.locator('#settingsview')).toBeVisible();
-  await page.locator('#settings input').first().focus();await page.evaluate(()=>syncVisualViewport());await assertGeometry('#settingsview');
-  await page.evaluate(()=>dismissOverlay());await expect(page.locator('#settingsview')).toBeHidden();
+  // Settings is a destination now (not a full-screen surface), so the visual
+  // viewport contract covers the remaining overlays only.
   await page.evaluate(()=>openSearchContext(901));await expect(page.locator('#searchview')).toBeVisible();await assertGeometry('#searchview');
   await page.evaluate(()=>dismissOverlay());await expect(page.locator('#searchview')).toBeHidden();
   await page.evaluate(()=>openHandoff('codex:thread-one','claude'));await expect(page.locator('#handoffpreview')).toBeVisible();
@@ -3283,11 +3289,11 @@ test('notification policy controls every kind, warns on aggressive cadence, and 
   await openSettingsSection(page, 'devices');
   await expect(page.locator('.pushsetup')).toContainText('Fleet app & Web Push');
   await page.goBack();
-  await expect(page.locator('#settingsview')).toBeVisible();
+  await expect(page.locator('#route-settings')).toBeVisible();
   await expect(page).toHaveURL(/#settings\/notifications$/);
   await expect(page.locator('.policyanswer')).toBeVisible();
   await page.goBack();
-  await expect(page.locator('#settingsview')).toBeHidden();
+  await expect(page.locator('#route-settings')).toBeHidden();
   if (testInfo.project.name.startsWith('mobile'))
     await expect(page.locator('#bottomnav')).toBeVisible();
 });
@@ -3491,7 +3497,6 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
     metric: 'tokens', limit_value: 50000, block_spawns: false});
   expect(state.actions.some(item => item.type === 'legacy_ntfy_test')).toBe(true);
 
-  await page.locator('#setclose').click();
   await goTo(page, 'now');
   await page.locator('.actionfilters').getByRole('button', { name: 'Budgets' }).click();
   const budgetAction = page.locator('.actionrow.budget');
@@ -3540,7 +3545,6 @@ test('Console settings sections own their moved controls and Insights renders ch
   await openSettingsSection(page, 'advanced');
   await expect(page.locator('#settings')).toContainText('Diagnostics');
   await expect(page.locator('#settings')).not.toContainText('Legacy ntfy');
-  await page.locator('#setclose').click();
   // Insights (9b): headline stats, window chips, chart cards, detail folds
   await goTo(page, 'insights');
   await expect(page.locator('.insstats')).toContainText('agents');
@@ -3684,4 +3688,69 @@ test('Console mobile pass: inline card status, file chips over the reader, botto
   } else {
     await expect(page.locator('#sfilechips')).toBeHidden();
   }
+});
+
+test('sessions always open split, settings shares the screen, and the divider moves only manually', async ({ page }, testInfo) => {
+  await reset(page);
+  const mobile = testInfo.project.name.startsWith('mobile');
+  if (mobile) {
+    // no split exists on phones; settings is still an ordinary destination
+    await goTo(page, 'settings');
+    await expect(page.locator('#route-settings')).toBeVisible();
+    return;
+  }
+  const html = page.locator('html');
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sview')).toHaveClass(/docked/);
+  await expect(html).toHaveClass(/fd-pane/);
+  await expect(html).not.toHaveClass(/fd-expanded/);
+  // ⤢ expands, but the state is transient: rail navigation returns to split
+  await page.locator('#sexpand').click();
+  await expect(html).toHaveClass(/fd-expanded/);
+  await page.locator('#sidenav [data-route="search"]').click();
+  await expect(html).not.toHaveClass(/fd-expanded/);
+  await expect(html).toHaveClass(/fd-pane/);
+  await page.locator('#sidenav [data-route="now"]').click();
+  // closing an expanded workspace and opening any session starts split again
+  await page.locator('#sexpand').click();
+  await expect(html).toHaveClass(/fd-expanded/);
+  await page.locator('#sclose').click();
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await expect(html).toHaveClass(/fd-pane/);
+  await expect(html).not.toHaveClass(/fd-expanded/);
+  // expansion is never persisted across reloads
+  await page.locator('#sexpand').click();
+  await expect(html).toHaveClass(/fd-expanded/);
+  await page.reload();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(html).toHaveClass(/fd-pane/);
+  await expect(html).not.toHaveClass(/fd-expanded/);
+  // settings renders beside the docked pane instead of covering it
+  await goTo(page, 'settings');
+  await expect(page.locator('#route-settings')).toBeVisible();
+  await expect(page.locator('#sview')).toBeVisible();
+  await expect(page.locator('#sview')).toHaveClass(/docked/);
+  await goTo(page, 'now');
+  // the divider position is the user's number: route changes never move it,
+  // even when a destination's content adds a document scrollbar
+  await page.evaluate(() => setPaneSplit(800, true));
+  const splitX = async () => (await page.locator('#ssplit').boundingBox()).x;
+  const baseline = await splitX();
+  await page.evaluate(() => {
+    const filler = document.createElement('div');
+    filler.style.height = '3000px';
+    document.querySelector('#route-search').append(filler);
+  });
+  for (const route of ['search', 'workstreams', 'notifications', 'insights', 'settings', 'now']) {
+    await page.evaluate(value => navigateTo(value), route);
+    expect(await splitX(), `divider stable on ${route}`).toBe(baseline);
+  }
+  // a transiently narrow window clamps the APPLIED width, not the preference
+  await page.setViewportSize({ width: 1250, height: 1000 });
+  await expect.poll(() => page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--fleet-pane-width').trim())).toBe('694px');
+  expect(await page.evaluate(() => workspacePaneWidth)).toBe(800);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect.poll(() => page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--fleet-pane-width').trim())).toBe('800px');
 });
