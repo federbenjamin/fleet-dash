@@ -285,6 +285,16 @@ it.
 
 ### W3 — Client render work (D3)
 
+**Part 1 SHIPPED 2026-07-24.** `scheduleRender(force,after)` in `main.js`; `uiRefresh()` is
+`scheduleRender(true)`. The audit found eight call sites doing DOM work right after the refresh;
+four genuinely needed the paint first (`settingMessage` ×2, the mode and permission "changing…"
+notes) and now pass an `after` callback, two were already rAF-wrapped and stay correct by queue
+order, and two were `recordInputFeedback` — moved into `after` so the latency budget still measures
+when the UI actually changed rather than when the paint was scheduled. `ensureCtx` schedules
+UNFORCED, so a background fetch completing mid-scroll no longer repaints through the touch guard.
+A browser spec asserts one paint per answer tap (was four or more), the `force` union, and the
+`after` ordering. Part 2 (scoping to `uiRefresh(sid)`) is still open.
+
 1. **Coalesce.** `uiRefresh()` sets a dirty flag and schedules one `requestAnimationFrame` render
    with a `force` union. Audit call sites that read the DOM synchronously afterwards
    (`restoreOptimistic`'s focus rAF, `renderComposer` follow-ups).
