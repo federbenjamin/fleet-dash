@@ -509,6 +509,7 @@ function closeSession(){
   $('#sactivity').innerHTML='';delete $('#sactivity').dataset.renderKey;
   $('#sact').innerHTML='';$('#sact').classList.remove('session-composer','composer-active','tools-open','question-present');
   $('#sctrl').innerHTML='';$('#sdetails').innerHTML='';$('#sfilelist').innerHTML='';
+  const chips=$('#sfilechips');if(chips){chips.hidden=true;chips.innerHTML='';}
   $('#sagentlist').innerHTML='';$('#vbody').innerHTML='';$('#abody').innerHTML='';
   syncModalStack();
 }
@@ -599,6 +600,7 @@ function renderWorkspaceFiles(force=false){
   if(!c||c.fetching&&!c.messages){list.innerHTML='<div class="ctxload">loading file inventory…</div>';return;}
   if(!files.length){list.innerHTML='<div class="workspaceempty"><b>No retained files</b><p>This session has no validated file records.</p></div>';
     $('#vtitle').textContent='Files';$('#vbody').innerHTML='<div class="workspaceempty"><b>Nothing to preview</b></div>';
+    const emptyChips=$('#sfilechips');if(emptyChips){emptyChips.hidden=true;emptyChips.innerHTML='';}
     $('#sfilebrowser').classList.remove('has-selection');return;}
   const selected=chosenWorkspaceFile(files);sessionView.fileId=selected?.file_id||null;viewerPath=sessionView.fileId;
   if(selected)rememberSessionFile(sessionView.sid,selected.file_id);
@@ -607,6 +609,15 @@ function renderWorkspaceFiles(force=false){
     <div class="workspacelist">${files.map(file=>`<button class="workspaceitem ${file.file_id===selected?.file_id?'selected':''}" ${file.missing||!file.file_id?'disabled':''}
       onclick="viewFile('${enc(sessionView.sid)}','${enc(file.file_id)}')"><span>${file.kind==='image'?'🖼':'📄'}</span><b>${esc(file.name)}</b><small>${esc(file.caption||'')}</small></button>`).join('')}</div>`;
   list.scrollTop=keepListTop;
+  // mobile (11e): a horizontal file-chip strip above the reader switches files
+  // without returning to the list; CSS shows it only on phones with a selection
+  const chips=$('#sfilechips');
+  if(chips){const keepChipsLeft=chips.scrollLeft;
+    chips.innerHTML=files.map(file=>`<button class="filechip ${file.file_id===selected?.file_id?'on':''}" role="tab"
+      aria-selected="${file.file_id===selected?.file_id}" ${file.missing||!file.file_id?'disabled':''}
+      title="${esc(file.name)}" aria-label="${esc(file.name)}"
+      onclick="viewFile('${enc(sessionView.sid)}','${enc(file.file_id)}')">${esc(file.name)}</button>`).join('');
+    chips.hidden=false;chips.scrollLeft=keepChipsLeft;}
   $('#sfilebrowser').classList.toggle('has-selection',Boolean(sessionView.fileExplicit));
   if(selected)renderWorkspaceFileDocument({...selected,session_id:sessionView.sid});
   renderParentWorkspaceAction(workspaceSessionModel(),c,{pending:true});

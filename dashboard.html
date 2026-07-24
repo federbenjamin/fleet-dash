@@ -155,7 +155,7 @@
 </div>
 <nav id="bottomnav" aria-label="Fleet mobile navigation">
   <button data-route="now" onclick="navigateTo('now')"><span>⌂</span><small>Now</small></button>
-  <button data-route="notifications" onclick="navigateTo('notifications')"><span>◉</span><small>Notifications</small><b id="mobile-notification-count"></b></button>
+  <button data-route="notifications" onclick="navigateTo('notifications')"><span>◉</span><small>Notifs</small><b id="mobile-notification-count"></b></button>
   <button data-route="search" onclick="navigateTo('search')"><span>⌕</span><small>Search</small></button>
   <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>⌘</span><small>Work</small></button>
   <button data-route="more" onclick="toggleMobileMore()"><span>•••</span><small>More</small></button>
@@ -192,6 +192,7 @@
         <div class="workspacedivider" role="separator" aria-label="Resize file list" aria-orientation="vertical" tabindex="0"
           onpointerdown="startWorkspaceSplit(event,'files')" onkeydown="workspaceSplitKey(event,'files')"></div>
         <article id="sfilepreview"><button class="workspaceback" onclick="clearWorkspaceSelection()">← Back to files</button>
+          <div id="sfilechips" role="tablist" aria-label="Session files" hidden></div>
           <header id="vtitle"></header><div id="vbody"></div></article></div>
     </section>
     <section id="spanel-subagents" class="workspacepanel" role="tabpanel" aria-labelledby="stab-subagents" hidden>

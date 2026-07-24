@@ -3654,3 +3654,34 @@ test('session history text and access/provider filters shape one flat list in Se
   await expect(results).toContainText('External');
   await expect(results).toContainText('Closed');
 });
+
+test('Console mobile pass: inline card status, file chips over the reader, bottom bar', async ({ page }, testInfo) => {
+  await reset(page);
+  const mobile = testInfo.project.name.startsWith('mobile');
+  const codex = page.locator('[data-sid="codex:thread-one"]');
+  if (mobile) {
+    // 10a: the meta rail renders as an inline status row directly under the header
+    const boxes = await codex.evaluate(card => ({
+      head: card.querySelector('.shead').getBoundingClientRect().toJSON(),
+      meta: card.querySelector('.cmeta').getBoundingClientRect().toJSON(),
+      peek: card.querySelector('.sessionpeek')?.getBoundingClientRect().toJSON() || null,
+    }));
+    expect(boxes.meta.top).toBeGreaterThanOrEqual(boxes.head.bottom - 1);
+    if (boxes.peek) expect(boxes.meta.bottom).toBeLessThanOrEqual(boxes.peek.top + 1);
+    await expect(page.locator('#bottomnav [data-route="notifications"] small')).toHaveText('Notifs');
+  }
+  await codex.locator('.shead').click();
+  await page.locator('#stab-files').click();
+  await page.getByRole('button', { name: /artifact\.md/ }).click();
+  await expect(page.locator('#vbody')).toContainText('Safe preview');
+  if (mobile) {
+    // 11e: the chip strip replaces the back-to-list button and switches files
+    await expect(page.locator('#sfilechips')).toBeVisible();
+    await expect(page.locator('#sfilepreview .workspaceback')).toBeHidden();
+    await page.locator('#sfilechips .filechip', { hasText: 'data.json' }).click();
+    await expect(page.locator('#sfilechips .filechip.on')).toContainText('data.json');
+    await expect(page.locator('#vtitle')).toContainText('data.json');
+  } else {
+    await expect(page.locator('#sfilechips')).toBeHidden();
+  }
+});

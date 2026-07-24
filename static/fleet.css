@@ -1702,12 +1702,18 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .instoprow{grid-template-columns:minmax(0,1fr) 60px;gap:4px 10px}
   .instoprow>span,.instoprow .insmeter{display:none}
   #usagechip{display:inline-block;min-height:34px;max-width:calc(100vw - 130px);overflow:hidden;text-overflow:ellipsis}
-  /* mobile cards use inline status — the desktop meta rail folds into a
-     horizontal footer row (phase 5 finishes the mobile card pass). The fixed
-     collapsed frame grows by that footer row's 24px. */
-  .card>.ctop{flex-direction:column}
-  .cmeta{width:auto;border-left:0;background:transparent;flex-direction:row;flex-wrap:wrap;
-    align-items:center;gap:4px 12px;padding:0 16px 10px;min-height:24px;flex:none}
+  /* mobile card pass (10a): one column, the meta rail becomes an inline
+     status row directly under the header. .cmain{display:contents} lifts its
+     children into .ctop's flex context so `order` can interleave the .cmeta
+     sibling right after .shead; .cmain's padding moves to .ctop. The fixed
+     collapsed frame keeps the same 24px status-row allowance (invariant 45). */
+  .card>.ctop{flex-direction:column;padding:12px 16px}
+  .card.needs>.ctop{padding:14px 16px}
+  .card .cmain{display:contents}
+  .card .cmain>*{order:2}
+  .card .cmain>.shead{order:0}
+  .card>.ctop>.cmeta{order:1;width:auto;border-left:0;background:transparent;flex-direction:row;
+    flex-wrap:wrap;align-items:center;gap:4px 12px;padding:4px 0 0;min-height:20px;flex:none}
   .cmeta .railbar{display:none}
   .cmeta.alert{background:transparent}
   .card.fixedpeek{height:calc(100px + var(--session-card-lines,2) * 17.9px)}
@@ -1728,21 +1734,32 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .notificationactions{padding:3px 15px 18px}.notificationrequest,.notificationactionmsg,.notificationreadonly{margin-left:15px;margin-right:15px}
   #bottomnav button{position:relative}
   #mobile-notification-count{position:absolute;top:4px;left:calc(50% + 8px);min-width:15px;height:15px;display:flex;
-    align-items:center;justify-content:center;border:2px solid var(--bg);border-radius:9px;background:var(--red);color:#fff;
+    align-items:center;justify-content:center;border:2px solid var(--bg);border-radius:9px;background:var(--amber);color:#0E0D0B;
     font:700 8px/1 var(--font-mono);padding:0 3px}
   #mobile-notification-count[hidden]{display:none}
   .searchfilters{grid-template-columns:1fr;gap:5px}
   .searchfilters label{grid-template-columns:64px minmax(0,1fr)}
   .searchresult{grid-template-columns:28px minmax(0,1fr);padding:10px;gap:9px}
   .searchtime{display:none}
+  /* TYPE=SESSION rows (10c): compact single-column card; the action buttons
+     stay (invariant 63) and wrap onto their own right-aligned row */
+  .searchresult.sessionresult{grid-template-columns:auto minmax(0,1fr);padding:11px 13px;gap:5px 9px}
+  .sessionresult .sessionresultside{grid-column:1/-1;justify-content:flex-end;gap:6px}
+  .historyaction{padding:5px 9px;font-size:10px}
+  /* New-session pane (10d): one wide amber spawn action */
+  .newpane{padding:14px 6px 24px}
+  .newpane .nfactions{display:flex;flex-direction:column-reverse;gap:8px}
+  .newpane .nfactions .pbtn{width:100%;min-height:44px}
+  /* Console bottom bar (10a): workspace-dark surface, mono-caps labels,
+     amber active destination — no filled active pill */
   #bottomnav{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;
-    z-index:40;padding:5px 6px calc(5px + env(safe-area-inset-bottom));background:rgba(14,13,11,.98);
+    z-index:40;padding:5px 6px calc(5px + env(safe-area-inset-bottom));background:rgba(11,10,8,.97);
     backdrop-filter:blur(16px);border-top:1px solid var(--line)}
   #bottomnav button{min-width:0;height:50px;display:flex;flex-direction:column;align-items:center;justify-content:center;
-    gap:2px;border:0;border-radius:8px;background:transparent;color:var(--fg-dim-3);font:inherit;cursor:pointer}
+    gap:3px;border:0;border-radius:8px;background:transparent;color:var(--fg-dim-3);font:inherit;cursor:pointer}
   #bottomnav button>span{font:16px/1 var(--font-mono)}
-  #bottomnav button>small{font:400 9.5px var(--font-mono);letter-spacing:.04em}
-  #bottomnav button.active{background:var(--surface-raised);color:var(--fg)}
+  #bottomnav button>small{font:500 9px var(--font-mono);letter-spacing:.08em;text-transform:uppercase}
+  #bottomnav button.active{color:var(--amber)}
   #mobilemore{position:fixed;right:10px;bottom:calc(66px + env(safe-area-inset-bottom));z-index:45;
     width:210px;flex-direction:column;padding:6px;background:var(--surface-button);border:1px solid var(--line-input);
     border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.62)}
@@ -1859,6 +1876,16 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
 #sagentfilters button.active{border-color:var(--fg);background:var(--fg);color:var(--bg)}
 .workspaceback{display:none;min-height:42px;border:0;border-bottom:1px solid var(--line);background:var(--card);color:var(--blue);
   font:inherit;font-size:12px;font-weight:600;line-height:1;text-align:left;padding:0 13px;cursor:pointer}
+/* mobile Files (11e): horizontal file-chip strip above the reader — the chips
+   ARE the list once a file is open; desktop keeps the aside list instead */
+#sfilechips{display:none;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);overflow-x:auto;flex:none}
+.filechip{flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  border:1px solid var(--line);border-radius:var(--radius-badge);background:transparent;
+  color:var(--fg-dim-3);font:500 10px var(--font-mono);padding:6px 10px;cursor:pointer}
+.filechip.on{background:#1C1811;border-color:var(--line-input);color:var(--fg)}
+.filechip:disabled{opacity:.45;cursor:default}
+#sview.light .filechip{border-color:#E3DDD1;color:#6E675C}
+#sview.light .filechip.on{background:#F1E7CE;border-color:#B97F16;color:#1C1A16}
 .workspaceempty{display:grid;place-content:center;gap:5px;min-height:180px;padding:24px;color:var(--faint);text-align:center}
 .workspaceempty b{color:var(--dim);font-size:13px}.workspaceempty p{max-width:430px;margin:0;font-size:11px;line-height:1.5}
 #spanel-details{grid-template-columns:180px minmax(0,1fr);overflow:auto;padding:16px;gap:16px;scroll-behavior:smooth}
@@ -1889,6 +1916,10 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .workspacebrowser{display:block}.workspacedivider{display:none}.workspacebrowser>aside{display:block;width:100%;height:100%;border-right:0}
   .workspacebrowser>article{display:none;width:100%;height:100%}.workspacebrowser.has-selection>aside{display:none}
   .workspacebrowser.has-selection>article{display:flex}.workspacebrowser.has-selection .workspaceback{display:block}
+  /* Files (11e): the chip strip replaces the back-to-list button — chips
+     switch files; browser Back / edge swipe still clears the selection */
+  #sfilebrowser.has-selection #sfilechips{display:flex}
+  #sfilebrowser.has-selection .workspaceback{display:none}
   #spanel-details{grid-template-columns:1fr;padding:0;gap:0}
   #sdetailindex{top:0;z-index:4;flex-direction:row;overflow-x:auto;padding:7px 10px;border-bottom:1px solid var(--line);
     background:rgba(11,10,8,.96);scrollbar-width:none}

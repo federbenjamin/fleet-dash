@@ -159,9 +159,11 @@ function cardUsesFixedPeekHeight(s){
 function cardFrame(s){
   return{fixed:cardUsesFixedPeekHeight(s),lines:previewSessions()?clampS():0};
 }
-// The Console card's right meta rail (desktop; inline row on mobile): status
-// dot+label, model, context bar, quiet time, live agent count. Alert states
-// (stalled / limit) darken the rail surface and redden the quiet clock.
+// The Console card's meta strip: status dot+label, model, context bar, quiet
+// time, live agent count. One DOM node, two presentations: the desktop right
+// rail, and on mobile an inline status row directly under the header (10a) —
+// `.cmain{display:contents}` lets flex `order` interleave it there. Alert
+// states (stalled / limit) darken the rail surface and redden the quiet clock.
 function cardMetaRail(s){
   const cls=cardCls(s);
   const tone=cls==='needs'?'amber':cls==='stalled'?'red':
