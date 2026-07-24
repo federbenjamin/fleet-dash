@@ -5,7 +5,7 @@
 <!-- maximum-scale=1 only disables iOS's AUTO-zoom on input focus; pinch zoom
      still works (iOS ignores it for user gestures since iOS 10) -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0a0e14">
+<meta name="theme-color" content="#0E0D0B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Fleet Dash">
@@ -36,17 +36,22 @@
 <body>
 <div id="appshell">
   <aside id="sidenav" aria-label="Fleet navigation">
-    <div class="brand"><span class="brandmark">F</span><span><b>Fleet Dash</b><small>local operations</small></span></div>
+    <div class="brand"><span class="brandmark">F</span><span><b>Fleet Dash</b><small>console</small></span></div>
     <nav class="navlist">
-      <button data-route="now" onclick="navigateTo('now')"><span class="navicon">⌂</span><span>Now</span><b id="nav-now-count"></b></button>
-      <button data-route="notifications" onclick="navigateTo('notifications')"><span class="navicon">◉</span><span>Notifications</span><b id="nav-notification-count"></b></button>
-      <button data-route="search" onclick="navigateTo('search')"><span class="navicon">⌕</span><span>Search</span></button>
-      <button data-route="workstreams" onclick="navigateTo('workstreams')"><span class="navicon">⌘</span><span>Workstreams</span></button>
-      <button data-route="history" onclick="navigateTo('history')"><span class="navicon">↺</span><span>History</span></button>
-      <button data-route="insights" onclick="navigateTo('insights')"><span class="navicon">⌁</span><span>Insights</span></button>
-      <button data-route="settings" onclick="navigateTo('settings')"><span class="navicon">⚙</span><span>Settings</span></button>
+      <button data-route="now" onclick="navigateTo('now')"><span>Now</span><b id="nav-now-count"></b></button>
+      <button data-route="notifications" onclick="navigateTo('notifications')"><span>Notifs</span><b id="nav-notification-count"></b></button>
+      <button data-route="search" onclick="navigateTo('search')"><span>Search</span></button>
+      <button data-route="workstreams" onclick="navigateTo('workstreams')"><span>Workstreams</span></button>
+      <button data-route="history" onclick="navigateTo('history')"><span>History</span></button>
+      <button data-route="insights" onclick="navigateTo('insights')"><span>Insights</span></button>
+      <button data-route="settings" onclick="navigateTo('settings')"><span>Settings</span></button>
     </nav>
-    <div class="railstatus"><span class="statuslamp"></span><span>local daemon</span></div>
+    <div class="railfoot">
+      <button id="railusage" aria-haspopup="dialog" aria-expanded="false" title="all accounts &amp; usage"
+        onclick="toggleUsage('rail')"></button>
+      <div class="railuser" id="railuser"></div>
+      <div class="railstatus"><span class="statuslamp"></span><span>local daemon</span></div>
+    </div>
   </aside>
   <main id="appmain">
     <div id="instancebanner" hidden></div>
@@ -55,7 +60,7 @@
     <section class="destination" id="route-now" data-destination="now">
       <div class="desthead"><div class="nowtitle"><h1>Now</h1>
         <button id="usagechip" aria-haspopup="dialog" aria-expanded="false" onclick="toggleUsage()">Usage</button></div>
-        <button class="headprimary" onclick="openNewSessionComposer(true)">+ New session</button></div>
+        <button class="headprimary" onclick="openNewSessionComposer(true)">New session</button></div>
       <div class="commandbar" role="search">
         <label class="commandinput"><span>⌕</span><input id="nowfilter" data-draft-key="filter:now" placeholder="Filter sessions" autocomplete="off"
           oninput="setNowFilter(this.value)"></label>
@@ -63,7 +68,7 @@
           <button data-now-filter="all" onclick="setNowState('all')">All</button>
           <button data-now-filter="needs_you" onclick="setNowState('needs_you')">Needs you</button>
           <button data-now-filter="working" onclick="setNowState('working')">Working</button>
-          <button data-now-filter="available" onclick="setNowState('available')">Available</button>
+          <button data-now-filter="available" onclick="setNowState('available')">Avail</button>
           <button data-now-filter="subagents" onclick="setNowState('subagents')">Subagents</button>
           <button id="outboxchip" onclick="openOutbox()">Outbox</button>
           <span id="nowsaved" class="savedviews"></span>
@@ -160,7 +165,7 @@
   <button role="menuitem" onclick="navigateTo('settings')">⚙ <span>Settings</span></button>
 </div>
 <div id="usagepanel" role="dialog" aria-modal="false" aria-labelledby="usagetitle">
-  <div class="usagepanelhead"><span><b id="usagetitle">Usage</b><small>Provider windows and local totals</small></span>
+  <div class="usagepanelhead"><span><b id="usagetitle">Accounts &amp; usage</b><small>full breakdown lives in Insights</small></span>
     <button aria-label="close usage" onclick="closeUsage()">✕</button></div>
   <div id="usagebody"></div>
 </div>

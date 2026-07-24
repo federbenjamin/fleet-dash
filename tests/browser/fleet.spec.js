@@ -4,7 +4,13 @@ async function reset(page, scenario = 'base') {
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
   await expect(page.locator('#route-now')).toBeVisible();
-  await expect(page.locator('#usagechip')).toBeVisible();
+  // usage entry: the rail footer owns it on desktop, the header chip on mobile
+  await expect(page.locator('#railusage:visible, #usagechip:visible')).toHaveCount(1);
+}
+
+// The visible usage trigger for this viewport (rail footer or mobile chip).
+function usageTrigger(page) {
+  return page.locator('#railusage:visible, #usagechip:visible');
 }
 
 async function refresh(page) {
@@ -464,32 +470,44 @@ test('Now hierarchy, Usage chip, active-subagent filter, and card actions are un
   await expect(page.locator('#pinned')).toHaveCount(1);
   await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
   await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
-  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Avail · 2');
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
 
   const claude = page.locator('[data-sid="claude-one"]');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(claude.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
   await expect(codex.getByRole('button', { name: 'Continue', exact: true })).toHaveCount(0);
-  if (testInfo.project.name === 'desktop') {
-    await expect(claude.getByRole('button', { name: 'Terminal', exact: true })).toBeVisible();
-  }
+  // Console cards carry no Terminal button — the terminal lives in the
+  // session workspace header (and its ⋮ menu), never on the card.
+  await expect(claude.locator('.termbtn')).toHaveCount(0);
 
   await reset(page, 'inactive-usage-warning');
   await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
   await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
-  await page.locator('#usagechip').click();
+  await usageTrigger(page).click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('94%');
-  // the panel hangs off the button: top-left pinned to its bottom-left, small gap
-  const anchored = await page.evaluate(() => {
-    const button = document.querySelector('#usagechip').getBoundingClientRect();
-    const panel = document.querySelector('#usagepanel').getBoundingClientRect();
-    return { gap: Math.round(panel.top - button.bottom), leftDelta: Math.round(panel.left - button.left),
-      rightOverflow: Math.round(Math.max(0, panel.right - innerWidth)),
-      bottomOverflow: Math.round(Math.max(0, panel.bottom - innerHeight)) };
-  });
-  expect(anchored).toEqual({ gap: 8, leftDelta: 0, rightOverflow: 0, bottomOverflow: 0 });
+  if (testInfo.project.name === 'desktop') {
+    // rail-opened: pinned beside the rail, bottom-aligned, inside the viewport
+    const anchored = await page.evaluate(() => {
+      const rail = document.querySelector('#sidenav').getBoundingClientRect();
+      const panel = document.querySelector('#usagepanel').getBoundingClientRect();
+      return { leftGap: Math.round(panel.left - rail.right),
+        bottomGap: Math.round(innerHeight - panel.bottom),
+        rightOverflow: Math.round(Math.max(0, panel.right - innerWidth)) };
+    });
+    expect(anchored).toEqual({ leftGap: 8, bottomGap: 14, rightOverflow: 0 });
+  } else {
+    // chip-opened: top-left pinned to the button's bottom-left, small gap
+    const anchored = await page.evaluate(() => {
+      const button = document.querySelector('#usagechip').getBoundingClientRect();
+      const panel = document.querySelector('#usagepanel').getBoundingClientRect();
+      return { gap: Math.round(panel.top - button.bottom), leftDelta: Math.round(panel.left - button.left),
+        rightOverflow: Math.round(Math.max(0, panel.right - innerWidth)),
+        bottomOverflow: Math.round(Math.max(0, panel.bottom - innerHeight)) };
+    });
+    expect(anchored).toEqual({ gap: 8, leftDelta: 0, rightOverflow: 0, bottomOverflow: 0 });
+  }
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
 
   await reset(page, 'usage-amber');
@@ -498,7 +516,7 @@ test('Now hierarchy, Usage chip, active-subagent filter, and card actions are un
   await reset(page, 'usage-warning');
   await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
   await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
-  await page.locator('#usagechip').click();
+  await usageTrigger(page).click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('Fable weekly');
   await expect(page.locator('#usagebody')).toContainText('96%');
@@ -809,14 +827,14 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await reset(page);
   await expect(page.locator('[data-now-filter="needs_you"]')).toHaveText('Needs you · 0');
   await expect(page.locator('[data-now-filter="working"]')).toHaveText('Working · 0');
-  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Available · 2');
+  await expect(page.locator('[data-now-filter="available"]')).toHaveText('Avail · 2');
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 0');
   await expect(page.locator('#totals')).toHaveCount(0);
   await expect(page.locator('[data-sid="claude-one"]')).toContainText('Claude parser fix');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   await expect(codex).toContainText('Codex parity work');
   await expect(page.locator('#usagechip')).toHaveText('Usage · Claude 20/30 · Codex 30');
-  await page.locator('#usagechip').click();
+  await usageTrigger(page).click();
   await expect(page.locator('#usagepanel')).toBeVisible();
   await expect(page.locator('#usagebody')).toContainText('Claude Code');
   await expect(page.locator('#usagebody')).toContainText('Codex CLI');
@@ -835,12 +853,10 @@ test('shared fleet, spawn controls, usage, files, and capability-aware cost', as
   await expect(page.locator('#usagebody')).not.toContainText('GPT-5.3-Codex-Spark');
   await page.locator('#usagepanel').getByRole('button', { name: 'close usage' }).click();
   await expect(codex.locator('select.modesel')).toHaveCount(0);
-  if (testInfo.project.name === 'desktop') {
-    const pin = codex.getByRole('button', { name: 'pin session', exact: true });
-    await expect(codex.locator('.termbtn')).toHaveCount(0);
-    await expect(pin).toBeVisible();
-    expect(await pin.evaluate((el) => getComputedStyle(el).borderStyle)).toBe('solid');
-  }
+  // Console cards expose no pin/terminal buttons: pin is right-click (desktop)
+  // or long-press (mobile); the terminal lives in the workspace header.
+  await expect(codex.locator('.termbtn')).toHaveCount(0);
+  await expect(codex.locator('.spin')).toHaveCount(0);
 
   for (let index = 0; index < 20; index += 1) await refresh(page);
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
@@ -946,7 +962,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
   await expect(card).toHaveClass(/fixedpeek/);
-  await peekRow.locator('.lmwho').click();
+  await peekRow.locator('.peekmd').click({ position: { x: 4, y: 4 } });
   await expect(peekRow).toHaveClass(/expanded/);
   await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
   const expandedBox = await peek.evaluate(el => el.getBoundingClientRect().height);
@@ -964,7 +980,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(peekRow).toHaveClass(/expanded/);
   expect(await page.evaluate(() => window.__peekLinkClicks)).toBe(1);
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
-  await peekRow.locator('.lmwho').click();
+  await peekRow.locator('.peekmd').click({ position: { x: 4, y: 4 } });
   await expect(peekRow).toHaveClass(/expanded/);
   await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
   await expect(peekRow).toHaveClass(/truncated/);
@@ -977,15 +993,19 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   expect(fiveLineHeight - collapsedHeight).toBeLessThan(60);
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-fixed.png'), fullPage: true });
 
-  const gauge = await card.locator('.ctxbar').evaluate(el => ({
-    background: getComputedStyle(el).backgroundColor,
-    border: getComputedStyle(el).borderColor,
-    borderWidth: getComputedStyle(el).borderTopWidth,
-    card: getComputedStyle(el.closest('.card')).backgroundColor,
-  }));
-  expect(gauge.background).not.toBe(gauge.card);
-  expect(gauge.border).not.toBe(gauge.card);
-  expect(gauge.borderWidth).toBe('1px');
+  // Console context gauge: a 3px track in the desktop meta rail whose track
+  // color is distinct from the card surface (mobile shows ctx % inline only).
+  if (testInfo.project.name === 'desktop') {
+    const gauge = await card.locator('.cmeta .railbar').evaluate(el => ({
+      background: getComputedStyle(el).backgroundColor,
+      height: Math.round(el.getBoundingClientRect().height),
+      card: getComputedStyle(el.closest('.card')).backgroundColor,
+    }));
+    expect(gauge.background).not.toBe(gauge.card);
+    expect(gauge.height).toBe(3);
+  } else {
+    await expect(card.locator('.cmeta')).toContainText('ctx');
+  }
   await page.screenshot({ path: testInfo.outputPath('markdown-peek-context.png'), fullPage: true });
 
   await card.locator('.shead').click();
@@ -1052,7 +1072,7 @@ test('a fully visible collapsed peek has no expansion action', async ({ page }) 
   await reset(page);
   const peek = page.locator('[data-sid="codex:thread-one"] .sessionpeek');
   await expect(peek).not.toHaveClass(/truncated|expanded/);
-  await peek.locator('.lmwho').click();
+  await peek.locator('.peekmd').click({ position: { x: 4, y: 4 } });
   await expect(peek).not.toHaveClass(/truncated|expanded/);
   await expect(peek.getByRole('button', { name: 'collapse latest message' })).toHaveCount(0);
 });
@@ -1187,9 +1207,10 @@ test('session cards remove More and list every running subagent', async ({ page 
   await reset(page, 'subagent');
   surfaces = await themeSurfaces();
   const running = page.locator('[data-sid="codex:thread-one"]');
-  await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card2);
-  expect(await running.locator('.shead').evaluate(el => getComputedStyle(el).backgroundColor))
-    .toBe(surfaces.card2);
+  // Console: every ordinary card sits on the one card surface; state is carried
+  // by the meta rail and border, not a raised background.
+  await expect.poll(async () => (await cardStyle(running)).background).toBe(surfaces.card);
+  expect((await cardStyle(running)).opacity).toBe('1');
   const preview=running.locator('.agents');
   await expect(preview).toBeVisible();
   await expect(preview.locator('.arow')).toHaveCount(1);
@@ -1260,14 +1281,14 @@ test('full chat renders main work as the newest non-interactive conversation row
 
 test('quiet age is limited to working session cards', async ({ page }) => {
   await reset(page);
-  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveCount(0);
-  await expect(page.locator('[data-sid="codex:thread-one"] .squiet')).toHaveCount(0);
+  await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
+  await expect(page.locator('[data-sid="codex:thread-one"] .cquiet')).toHaveCount(0);
 
   await reset(page, 'single-question');
-  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveCount(0);
+  await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
 
   await reset(page, 'send-while-busy');
-  await expect(page.locator('[data-sid="claude-one"] .squiet')).toHaveText('quiet 3s');
+  await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveText('quiet 3s');
 });
 
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
@@ -1290,17 +1311,15 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
-  await expect(card.locator('.chip')).toContainText('Available');
+  await expect(card.locator('.cstat')).toContainText('available');
   await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
 });
 
 test('an exact existing Codex terminal exposes Open without Attach', async ({ page }, testInfo) => {
   await reset(page, 'codex-terminal');
   const card = page.locator('[data-sid="codex:thread-one"]');
-  if (testInfo.project.name === 'desktop') {
-    const cardOpen = card.getByRole('button', { name: 'Open', exact: true });
-    await expect(cardOpen).toBeEnabled();
-  }
+  // Console cards never carry terminal controls — Open lives in the workspace header
+  await expect(card.locator('.termbtn')).toHaveCount(0);
   await card.locator('.shead').click();
   const open = page.locator('#sctrl > .termbtn');
   await expect(open).toHaveText('Open');
@@ -1395,7 +1414,7 @@ test('native model changes supersede settled Fleet feedback and seed the next CA
   expect(changed.ok()).toBeTruthy();
   await page.evaluate(() => tick(true));
 
-  await expect(page.locator('[data-sid="claude-one"] .amodel')).toContainText('sonnet · low');
+  await expect(page.locator('[data-sid="claude-one"] .cmodel')).toContainText('sonnet · low');
   await expect(page.locator('#sact .status-secondary')).toContainText('sonnet · low');
   await expect(page.getByLabel('Session model')).toHaveValue('sonnet');
   await expect(page.getByLabel('Session effort')).toHaveValue('low');
@@ -1456,7 +1475,7 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   const card = page.locator('[data-sid="claude-one"]');
   await expect(card).toBeVisible();
   await expect(card).toContainText('New Claude session');
-  await expect(card).toContainText('Available');
+  await expect(card.locator('.cstat')).toContainText('available');
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
@@ -1474,7 +1493,7 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   const card = page.locator('[data-sid="codex:thread-one"]');
 
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(card.locator('.chip')).toContainText('Working elsewhere');
+  await expect(card.locator('.cstat')).toContainText('working elsewhere');
   await expect(card).toContainText('Working in ChatGPT desktop.');
   await expect(card.getByRole('button', { name: 'View', exact: true })).toHaveCount(0);
   await expect(card.locator('.termbtn')).toHaveCount(0);
@@ -2707,7 +2726,7 @@ test('available stays visible while inactive lifecycles live in the History dest
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
-  await expect(page.locator('#sessions [data-sid="claude-one"]')).toContainText('Available');
+  await expect(page.locator('#sessions [data-sid="claude-one"] .cstat')).toContainText('available');
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
@@ -2736,7 +2755,7 @@ test('action inbox separates requests, work, availability, and unread responses'
   await reset(page, 'subagent');
   const working = page.locator('[data-sid="codex:thread-one"]');
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(working.locator('.chip')).toHaveText('Working');
+  await expect(working.locator('.cstat')).toHaveText('working');
   await expect(working.locator('.primarybtn')).toHaveCount(0);
   await working.locator('.shead').click();
   await expect(page.locator('#sview')).toBeVisible();
@@ -2806,7 +2825,7 @@ test('mobile Needs You keeps a Claude question identifiable when its inbox actio
   await expect(fallback).toBeVisible();
   await expect(fallback).toContainText('Get 429 into a mergable state');
   await expect(fallback).toContainText('hazy-hatching-curry');
-  await expect(fallback.locator('.chip')).toHaveText('Question waiting');
+  await expect(fallback.locator('.qsignal .ptool')).toContainText('waiting on you');
   await expect(fallback.locator('.primarybtn')).toHaveCount(0);
   await fallback.locator('.shead').click();
   await expect(page.locator('#sview')).toContainText('How should I bring PR #429 up to date with main');
@@ -3116,9 +3135,11 @@ test('full-screen surfaces are semantic focus modals and session headers open Ch
   const card=page.locator('[data-sid="claude-one"]');
   const header=card.locator('.shead');
   await expect(card.locator('.sessionopen')).toHaveCount(0);
-  await card.locator('.spin').click();
+  // right-click is the pin gesture, never navigation
+  await header.click({ button: 'right' });
   await expect(page.locator('#sview')).toBeHidden();
-  await card.locator('.smeta').click();
+  await header.click({ button: 'right' });   // unpin again
+  await card.locator('.cmeta').click();
   await expect(page.locator('#sview')).toBeVisible();
   await page.locator('#sclose').click();
   await expect(page.locator('#sview')).toBeHidden();
@@ -3459,16 +3480,16 @@ test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast 
 
 test('pins persist and relocate sessions above the needs-you queue', async ({ page }) => {
   await reset(page, 'single-question');
-  const cardPin=page.locator('[data-sid="claude-one"] .shead')
-    .getByRole('button', { name: 'pin session' });
-  await expect(cardPin).toBeVisible();
-  await cardPin.click();
+  // pin = right-click on the session header (desktop) / long-press (mobile);
+  // the ⌖ marker carries pinned state — there is no pin button on the card
+  const cardHeader=page.locator('[data-sid="claude-one"] .shead');
+  await expect(cardHeader.getByRole('button')).toHaveCount(0);
+  await cardHeader.click({ button: 'right' });
   await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
     .toEqual(['claude-one']);
-  const pinnedPin=page.locator('#pinned [data-sid="claude-one"]')
-    .getByRole('button', { name: 'unpin session' });
-  await expect(pinnedPin).toBeVisible();
-  await pinnedPin.click();
+  const pinnedHeader=page.locator('#pinned [data-sid="claude-one"] .shead');
+  await expect(pinnedHeader.locator('.pinmark')).toBeVisible();
+  await pinnedHeader.click({ button: 'right' });
   await expect.poll(async () => (await fixtureState(page)).settings.pinned_sessions)
     .toEqual([]);
   const heldHeader=page.locator('[data-sid="claude-one"] .shead');

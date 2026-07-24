@@ -23,11 +23,13 @@ the provider's native control path. Built 2026-07-13; still evolving.
   The complete classification and action contract is in
   [`docs/session-organization.md`](docs/session-organization.md). The sticky command box carries the
   distinct-session counts for **Needs you**, **Working**, and **Available** instead of repeating a
-  totals line. The Now header carries a compact active-account summary such as
+  totals line. On desktop the nav-rail footer carries per-window usage bars (the accounts flyout
+  opens beside the rail); on mobile the Now header keeps a compact summary chip such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
-  session's AI tab title (same string as your iTerm tab), with project · branch beneath. On an open card the header
-  pins to the top of the screen while you scroll the card body (collapse from anywhere), and
-  scrolls away past the card's end.
+  session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
+  a 118px meta rail on the right carries status, model, context %, quiet time, and live agent
+  count ("Console" design system — see `design-system/`). Pin/unpin is right-click on the header
+  (desktop) or long-press (mobile); pinned cards show a `⌖ pinned` marker.
 - **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
   **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
   mobile tab show active/unread counts; opening a row loads its current exact state before marking it
@@ -262,11 +264,13 @@ the provider without affecting Claude sessions.
   conversation instead of becoming duplicate history rows.
 - Provider-wide failures appear once as a banner. Fleet preserves the last known placement instead
   of turning every session into a duplicate error card.
-- **Usage button** (under the Now title): it shows the active Claude account's 5-hour/weekly values
+- **Usage entry** (desktop: nav-rail footer bars · mobile: Now-header chip): it shows the active
+  Claude account's 5-hour/weekly values
   and the highest active non-Spark Codex window, for example **Usage · Claude 23/8 · Codex 14**.
   At 70% an active account/window turns it amber; at 90% it turns red. Inactive Claude profiles do
-  not color the button, but retain their own gauge colors inside the panel. Tapping opens every
-  provider/account gauge in a desktop popover or mobile sheet. Provider, email, and plan details use
+  not color the summary, but retain their own gauge colors inside the panel. Tapping opens every
+  provider/account gauge in the accounts flyout (pinned beside the rail on desktop; a sheet under
+  the chip on mobile). Provider, email, and plan details use
   middle-dot separators. When Claude Usage is installed, Fleet mirrors its selected profiles,
   active-account marker, 5-hour/weekly/Fable-weekly gauges, visibility setting, and live file updates. Fleet reads
   only display-safe identity/quota fields from the app preferences; its stored credentials never enter

@@ -5,13 +5,16 @@ const SAMPLE_COUNT = 20;
 async function reset(page, scenario = 'base') {
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
-  await expect(page.locator('#usagechip')).toBeVisible();
+  // usage entry: the rail footer owns it on desktop, the header chip on mobile
+  await expect(page.locator('#railusage:visible, #usagechip:visible')).toHaveCount(1);
 }
 
 async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
   return page.evaluate(async ({ flow, count }) => {
     const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
     const values = [];
+    // the Terminal control lives in the session workspace header, not the card
+    if (flow === 'native_requests') { openSession('claude-one'); await frame(); }
     for (let index = 0; index < count; index += 1) {
       await frame();
       const started = performance.now();
@@ -21,16 +24,18 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       else if (flow === 'notification_action') snoozeNotification('evt-6-question', 'rev-6', 'quarter');
       else if (flow === 'now') document.querySelector('[data-now-filter="needs_you"]')?.click();
       else if (flow === 'session_chat') document.querySelector('[data-sid="claude-one"] .shead')?.click();
-      else if (flow === 'native_requests') document.querySelector('[data-sid="claude-one"] .termbtn')?.click();
+      else if (flow === 'native_requests') document.querySelector('#sctrl > .termbtn')?.click();
       else if (flow === 'session_lifecycle') document.querySelector('#newsess .newbtn')?.click();
       else if (flow === 'subagents') document.querySelector('[data-now-filter="subagents"]')?.click();
       else if (flow === 'search_history') document.querySelector('[data-route="history"]:not([hidden])')?.click();
       else if (flow === 'workstreams_repository') document.querySelector('[data-route="workstreams"]:not([hidden])')?.click();
-      else if (flow === 'insights_usage') document.querySelector('#usagechip')?.click();
+      else if (flow === 'insights_usage') (document.querySelector('#railusage')?.offsetParent
+        ? document.querySelector('#railusage') : document.querySelector('#usagechip'))?.click();
       else if (flow === 'settings') openSettings();
       else if (flow === 'outbox_handoff') document.querySelector('#outboxchip')?.click();
       else if (flow === 'file_markdown') document.querySelector('#sact .latestfile')?.click();
-      else if (flow === 'pinning') document.querySelector('[data-sid="claude-one"] .spin')?.click();
+      else if (flow === 'pinning') document.querySelector('[data-sid="claude-one"] .shead')
+        ?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
       else if (flow === 'mobile_pin_hold') {
         const target = document.querySelector('[data-sid="claude-one"] .shead');
         sessionPressStart('claude-one', target);
@@ -74,6 +79,7 @@ async function paintedSamples(page, flow, count = SAMPLE_COUNT) {
       else if (flow === 'file_markdown') { closeViewer(); openSession('codex:thread-one'); }
       else if (flow === 'mobile_pin_hold') sessionPressEnd();
     }
+    if (flow === 'native_requests') closeSession();
     return values;
   }, { flow, count });
 }

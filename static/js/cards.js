@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardTop,cardAgentList,cardDetail,detailSig,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,cardDetail,detailSig,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -159,9 +159,34 @@ function cardUsesFixedPeekHeight(s){
 function cardFrame(s){
   return{fixed:cardUsesFixedPeekHeight(s),lines:previewSessions()?clampS():0};
 }
-// The volatile top of the card — rebuilt every poll (header, meta, peek, pending,
-// running agents, the more/less toggle). No native <details> here, so replacing it
-// each tick doesn't flash.
+// The Console card's right meta rail (desktop; inline row on mobile): status
+// dot+label, model, context bar, quiet time, live agent count. Alert states
+// (stalled / limit) darken the rail surface and redden the quiet clock.
+function cardMetaRail(s){
+  const cls=cardCls(s);
+  const tone=cls==='needs'?'amber':cls==='stalled'?'red':
+    s.ui_group==='working'?'green':'dim';
+  const label=String(s.reason_label||stateLabel[s.state]||s.state||'').toLowerCase();
+  const running=(s.agents||[]).filter(a=>!terminalAgentStates.has(a.state)).length;
+  const ctx=s.ctx_pct==null?
+    (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow">${fmtTok(s.ctx_tokens)} tok</span>`):
+    `<span class="mrow">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
+  return`<div class="cmeta${cls==='stalled'?' alert':''}" role="button" tabindex="-1"
+      onclick="sessionTap(event,'${s.session_id}')">
+      <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
+      <span class="mrow cmodel">${modelLabel(s)}</span>
+      ${ctx}
+      ${s.quiet_s!=null&&s.ui_group!=='available'?`<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
+      ${s.compacting!=null?`<span class="mrow" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
+      ${s.running?`<span class="mrow runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
+      ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}
+    </div>`;
+}
+// The volatile top of the card — rebuilt every poll (header, peek, pending,
+// running agents, meta rail). No native <details> here, so replacing it each
+// tick doesn't flash. Pin = right-click (desktop) / long-press (mobile); the
+// ⌖ marker shows pinned state. Terminal and navigation actions live in the
+// session workspace, never as card buttons.
 function cardTop(s){
   if(s.provisional)return provisionalCardTop(s);
   const navigationOnly=!s.primary_action||['open','continue','view'].includes(s.primary_action);
@@ -170,40 +195,31 @@ function cardTop(s){
   // conversation itself now lives only in the full view
   if(previewSessions()&&s.last_msg)ensureCtx(s.session_id,ctxVersion(s));
   const pinned=pinnedSessions.has(s.session_id);
-  return`<div class="shead${sessionPressSid===s.session_id?' pinpress':''}" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
+  const questionCard=cardCls(s)==='needs'&&s.pending&&s.pending.kind!=='permission';
+  const headRight=questionCard?
+    `<span class="cwaiting">WAITING ${fmtAge(s.quiet_s||0)}</span>`:'';
+  return`<div class="cmain">
+    <div class="shead${sessionPressSid===s.session_id?' pinpress':''}" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
       title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')" onkeydown="sessionHeaderKey(event,'${s.session_id}')"
+      oncontextmenu="event.preventDefault();toggleSessionPin('${s.session_id}')"
       ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       ${s.new_response?'<span class="newdot" role="img" aria-label="new response" title="new response"></span>':''}
-      <span class="chip ${s.ui_group||s.state}${s.reason_label==='Fix needed'?' problem':''}">${esc(s.reason_label||stateLabel[s.state]||s.state)}</span>
-      <span class="sname">${s.title?`<span class="stitle">${esc(s.title)}</span><small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''}</small>`:`${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` <small>· ${esc(s.branch)}</small>`:''}`}</span>
+      <span class="sname"><span class="stitle">${esc(s.title||s.project||'session')}</span>
+        <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.provider||'claude')}</small></span>
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
-      <span class="m" title="session provider">${esc(s.provider||'claude')}</span>
+      ${pinned?`<span class="pinmark" title="pinned — right-click or long-press to unpin">⌖ pinned</span>`:''}
+      ${headRight}
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
-      ${terminalButton(s,true)}
-      <button class="spin${pinned?' on':''}" ${pinActions.get(s.session_id)?.busy?'disabled':''} title="${pinned?'unpin session':'pin session'}"
-        aria-label="${pinned?'unpin session':'pin session'}"
-        onclick="event.stopPropagation();toggleSessionPin('${s.session_id}')">📌</button>
     </div>
-    <div class="smeta" role="button" tabindex="0" aria-label="Open chat: ${esc(s.title||s.project||'session')}"
-      title="open the full conversation" onclick="sessionTap(event,'${s.session_id}')" onkeydown="sessionHeaderKey(event,'${s.session_id}')">
-      <div class="smeta-l">
-        ${s.agents_running?`<span class="m"><b style="color:var(--green)">${s.agents_running} agent${s.agents_running>1?'s':''}</b></span>`:''}
-        ${s.running?`<span class="m runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
-        ${s.compacting!=null?`<span class="m compacting" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
-        ${!['available','needs_you'].includes(s.ui_group)?`<span class="squiet">quiet ${fmtAge(s.quiet_s)}</span>`:''}
-      </div>
-      <div class="smeta-r">
-        ${s.ctx_pct==null?(s.provider==='codex'?'':`<span class="m">${fmtTok(s.ctx_tokens||0)} tok</span>`):`<span class="ctxwrap"><span>${s.ctx_pct}%</span><span class="ctxbar"><i style="width:${Math.min(s.ctx_pct||0,100)}%;background:${s.ctx_pct>=60?'var(--red)':s.ctx_pct>=50?'var(--amber)':'var(--blue)'}"></i></span></span>`}
-        <span class="m amodel">${modelLabel(s)}</span>
-      </div>
-    </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})"><span class="lmwho ${s.last_msg.role}">${s.last_msg.role==='user'?'you':esc(s.provider||'claude')}</span><div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
-    ${s.error?`<div class="lastmsg"><span class="lmwho">provider</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})">${s.last_msg.role==='user'?'<span class="peekwho">you ·</span>':''}<div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
+    ${s.error?`<div class="lastmsg carderror"><span class="peekwho">provider ·</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${s.reply_requested&&!s.staging_observer?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
     ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
     ${cardPending(s)}
-    ${cardAgentList(s)}`;
+    ${cardAgentList(s)}
+    </div>
+    ${questionCard?'':cardMetaRail(s)}`;
 }
 // The card's running-subagent list: every non-terminal agent, in engine tree
 // order so agentRow's depth indentation still describes the hierarchy — never

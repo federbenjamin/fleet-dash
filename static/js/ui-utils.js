@@ -40,6 +40,7 @@ const USAGE_EDGE=8;     // keep this much clear of every viewport edge
 function positionUsagePanel(){
   const panel=$('#usagepanel'),chip=$('#usagechip');
   if(!panel||!chip||!usageOpen)return;
+  if(panel.classList.contains('fromrail'))return; // CSS pins it beside the rail footer
   const button=chip.getBoundingClientRect();
   const vw=window.innerWidth,vh=window.innerHeight;
   // shrink to whatever fits to the button's right, so the left edges can line
@@ -58,10 +59,15 @@ function closeUsage(){
   $('#usagepanel')?.classList.remove('open');
   $('#usagechip')?.setAttribute('aria-expanded','false');
 }
-function toggleUsage(){
+function toggleUsage(source){
   usageOpen=!usageOpen;
-  $('#usagepanel')?.classList.toggle('open',usageOpen);
+  const panel=$('#usagepanel');
+  // Desktop opens from the rail footer (pinned beside the rail); mobile still
+  // anchors under the Now-header Usage chip.
+  panel?.classList.toggle('fromrail',source==='rail');
+  panel?.classList.toggle('open',usageOpen);
   $('#usagechip')?.setAttribute('aria-expanded',String(usageOpen));
+  $('#railusage')?.setAttribute('aria-expanded',String(usageOpen));
   // measure only once it is displayed, or offsetWidth is 0
   if(usageOpen)positionUsagePanel();
 }
@@ -107,6 +113,30 @@ function usageBar(legacy,providers){
   if(Number.isFinite(activeCodex))summaries.push(`Codex ${Math.round(activeCodex)}`);
   chip.textContent=`Usage${summaries.length?` · ${summaries.join(' · ')}`:''}`;
   chip.title='Claude active account: 5-hour/weekly · Codex: highest active non-Spark window';
+  // Desktop rail footer: per-window usage bars (single %-used numbers,
+  // amber ≥70 / red ≥90) + signed-in account. Same data as the chip summary.
+  const rail=$('#railusage'),railUser=$('#railuser');
+  if(rail){
+    const rows=[];
+    if(activeClaude){
+      if(Number.isFinite(Number(activeClaude.five_hour_pct)))
+        rows.push(['CLAUDE 5H',Math.round(Number(activeClaude.five_hour_pct))]);
+      if(claude?.show_week!==false&&Number.isFinite(Number(activeClaude.weekly_pct)))
+        rows.push(['CLAUDE WK',Math.round(Number(activeClaude.weekly_pct))]);
+    }
+    if(Number.isFinite(activeCodex))rows.push(['CODEX',Math.round(activeCodex)]);
+    rail.innerHTML=rows.map(([label,pct])=>{
+      const tone=pct>=90?'crit':pct>=70?'warn':'';
+      return`<span class="urow"><span>${esc(label)}</span><span class="${tone}">${pct}%</span></span>`+
+        `<span class="ubarline"><i class="${tone}" style="width:${Math.min(pct,100)}%"></i></span>`;
+    }).join('');
+  }
+  if(railUser){
+    const email=String(activeClaude?.email||codex?.email||'');
+    const name=email.split('@')[0];
+    railUser.innerHTML=name?`<span class="railavatar">${esc(name.slice(0,1))}</span>
+      <span><b>${esc(name)}</b><small>signed in</small></span>`:'';
+  }
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
     ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
       <div class="uhead"><span class="uname">Claude Code</span>
@@ -132,7 +162,7 @@ function spark(pts,w=64,h=16){
   if(!pts||pts.length<2)return'';
   const min=Math.min(...pts),max=Math.max(...pts),r=max-min||1;
   const p=pts.map((v,i)=>`${(i/(pts.length-1)*w).toFixed(1)},${(h-2-(v-min)/r*(h-4)).toFixed(1)}`).join(' ');
-  return`<svg class="spark" width="${w}" height="${h}"><polyline points="${p}" fill="none" stroke="#58a6ff" stroke-width="1.5"/></svg>`;
+  return`<svg class="spark" width="${w}" height="${h}"><polyline points="${p}" fill="none" stroke="var(--green)" stroke-width="1.5"/></svg>`;
 }
 
 // ---- tiny markdown renderer (self-contained: no CDN on the tailnet path) ----

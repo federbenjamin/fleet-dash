@@ -1,8 +1,12 @@
-const SHELL_CACHE = 'fleet-shell-n7-v1';
+const SHELL_CACHE = 'fleet-shell-n8-v1';
 const RUNTIME_CACHE = 'fleet-runtime-n6-v1';
 const SHELL_ASSETS = [
   '/',
   '/static/fleet.css',
+  '/static/fonts/SpaceGrotesk-var.woff2',
+  '/static/fonts/IBMPlexMono-Regular.woff2',
+  '/static/fonts/IBMPlexMono-Medium.woff2',
+  '/static/fonts/IBMPlexMono-SemiBold.woff2',
   '/static/js/main.js',
   '/static/js/state-store.js',
   '/static/js/nav.js',

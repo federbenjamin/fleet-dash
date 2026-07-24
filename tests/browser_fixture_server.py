@@ -1320,6 +1320,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, "text/html; charset=utf-8", handle.read())
         assets = {
             "/static/fleet.css": ("static/fleet.css", "text/css; charset=utf-8"),
+            **{f"/static/fonts/{name}": (f"static/fonts/{name}", "font/woff2")
+               for name in ("SpaceGrotesk-var.woff2", "IBMPlexMono-Regular.woff2",
+                            "IBMPlexMono-Medium.woff2", "IBMPlexMono-SemiBold.woff2")},
             **{f"/static/js/{name}": (f"static/js/{name}", "text/javascript; charset=utf-8")
                for name in ("main.js", "state-store.js", "nav.js", "search.js",
                             "ui-utils.js", "outbox.js", "push.js", "notifications.js",

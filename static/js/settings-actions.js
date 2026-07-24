@@ -407,11 +407,19 @@ function cardPending(s){
     <button class="pbtn qanswer" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">respond ⤢</button></div>`;
   if(p.kind!=='question'||!p.questions||!p.questions.length)return'';
   const n=p.questions.length;
-  const label=n>1?`multi-part question (${n})`:(p.questions[0].header||'question');
+  const q0=p.questions[0],options=q0.options||[];
+  // Console question card: the question TEXT plus a summary line — option
+  // selectors never render on the card (they live in the full-view drawer).
+  const rec=options.find(option=>/\(recommended\)/i.test(String(option.label||'')));
+  const recLabel=rec?String(rec.label).replace(/\s*\(recommended\)\s*/i,'').trim():'';
+  const summary=[`${options.length} option${options.length===1?'':'s'}`]
+    .concat(recLabel?[`recommended: ${recLabel}`]:[])
+    .concat(n>1?[`${n} questions`]:[]).join(' · ');
   return`<div class="pend qsignal" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
-    <div class="ptool"><span class="ptlabel">${esc(label)} — ${esc(nativePromptLabel(s))}</span></div>
+    <div class="ptool"><span class="ptlabel">◆ ${esc(n>1?`multi-part question (${n})`:(q0.header||'question'))} — ${esc(nativePromptLabel(s))}</span></div>
+    <div class="qcardtext">${esc(q0.question||'')}</div>
     ${p.files&&p.files.length?`<div class="pfiles"><span class="plabel">read first</span>${p.files.map(f=>fchip(s.session_id,f,f.caption)).join('')}</div>`:''}
-    <button class="pbtn qanswer" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">answer ⤢</button>
+    <div class="qcardsummary"><span>${esc(summary)}</span><span class="qanswercue">ANSWER IN CHAT →</span></div>
   </div>`;
 }
 function openSessionQ(sid){

@@ -269,14 +269,14 @@ function sessionsWithProvisional(f){
 }
 function provisionalCardTop(s){
   const p=spawnProvisional,failed=p?.status==='failed';
-  return`<div class="shead" title="open startup details" onclick="sessionTap(event,'${s.session_id}')">
+  return`<div class="cmain"><div class="shead" title="open startup details" onclick="sessionTap(event,'${s.session_id}')">
       <span class="chip ${failed?'problem':'working'}">${failed?'Start failed':'Starting'}</span>
       <span class="sname"><span class="stitle">New coding session</span><small>${esc(s.project)} · ${esc(s.provider)}</small></span>
       <span class="m amodel">${modelLabel(s)}</span>
     </div>
-    ${p?.spec.message?`<div class="lastmsg"><span class="lmwho user">you</span><span class="lmtext">${esc(p.spec.message)}</span><span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span></div>`:''}
+    ${p?.spec.message?`<div class="lastmsg"><span class="peekwho">you ·</span><span class="lmtext">${esc(p.spec.message)}</span><span class="delivery ${failed?'failed':'sending'}" aria-label="${failed?'start failed':'starting session'}">${failed?'!':'◌'}</span></div>`:''}
     <div class="spawncardstate ${failed?'failed':''}">${failed?esc(p.error||'Session did not start'):`<span class="delivery sending" aria-hidden="true">◌</span> ${esc(p?.status==='discovering'?'Finding the new session…':'Starting session…')}`}</div>
-    ${failed&&p?.canRetry?`<div class="spawncardactions"><button class="pbtn send" onclick="event.stopPropagation();retrySpawn()">retry</button><button class="pbtn" onclick="event.stopPropagation();restoreSpawnForm()">restore form</button></div>`:''}`;
+    ${failed&&p?.canRetry?`<div class="spawncardactions"><button class="pbtn send" onclick="event.stopPropagation();retrySpawn()">retry</button><button class="pbtn" onclick="event.stopPropagation();restoreSpawnForm()">restore form</button></div>`:''}</div>`;
 }
 function renderProvisionalSession(s){
   const p=spawnProvisional;if(!p)return;
