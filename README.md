@@ -595,7 +595,11 @@ session's transcript jsonl + `subagents/*.jsonl` for usage/state. Pending prompt
 **hooks** (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) because the CLI
 only writes AskUserQuestion rows to the transcript *after* they're answered. Hook evidence is
 immediate; a bare registry `waiting` flag is confirmed for 3 seconds because Claude can flash it
-between progress prose and the next tool call. Answers are injected through whichever terminal
+between progress prose and the next tool call. Each prompt gets a server-owned identity, so it stays
+the same request even when its evidence flips from the hook capture to the transcript — an answered
+question does not reappear — and once Fleet accepts an answer, a second device (or a second tap)
+gets "this prompt was already answered" instead of typing a second set of keys into a terminal that
+has moved on. Answers are injected through whichever terminal
 transport owns that session — tmux `send-keys` when its tty is a live tmux pane, otherwise
 `FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
 applet types into the iTerm session matched by tty). See

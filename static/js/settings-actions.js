@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
+Object.assign(globalThis,{uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,suppressWhileAnswering,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
 const SETTINGS_SECTIONS=['notifications','devices','sessions','appearance','budgets','advanced'];
 const SETTINGS_LABELS={notifications:'Notifications',devices:'Devices & delivery',sessions:'Sessions',
   appearance:'Appearance',budgets:'Budgets & spawning',advanced:'Advanced'};
@@ -408,7 +408,7 @@ function sendElicitation(sid,nonce,choice,pre){
 // question expanded. Permission prompts are small and stay inline (allow/deny).
 function cardPending(s){
   const p=s.pending;
-  if(!p||(p.nonce&&answered[s.session_id]===p.nonce))return'';
+  if(!p||(requestKey(p)&&answered[s.session_id]===requestKey(p)))return'';
   if(s.staging_observer)return`<div class="pend qsignal stagingreadonly" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
     <div class="ptool"><span class="ptlabel">production request · view only in staging</span></div>
     <button class="pbtn" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">view ⤢</button></div>`;
@@ -458,7 +458,7 @@ function stagingPendingBox(s,p){
 }
 function pendingBox(s,pre='msg'){
   const p=s.pending; if(!p)return'';
-  if(p.nonce&&answered[s.session_id]===p.nonce)return'';   // sent: dismiss instantly
+  if(requestKey(p)&&answered[s.session_id]===requestKey(p))return'';   // sent: dismiss instantly
   if(s.staging_observer)return stagingPendingBox(s,p);
   if(s.delivery_uncertain?.nonce===p.nonce)return`<div class="pend deliveryuncertain" role="alert">
     <div class="ptool"><span class="ptlabel">delivery uncertain — check terminal</span></div>
@@ -633,7 +633,7 @@ async function act(sid,payload,pre='msg',optimisticId=null){
     if(!d.ok&&!el&&quickId==null&&optimisticId==null&&payload.type!=='focus'&&pre!==false)
       alert(d.error||'failed');
     if(d.ok&&payload.nonce&&['option','multiq','permission','dismiss','dismiss_then_send','elicitation'].includes(payload.type)){
-      answered[sid]=payload.nonce;      // retain immediate nonce suppression through canonical QA
+      answered[sid]=sessionRequestKey(sid,payload.nonce);  // retain suppression through canonical QA
       clearDraftPrefix(questionDraftPrefix(sid,payload.nonce));
       delete otherDraft[sid];delete mqSel[sid];delete elicitDraft[sid];multiSel[sid]=new Set();
       uiRefresh();
@@ -702,8 +702,28 @@ function sendOther(sid,nonce,n,pre){
     return act(sid,{type:'option',nonce,n_options:n,other},pre,optimisticId);
   });
 }
+// Hide the selector the moment the action is sent, the way an option answer does
+// through beginOptimisticAnswer (invariant 14). Without this a permission prompt
+// stays visible and tappable for the whole injection — long enough to answer it
+// twice, from one device or from two.
+async function suppressWhileAnswering(sid,nonce,work){
+  const had=Object.prototype.hasOwnProperty.call(answered,sid),previous=answered[sid];
+  answered[sid]=sessionRequestKey(sid,nonce);uiRefresh();
+  const result=await work();
+  // A definite pre-delivery failure reopens the selector. Uncertainty must NOT:
+  // some keys may already have landed, and re-offering the prompt invites a
+  // second answer to a request the provider may consider resolved (invariant 66).
+  // `duplicate` means the prompt was already answered (this device's in-flight
+  // lock, or the server's answered fence). Reopening it would be a lie.
+  if(result&&!result.ok&&!result.duplicate&&
+      !['duplicate','delivery_uncertain','control_delivery_uncertain'].includes(result.code)){
+    if(had)answered[sid]=previous;else delete answered[sid];
+  }
+  return result;
+}
 function sendDismiss(sid,nonce,pre){
-  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'dismiss',nonce},pre));
+  return withNativeRequestLock(sid,nonce,()=>
+    suppressWhileAnswering(sid,nonce,()=>act(sid,{type:'dismiss',nonce},pre)));
 }
 // desktop only: pointless from the phone — it focuses a tab on the Mac
 async function focusSession(sid,button=null){
@@ -869,7 +889,8 @@ function copyTxt(ev,el){
   }).catch(()=>{el.textContent='copy failed';setTimeout(()=>{el.textContent=original},1200);});
 }
 function sendPerm(sid,nonce,choice,pre='msg'){
-  return withNativeRequestLock(sid,nonce,()=>act(sid,{type:'permission',nonce,choice},pre));
+  return withNativeRequestLock(sid,nonce,()=>
+    suppressWhileAnswering(sid,nonce,()=>act(sid,{type:'permission',nonce,choice},pre)));
 }
 function imageType(file){
   const mime=String(file?.type||'').toLowerCase();

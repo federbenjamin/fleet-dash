@@ -88,6 +88,8 @@ function rememberSessionFile(sid,fileId){
 }
 globalThis.sessionOpened=false;         // just-opened: force-scroll to bottom on the first render
 globalThis.questionResizeActive=null;
+// epoch until which a just-finished resize still owns the action dock
+globalThis.questionResizeSettling=0;
 const questionScrollPositions=new Map();
 globalThis.questionPanelStore=(()=>{try{
   const value=JSON.parse(localStorage.getItem(QUESTION_PANEL_STORE_KEY)||'{}');
@@ -179,7 +181,10 @@ function startQuestionResize(event,encodedSid,encodedNonce){
     // An ordinary resize already has the correct live DOM. Rebuilding the
     // entire action dock here briefly detaches the drawer, flickers on slower
     // devices, and can discard its reading position between pointerup and the
-    // next paint.
+    // next paint. A FORCED render landing in the settle window right after
+    // pointerup does the same damage, so the gesture's suppression outlives the
+    // pointer by one animation settle (invariant 60).
+    questionResizeSettling=Date.now()+400;
     drawer.classList.remove('resizing','collapse-ready');
     drawer.style.height=`${state.height}px`;
     const resizer=drawer.querySelector('.question-resizer');
@@ -601,7 +606,7 @@ function renderParentWorkspaceAction(s,c,{pending=true,showFiles=false,note=''}=
     refreshStatusStrip('#sact',s.status_line,'session:'+s.session_id);return;
   }
   const p=pending?s.pending:null;
-  const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==p.nonce;
+  const hasQ=p&&p.kind==='question'&&p.questions&&p.questions.length&&answered[s.session_id]!==requestKey(p);
   const qHtml=hasQ?questionDrawerHtml(s,p,'smsg'):(p?pendingBox(s,'smsg'):'');
   act.classList.remove('tools-open');act.classList.toggle('session-composer',canCompose(s));
   act.classList.toggle('question-present',Boolean(hasQ));
@@ -864,7 +869,7 @@ function renderSession(force){
   // A focused composer must not freeze transcript confirmation. The composer
   // itself is preserved below; only defer the body repaint during an active
   // touch gesture so mobile scrolling is not interrupted.
-  if(questionResizeActive||(!force&&touching()))return;
+  if(questionResizeActive||Date.now()<questionResizeSettling||(!force&&touching()))return;
   const body=$('#sbody');
   const old={top:body.scrollTop};
   const opened=sessionOpened;

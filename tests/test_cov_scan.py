@@ -391,7 +391,16 @@ class ScanStateTests(EngineFixture):
         session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
         self.assertEqual(session["state"], "dormant")
 
-    def test_transcript_pending_question(self):
+    def test_a_transcript_question_is_never_a_pending_request(self):
+        """Questions come only from the hook capture (invariant 1).
+
+        The CLI flushes AskUserQuestion rows AFTER the answer, so a row here is
+        evidence of a RESOLVED ask. Surfacing it gave one prompt a second identity
+        (tool_use_id rather than the hook nonce), which is what made an answered
+        question reappear in production once the capture's ghost guard dropped it.
+        It must also never fall through to the permission branch: those keys are a
+        different recipe entirely (invariants 4, 5).
+        """
         self.write_registry(status="idle")
         self.append_transcript({"type": "assistant",
             "timestamp": "2026-07-15T00:00:05Z",
@@ -401,7 +410,54 @@ class ScanStateTests(EngineFixture):
                      "options": [{"label": "A"}]}]}}]}})
         fleet = self.engine.scan()
         session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
-        self.assertEqual((session["pending"] or {}).get("kind"), "question")
+        self.assertIsNone(session["pending"])
+
+    def test_a_real_permission_still_surfaces_beside_a_question_row(self):
+        """The permission fallback survives; it just skips AskUserQuestion rows."""
+        self.write_registry(status="idle")
+        self.append_transcript({"type": "assistant",
+            "timestamp": "2026-07-15T00:00:05Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "bash-1", "name": "Bash",
+                 "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "q", "name": "AskUserQuestion",
+                 "input": {"questions": []}}]}})
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual((session["pending"] or {}).get("kind"), "permission")
+        self.assertEqual(session["pending"]["tool"], "Bash")
+        self.assertEqual(session["pending"]["nonce"], "bash-1")
+
+    def test_a_scanned_prompt_carries_a_stable_request_id(self):
+        """The client suppresses on identity, not on the injection nonce
+        (invariant 75)."""
+        self.write_registry(status="idle")
+        self.append_transcript({"type": "assistant",
+            "timestamp": "2026-07-15T00:00:05Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "bash-1", "name": "Bash",
+                 "input": {"command": "ls"}}]}})
+        first = next(s for s in self.engine.scan()["sessions"]
+                     if s["session_id"] == "same")
+        second = next(s for s in self.engine.scan()["sessions"]
+                      if s["session_id"] == "same")
+        self.assertTrue(first["pending"]["request_id"].startswith("req-"))
+        self.assertEqual(first["pending"]["request_id"],
+                         second["pending"]["request_id"])
+
+    def test_an_answered_prompt_stops_being_scanned_until_it_resolves(self):
+        self.write_registry(status="idle")
+        self.append_transcript({"type": "assistant",
+            "timestamp": "2026-07-15T00:00:05Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "bash-1", "name": "Bash",
+                 "input": {"command": "ls"}}]}})
+        self.assertIsNotNone(next(s for s in self.engine.scan()["sessions"]
+                                  if s["session_id"] == "same")["pending"])
+        self.engine._record_answered_request("same", "bash-1")
+        session = next(s for s in self.engine.scan()["sessions"]
+                       if s["session_id"] == "same")
+        self.assertIsNone(session["pending"])
 
     def test_transcript_pending_permission(self):
         self.write_registry(status="idle")

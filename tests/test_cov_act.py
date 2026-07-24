@@ -2,6 +2,7 @@
 Claude state gates, question/permission answer building, control changes, and
 direct text/relay (all with the applet exchange mocked)."""
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -472,6 +473,46 @@ class PermissionAnswerTests(EngineFixture):
         out = self.engine.act({"type": "permission", "session_id": "same",
                                "nonce": "p1", "choice": "maybe"})
         self.assertIn("unknown choice", out["error"])
+
+    def test_an_accepted_answer_fences_the_prompt_against_a_second_device(self):
+        """Two devices can render the same prompt; only one may answer it
+        (invariant 75)."""
+        self._arm_permission()
+        self.engine._apply_request_identity(
+            "same", {"kind": "permission", "nonce": "p1", "tool": "Bash",
+                     "input_summary": ""}, time.time())
+        first = self.engine.act({"type": "permission", "session_id": "same",
+                                 "nonce": "p1", "choice": "allow"})
+        self.assertTrue(first["ok"], first)
+        second = self.engine.act({"type": "permission", "session_id": "same",
+                                  "nonce": "p1", "choice": "deny"})
+        self.assertEqual(second["code"], "duplicate")
+        self.assertEqual(self.engine._iterm_write.call_count, 1)
+
+    def test_a_possibly_delivered_answer_also_fences_the_prompt(self):
+        """Uncertainty is not permission to try again from another device."""
+        self._arm_permission()
+        self.engine._iterm_write = mock.Mock(
+            return_value={"ok": False, "error": "no result file"})
+        self.engine._apply_request_identity(
+            "same", {"kind": "permission", "nonce": "p1", "tool": "Bash",
+                     "input_summary": ""}, time.time())
+        first = self.engine.act({"type": "permission", "session_id": "same",
+                                 "nonce": "p1", "choice": "allow"})
+        self.assertEqual(first["code"], "delivery_uncertain")
+        self.assertTrue(self.engine._request_answered("same", "p1"))
+
+    def test_a_proven_pre_delivery_failure_leaves_the_prompt_answerable(self):
+        self._arm_permission()
+        self.engine._iterm_write = mock.Mock(
+            return_value={"ok": False, "code": "terminal_not_available",
+                          "error": "no pane"})
+        self.engine._apply_request_identity(
+            "same", {"kind": "permission", "nonce": "p1", "tool": "Bash",
+                     "input_summary": ""}, time.time())
+        self.engine.act({"type": "permission", "session_id": "same",
+                         "nonce": "p1", "choice": "allow"})
+        self.assertFalse(self.engine._request_answered("same", "p1"))
 
 
 class ControlChangeTests(EngineFixture):

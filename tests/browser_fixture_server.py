@@ -1418,6 +1418,19 @@ class Handler(BaseHTTPRequestHandler):
                     answer_reason="" if waiting else
                         "Waiting for Claude's native prompt state")
                 return self.json_reply({"ok": True})
+            if route == "/test/prompt-identity":
+                # A prompt's nonce flips when its evidence source changes (hook
+                # capture -> transcript fallback). The server-owned request_id
+                # does not (invariant 75); this drives that transition.
+                session = next((item for item in STATE["sessions"]
+                                if item["session_id"] == payload.get("session_id")), None)
+                if not session or not session.get("pending"):
+                    return self.json_reply({"ok": False, "error": "no pending request"}, 404)
+                if payload.get("request_id") is not None:
+                    session["pending"]["request_id"] = str(payload["request_id"])
+                if payload.get("nonce") is not None:
+                    session["pending"]["nonce"] = str(payload["nonce"])
+                return self.json_reply({"ok": True, "pending": session["pending"]})
             if route == "/test/confirm":
                 sid = payload.get("session_id")
                 context = STATE.setdefault("contexts", {}).setdefault(sid, [])

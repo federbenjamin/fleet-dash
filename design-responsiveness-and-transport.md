@@ -1,6 +1,7 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W5-T1 and the first half of W5-T2a shipped 2026-07-24; everything else proposed.** Written 2026-07-24 after a
+Status: **W5-T1, the first half of W5-T2a, W3 part 1, W4 and W2 shipped 2026-07-24; W1, W3 part 2
+and W5-T2b/T3 remain proposed.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -259,6 +260,30 @@ Touches: `server.py` route table, `fleetdash/engine_act.py`, a new receipt store
 call sites that read `d.ok` synchronously today.
 
 ### W2 — Server-owned request identity (D2)
+
+**SHIPPED 2026-07-24.** All three parts landed, plus a client fix the audit turned up that had
+nothing to do with identity: `render()` called `renderSession()` with no `force`, so a `pointerdown`
+kept `touching()` true for 800 ms and the workspace pane deferred the repaint that the very tap had
+requested. Answering a permission therefore left its buttons live for most of a second — the same
+window this workstream exists to close. `renderSession(force)` now passes it through; the poll's
+unforced render still defers during a touch gesture.
+
+Two corrections to the plan as written:
+
+- Part 1 assumed the question fallback and the hook capture both needed mapping. After part 3 there
+  is no question fallback, so QUESTIONS have exactly one source. The two-nonce problem is now
+  permission-only — hook capture, then transcript `tool_use_id` once the capture expires at 15 s.
+  Identity still covers both kinds, because a question's identity is what the answered fence keys on.
+- Content signatures cannot be compared ACROSS sources: a hook permission carries Claude's
+  notification text while the transcript carries a tool name and JSON input. Continuity is the
+  evidence instead — the first sighting through a source not yet seen for the currently open prompt
+  is the same prompt. Within one source, a changed signature mints a new id.
+
+The retirement rule is the subtle part: identity retires on the RAW pending going away, evaluated
+before the fence's own suppression. Keying it off the projected pending would have made the fence
+clear itself on the very next scan.
+
+Full contract: invariant 75.
 
 Three parts, all server-side:
 

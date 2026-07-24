@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{messageFingerprint,mergeFreshConversation,ensureCtx,conversationCache,conversationEndpoint,loadOlderConversation,sessionSettingActionPending,reconcileSessionActions,catalogModelForSession,repairedSessionEffort,sessionSettingValues,sessionSettingsControls,claudePermissionLocked,claudePermissionSelect,modeSelect,fchip,eventRow,nativeRequestLocked,nativePromptCapabilityLocked,nativePromptLocked,nativePromptLabel,withNativeRequestLock,beginOptimisticAnswer,optimisticBucket,optimisticList,canonicalCount,expireOptimistic,paintOptimisticItem,scheduleOptimisticTimeout,armOptimisticTimeout,addOptimistic,composerKey,sessionTailTarget,sessionNearTail,pinSessionTail,scheduleSessionTailPin,observeSessionTail,activeReadingBody,readingBlocks,captureReadingAnchor,restoreReadingAnchor,resizeComposer,composerInput,composerFocus,updateOptimistic,markOptimisticUncertain,visibleOptimistic,restoreOptimistic,dismissOptimistic,optimisticItemHtml,optimisticHtml,quickResponseLabel,beginQuickResponse,finishQuickResponse,reconcileQuickResponses,cardResponseFeedback,convoMsgs,convoBox});
+Object.assign(globalThis,{messageFingerprint,mergeFreshConversation,ensureCtx,conversationCache,conversationEndpoint,loadOlderConversation,sessionSettingActionPending,reconcileSessionActions,catalogModelForSession,repairedSessionEffort,sessionSettingValues,sessionSettingsControls,claudePermissionLocked,claudePermissionSelect,modeSelect,fchip,eventRow,nativeRequestLocked,requestKey,sessionRequestKey,nativePromptCapabilityLocked,nativePromptLocked,nativePromptLabel,withNativeRequestLock,beginOptimisticAnswer,optimisticBucket,optimisticList,canonicalCount,expireOptimistic,paintOptimisticItem,scheduleOptimisticTimeout,armOptimisticTimeout,addOptimistic,composerKey,sessionTailTarget,sessionNearTail,pinSessionTail,scheduleSessionTailPin,observeSessionTail,activeReadingBody,readingBlocks,captureReadingAnchor,restoreReadingAnchor,resizeComposer,composerInput,composerFocus,updateOptimistic,markOptimisticUncertain,visibleOptimistic,restoreOptimistic,dismissOptimistic,optimisticItemHtml,optimisticHtml,quickResponseLabel,beginQuickResponse,finishQuickResponse,reconcileQuickResponses,cardResponseFeedback,convoMsgs,convoBox});
 const ctxCache={};   // sid -> {v, messages, files} | {fetching:true}
 const ctxVersion=s=>(s.convo_v||'')+':'+(s.files_n||0);
 function messageFingerprint(message){
@@ -190,6 +190,18 @@ const quickResponses=new Map();
 const nativeRequestLocks=new Set();
 const nativeRequestKey=(sid,nonce)=>String(sid)+'\0'+String(nonce||'');
 function nativeRequestLocked(sid,nonce){return nativeRequestLocks.has(nativeRequestKey(sid,nonce));}
+// One native prompt can be evidenced by two different nonces (the hook capture's
+// and, for permissions, the transcript tool_use_id), and the nonce flips when one
+// source ages out. The server stamps a stable `request_id` on the prompt
+// (invariant 75); suppression keys off that, while the raw nonce stays the
+// injection key. `sessionRequestKey` maps a nonce a call site already holds onto
+// the identity, falling back to the nonce when the pending is not in view.
+function requestKey(p){return(p&&(p.request_id||p.nonce))||'';}
+function sessionRequestKey(sid,nonce){
+  const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid),p=s&&s.pending;
+  if(p&&(p.nonce===nonce||p.request_id===nonce))return requestKey(p);
+  return String(nonce||'');
+}
 function nativePromptCapabilityLocked(s,p){
   const capability=p?.kind==='permission'?'decide_approval':'answer_structured';
   return s?.capabilities?.[capability]!==true;
@@ -208,7 +220,7 @@ async function withNativeRequestLock(sid,nonce,work){
   finally{nativeRequestLocks.delete(key);uiRefresh();}
 }
 function beginOptimisticAnswer(sid,nonce,text){
-  answered[sid]=nonce;
+  answered[sid]=sessionRequestKey(sid,nonce);
   return addOptimistic(sid,text,'answer');
 }
 const normalizedMessage=text=>String(text||'').trim().replace(/\s+/g,' ');

@@ -190,6 +190,7 @@ test('switching chats replaces a closed chat route and relay uses the normal sen
   await page.evaluate(() => openSession('codex:thread-one'));
   // measure once the conversation has landed: only the open pane fetches now, so
   // a composer measured mid-load is measured against a different layout
+  await expect(page.locator('#sbody')).toContainText('Working through the matrix');
   await expect(page.locator('#sbody .ctxload')).toHaveCount(0);
   const mainSendWidth = await page.locator('#sact .freetext.composer .pbtn.send').evaluate(button =>
     button.getBoundingClientRect().width);
@@ -2724,6 +2725,61 @@ test('permission quick-response feedback reaches submitted on a fresh page', asy
   if((await feedback.textContent()).includes('Submitting'))
     await expect(feedback.getByLabel('sending quick response')).toBeVisible();
   await expect(feedback).toContainText('Submitted', { timeout: 5_000 });
+});
+
+test('answering a permission hides its selector before the provider replies', async ({ page }) => {
+  // approval-slow delays the response 750ms. Until now only act()'s completion
+  // set `answered`, so the buttons stayed live for that whole window — long
+  // enough to answer twice, from one device or two.
+  await reset(page, 'approval-slow');
+  await openAction(page, 'codex:thread-one');
+  const decisions = page.locator('#sact .pbtn.allow, #sact .pbtn.always, #sact .pbtn.deny');
+  await expect(decisions).toHaveCount(3);
+  await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
+  await expect(decisions).toHaveCount(0, { timeout: 400 });
+  await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.choice).toBe('allow');
+});
+
+test('an answered prompt stays hidden when its nonce flips to the other evidence source', async ({ page }) => {
+  // A permission capture expires 15s after `waiting` ends and the transcript
+  // fallback takes over under a different nonce. Suppressing by nonce made the
+  // answered prompt reappear; the server's stable request_id survives the flip
+  // (invariant 75).
+  await reset(page, 'approval-slow');
+  await openAction(page, 'codex:thread-one');
+  const decisions = page.locator('#sact .pbtn.allow, #sact .pbtn.always, #sact .pbtn.deny');
+  await page.request.post('/test/prompt-identity',
+    { data: { session_id: 'codex:thread-one', request_id: 'req-stable' } });
+  await page.evaluate(() => tick());
+  await expect(decisions).toHaveCount(3);
+  await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
+  await expect(decisions).toHaveCount(0);
+  await page.request.post('/test/prompt-identity',
+    { data: { session_id: 'codex:thread-one', nonce: 'toolu_from_transcript' } });
+  await page.evaluate(() => tick());
+  await expect(decisions).toHaveCount(0);
+});
+
+test('a rejected permission reopens its selector, an uncertain one does not', async ({ page }) => {
+  await reset(page, 'approval');
+  await openAction(page, 'codex:thread-one');
+  const decisions = page.locator('#sact .pbtn.allow, #sact .pbtn.always, #sact .pbtn.deny');
+
+  // definite pre-delivery failure: the decision is still the user's to make
+  await page.route('**/api/act', route => route.fulfill({ status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, error: 'provider refused' }) }));
+  await page.locator('#sact').getByRole('button', { name: 'allow', exact: true }).click();
+  await expect(decisions).toHaveCount(3);
+
+  // uncertain delivery: some keys may already have landed, so re-offering the
+  // prompt would invite a second answer to a resolved request (invariant 66)
+  await page.route('**/api/act', route => route.fulfill({ status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, code: 'delivery_uncertain', error: 'check the terminal' }) }));
+  await page.locator('#sact').getByRole('button', { name: 'deny', exact: true }).click();
+  await expect(decisions).toHaveCount(0);
+  await page.unroute('**/api/act');
 });
 
 test('every approval decision and MCP single/multi-select elicitation', async ({ page }) => {

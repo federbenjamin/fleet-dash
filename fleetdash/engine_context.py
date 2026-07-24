@@ -1,6 +1,6 @@
 """Conversation/file/context projections, hook pending, effort, commands
 (invariants 1, 10, 11, 43)."""
-import json, os, re, sys, glob, time, copy
+import json, os, re, sys, glob, time, copy, hashlib, uuid
 
 
 from . import paths as pathcfg
@@ -12,6 +12,28 @@ from .config import (IMG_EXTS, DANGER_COMMANDS, BUILTIN_COMMANDS, model_family, 
 
 
 class ContextOps:
+
+    # How long a hook-captured question keeps rendering while the registry is not
+    # `waiting`. It is a grace period for Claude's status flicker, not a decision:
+    # `act()` refuses to answer any prompt on a non-waiting session regardless.
+    GHOST_QUESTION_GRACE = 45
+    # A question capture is cleared by PostToolUse, so it only outlives its ask
+    # when the session died mid-prompt. This collects those, nothing else.
+    STALE_CAPTURE_SECONDS = 1800
+    # How long an accepted answer keeps its own prompt from re-rendering while
+    # the provider catches up. PostToolUse clears a question capture on
+    # resolution and a permission capture expires 15s after `waiting` ends, so
+    # this only has to outlast the slower of those two.
+    ANSWERED_FENCE_SECONDS = 20
+    # Bounded identity/fence maps; sessions come and go, so cap the retained set.
+    REQUEST_IDENTITY_LIMIT = 500
+
+    @staticmethod
+    def _discard_capture(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     def insights(self, days=7):
         """Aggregated where-does-the-money-go view: agent_runs + session_runs
@@ -134,25 +156,160 @@ class ContextOps:
                 d = json.load(handle)
         except Exception:
             return None
-        # a question stays valid while the session waits; permission notifications
-        # have no clear-event, so expire them once the session stops waiting
-        if reg_status != "waiting" and time.time() - d.get("ts", 0) > 15:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            return None
+        age = time.time() - d.get("ts", 0)
+        drop = lambda: (self._discard_capture(path), None)[1]
+        if d.get("kind") == "permission":
+            # A permission Notification has NO clear-event, so age is the only
+            # way it ever goes away: expire it once the session stops waiting.
+            if reg_status != "waiting" and age > 15:
+                return drop()
+            return {"kind": "permission", "nonce": d["nonce"], "tool": "requested tool",
+                    "input_summary": d.get("message", "")}
         if d.get("kind") == "question":
-            # ghost guard: a PreToolUse capture can outlive an ask another hook
-            # blocked — hide it unless the session is (or just became) waiting
-            if reg_status != "waiting" and time.time() - d.get("ts", 0) > 5:
+            # A question capture DOES have a clear-event — PostToolUse removes it
+            # on resolution — so age is not evidence of staleness and must not
+            # delete it. Only a dead session leaves one behind, which the long
+            # hard expiry below collects.
+            if age > self.STALE_CAPTURE_SECONDS:
+                return drop()
+            # Ghost guard: a PreToolUse capture can outlive an ask another hook
+            # BLOCKED, and injected digits would then type into the session's main
+            # input box (invariant 5). Claude's registry also flashes non-waiting
+            # between the capture and the ask actually opening, so this is a grace
+            # period, not a decision.
+            # Widened from 5s: the transcript fallback that used to re-surface a
+            # dropped capture is gone (invariant 1), so a guard firing early now
+            # loses the question outright instead of showing it again under a
+            # second identity. `act()` still refuses any prompt answer whose
+            # registry status is not `waiting`, so a capture that renders past its
+            # welcome still cannot be answered.
+            if reg_status != "waiting" and age > self.GHOST_QUESTION_GRACE:
                 return None
             return {"kind": "question", "nonce": d["nonce"], "questions": d.get("questions", []),
                     "_ts": d.get("ts")}
-        if d.get("kind") == "permission":
-            return {"kind": "permission", "nonce": d["nonce"], "tool": "requested tool",
-                    "input_summary": d.get("message", "")}
         return None
+
+    # ------------------------------------------------- request identity (75)
+    @staticmethod
+    def _pending_source(nonce):
+        """Which evidence produced this nonce. The hook stamps its own prefix;
+        anything else is a transcript `tool_use_id`."""
+        return "hook" if str(nonce or "").startswith("hook-") else "transcript"
+
+    @staticmethod
+    def _pending_signature(pending):
+        """Content fingerprint of one prompt, comparable only WITHIN a source.
+
+        A hook permission capture carries Claude's notification message while the
+        transcript carries a tool name and JSON input — the same prompt, no
+        shared text. Cross-source matching is handled by `_request_identity`."""
+        if pending.get("kind") == "question":
+            parts = []
+            questions = pending.get("questions")
+            for question in questions if isinstance(questions, list) else []:
+                if not isinstance(question, dict):
+                    parts.append(str(question))
+                    continue
+                parts.append(str(question.get("question", "")))
+                options = question.get("options")
+                for option in options if isinstance(options, list) else []:
+                    parts.append(str(option.get("label", "")
+                                     if isinstance(option, dict) else option))
+            raw = "\x00".join(parts)
+        else:
+            raw = f"{pending.get('tool', '')}\x00{pending.get('input_summary', '')}"
+        return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:32]
+
+    def _request_identity(self, sid, pending, now):
+        """Stable server-owned id for the prompt currently open on `sid`.
+
+        One prompt has up to two nonces: the hook capture's, and — for
+        permissions, whose captures have no clear-event — the transcript
+        `tool_use_id` the fallback uses once the capture ages out. The client
+        suppresses an answered prompt by identity, so a nonce flip used to make
+        an answered prompt reappear under a second identity. The id below
+        survives the flip and is retired when the prompt goes away."""
+        nonce = str(pending.get("nonce") or "")
+        kind = pending.get("kind") or ""
+        source = self._pending_source(nonce)
+        signature = self._pending_signature(pending)
+        with self._request_identity_guard:
+            record = self._request_ids.get(sid)
+            same = bool(record) and record["kind"] == kind and (
+                nonce in record["nonces"] or
+                record["signatures"].get(source) == signature or
+                # First sighting through this prompt's OTHER evidence source
+                # while it stayed continuously open: the flip case. Content is
+                # not comparable across sources, so continuity is the evidence.
+                source not in record["signatures"])
+            if not same:
+                record = {"request_id": f"req-{uuid.uuid4().hex[:16]}", "kind": kind,
+                          "nonces": [], "signatures": {}, "first_seen": now}
+                if len(self._request_ids) >= self.REQUEST_IDENTITY_LIMIT:
+                    self._request_ids.clear()
+                self._request_ids[sid] = record
+            if nonce not in record["nonces"]:
+                record["nonces"].append(nonce)
+                del record["nonces"][:-8]
+            record["signatures"][source] = signature
+            return record["request_id"]
+
+    def _retire_request_identity(self, sid):
+        """The prompt resolved: forget both its identity and its answered fence."""
+        with self._request_identity_guard:
+            self._request_ids.pop(sid, None)
+            self._answered_requests.pop(sid, None)
+
+    def _apply_request_identity(self, sid, pending, now):
+        """Stamp `request_id` onto a pending prompt, or hide one already answered.
+
+        Called with the RAW pending: retirement keys off the provider's state,
+        never off the fence's own suppression, or the fence would clear itself on
+        the next scan."""
+        if pending is None:
+            self._retire_request_identity(sid)
+            return None
+        pending["request_id"] = request_id = self._request_identity(sid, pending, now)
+        with self._request_identity_guard:
+            fence = self._answered_requests.get(sid)
+            if not fence or fence["request_id"] != request_id:
+                return pending
+            if now - fence["at"] <= self.ANSWERED_FENCE_SECONDS:
+                return None
+            # The provider never resolved it. Show it again rather than leave a
+            # genuinely open prompt permanently invisible.
+            self._answered_requests.pop(sid, None)
+        return pending
+
+    def _record_answered_request(self, sid, nonce):
+        """Fence the prompt this nonce belongs to (invariant 75).
+
+        Blocks a second device — or this one after a nonce flip — from answering
+        the same prompt twice. Only fences a prompt the scan has already seen;
+        without a record there is no identity to fence and refusing would be a
+        guess."""
+        nonce = str(nonce or "")
+        with self._request_identity_guard:
+            record = self._request_ids.get(sid)
+            if not record or nonce not in record["nonces"]:
+                return False
+            self._answered_requests[sid] = {"request_id": record["request_id"],
+                                            "at": time.time()}
+            return True
+
+    def _request_answered(self, sid, nonce):
+        """True while this nonce's prompt is inside its answered fence."""
+        nonce = str(nonce or "")
+        with self._request_identity_guard:
+            fence = self._answered_requests.get(sid)
+            record = self._request_ids.get(sid)
+            if (not fence or not record or nonce not in record["nonces"] or
+                    fence["request_id"] != record["request_id"]):
+                return False
+            if time.time() - fence["at"] > self.ANSWERED_FENCE_SECONDS:
+                self._answered_requests.pop(sid, None)
+                return False
+            return True
 
     def _paired_files(self, mt, q_epoch):
         win = self.cfg.get("question_file_pair_seconds", 300)

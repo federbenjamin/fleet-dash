@@ -134,7 +134,10 @@ function render(f,force){
     $('#rollup').innerHTML=insightsSection();
   }
   checkSpawn(f);
-  renderSession();
+  // Pass `force` through: a pointerdown keeps touching() true for 800ms, so a
+  // user action inside the pane (answering a question, sending) would otherwise
+  // have its own repaint deferred by the very tap that requested it.
+  renderSession(force);
   if(pendingWorkspaceRoute){const route=pendingWorkspaceRoute;pendingWorkspaceRoute=null;applyWorkspaceRoute(route);}
   schedulePeekOverflow();
   applyRouteNav(currentRoute);

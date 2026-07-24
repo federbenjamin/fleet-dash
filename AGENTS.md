@@ -16,7 +16,7 @@ fleetdash/                everything server.py imports
   engine.py                 Engine = __init__ + constants + spend CLI
   engine_scan.py            registry scan, session organization, status, control state
   engine_act.py             act(): the injection dispatcher
-  engine_context.py         conversation/file projections, hook pending, effort, commands
+  engine_context.py         conversation/file projections, hook pending, prompt identity, effort
   engine_ledger.py          spend ledger, closed sessions, history, handoffs
   engine_notify.py          notifications, Web Push, Outbox actions
   engine_spawn.py           spawn/handoff, iTerm applet exchange, settings
@@ -99,7 +99,7 @@ act freshness re-poll waits ~32 ms instead of up to the p95 1141 ms it used to. 
 Numbers are stable identifiers (code comments cite "invariant N") — never renumber;
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
-- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68
+- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75
 - Applet, transports & click latency: 3, 24, 25, 73, 74
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
@@ -115,7 +115,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 1. **Pending questions NEVER come from the transcript.** The CLI flushes AskUserQuestion
    tool_use rows only when answered (row timestamps are creation-time and lie). Hook capture
    (`hooks/pending-capture.py`, registered in `~/.claude/settings.json`) is the only source.
-   The transcript-derived `mt.pending` path survives only as a permission-prompt fallback.
+   The transcript-derived `mt.pending` path survives only as a permission-prompt fallback: it
+   explicitly skips AskUserQuestion rows, because a question falling through to the permission
+   branch would render with a completely different key recipe (invariants 4, 5). One prompt with
+   two possible nonces is why identity is server-owned (invariant 75).
 2. **The Notification event must never clobber a question capture.** ~6s after every question
    opens, an input-needed Notification containing "permission" fires for the SAME event.
 3. **All Apple Events go through the applet.** launchd-context osascript hangs FOREVER on the
@@ -160,8 +163,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    (option/multiq/permission/dismiss) when the registry status isn't `waiting`. The second
    check is load-bearing: a PreToolUse capture can outlive an ask that another hook BLOCKED —
    the ghost question renders, but the session sits at its main input and injected digits
-   would type (and send) as a message. hook_pending also hides a question pending >5s old on a
-   non-waiting session for the same reason. `interrupt` (Esc mid-turn) has the mirror gate: it
+   would type (and send) as a message. hook_pending also HIDES (never deletes — PostToolUse owns
+   the clear) a question capture older than `GHOST_QUESTION_GRACE` on a non-waiting session for the
+   same reason; the grace is wide because nothing re-surfaces a dropped capture any more. `interrupt` (Esc mid-turn) has the mirror gate: it
    requires status `busy`, or `shell` plus a freshly re-polled mid-tool transcript, so an Esc can
    never land in an idle session's input box. Close also interrupts an active shell before SIGTERM.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
@@ -241,9 +245,13 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     which breaks any viewport-sticky descendant and silently changes hit-testing/scroll
     behavior inside the card. (The Console redesign dropped the sticky `.shead`, but the
     clip-not-hidden rule still stands for the radius clipping.)
-14. **Answer suppression is client-side and nonce-keyed:** a sent answer records
-    `answered[sid]=nonce` and the selector hides immediately (the engine's pending clears a
-    poll or two later). Never suppress by sid alone — the next ask (new nonce) must render.
+14. **Answer suppression is client-side and IDENTITY-keyed:** a sent answer records
+    `answered[sid]=requestKey(p)` and the selector hides immediately (the engine's pending clears a
+    poll or two later). Never suppress by sid alone — the next ask must render — and never by the
+    raw nonce, which flips when the prompt's evidence source changes (invariant 75). Suppression
+    happens BEFORE the await, not after the provider replies: `sendPerm`/`sendDismiss` go through
+    `suppressWhileAnswering`, options through `beginOptimisticAnswer`. Only a definite pre-delivery
+    failure reopens the selector; `duplicate` and uncertain outcomes leave it hidden.
 15. **`usage_stats` rows are CUMULATIVE per transcript path, flushed with INSERT OR
     REPLACE.** Tails re-read whole files at daemon start, so cumulative+replace is the
     idempotency mechanism — switching the drain to additive upserts double-counts every
@@ -882,7 +890,7 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 60. **A fullscreen question is a persistent, independently scrollable drawer.** `#sact` renders a
     `.question-drawer` keyed by session id + pending nonce. Preserve its nested scroll position when
     the two-second poll replaces the action DOM; the conversation and question have separate scroll
-    state. Suppress replacement for the entire pointer-resize gesture. Its horizontal grip uses
+    state. Suppress replacement for the entire pointer-resize gesture AND for a short settle window after pointerup (`questionResizeSettling`) — a forced render landing between pointerup and the next paint detaches the live drawer and discards its reading position, which is the same damage the gesture guard exists to prevent. Its horizontal grip uses
     Pointer Events with `touch-action:none`: dragging upward clamps below the title bar while leaving
     the composer visible; dragging below the snap threshold collapses to a waiting bar. Keyboard
     Up/Down resizes, Home collapses, and End expands. Persist height/collapsed state per nonce in
@@ -1125,6 +1133,29 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     session that is not in a tmux pane (the applet has no read verb at all). Adding a fifth
     consumer of the capture is fine; widening any of these four is a boundary change.
 
+75. **One native prompt has one server-owned identity, and an answered prompt is fenced.**
+    A prompt can be evidenced two ways — the hook capture's `hook-<ms>` nonce and, for permissions,
+    the transcript `tool_use_id` the fallback uses once that capture expires — and the nonce FLIPS
+    when the source changes. The nonce stays the injection key; identity is
+    `pending.request_id`, minted by `_apply_request_identity` (`engine_context.py`) when a prompt
+    first appears on a session and retired the moment the raw pending goes away. Within one open
+    prompt, a nonce already recorded, a matching per-source content signature, OR the first sighting
+    through the *other* source all resolve to the same id — content is not comparable across sources
+    (a hook permission carries Claude's notification text, the transcript carries a tool name and
+    JSON), so continuity is the evidence. A different signature from a source already seen mints a
+    new id. Retirement must key off the RAW pending, never off the fence's own suppression, or the
+    fence clears itself on the next scan. The client suppresses on `requestKey(p)` =
+    `request_id || nonce`, so a flip no longer re-renders an answered prompt under a second identity.
+    **The fence:** `act()` records `_record_answered_request` for every prompt answer it accepts —
+    and for every one whose delivery is merely uncertain, because uncertainty is not permission to
+    try again (invariant 66) — then refuses a later answer to the same identity with
+    `code:"duplicate"` for `ANSWERED_FENCE_SECONDS`. That is what stops two devices rendering one
+    prompt from both answering it. A proven pre-delivery failure records nothing and leaves the
+    prompt answerable. The fence expires rather than persisting, so a prompt the provider never
+    resolved comes back instead of going permanently invisible. A nonce the scan has not recorded is
+    never fenced: without a record there is no identity, and refusing on a guess would strand a
+    genuinely open prompt.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1202,7 +1233,8 @@ because they are also spawned directly as scripts by absolute path.
   `engine_staging` (staging isolation), `engine_uploads` (phone images),
   `engine_scan` (registry scan/organization/status/control state), `engine_ledger`
   (spend ledger/closed sessions/history/handoffs), `engine_context`
-  (conversation/file/context projections, hook pending, effort, commands),
+  (conversation/file/context projections, hook pending, prompt request identity +
+  the answered fence, screen observation, effort, commands),
   `engine_worktree` (cleanup tickets), `engine_tmux` (the tmux transport),
   `engine_transport` (tty/process resolution,
   codex terminal routes, the `_terminal_write`/`_terminal_spawn` transport dispatcher,
@@ -1355,7 +1387,11 @@ because they are also spawned directly as scripts by absolute path.
   an element the render creates — an inline status message — must go through the `after`
   callback, not the next line**, or the deferred paint overwrites it; `settingMessage`,
   the mode/permission "changing…" notes, and `recordInputFeedback` (which must measure when
-  the UI actually changed) all do.
+  the UI actually changed) all do. **`render()` passes `force` down to `renderSession(force)`**:
+  a `pointerdown` keeps `touching()` true for 800ms, so without it the workspace pane deferred the
+  repaint that the tap itself requested — an answered permission kept its live buttons for most of
+  a second. The unforced poll render still defers during a gesture, and the question drawer keeps
+  its own gesture + settle suppression (invariant 60) ahead of the force.
   The render guard covers desktop too: `wheel` feeds the same `lastMove` window as
   `touchmove` (a poll re-render mid-wheel kills scroll momentum). Scrollbar auto-hide is a
   separate `scroll`-capture listener toggling `.scrolling` — deliberately NOT fed into

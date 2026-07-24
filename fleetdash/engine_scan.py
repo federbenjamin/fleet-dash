@@ -832,24 +832,36 @@ class ScanOps:
             interrupted = bool(self._claude_interrupted.get(sid) is not None and
                                state in ("idle", "turn_done"))
 
-            # hook-written pending file is the authoritative source: the CLI only
-            # flushes AskUserQuestion rows to the transcript AFTER they're answered
-            if pending is None:
-                for tid, p in mt.pending.items():
-                    if p["name"] == "AskUserQuestion":
-                        qs = (p.get("input") or {}).get("questions", [])
-                        pending = {"kind": "question", "nonce": tid, "questions": qs}
-                        break
-            if pending is None and mt.pending and (confirmed_waiting or reg_status == "idle"):
-                tid, p = list(mt.pending.items())[-1]
-                pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
-                           "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
+            # Questions come ONLY from the hook capture (invariant 1). There used
+            # to be a transcript fallback here that re-surfaced the same question
+            # under its tool_use_id once `hook_pending`'s ghost guard dropped the
+            # capture — a second identity for one prompt, which is exactly what
+            # made an answered question reappear in production (the client
+            # suppresses by nonce, so the new one did not match). The CLI only
+            # flushes those rows AFTER the answer anyway, so the fallback could
+            # not see a question that was genuinely still open.
+            # Permissions keep their fallback: a Notification capture has no
+            # clear-event, and the transcript is the only other evidence.
+            if pending is None and (confirmed_waiting or reg_status == "idle"):
+                # AskUserQuestion is excluded explicitly. Without the question
+                # branch above it would otherwise fall through to here and render
+                # an ask as a PERMISSION prompt, whose keys are a different recipe
+                # entirely (invariants 4, 5).
+                permissions = [(tid, p) for tid, p in mt.pending.items()
+                               if p["name"] != "AskUserQuestion"]
+                if permissions:
+                    tid, p = permissions[-1]
+                    pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
+                               "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
             if pending and pending.get("kind") == "question":
                 # deliver-then-ask pattern: surface files sent shortly before the question
                 q_ts = pending.pop("_ts", None) or now
                 paired = self._paired_files(mt, q_ts)
                 if paired:
                     pending["files"] = paired
+            # One prompt, one server-owned identity, and no re-render of a prompt
+            # this daemon already accepted an answer for (invariant 75).
+            pending = self._apply_request_identity(sid, pending, now)
             if pending and pending["nonce"] not in self.pending_seen:
                 self.pending_seen[pending["nonce"]] = now
                 if len(self.pending_seen) > 5000:
