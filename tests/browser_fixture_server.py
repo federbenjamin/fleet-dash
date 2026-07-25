@@ -888,6 +888,15 @@ def set_scenario(name):
                        reason_label="Stalled" if stalled else "Working",
                        active_tool={"name": "Bash", "count": 2 if stalled else 1,
                                     "seconds": 245 if stalled else 3})
+    elif name in ("compacting-hook", "compacting-screen"):
+        session = claude_session()
+        screen = name.endswith("screen")
+        session.update(state="running", normalized_state="running",
+                       reg_status="running", ui_group="working",
+                       reason_label="Working", compacting=42,
+                       compacting_source="screen" if screen else "hook")
+        if screen:
+            session["screen_state"] = "compacting"
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
     elif name.startswith("close-worktree"):

@@ -192,7 +192,10 @@ function cardMetaRail(s){
       <span class="mrow cmodel">${modelLabel(s)}</span>
       ${ctx}
       ${s.quiet_s!=null&&s.ui_group!=='available'?`<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
-      ${s.compacting!=null?`<span class="mrow" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
+      ${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
+        'seen on the terminal — Fleet has been watching it compact for at least this long, and it may have started earlier':
+        'a compaction is running — the transcript is frozen until it finishes'}">⧉ compacting ${
+        s.compacting_source==='screen'?'≥':''}${fmtAge(s.compacting)}</span>`:''}
       ${activeToolChip(s)}
       ${s.running?`<span class="mrow runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
       ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}

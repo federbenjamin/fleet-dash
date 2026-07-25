@@ -12,7 +12,15 @@ option list looks nearly identical across all three modal surfaces:
                 Esc to cancel · Tab to amend
     trust       ❯ 1. Yes, I trust this folder   2. No, exit
                 Enter to confirm · Esc to cancel
+    compacting  ✻ Compacting conversation…
+                ▰▰▱▱▱▱▱… 5%
     input       ─────  ❯   ─────   (an empty prompt between two rules)
+
+The compacting frames were captured the same way on **v2.1.220, 2026-07-25** —
+46 samples of a real `/compact`, about 40 of which carry that line. Its leading
+glyph rotates (`·` `✽` `✻` `✢` `✳` `✶`), so the marker deliberately starts after
+it. That surface is not modal: the empty input box is still on screen beneath
+it, which is exactly why `compacting` has to be tested BEFORE `input`.
 
 This module is pure text in, one label out. It never captures anything itself,
 so it cannot be the thing that puts a subprocess on a hot path.
@@ -24,6 +32,7 @@ TAIL_LINES = 40
 QUESTION = "question"
 PERMISSION = "permission"
 TRUST = "trust"
+COMPACTING = "compacting"
 INPUT = "input"
 UNKNOWN = "unknown"
 
@@ -38,6 +47,8 @@ _FOOTERS = (
 _TRUST_BODY = "I trust this folder"
 _QUESTION_BODY = "Chat about this"          # the ask TUI's n+2 row, unique to it
 _PERMISSION_BODY = "Do you want to"
+# The spinner glyph in front of this rotates, so match from the word onward.
+_COMPACTING_BODY = "Compacting conversation"
 
 
 def _tail(lines):
@@ -46,11 +57,16 @@ def _tail(lines):
 
 
 def classify_screen(lines):
-    """Return what the terminal is showing: question/permission/trust/input/unknown.
+    """Return what the terminal is showing: question/permission/trust/compacting/
+    input/unknown.
 
     `unknown` is a real answer and the common one — a mid-turn screen, a scrolled
     transcript, a resized pane. Callers must treat it as "no evidence", never as
     "no prompt".
+
+    Modal surfaces are tested first because they own the keyboard. `compacting`
+    is not modal — it renders above a live input box — so it must be settled
+    before `input`, or a compacting pane would report itself as idle.
     """
     rows = _tail(lines)
     text = "\n".join(rows)
@@ -65,6 +81,8 @@ def classify_screen(lines):
         return QUESTION
     if _PERMISSION_BODY in text and any(row.lstrip().startswith("❯ 1.") for row in rows):
         return PERMISSION
+    if _COMPACTING_BODY in text:
+        return COMPACTING
     if _idle_input(rows):
         return INPUT
     return UNKNOWN

@@ -28,6 +28,10 @@ class ContextOps:
     ANSWERED_FENCE_SECONDS = 20
     # Bounded identity/fence maps; sessions come and go, so cap the retained set.
     REQUEST_IDENTITY_LIMIT = 500
+    # How still a busy session's transcript has to be before its pane is worth a
+    # look. A compaction freezes the transcript completely (invariant 17) while a
+    # working turn writes constantly, so this keeps the eligible set near empty.
+    SCREEN_WATCH_QUIET_SECONDS = 8
 
     @staticmethod
     def _discard_capture(path):
@@ -619,12 +623,17 @@ class ContextOps:
         terminal contents do not belong in an offline cache.
         """
         now = time.time()
-        window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
+        default_window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
         if not self.cfg.get("screen_observe", True):
             self._screen_states.clear()
             return {}
         panes = {}
-        for sid, pid, eligible in rows:
+        for row in rows:
+            sid, pid, eligible = row[0], row[1], row[2]
+            # A row may name its own re-observation window. The trust/ghost cases
+            # are stable for minutes; a compaction is over in tens of seconds, so
+            # watching one at the default cadence would miss it entirely.
+            window = row[3] if len(row) > 3 and row[3] else default_window
             if not eligible or not pid:
                 continue
             seen = self._screen_states.get(sid)
@@ -644,10 +653,17 @@ class ContextOps:
                 frame = captured.get(pane["pane_id"])
                 if frame is None:
                     continue
+                state = screenlib.classify_screen(frame["lines"])
+                # `since` survives while the label does, so a caller can ask how
+                # long a surface has been up. It is when Fleet FIRST SAW it, not
+                # when it started — the difference is bounded by the window above
+                # and must be described honestly wherever it is rendered.
+                seen = self._screen_states.get(sid)
                 self._screen_states[sid] = {
-                    "state": screenlib.classify_screen(frame["lines"]),
-                    "at": now}
-        live = {sid for sid, _pid, _eligible in rows}
+                    "state": state, "at": now,
+                    "since": seen["since"] if seen and seen.get("state") == state
+                             and seen.get("since") else now}
+        live = {row[0] for row in rows}
         for sid in [key for key in self._screen_states if key not in live]:
             self._screen_states.pop(sid, None)
         return {sid: value["state"] for sid, value in self._screen_states.items()}
@@ -656,6 +672,15 @@ class ContextOps:
         """The most recent screen label for one session, or None if unobserved."""
         seen = self._screen_states.get(sid)
         return seen["state"] if seen else None
+
+    def observed_screen_seconds(self, sid, state):
+        """How long `sid` has been showing `state`, or None if it is showing
+        something else. This is time since Fleet first OBSERVED the surface, so it
+        is a lower bound — never present it as when the thing started."""
+        seen = self._screen_states.get(sid)
+        if not seen or seen.get("state") != state:
+            return None
+        return max(0, round(time.time() - (seen.get("since") or seen["at"])))
 
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""

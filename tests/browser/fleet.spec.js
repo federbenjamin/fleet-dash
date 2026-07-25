@@ -1576,6 +1576,19 @@ test('a working card names the tool it is blocked on, and a stalled one flags it
   await expect(page.locator('#sactivity')).toContainText('Bash +1 · 4m');
 });
 
+test('a pane-derived compaction pill says it is a lower bound', async ({ page }) => {
+  // The PreCompact hook knows when a compaction STARTED. The pane only knows
+  // when Fleet first saw it, and the card must not pretend otherwise.
+  await reset(page, 'compacting-hook');
+  const pill = page.locator('[data-sid="claude-one"] .ccompact');
+  await expect(pill).toHaveText('⧉ compacting 42s');
+  await expect(pill).toHaveAttribute('title', /transcript is frozen/);
+
+  await reset(page, 'compacting-screen');
+  await expect(pill).toHaveText('⧉ compacting ≥42s');
+  await expect(pill).toHaveAttribute('title', /may have started earlier/);
+});
+
 test('quiet age is limited to working session cards', async ({ page }) => {
   await reset(page);
   await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
