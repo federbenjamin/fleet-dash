@@ -10,6 +10,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -683,6 +684,130 @@ class BatchedCaptureTests(unittest.TestCase):
     def test_an_index_beyond_the_group_is_discarded(self):
         self.stub.results = [self._result(self._stdout([(9, ["ghost"])]))]
         self.assertEqual(self.stub._tmux_capture_many(self._panes(1)), {})
+
+
+class SettleDetectionTests(unittest.TestCase):
+    """Closed-loop key pacing (invariant 79).
+
+    Measured on a real Claude TUI 2026-07-24: a key changes the pane in 5–33 ms
+    and the screen settles by 31–61 ms, while an already-stable poll loop
+    confirms in 32 ms. That gap is why the detector must see a CHANGE before it
+    believes a screen is settled.
+    """
+
+    ASK = "❯ 1. Red\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+    INPUT = "────\n❯\n────"
+
+    def setUp(self):
+        self.stub = TmuxStub({"tmux_settle": True})
+        self.stub.SETTLE_INTERVAL = 0.0
+        self.stub.SETTLE_TIMEOUT = 0.2
+        self.pane = {"socket": "/tmp/s", "pane_id": "%1"}
+
+    @staticmethod
+    def _stream(texts):
+        """Yield the given screens, then hold the last one forever."""
+        def generate(_pane, *_args, **_kwargs):
+            index = min(generate.calls, len(texts) - 1)
+            generate.calls += 1
+            return {"ok": True, "lines": texts[index].split("\n"), "truncated": False}
+        generate.calls = 0
+        return generate
+
+    def _frames(self, *texts):
+        return mock.patch.object(self.stub, "_tmux_capture",
+                                 side_effect=self._stream(list(texts)))
+
+    def test_a_changed_then_stable_screen_settles(self):
+        with self._frames("after", "after"):
+            outcome, frame = self.stub._tmux_settle(self.pane, before="before")
+        self.assertEqual(outcome, "settled")
+        self.assertEqual(frame, "after")
+
+    def test_a_screen_that_never_changes_is_not_settled(self):
+        """The load-bearing case: two identical captures taken before the repaint
+        begins are indistinguishable from a settled screen, so an unchanged pane
+        must fall back to the fixed delay rather than race ahead."""
+        with self._frames("before", "before", "before"):
+            outcome, _frame = self.stub._tmux_settle(self.pane, before="before")
+        self.assertEqual(outcome, "unchanged")
+
+    def test_a_screen_still_redrawing_times_out(self):
+        def never_still(_pane, *_args, **_kwargs):
+            never_still.calls += 1
+            return {"ok": True, "lines": [f"frame{never_still.calls}"],
+                    "truncated": False}
+        never_still.calls = 0
+        with mock.patch.object(self.stub, "_tmux_capture", side_effect=never_still):
+            outcome, _frame = self.stub._tmux_settle(self.pane, before="before")
+        self.assertEqual(outcome, "timeout")
+
+    def test_an_unreadable_pane_is_not_evidence(self):
+        with mock.patch.object(self.stub, "_tmux_capture",
+                               return_value={"ok": False, "error": "gone"}):
+            outcome, frame = self.stub._tmux_settle(self.pane, before="before")
+        self.assertEqual(outcome, "unreadable")
+        self.assertIsNone(frame)
+
+    # ------------------------------------------------------------ _tmux_write
+    def _write(self, screens, expect="question", steps=None):
+        steps = steps or [("1", False), ("2", False)]
+        with mock.patch.object(self.stub, "_tmux_capture",
+                               side_effect=self._stream(list(screens))):
+            return self.stub._tmux_write(self.pane, steps, step_delay=0.4,
+                                         expect=expect)
+
+    def test_a_verified_gap_sends_the_next_key_without_the_fixed_delay(self):
+        started = time.monotonic()
+        result = self._write([self.ASK, self.ASK + " x", self.ASK + " x"])
+        self.assertTrue(result["ok"], result)
+        self.assertLess(time.monotonic() - started, 0.3)   # not the 0.4s sleep
+
+    def test_a_surface_that_changed_underneath_stops_the_sequence(self):
+        """Remaining digits must not be typed at whatever is there now."""
+        result = self._write([self.ASK, self.INPUT, self.INPUT])
+        self.assertEqual(result["code"], "delivery_uncertain")
+        sends = [call for call in self.stub.calls if "send-keys" in call[1]]
+        self.assertEqual(len(sends), 1)      # the second key never went out
+
+    def test_an_unrecognized_screen_does_not_abort(self):
+        """A permission variant Fleet has never captured classifies as unknown.
+        That means no verification, not a false alarm."""
+        result = self._write([self.ASK, "something new", "something new"])
+        self.assertTrue(result["ok"], result)
+
+    def test_a_key_with_no_visible_effect_falls_back_to_the_fixed_delay(self):
+        """An unchanged pane is not evidence of a settled one, so the gap keeps
+        the fixed delay rather than racing ahead on a guess."""
+        self.stub.SETTLE_TIMEOUT = 0.05
+        started = time.monotonic()
+        with mock.patch.object(self.stub, "_tmux_capture",
+                               side_effect=self._stream([self.ASK])):
+            result = self.stub._tmux_write(self.pane, [("1", False), ("2", False)],
+                                           step_delay=0.08, expect="question")
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(time.monotonic() - started, 0.08)
+
+    def test_settling_is_skipped_without_an_expected_surface(self):
+        with mock.patch.object(self.stub, "_tmux_capture") as capture:
+            self.stub._tmux_write(self.pane, [("1", False)], step_delay=0.0)
+        capture.assert_not_called()
+
+    def test_the_switch_restores_the_fixed_delay(self):
+        self.stub.cfg["tmux_settle"] = False
+        with mock.patch.object(self.stub, "_tmux_capture") as capture:
+            self.stub._tmux_write(self.pane, [("1", False), ("2", False)],
+                                  step_delay=0.0, expect="question")
+        capture.assert_not_called()
+
+    def test_an_unreadable_pane_falls_back_to_the_fixed_delay(self):
+        with mock.patch.object(self.stub, "_tmux_capture",
+                               return_value={"ok": False, "error": "gone"}):
+            started = time.monotonic()
+            result = self.stub._tmux_write(self.pane, [("1", False), ("2", False)],
+                                           step_delay=0.05, expect="question")
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
 
 if __name__ == "__main__":  # pragma: no cover - module entrypoint
     unittest.main()

@@ -618,12 +618,20 @@ class ActOps:
             if not tty:
                 return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
 
+        # The drive allowlist (operator decision 2026-07-24): closed-loop
+        # delivery may pace and verify keys for Claude's ask selector and its
+        # tool-permission prompt, and nothing else. Every other action keeps the
+        # fixed inter-key delay, so an unobserved surface is never driven.
+        expect_surface = ({"option": "question", "multiq": "question",
+                           "permission": "permission"}.get(typ))
+
         def native_write(write_steps):
             if background_claude:
                 return (self._focus_background_claude(reg) if typ == "focus" else
                         self._write_background_claude(reg, write_steps, step_delay))
             return self._terminal_write(f"/dev/{tty}", write_steps,
-                                        step_delay=step_delay)
+                                        step_delay=step_delay,
+                                        expect=expect_surface)
 
         if typ == "session_settings" and len(steps) > 1:
             # `/model` and `/effort` are separate Claude commands, not one

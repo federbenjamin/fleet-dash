@@ -26,6 +26,7 @@ import shutil
 import subprocess
 
 from . import paths as pathcfg
+from . import screen
 
 _PANE_TTY = re.compile(r"/dev/ttys[0-9A-Za-z]{1,16}\Z")
 _PANE_ID = re.compile(r"%[0-9]{1,9}\Z")
@@ -46,6 +47,12 @@ class TmuxOps:
     TMUX_WRITE_TIMEOUT = 5
     TMUX_SPAWN_TIMEOUT = 15
     TMUX_MAX_PANES = 2000
+    # Settle detection (invariant 79). Measured on a real Claude TUI 2026-07-24:
+    # a key changes the pane in 5–33 ms and settles by 31–61 ms, so a 1.5 s
+    # budget is ~25x the observed worst case and the interval is under the
+    # fastest observed change.
+    SETTLE_TIMEOUT = 1.5
+    SETTLE_INTERVAL = 0.015
 
     # ------------------------------------------------------------ primitives
     def _tmux_command(self):
@@ -155,12 +162,60 @@ class TmuxOps:
         return self._tmux_panes(force=force).get(tty)
 
     # ------------------------------------------------------------- delivery
-    def _tmux_write(self, pane, steps, step_delay=None):
+    def _tmux_settle(self, pane, before, timeout=None, interval=None, stable=2):
+        """Wait for the pane to CHANGE from `before`, then hold still (invariant 79).
+
+        The change requirement is the part that is not obvious, and skipping it
+        is the bug: two identical captures taken before the repaint has begun are
+        indistinguishable from a settled screen. Measured on a real Claude TUI
+        2026-07-24 — a key changes the pane within 5–33 ms and settles by
+        31–61 ms, while an already-stable loop confirms in 32 ms. A detector
+        without the change gate would therefore "settle" immediately, having
+        observed nothing at all.
+
+        Returns (outcome, frame): `settled` (proceed), `unchanged` (the key
+        produced no visible effect within the budget), `timeout` (it is still
+        redrawing), or `unreadable` (no capture). Only `settled` is evidence;
+        every other outcome falls back to the fixed delay.
+        """
+        timeout = self.SETTLE_TIMEOUT if timeout is None else timeout
+        interval = self.SETTLE_INTERVAL if interval is None else interval
+        started = time.monotonic()
+        changed = False
+        previous, matches = None, 0
+        while time.monotonic() - started < timeout:
+            frame = self._tmux_capture(pane)
+            if not frame.get("ok"):
+                return "unreadable", None
+            current = "\n".join(frame["lines"])
+            if not changed:
+                if current != before:
+                    changed, previous, matches = True, current, 0
+            elif current == previous:
+                matches += 1
+                if matches >= stable - 1:
+                    return "settled", current
+            else:
+                previous, matches = current, 0
+            time.sleep(interval)
+        return ("timeout" if changed else "unchanged"), previous
+
+    def _tmux_screen_text(self, pane):
+        frame = self._tmux_capture(pane)
+        return "\n".join(frame["lines"]) if frame.get("ok") else None
+
+    def _tmux_write(self, pane, steps, step_delay=None, expect=None):
         """Deliver Engine-composed keys to one exact pane.
 
         Mirrors `_iterm_write`'s return contract. Each key is its own `send-keys`
         call, matching the applet's per-step requests: invariant 4's recipes are
         unchanged, and the delay only ever fires BETWEEN steps (invariant 24).
+
+        `expect` names the surface these keys are for (`question` / `permission`).
+        When it is set and settle detection is on, each gap between keys waits for
+        the pane to actually settle instead of sleeping a fixed 0.4 s, and the
+        settled frame is re-classified before the next key: if the screen is no
+        longer that surface, the remaining keys are NOT sent (invariant 79).
         """
         steps = list(steps)
         if any(text == "__FOCUS__" for text, _ in steps):
@@ -170,8 +225,10 @@ class TmuxOps:
                     "error": "tmux is not installed; set tmux_command in config.json"}
         socket_path, target = pane["socket"], pane["pane_id"]
         delay = 0.4 if step_delay is None else max(0.0, min(5.0, float(step_delay)))
+        settling = bool(expect) and bool(self.cfg.get("tmux_settle", True))
         wrote = False
         for index, (text, newline) in enumerate(steps):
+            before = self._tmux_screen_text(pane) if settling else None
             # raw CR is what a raw-mode TUI treats as Enter; LF only inserts a
             # newline, which is why the caller asks for the two separately
             for chunk in [item for item in (text, "\r" if newline else "") if item]:
@@ -192,7 +249,25 @@ class TmuxOps:
                     return {"ok": False, "code": "terminal_not_available",
                             "error": f"tmux could not reach this pane: {detail}"}
                 wrote = True
-            if index + 1 < len(steps) and delay:
+            if index + 1 >= len(steps):
+                break
+            if settling and before is not None:
+                outcome, frame = self._tmux_settle(pane, before)
+                if outcome == "settled":
+                    kind = screen.classify_screen((frame or "").split("\n"))
+                    if kind not in (expect, screen.UNKNOWN):
+                        # The surface changed under us. Whatever is on screen now
+                        # is not what these keys were composed for, so the rest of
+                        # the sequence must not be typed at it (invariant 79).
+                        return {"ok": False, "code": "delivery_uncertain",
+                                "error": ("delivery uncertain — the terminal stopped "
+                                          f"showing this {expect} partway through the "
+                                          "answer; check it before retrying")}
+                    continue                    # verified: next key immediately
+                # No evidence: fall back to the fixed delay this has always used.
+                time.sleep(delay)
+                continue
+            if delay:
                 time.sleep(delay)
         return {"ok": True, "transport": "tmux"}
 

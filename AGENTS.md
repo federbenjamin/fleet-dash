@@ -102,7 +102,7 @@ Numbers are stable identifiers (code comments cite "invariant N") — never renu
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
 - Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75, 77, 78
-- Applet, transports & click latency: 3, 24, 25, 73, 74
+- Applet, transports & click latency: 3, 24, 25, 73, 74, 79
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
 - Codex runtime & ownership: 30, 38, 49, 65, 69
@@ -157,9 +157,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    scratchpad sbx2.py — never experiment on real sessions. The recipes are transport-independent
    and were **re-confirmed on v2.1.219, 2026-07-24** — do not re-derive them. tmux delivers the
    same per-key steps through `send-keys -l -- <key>` (verified byte-exact on tmux 3.7b: no
-   key-name lookup, no C-escape processing, UTF-8 and embedded LF preserved) and keeps the same
-   fixed inter-key delay as the applet. Replacing that delay with settle detection is W5-T2b of
-   [`design-responsiveness-and-transport.md`](design-responsiveness-and-transport.md), not shipped.
+   key-name lookup, no C-escape processing, UTF-8 and embedded LF preserved). The RECIPES are
+   unchanged; only the pacing between them moved. On tmux, ask and permission sequences are now
+   paced by watching the pane settle (invariant 79) and fall back to this fixed delay whenever the
+   screen gives no evidence; the applet has no read verb and always uses it.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
    (hook-file nonce or transcript tool_use_id) before writing keys, AND refuses prompt answers
    (option/multiq/permission/dismiss) when the registry status isn't `waiting`. The second
@@ -362,7 +363,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     the same between-steps-only delay rule. (c) is transport-independent.
     (a) The applet delays only BETWEEN
     steps, never after the last; (b) the delay is per-request (flag 4) — 0.4s ONLY for ask-TUI
-    key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay;
+    key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay.
+    On tmux that 0.4s is now a FALLBACK rather than the normal path: ask and permission sequences
+    wait for the screen to settle instead (invariant 79), measured 0.106s against 0.8s for a real
+    three-key answer, and drop back to the fixed delay whenever the pane gives no evidence;
     (c) `act()` takes `scan_lock` + re-polls the tail only for native-surface mutations that need
     final freshness: prompt answers, controls, direct text/images, handoffs, and relays. Focus and
     interrupt keep the no-tail fast path. The poll thread holds that lock only while FOLDING (the
@@ -1252,6 +1256,29 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     only — there is no control that would answer that dialog, because accepting folder trust is
     the user's call and always the Mac's (invariant 21).
 
+79. **Ask and permission keys are paced by the screen, not by a stopwatch.** With `expect` set to
+    `question` or `permission`, `_tmux_write` waits for the pane to settle between keys instead of
+    sleeping invariant 4's fixed 0.4 s, and re-classifies the settled frame before sending the next
+    one. That drive allowlist is exactly two surfaces (operator decision 2026-07-24); every other
+    action, and every applet write, keeps the fixed delay, so a surface Fleet has never captured is
+    never driven.
+    **`_tmux_settle` must see a CHANGE before it believes a screen is still.** This is the whole
+    subtlety: two identical captures taken before the repaint has begun are indistinguishable from
+    a settled screen. Measured on a real Claude TUI 2026-07-24 — a key changes the pane in 5–33 ms
+    and it settles by 31–61 ms, while an already-stable poll loop confirms in 32 ms, so a detector
+    without the change gate would "settle" instantly having observed nothing. Outcomes are
+    `settled` (proceed at once), `unchanged`, `timeout` and `unreadable`; **only `settled` is
+    evidence** and every other outcome falls back to the fixed delay, so the worst case is exactly
+    the old behaviour.
+    A settled frame that classifies as a DIFFERENT surface aborts the rest of the sequence and
+    returns `delivery_uncertain` — some keys landed, and the remaining ones must not be typed at
+    whatever is there now (invariant 66). A frame the classifier does not recognize is `unknown`
+    and does NOT abort: an uncaptured permission variant means no verification, not a false alarm.
+    Verified in the sandbox against a real multi-select ask driven through this exact code path
+    (AGENTS.md's standing rule for touching inter-key pacing): keys `2`, `→`, CR answered
+    "Pick fruit → Pear" correctly in **0.106 s** against the 0.8 s the fixed delay would have
+    taken. `tmux_settle: false` restores the fixed delay everywhere.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1359,7 +1386,8 @@ because they are also spawned directly as scripts by absolute path.
   background attach), `engine_notify` (notifications/Web
   Push/Outbox actions), `engine_act` (the act() injection dispatcher),
   `engine_spawn` (spawn/handoff, iTerm applet exchange, settings).
-- `fleetdash/engine_tmux.py` — `TmuxOps`: bounded tmux-socket enumeration under
+- `fleetdash/engine_tmux.py` — `TmuxOps`: settle detection and per-key surface
+  re-verification (`_tmux_settle`, invariant 79), bounded tmux-socket enumeration under
   `paths.TMUX_SOCKETS`, the cached tty→pane map, per-key `send-keys -l` delivery,
   spawn into the operator's session, pane focus, the read-only `capture-pane`
   screen read (`_tmux_capture`, invariant 74), and its batched many-pane form
