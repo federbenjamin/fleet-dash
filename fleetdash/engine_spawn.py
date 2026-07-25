@@ -183,7 +183,7 @@ class SpawnOps:
         route = self._codex_terminal_route(tid, force=True)
         if not route:
             return {"ok": False, "error": "no attached Codex terminal is available"}
-        result = self._iterm_write(
+        result = self._terminal_write(
             route["tty"], [("__FOCUS__", False)], step_delay=0.05)
         if result.get("ok"):
             result.update(session_id=sid, shared_runtime=True,
@@ -220,7 +220,7 @@ class SpawnOps:
                 "initial_message": initial_text if tid else None}
 
     def spawn_session(self, action, reserved_sid=None):
-        """Start a NEW Claude Code session in a fresh iTerm tab.
+        """Start a NEW Claude Code session in a fresh terminal.
 
         Every value that reaches the shell is allowlisted or quoted: the model and
         effort and permission mode must be members of fixed sets above, the worktree
@@ -273,9 +273,10 @@ class SpawnOps:
             cmd += f" --permission-mode {permission_mode}"
         if worktree:
             cmd += " --worktree" + (f" {name}" if name else "")
-        r = self._iterm_write("SPAWN", [(cmd, False)])
+        r = self._terminal_spawn(cmd, label="claude")
         if r.get("ok"):
-            print(f"spawn: {cmd}", file=sys.stderr, flush=True)
+            print(f"spawn ({r.get('transport') or 'applet'}): {cmd}",
+                  file=sys.stderr, flush=True)
             r["command"] = cmd
             r["cwd"] = cwd
             r["session_id"] = session_id

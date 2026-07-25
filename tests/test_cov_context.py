@@ -767,6 +767,63 @@ class ContextCovTest(EngineCovBase):
         _, _, err = self.engine.file_content(self.sid, selector)
         self.assertIn("delivered file and Claude backup are gone", err)
 
+    # ------------------------------------------------------ terminal screen
+    def _screen_pane(self, lines="❯ hello\n"):
+        """Put this session's tty on a fake tmux pane returning `lines`."""
+        self.engine._tty_cache[os.getpid()] = "ttys009"
+        return (mock.patch.object(self.engine, "_tmux_target_for_tty",
+                                  return_value={"socket": "/s", "pane_id": "%1",
+                                                "session": "fleet", "attached": True}),
+                mock.patch.object(self.engine, "_tmux_capture",
+                                  return_value={"ok": True,
+                                                "lines": lines.splitlines(),
+                                                "truncated": False}))
+
+    def test_session_screen_reads_a_tmux_pane(self):
+        target, capture = self._screen_pane()
+        with target, capture:
+            out = self.engine.session_screen(self.sid)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["lines"], ["❯ hello"])
+        self.assertEqual(out["transport"], "tmux")
+        self.assertEqual(out["session_id"], self.sid)
+        self.assertFalse(out["truncated"])
+        self.assertGreater(out["captured_at"], 0)
+
+    def test_session_screen_needs_a_tmux_pane(self):
+        self.engine._tty_cache[os.getpid()] = "ttys009"
+        with mock.patch.object(self.engine, "_tmux_target_for_tty", return_value=None):
+            out = self.engine.session_screen(self.sid)
+        self.assertEqual(out["code"], "screen_unavailable")
+        self.assertIn("not running in a tmux pane", out["error"])
+
+    def test_session_screen_refuses_unreadable_sessions(self):
+        self.assertIn("no session", self.engine.session_screen("")["error"])
+        self.assertIn("Codex", self.engine.session_screen("codex:t1")["error"])
+        self.assertIn("not live", self.engine.session_screen("missing")["error"])
+        # a VS Code / headless session has no tty to read
+        self.engine._tty_cache[os.getpid()] = ""
+        self.assertIn("no terminal", self.engine.session_screen(self.sid)["error"])
+
+    def test_session_screen_refuses_a_background_job(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=True):
+            out = self.engine.session_screen(self.sid)
+        self.assertIn("background Claude job", out["error"])
+
+    def test_session_screen_refuses_production_sessions_in_staging(self):
+        self.engine.cfg["instance_mode"] = "staging"
+        out = self.engine.session_screen(self.sid)
+        self.assertIn("sessions it started", out["error"])
+
+    def test_session_screen_surfaces_a_capture_failure(self):
+        target, _ = self._screen_pane()
+        with target, mock.patch.object(
+                self.engine, "_tmux_capture",
+                return_value={"ok": False, "error": "can't find pane"}):
+            out = self.engine.session_screen(self.sid)
+        self.assertEqual(out["code"], "screen_unavailable")
+        self.assertIn("can't find pane", out["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

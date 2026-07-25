@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
+Object.assign(globalThis,{workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,sessionScreenHtml,loadSessionScreen,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
 globalThis.sessionView=null;            // one session workspace: section + optional file/agent selection
 // Console two-pane shell: on wide desktops the workspace docks as a persistent
 // right pane beside the queue (never a modal there); ⤢ expands it to the full
@@ -256,6 +256,38 @@ function renderEvidenceRail(s){
       ${cache.loaded&&!(cache.events||[]).length?'<div class="evidenceempty">No earlier transitions recorded.</div>':''}
       ${cache.next_cursor&&!cache.loading?`<button class="historyaction evidenceolder" onclick="loadSessionEvidence('${enc(s.session_id)}',true)">Load older</button>`:''}
     </div>`;
+}
+// Terminal screen: what the session is ACTUALLY rendering, which no transcript
+// or registry word can tell you. Only readable over the tmux transport, so the
+// block explains itself rather than disappearing. Never auto-refreshed on the
+// poll — a capture is a subprocess, and a stale screen is honestly labelled.
+const screenCache={};            // sid -> {lines,truncated,captured_at,loaded,loading,error}
+function sessionScreenHtml(s){
+  const cache=screenCache[s.session_id]||{};
+  const stamp=cache.captured_at?fmtAge(Math.max(0,Math.round(Date.now()/1000-cache.captured_at)))+' ago':'';
+  const body=cache.loading?'<div class="ctxload">reading the terminal…</div>':
+    cache.error?`<div class="evidenceerror">${esc(cache.error)}</div>`:
+    (cache.lines||[]).length?`<pre class="screenpeek" aria-label="terminal screen">${esc((cache.lines||[]).join('\n'))}</pre>`:
+    cache.loaded?'<div class="evidenceempty">The pane is rendering nothing right now.</div>':'';
+  return`<div class="screenhead"><small>${cache.loaded&&!cache.error?`captured ${esc(stamp)}${cache.truncated?' · oldest rows dropped':''}`:'Read-only — no keys are sent.'}</small>
+      <button class="historyaction" ${cache.loading?'disabled':''} onclick="loadSessionScreen('${enc(s.session_id)}',true)">${cache.loaded?'Refresh':'Read screen'}</button></div>${body}`;
+}
+async function loadSessionScreen(encodedSid,force=false){
+  const sid=decodeURIComponent(encodedSid),cache=screenCache[sid]||(screenCache[sid]={});
+  if(cache.loading||(!force&&cache.loaded))return;
+  cache.loading=true;cache.error=null;
+  const repaint=()=>{if(sessionView&&sessionView.sid===sid&&sessionView.section==='details')
+    renderWorkspaceDetails(workspaceSessionModel(),workspaceContext());};
+  repaint();
+  try{
+    const response=await fetch('/api/screen?sid='+encodeURIComponent(sid),{cache:'no-store'});
+    const data=await response.json();
+    if(!data.ok)throw new Error(data.error||'terminal screen unavailable');
+    cache.lines=data.lines||[];cache.truncated=Boolean(data.truncated);
+    cache.captured_at=data.captured_at||Date.now()/1000;cache.loaded=true;
+  }catch(error){cache.error=String(error.message||error);cache.loaded=true;}
+  finally{cache.loading=false;}
+  repaint();
 }
 async function loadSessionEvidence(encodedSid,more=false){
   const sid=decodeURIComponent(encodedSid),cache=evidenceCache[sid]||(evidenceCache[sid]={events:[]});
@@ -687,7 +719,10 @@ function workspaceSessionModel(){
 function renderWorkspaceDetails(s,c){
   if(!sessionView||sessionView.section!=='details')return;
   const cache=evidenceCache[s.session_id]||{},status=s.status_line||c?.info?.status_line;
-  $('#sdetailindex').innerHTML=['overview','placement','notifications','continuation'].map(id=>`<a href="#detail-${id}" onclick="event.preventDefault();document.getElementById('detail-${id}').scrollIntoView({behavior:'smooth',block:'start'})">${id[0].toUpperCase()+id.slice(1)}</a>`).join('');
+  // A closed session has no process, and Codex terminals are deliberately not read.
+  const showScreen=!sessionView.closed&&(s.provider||'claude')==='claude';
+  const sections=['overview','placement',...(showScreen?['terminal']:[]),'notifications','continuation'];
+  $('#sdetailindex').innerHTML=sections.map(id=>`<a href="#detail-${id}" onclick="event.preventDefault();document.getElementById('detail-${id}').scrollIntoView({behavior:'smooth',block:'start'})">${id[0].toUpperCase()+id.slice(1)}</a>`).join('');
   $('#sdetails').innerHTML=`<section class="detailsection" id="detail-overview"><h2>Overview</h2><div class="kv">
       <span>provider</span><b>${esc(s.provider||'claude')}</b><span>session ID</span>${cpb(s.session_id)}
       <span>status</span><b>${esc(s.state||'closed')}</b><span>model</span><b>${esc(s.model||'?')}</b>
@@ -701,6 +736,7 @@ function renderWorkspaceDetails(s,c){
       ${evidenceFactsHtml(s)}<div class="evidencehistory">${cache.error?`<div class="evidenceerror">${esc(cache.error)}</div>`:''}${(cache.events||[]).map(evidenceEventHtml).join('')}
       ${cache.loading?'<div class="ctxload">loading placement history…</div>':''}${cache.loaded&&!(cache.events||[]).length?'<div class="evidenceempty">No earlier transitions recorded.</div>':''}
       ${cache.next_cursor&&!cache.loading?`<button class="historyaction" onclick="loadSessionEvidence('${enc(s.session_id)}',true)">Load older</button>`:''}</div></section>
+    ${showScreen?`<section class="detailsection" id="detail-terminal"><h2>Terminal screen</h2>${sessionScreenHtml(s)}</section>`:''}
     <section class="detailsection" id="detail-notifications"><h2>Notifications</h2><div class="mutebox"><button class="bell ${s.muted?'muted':''}" ${sessionView.closed?'disabled':''}
       onclick="toggleMute('${s.session_id}',${s.muted?'false':'true'},'dmsg-${s.session_id}')">${s.muted?'🔕':'🔔'}</button><span>${sessionView.closed?'Notification controls are unavailable for a closed session.':s.muted?'Push notifications muted for this session.':'Notifications follow your session policy.'}</span></div><div class="actmsg" id="dmsg-${s.session_id}"></div></section>
     <section class="detailsection" id="detail-continuation"><h2>Continuation</h2>${handoffLinksHtml(s)}
@@ -992,4 +1028,4 @@ function agentRow(a,buildTap){
 // Pins are one shared server-side watchlist. Cards relocate to the top; they are
 // never duplicated in their normal action group.
 
-Object.assign(globalThis,{workspaceScrolls,LAST_FILE_STORE_KEY,questionScrollPositions,questionPanelKey,closedCtx,reopenedSessions,evidenceCache,WORKSPACE_SWIPE_MIN_PX,WORKSPACE_EDGE_SWIPE_PX,terminalAgentStates,closedResumeRequests,closedResumeWarned,agentCache,agentCacheKey,agentRelays});
+Object.assign(globalThis,{workspaceScrolls,LAST_FILE_STORE_KEY,questionScrollPositions,questionPanelKey,closedCtx,reopenedSessions,evidenceCache,screenCache,WORKSPACE_SWIPE_MIN_PX,WORKSPACE_EDGE_SWIPE_PX,terminalAgentStates,closedResumeRequests,closedResumeWarned,agentCache,agentCacheKey,agentRelays});

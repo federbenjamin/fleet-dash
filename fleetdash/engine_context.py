@@ -358,6 +358,59 @@ class ContextOps:
             return None
         return candidate
 
+    def session_screen(self, sid):
+        """Bounded read-only capture of the terminal a live session is rendering.
+
+        Fleet has never been able to see a screen; everything it believed about a
+        terminal was inferred from the registry word, the hook capture, and the
+        transcript fold. tmux makes the screen readable, which closes the standing
+        "show me the terminal" gap for a stalled session — the pane shows the live
+        tool output the transcript cannot.
+
+        Three refusals are deliberate, not missing features:
+
+        - **Background Claude jobs.** Their only channel is a private PTY whose
+          bytes are readiness evidence and must never cross an API (invariant 25).
+        - **Codex.** Its terminal route is proved narrowly and enables exactly
+          text, image-path text, and focus (invariant 30). Reading its screen is
+          not on that list, so it is not taken.
+        - **Production sessions from staging.** A live terminal read is a
+          capability, and staging holds none over sessions it did not start
+          (invariant 56).
+
+        Screen content is session content Fleet already serves through
+        `/api/context` — the same prose and tool output — so this opens no new
+        class of exposure, but it is raw rather than a projection, which is why the
+        route is token-gated and the result is never cached, logged, or snapshotted.
+        """
+        sid = str(sid or "")
+        unavailable = lambda reason: {"ok": False, "code": "screen_unavailable",
+                                      "error": reason}
+        if not sid:
+            return unavailable("no session")
+        if sid.startswith("codex:"):
+            return unavailable("Fleet does not read Codex terminal screens")
+        if self.is_staging and not self._staging_owns(sid):
+            return unavailable("staging reads only the terminals of sessions it started")
+        reg, _ = self._reg_main_path(sid)
+        if not reg:
+            return unavailable("session is not live")
+        if self._is_background_claude(reg):
+            return unavailable("a background Claude job has no terminal to read")
+        tty = self._tty_for_pid(reg.get("pid"))
+        if not tty:
+            return unavailable("session has no terminal (VS Code / headless)")
+        pane = self._tmux_target_for_tty(f"/dev/{tty}")
+        if not pane:
+            return unavailable("this session is not running in a tmux pane — only the "
+                               "tmux transport can read a terminal screen")
+        capture = self._tmux_capture(pane)
+        if not capture.get("ok"):
+            return unavailable(str(capture.get("error") or "the pane could not be read"))
+        return {"ok": True, "session_id": sid, "transport": "tmux",
+                "lines": capture["lines"], "truncated": capture["truncated"],
+                "captured_at": time.time()}
+
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""
         if str(sid).startswith("codex:"):

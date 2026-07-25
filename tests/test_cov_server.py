@@ -350,6 +350,14 @@ class GetHandlerTest(unittest.TestCase):
             "/api/agent_context?sid=s&aid=a",
             agent_context=lambda sid, aid: dict(msgs))[0], 200)
 
+    def test_get_screen_is_token_gated(self):
+        status, _, body, _kw = self.call(
+            "get_screen", "/api/screen?sid=s",
+            session_screen=lambda sid: {"ok": True, "lines": ["x"], "session_id": sid})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["lines"], ["x"])
+        self.assertEqual(Handler.GET_ROUTES["/api/screen"], ("token", "get_screen"))
+
     def test_get_commands_insights_briefing_budgets(self):
         self.assertEqual(self.call("get_commands", "/api/commands?sid=s",
             commands=lambda sid: {"ok": True})[0], 200)

@@ -396,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/evidence": ("open", "get_evidence"),
         "/api/history": ("open", "get_history"),
         "/api/file": ("token-text", "get_file"),
+        "/api/screen": ("token", "get_screen"),
         "/api/commands": ("token", "get_commands"),
         "/api/search": ("token", "get_search"),
         "/api/search/status": ("token", "get_search_status"),
@@ -560,6 +561,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, "text/plain", err.encode())
         return self.reply(200, ctype, data,
                           extra_headers={"X-Content-Type-Options": "nosniff"})
+
+    def get_screen(self):
+        # reads a live terminal's rendered screen -> token-gated like /api/file
+        out = self.eng.session_screen(self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_commands(self):
         # reads command/skill names + descriptions off disk -> token-gated
