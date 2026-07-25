@@ -1,6 +1,7 @@
 """Conversation/file/context projections, hook pending, effort, commands
 (invariants 1, 10, 11, 43)."""
 import json, os, re, sys, glob, time, copy, hashlib, uuid
+from collections import deque
 
 
 from . import paths as pathcfg
@@ -714,8 +715,98 @@ class ContextOps:
         seen = self._screen_states.get(sid)
         return seen["state"] if seen else None
 
-    def session_context(self, sid):
-        """Recent conversation turns + SendUserFile deliveries for one session."""
+    # One page of older conversation, in raw transcript rows read per request.
+    # 600 rows folds to well under the ring cap and reads a few hundred KB from
+    # the tail of the file — never the whole transcript, which runs to 15 MB.
+    TRANSCRIPT_PAGE_ROWS = 600
+    TRANSCRIPT_PAGE_CHUNK = 512 * 1024
+
+    @classmethod
+    def _lines_before(cls, path, before):
+        """The complete JSONL lines immediately preceding byte `before`.
+
+        Returns `(lines, start)`. Reading BACKWARDS in chunks is what makes
+        paging affordable: a session's transcript is tens of megabytes and the
+        reader only ever wants the few hundred rows above where it already is.
+        """
+        start, chunks, rows = before, [], 0
+        with open(path, "rb") as handle:
+            while start > 0 and rows < cls.TRANSCRIPT_PAGE_ROWS:
+                size = min(cls.TRANSCRIPT_PAGE_CHUNK, start)
+                start -= size
+                handle.seek(start)
+                chunk = handle.read(size)
+                rows += chunk.count(b"\n")
+                chunks.insert(0, chunk)
+        blob = b"".join(chunks)
+        if start > 0:
+            # the first line in the blob began before `start`, so it is partial
+            cut = blob.find(b"\n")
+            if cut < 0:
+                return [], before
+            start += cut + 1
+            blob = blob[cut + 1:]
+        lines = blob.splitlines()
+        if len(lines) > cls.TRANSCRIPT_PAGE_ROWS:
+            dropped = lines[:len(lines) - cls.TRANSCRIPT_PAGE_ROWS]
+            start += sum(len(line) + 1 for line in dropped)
+            lines = lines[len(dropped):]
+        return lines, start
+
+    def _older_page(self, path, before):
+        """Fold the transcript window ending at `before` into conversation rows.
+
+        A window folded on its own cannot attach a result whose call sits above
+        it, and does not merge with an assistant row outside it. That is the
+        honest trade for not re-folding 15 MB per page: the boundary row is
+        slightly less complete than it is in the live tail.
+        """
+        try:
+            before = max(0, min(int(before), os.path.getsize(path)))
+        except (TypeError, ValueError, OSError):
+            return None
+        if before <= 0:
+            return {"ok": True, "paged": True, "messages": [], "files": [],
+                    "next_cursor": None}
+        lines, start = self._lines_before(path, before)
+        window = Tail(path)
+        # The live ring is a bounded TAIL; a page is a window, and dropping its
+        # oldest entries would leave a hole between what this page shows and
+        # where its cursor points. Fold the whole window.
+        window.convo = deque(maxlen=self.TRANSCRIPT_PAGE_ROWS)
+        offset = start
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except Exception:
+                # a line that will not parse still advances the cursor by its
+                # own length, or every offset after it is wrong
+                offset += len(line) + 1
+                continue
+            window._fold(row, row_start=offset)
+            offset += len(line) + 1
+        messages = [dict(entry) for entry in window.convo]
+        # The cursor is where the OLDEST ROW RETURNED begins — never the window
+        # start. Those differ whenever the window folds to fewer rows than it
+        # read, and pointing at the window start would silently skip the
+        # difference on the next page. `off` of 0 is the first row in the file
+        # and correctly ends the walk.
+        # A window that folds to nothing is the head of the file — session
+        # metadata rows that are not conversation. Ending the walk there is what
+        # stops the reader being offered one more empty page.
+        cursor = next((row["off"] for row in messages if row.get("off")), None)
+        return {"ok": True, "paged": True, "messages": messages, "files": [],
+                "next_cursor": cursor if messages else None}
+
+    def session_context(self, sid, before=None, limit=50):
+        """Recent conversation turns + SendUserFile deliveries for one session.
+
+        Claude sessions are paged by TRANSCRIPT BYTE OFFSET (`next_cursor`), not
+        by an index into the live ring: the ring is a 300-entry tail and indexes
+        into it shift as it evicts. The offset is stable, monotonic, and already
+        the coordinate the fold works in — so "load older" reaches the first
+        message of the session instead of stopping at the ring's edge.
+        """
         if str(sid).startswith("codex:"):
             with self.lock:
                 known = any(item.get("session_id") == sid and
@@ -729,6 +820,11 @@ class ContextOps:
             return {"ok": False, "error": "session not live"}
         if not os.path.isfile(path):
             return {"ok": True, "messages": [], "files": [], "starting": True}
+        if before is not None:
+            page = self._older_page(path, before)
+            if page is None:
+                return {"ok": False, "error": "invalid conversation cursor"}
+            return page
         snapshot = self._claude_context_snapshots.get(sid)
         if snapshot is not None:
             msgs = copy.deepcopy(snapshot.get("messages") or [])
@@ -755,7 +851,15 @@ class ContextOps:
         out_files = []
         for f in reversed(files):       # newest delivery first
             out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
-        return {"ok": True, "messages": msgs, "files": out_files}
+        # The live page is the newest `limit` of the ring; its cursor is where
+        # the oldest row it returns began in the file. Rows inserted by timestamp
+        # rather than appended (a compaction's event row, invariant 17) carry no
+        # offset, so the cursor comes from the oldest row that has one — a page
+        # boundary that repeats a row is recoverable, one that skips is not.
+        page = msgs[-max(1, int(limit or 50)):] if msgs else []
+        cursor = next((row["off"] for row in page if row.get("off")), None)
+        return {"ok": True, "paged": True, "messages": page, "files": out_files,
+                "next_cursor": cursor}
 
     def _agent_paths(self, sid, aid):
         """Resolve a subagent transcript. aid is client-supplied — hard-whitelist

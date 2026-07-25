@@ -149,5 +149,101 @@ class ToolResultRouteTest(EngineCovBase):
         self.assertIn("unreadable", out["error"])
 
 
+class TranscriptPagingTest(EngineCovBase):
+    """`load older` reaches the first message of the session, not the ring's edge.
+
+    The live conversation is a 300-entry tail, so indexes into it shift as it
+    evicts. The cursor is a transcript BYTE OFFSET instead: stable, monotonic,
+    and already the coordinate the fold works in.
+    """
+
+    def _long_session(self, turns=400):
+        rows = []
+        for index in range(turns):
+            rows.append({"type": "user", "timestamp": "2026-07-25T10:00:00.000Z",
+                         "message": {"role": "user", "content": f"prompt {index}"}})
+            rows.append(assistant(
+                [{"type": "tool_use", "id": f"t{index}", "name": "Read",
+                  "input": {"file_path": f"/tmp/{index}.py"}}], uuid=f"u{index}"))
+            rows.append(result(f"t{index}", f"body {index}"))
+        self.write_transcript(rows)
+        self.engine._reg_main_path = lambda sid: ({"pid": 1}, self.transcript)
+        self.engine._claude_context_snapshots = {}
+
+    def test_the_live_page_is_the_tail_and_carries_a_cursor(self):
+        self._long_session()
+        out = self.engine.session_context("s1", limit=50)
+        self.assertTrue(out["paged"])
+        self.assertEqual(len(out["messages"]), 50)
+        newest_prompt = [m for m in out["messages"] if m.get("role") == "user"][-1]
+        self.assertEqual(newest_prompt["text"], "prompt 399")
+        self.assertGreater(out["next_cursor"], 0)
+
+    def test_paging_walks_back_to_the_first_message(self):
+        self._long_session()
+        seen, cursor, pages = [], self.engine.session_context("s1")["next_cursor"], 0
+        while cursor is not None and pages < 60:
+            page = self.engine.session_context("s1", before=cursor)
+            self.assertTrue(page["paged"])
+            seen = page["messages"] + seen
+            self.assertNotEqual(page["next_cursor"], cursor, "the cursor must advance")
+            cursor = page["next_cursor"]
+            pages += 1
+        self.assertLess(pages, 60, "paging terminated")
+        self.assertEqual(seen[0]["text"], "prompt 0",
+                         "the walk reaches the session's first message")
+
+    def test_a_page_is_bounded_well_below_the_whole_transcript(self):
+        """400 turns fold to ~800 conversation rows; one page must not be all
+        of them, and must not be empty either."""
+        self._long_session()
+        page = self.engine.session_context("s1", before=self.engine.session_context(
+            "s1")["next_cursor"])
+        self.assertLessEqual(len(page["messages"]), Engine.TRANSCRIPT_PAGE_ROWS)
+        self.assertGreater(len(page["messages"]), 0)
+
+    def test_a_page_returns_every_row_its_cursor_covers(self):
+        """The window folds fewer rows than it reads, so the cursor has to be the
+        oldest row RETURNED — pointing at the window start would skip the
+        difference on the next page."""
+        self._long_session()
+        cursor = self.engine.session_context("s1")["next_cursor"]
+        page = self.engine.session_context("s1", before=cursor)
+        oldest = next(row["off"] for row in page["messages"] if row.get("off"))
+        self.assertEqual(page["next_cursor"], oldest)
+
+    def test_the_start_of_the_file_ends_the_walk(self):
+        self._long_session(turns=3)
+        self.assertIsNone(self.engine.session_context("s1", before=0)["next_cursor"])
+        self.assertEqual(self.engine.session_context("s1", before=0)["messages"], [])
+
+    def test_a_cursor_past_the_end_is_clamped_not_trusted(self):
+        self._long_session(turns=3)
+        page = self.engine.session_context("s1", before=10 ** 12)
+        self.assertTrue(page["ok"])
+        self.assertTrue(page["messages"])
+
+    def test_a_negative_cursor_is_clamped(self):
+        self._long_session(turns=3)
+        self.assertEqual(self.engine.session_context("s1", before=-5)["messages"], [])
+
+    def test_a_malformed_cursor_is_refused(self):
+        self._long_session(turns=3)
+        out = self.engine.session_context("s1", before="nope")
+        self.assertFalse(out["ok"])
+        self.assertIn("invalid conversation cursor", out["error"])
+
+    def test_a_malformed_transcript_line_does_not_desync_the_offsets(self):
+        """A line that will not parse still advances the cursor by its length."""
+        self._long_session(turns=5)
+        with open(self.transcript, "a") as handle:
+            handle.write("{not json\n")
+            handle.write(json.dumps(
+                {"type": "user", "timestamp": "2026-07-25T11:00:00.000Z",
+                 "message": {"role": "user", "content": "after the bad line"}}) + "\n")
+        out = self.engine.session_context("s1")
+        self.assertEqual(out["messages"][-1]["text"], "after the bad line")
+
+
 if __name__ == "__main__":   # pragma: no cover
     unittest.main()

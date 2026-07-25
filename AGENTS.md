@@ -962,6 +962,23 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     slow-but-progressing response on the next interval. Main, closed, and subagent context failures
     retain the last-good in-memory/device cache. Conversation revision refreshes merge the current
     tail into older loaded pages and preserve the reader's scroll anchor.
+    **A live Claude conversation pages by TRANSCRIPT BYTE OFFSET, not by an index into the
+    ring** (operator decision 2026-07-25). The ring is a 300-entry tail whose indexes shift as
+    it evicts, so an index cursor could only ever reach the ring's edge; the byte offset is
+    stable, monotonic, and already the coordinate the fold works in, so `load older` reaches the
+    session's first message. Every folded row carries `off` (its line's START — distinct from
+    `evidence_offset`, the row END that model/effort ordering uses and which is unchanged).
+    `session_context(sid, before=…)` folds a bounded backwards window
+    (`_lines_before` reads 512 KB chunks until `TRANSCRIPT_PAGE_ROWS`=600 rows, never the whole
+    file) into a throwaway `Tail` whose deque is widened to the page size. **The cursor is the
+    oldest row RETURNED, never the window start** — those differ whenever the window folds to
+    fewer rows than it read, and pointing at the window start silently skips the difference; a
+    page that folds to nothing is the file's metadata head and ends the walk. A window folded
+    alone cannot attach a result whose call sits above it, which is the accepted trade for not
+    re-folding 15 MB per page. `server.paginate_context` must pass through any projection that
+    set `paged` — slicing it by index truncates a page and replaces a meaningful cursor with a
+    meaningless one. Closed and subagent contexts keep index pagination. Measured on a 15 MB
+    live transcript: 17 pages, 2,028 rows, 0.4 s total, ~30 ms per page.
 
 63. **Full-screen overlays are stack-aware modals — except the desktop-docked session pane.**
     Search/Handoff/Outbox/Schedule/Confirm surfaces (Settings is a destination, invariant 59,

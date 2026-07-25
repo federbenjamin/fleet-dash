@@ -38,6 +38,7 @@ class Tail:
         # tail only — reaching further back is the transcript's job, not the
         # ring's, and it is paged there rather than held in memory per session.
         self.convo = deque(maxlen=300)
+        self._row_start = None          # byte offset of the row being folded
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
         # Durable delivery whitelist: files/convo are ring buffers, so a
@@ -107,10 +108,14 @@ class Tail:
                 o = json.loads(line)
             except Exception:
                 continue
-            self._fold(o, evidence_offset=row_end)
+            self._fold(o, evidence_offset=row_end, row_start=row_end - len(line))
         return True
 
-    def _fold(self, o, evidence_offset=None):
+    def _fold(self, o, evidence_offset=None, row_start=None):
+        # Where this row starts in the file. Conversation entries carry it so a
+        # client can ask for what came BEFORE them; `evidence_offset` is the
+        # row's END and stays what it was — model/effort evidence ordering.
+        self._row_start = row_start
         ts = o.get("timestamp")
         if ts:
             self.first_ts = self.first_ts or ts
@@ -324,7 +329,7 @@ class Tail:
             entry["arg"] = self._tool_arg(name, inp)
             if name == "Bash" and inp.get("command"):
                 entry["command"] = str(inp.get("command"))[:2000]
-        self.convo.append(entry)
+        self.convo.append(self._with_offset(entry))
         self.convo_rev += 1
         if b.get("id"):
             # The id is what the browser asks for when you expand a result. The
@@ -383,8 +388,8 @@ class Tail:
         """Append a system-event row. Insert by TIMESTAMP, not file order: a
         compaction flushes its whole block at completion, so the `/compact`
         command row is written AFTER the boundary row it preceded in time."""
-        e = {"role": "event", "kind": kind, "title": title,
-             "detail": detail or "", "level": level, "ts": ts}
+        e = self._with_offset({"role": "event", "kind": kind, "title": title,
+                               "detail": detail or "", "level": level, "ts": ts})
         self.convo_rev += 1
         ep = iso_epoch(ts) or 0
         if len(self.convo) == self.convo.maxlen:
@@ -480,6 +485,11 @@ class Tail:
                     q["a"] = leftovers.pop(0)
         self.convo_rev += 1
 
+    def _with_offset(self, entry):
+        if self._row_start is not None:
+            entry["off"] = self._row_start
+        return entry
+
     def _convo_add(self, role, text, ts):
         text = str(text)
         self.convo_rev += 1
@@ -490,7 +500,7 @@ class Tail:
             prev["text"] = prev["text"] + "\n\n" + text
             prev["ts"] = ts or prev["ts"]
             return
-        self.convo.append({"role": role, "text": text, "ts": ts})
+        self.convo.append(self._with_offset({"role": role, "text": text, "ts": ts}))
 
     def _cache_track(self, u, ts, mdl):
         """Per-day token-class mix + prompt-cache invalidation detection.

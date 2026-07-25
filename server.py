@@ -368,6 +368,12 @@ class Handler(BaseHTTPRequestHandler):
     def paginate_context(self, out):
         if not isinstance(out, dict) or not out.get("ok"):
             return out
+        # A projection that paged itself owns its own cursor. Claude sessions
+        # page by transcript BYTE OFFSET so "load older" can leave the live ring
+        # entirely; slicing that result by index here would truncate a page and
+        # replace a meaningful cursor with a meaningless one.
+        if out.get("paged"):
+            return out
         messages = list(out.get("messages") or [])
         try:
             limit = max(1, min(100, int(self.query("limit") or 50)))
@@ -544,7 +550,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_context(self):
-        out = self.paginate_context(self.eng.session_context(self.query("sid")))
+        cursor = self.query("cursor")
+        try:
+            limit = max(1, min(200, int(self.query("limit") or 50)))
+            before = int(cursor) if cursor not in ("", None) else None
+        except (TypeError, ValueError):
+            return self.reply(400, "application/json", json.dumps(
+                {"ok": False, "error": "invalid conversation pagination"}).encode())
+        out = self.paginate_context(
+            self.eng.session_context(self.query("sid"), before=before, limit=limit))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_closed_context(self):

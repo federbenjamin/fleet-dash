@@ -344,7 +344,21 @@ class GetHandlerTest(unittest.TestCase):
     def test_context_routes_paginate(self):
         msgs = {"ok": True, "messages": [{"text": "1"}]}
         self.assertEqual(self.call("get_context", "/api/context?sid=s",
-            session_context=lambda sid: dict(msgs))[0], 200)
+            session_context=lambda sid, before=None, limit=50: dict(msgs))[0], 200)
+        # a projection that paged itself keeps its own byte cursor
+        status, _, body, _kw = self.call(
+            "get_context", "/api/context?sid=s&cursor=900",
+            session_context=lambda sid, before=None, limit=50: {
+                "ok": True, "paged": True, "messages": [{"text": "old", "off": 800}],
+                "next_cursor": before and before - 100})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["next_cursor"], 800)
+        # …and a cursor that is not a number is refused before any read
+        status, _, body, _kw = self.call(
+            "get_context", "/api/context?sid=s&cursor=nope",
+            session_context=lambda sid, before=None, limit=50: dict(msgs))
+        self.assertEqual(status, 400)
+        self.assertIn("invalid conversation pagination", json.loads(body)["error"])
         self.assertEqual(self.call("get_closed_context", "/api/closed_context?sid=s",
             closed_context=lambda sid: dict(msgs))[0], 200)
         self.assertEqual(self.call("get_agent_context",
