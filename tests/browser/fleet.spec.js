@@ -1087,6 +1087,47 @@ test('a poll never resizes a card it did not change', async ({ page }) => {
   expect(after.height).toBeGreaterThan(before.height);
 });
 
+test('opening and switching the docked pane settles the queue in one layout', async ({ page }) => {
+  // The pane transitions were the worst case of the same fight: opening the pane
+  // narrows the left column, so every card is re-measured — and while the
+  // measurement landed a frame late, each card grew to the full clamp and shrank
+  // back TWICE per transition. Measured on production before the fix: 5–9
+  // distinct card geometries per action, in bursts 8ms apart.
+  await reset(page);
+  await page.setViewportSize({ width: 1500, height: 1000 });
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(150);
+
+  const layouts = async (action) => page.evaluate(async (name) => {
+    const shot = () => [...document.querySelectorAll('#route-now .card')].map(card => {
+      const box = card.getBoundingClientRect();
+      return `${card.dataset.sid}:${Math.round(box.top)}/${Math.round(box.height)}`;
+    }).join(' ');
+    const seen = [shot()];
+    globalThis.__paneAction(name);
+    for (let frame = 0; frame < 40; frame += 1) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const now = shot();
+      if (now !== seen[seen.length - 1]) seen.push(now);
+    }
+    return seen.length - 1;         // how many times the queue moved
+  }, action);
+
+  await page.evaluate(() => {
+    const ids = [...document.querySelectorAll('#route-now .card')].map(card => card.dataset.sid);
+    globalThis.__paneAction = (name) => name === 'close' ? closeSession()
+      : openSession(name === 'first' ? ids[0] : ids[ids.length - 1]);
+  });
+
+  // opening from closed legitimately reflows the column once; everything after
+  // it must not move the queue at all
+  expect(await layouts('first')).toBeLessThanOrEqual(1);
+  await page.waitForTimeout(300);
+  expect(await layouts('last')).toBe(0);
+  await page.waitForTimeout(300);
+  expect(await layouts('first')).toBe(0);
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).
