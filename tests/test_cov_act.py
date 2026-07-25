@@ -526,7 +526,8 @@ class ScreenGateTests(EngineFixture):
         self.engine.compacting_secs = lambda *a, **k: None
         self.engine._tty_cache[PID] = "ttys-test"
         self.engine._iterm_write = mock.Mock(return_value={"ok": True})
-        self.engine.screen_prompt_kind = lambda reg, tty: screen_kind
+        self.engine.screen_prompt_state = lambda reg, tty: (
+            {"kind": screen_kind, "always": None} if screen_kind else None)
 
     def test_a_visible_question_is_answered(self):
         self._arm_question("question")
