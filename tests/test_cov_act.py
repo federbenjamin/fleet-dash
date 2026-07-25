@@ -515,6 +515,70 @@ class PermissionAnswerTests(EngineFixture):
         self.assertFalse(self.engine._request_answered("same", "p1"))
 
 
+class ScreenGateTests(EngineFixture):
+    """act() refuses to type at a widget that is not on screen (invariant 77)."""
+
+    def _arm_question(self, screen_kind):
+        self.write_registry(status="waiting")
+        self.engine.hook_pending = lambda sid, status: {
+            "kind": "question", "nonce": "q1",
+            "questions": [{"question": "Pick", "options": [{"label": "Red"}]}]}
+        self.engine.compacting_secs = lambda *a, **k: None
+        self.engine._tty_cache[PID] = "ttys-test"
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+        self.engine.screen_prompt_kind = lambda reg, tty: screen_kind
+
+    def test_a_visible_question_is_answered(self):
+        self._arm_question("question")
+        out = self.engine.act({"type": "option", "session_id": "same",
+                               "nonce": "q1", "digits": [1], "n_options": 1})
+        self.assertTrue(out["ok"], out)
+
+    def test_no_screen_evidence_keeps_the_previous_behaviour(self):
+        self._arm_question(None)
+        out = self.engine.act({"type": "option", "session_id": "same",
+                               "nonce": "q1", "digits": [1], "n_options": 1})
+        self.assertTrue(out["ok"], out)
+
+    def test_an_ordinary_input_box_refuses_the_keys(self):
+        """The exact failure invariant 5 exists to prevent: digits typed into the
+        main input become a message."""
+        self._arm_question("input")
+        out = self.engine.act({"type": "option", "session_id": "same",
+                               "nonce": "q1", "digits": [1], "n_options": 1})
+        self.assertEqual(out["code"], "screen_mismatch")
+        self.assertIn("ordinary input box", out["error"])
+        self.engine._iterm_write.assert_not_called()
+
+    def test_the_folder_trust_dialog_is_never_answered(self):
+        """Digits there would accept trust on the user's behalf (invariant 21)."""
+        self._arm_question("trust")
+        out = self.engine.act({"type": "option", "session_id": "same",
+                               "nonce": "q1", "digits": [1], "n_options": 1})
+        self.assertEqual(out["code"], "screen_mismatch")
+        self.assertIn("folder-trust", out["error"])
+        self.engine._iterm_write.assert_not_called()
+
+    def test_a_permission_screen_refuses_a_question_answer(self):
+        self._arm_question("permission")
+        out = self.engine.act({"type": "option", "session_id": "same",
+                               "nonce": "q1", "digits": [1], "n_options": 1})
+        self.assertEqual(out["code"], "screen_mismatch")
+        self.engine._iterm_write.assert_not_called()
+
+    def test_dismiss_is_accepted_on_either_modal_screen(self):
+        for kind in ("question", "permission"):
+            self._arm_question(kind)
+            out = self.engine.act({"type": "dismiss", "session_id": "same",
+                                   "nonce": "q1"})
+            self.assertTrue(out["ok"], (kind, out))
+
+    def test_dismiss_is_refused_at_the_input_box(self):
+        self._arm_question("input")
+        out = self.engine.act({"type": "dismiss", "session_id": "same", "nonce": "q1"})
+        self.assertEqual(out["code"], "screen_mismatch")
+
+
 class ActReceiptTests(EngineFixture):
     """The receipt binding around act() itself (invariant 76)."""
 

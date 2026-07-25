@@ -1,7 +1,9 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W1, W2, W3, W4, W5-T1 and the first half of W5-T2a shipped 2026-07-24; the remaining
-W5-T2a consumers and W5-T2b/T3 are still proposed.** Written 2026-07-24 after a
+Status: **W1, W2, W3, W4, W5-T1 and two of W5-T2a's consumers (screen peek, and the act() screen
+gate that replaces invariant 5's ghost-question guess) shipped 2026-07-24. The remaining T2a
+consumers need a scan-path capture, which invariant 74 forbids; W5-T2b/T3 is still blocked on open
+question 6.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -494,10 +496,19 @@ can ship with T1:
 - **Screen-peek ships essentially free.** AGENTS.md line 1280 lists it as "technique proven, UI not
   built"; it becomes ~10 server lines and a `<pre>`. It was blocked on the daemon being unable to
   read a screen at all, which tmux fixes.
-- **Ghost-question detection stops being a heuristic.** Invariant 5 currently guesses via registry
-  status plus a 5 s timeout because a PreToolUse capture can outlive a hook-blocked ask. With a
-  capture Fleet just looks: is the ask widget rendered? This removes a guess from the exact path
-  that produces finding 4's reappearing prompt.
+- **Ghost-question detection stops being a heuristic. SHIPPED 2026-07-24, at the act() gate rather
+  than in `hook_pending`.** Invariant 74 forbids captures on the scan path, and `hook_pending` runs
+  per session per poll — a subprocess there would undo W1 entirely. The place where the guess
+  actually costs something is the moment keys are written, and that is a request. `act()` now
+  classifies the pane before any prompt answer and refuses a mismatch (`screen_mismatch`), so
+  digits can no longer land in an ordinary input box and become a message. The classifier
+  (`fleetdash/screen.py`, invariant 77) was written against real `capture-pane` frames from a
+  disposable sandbox, not from memory; the footer line turned out to be the discriminator, because
+  the ask, the permission prompt and the folder-trust dialog all render the same numbered list.
+  The trust case is a bonus the plan did not name: Fleet can now prove it is not about to answer
+  that dialog (invariant 21), rather than merely intending not to.
+  `hook_pending`'s ghost guard is unchanged and still heuristic — correctly, since it is on the
+  scan path.
 - **Stall diagnosis.** Invariant 7's "stalled" means frozen mid-tool, but Fleet cannot say *on what*
   beyond the transcript. The pane shows the live tool output.
 - **Compaction without a hook.** Invariant 17 reads the PreCompact checkpoint mtime and gives
@@ -505,7 +516,10 @@ can ship with T1:
 - **Trust-prompt confirmation.** `is_trusted()` is a filesystem prediction
   (`engine_spawn.py:286`); a capture confirms the session is actually sitting on the dialog. This is
   read-only, so it sidesteps §4.1's policy question entirely — Fleet reports accurately without
-  answering.
+  answering. PARTLY DONE: the classifier recognizes the dialog (a real frame is in
+  `tests/test_cov_screen.py`) and `act()` refuses to type at it, but nothing yet reports "this
+  spawn is waiting on trust" in the UI — that needs a check some seconds after spawn, which is a
+  scan-path capture and therefore blocked on invariant 74.
 - **Codex tty disambiguation.** `_codex_terminal_routes` scans `ps` argv and gives up when two
   distinct ttys match one thread UUID (`engine_transport.py:107-182`). tmux's pane→pid mapping is
   exact, which can resolve that case.
@@ -668,10 +682,13 @@ this plan is a comfort improvement; T1 is the difference between Fleet controlli
    observing the surfaces first: `/clear`, `/model`, the bypass-permissions warning and OAuth
    prompts have not been captured, and the trust dialog needs a deliberate yes/no rather than a
    default. Blocks W5-T2b only — not T1, and not the read-only T2a.
-7. **Known roadmap gap now closable** — "permission-prompt injection untested against a real dialog
-   (`permission_keys` may need tuning per variant)" was untestable because Fleet could not see which
-   variant rendered. T2a makes the variant observable and T2b makes the keys verifiable. Worth
-   scheduling deliberately rather than leaving as a standing gap.
+7. **Known roadmap gap now PARTLY closed** — "permission-prompt injection untested against a real
+   dialog (`permission_keys` may need tuning per variant)". The sandbox capture on 2026-07-24 gave
+   one real variant: `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for this
+   session` / `3. No`, footer `Esc to cancel · Tab to amend`. The shipped mapping
+   (`allow:"1"`, `always:"2"`, `deny:` Esc) is correct for it, and a bare digit instant-selects.
+   Remaining: the Bash and MCP variants, whose row-2 wording is unobserved. T2a made the variant
+   observable, which is what made even this much testable.
 
 *(iTerm2's `-CC` control-mode integration was an open question in an earlier draft. D11 removes it:
 it is as iTerm-bound as the applet.)*

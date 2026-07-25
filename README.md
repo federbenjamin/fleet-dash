@@ -599,7 +599,10 @@ between progress prose and the next tool call. Each prompt gets a server-owned i
 the same request even when its evidence flips from the hook capture to the transcript — an answered
 question does not reappear — and once Fleet accepts an answer, a second device (or a second tap)
 gets "this prompt was already answered" instead of typing a second set of keys into a terminal that
-has moved on. Every action that can move Claude's terminal also leaves a durable receipt keyed by an
+has moved on. When a session runs in a tmux pane Fleet also looks at the screen before it types:
+if the pane is showing an ordinary input box, a different prompt, or the folder-trust dialog rather
+than the question you are answering, the keys are refused instead of sent. Every action that can
+move Claude's terminal also leaves a durable receipt keyed by an
 id the browser mints before it sends, so a phone whose connection drops mid-answer can ask Fleet what
 actually happened once it reconnects instead of being told only that delivery was uncertain — and
 resending the same id returns the recorded outcome rather than typing a second time. Receipts are

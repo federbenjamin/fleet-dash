@@ -384,6 +384,27 @@ class ActOps:
                 if typ == "permission" and pending_kind != "permission":
                     return {"ok": False, "error": "this prompt is not a permission request"}
 
+                # Direct evidence beats inference (invariant 77). When the
+                # session is in a tmux pane Fleet can SEE which widget owns the
+                # keyboard, so it no longer has to trust the registry word that
+                # invariant 5 has been guessing from. A `trust` screen is the
+                # sharpest case: injecting digits there would answer Claude's
+                # folder-trust dialog, which Fleet must never do (invariant 21).
+                screen_kind = self.screen_prompt_kind(reg, self._tty_for_pid(reg.get("pid")))
+                if screen_kind is not None:
+                    allowed_screens = ({"question", "permission"} if typ == "dismiss"
+                                       else {"question"} if typ in ("option", "multiq")
+                                       else {"permission"})
+                    if screen_kind not in allowed_screens:
+                        showing = {"question": "a different question",
+                                   "permission": "a permission request",
+                                   "trust": "its folder-trust dialog",
+                                   "input": "its ordinary input box"}.get(
+                                       screen_kind, "something else")
+                        return {"ok": False, "code": "screen_mismatch",
+                                "error": f"the terminal is showing {showing}, not this "
+                                         "prompt — refresh before answering"}
+
                 question_specs = []
                 if typ in ("option", "multiq"):
                     if not isinstance(questions, list) or not (1 <= len(questions) <= 8):

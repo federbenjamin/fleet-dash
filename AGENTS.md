@@ -12,6 +12,7 @@ fleetdash/                everything server.py imports
   paths.py                  instance dirs (BASE/CAPTURE/…) — the single test patch point
   config.py                 DEFAULT_CONFIG, load_config, pricing, shared constants
   placement.py              Now-queue classification + reply-request detection
+  screen.py                 pure TUI screen classifier (question/permission/trust/input)
   tail.py                   Tail: incremental transcript fold (offsets, convo/files, usage)
   engine.py                 Engine = __init__ + constants + spend CLI
   engine_scan.py            registry scan, session organization, status, control state
@@ -100,7 +101,7 @@ act freshness re-poll waits ~32 ms instead of up to the p95 1141 ms it used to. 
 Numbers are stable identifiers (code comments cite "invariant N") — never renumber;
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
-- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75
+- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75, 77
 - Applet, transports & click latency: 3, 24, 25, 73, 74
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
@@ -169,6 +170,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    same reason; the grace is wide because nothing re-surfaces a dropped capture any more. `interrupt` (Esc mid-turn) has the mirror gate: it
    requires status `busy`, or `shell` plus a freshly re-polled mid-tool transcript, so an Esc can
    never land in an idle session's input box. Close also interrupts an active shell before SIGTERM.
+   **Where a screen is readable, the guess is replaced by evidence** — invariant 77's classifier
+   refuses any prompt answer whose widget is not the one the pane is rendering. That is an extra
+   refusal, never an extra permission: the registry gates above all still apply, and a session
+   outside tmux behaves exactly as before.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
 7. **Agent state semantics: "stalled" means frozen mid-TOOL, nothing else.** An agent is
    working only while something is in flight — a `tool_use` awaiting its result, or a
@@ -1132,7 +1137,8 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     text, and focus — invariant 30), a production session read from staging (a live terminal read
     is a capability, and staging holds none over sessions it did not start — invariant 56), and a
     session that is not in a tmux pane (the applet has no read verb at all). Adding a fifth
-    consumer of the capture is fine; widening any of these four is a boundary change.
+    consumer of the capture is fine; widening any of these four is a boundary change. The second
+    consumer is `screen_prompt_kind` (invariant 77) and it obeys the same rule: request path only.
 
 75. **One native prompt has one server-owned identity, and an answered prompt is fenced.**
     A prompt can be evidenced two ways — the hook capture's `hook-<ms>` nonce and, for permissions,
@@ -1190,6 +1196,28 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     applet, so "return in ~10 ms and poll a receipt" buys nothing once the terminal switch lands.
     Durability was the other half of that plan and stands on its own.
 
+77. **Before writing prompt keys, Fleet looks at the screen.** `fleetdash/screen.py` is a pure
+    classifier: pane text in, one of `question` / `permission` / `trust` / `input` / `unknown` out.
+    Every marker in it was read off a real `capture-pane -p` frame from Claude Code v2.1.219 in a
+    disposable tmux sandbox (2026-07-24) — the same discipline invariant 4's key map was built with,
+    and for the same reason. The **footer** is the discriminator, because the option list looks
+    nearly identical on all three modal surfaces: `Enter to select · ↑/↓ to navigate · Esc to cancel`
+    is the ask, `Esc to cancel · Tab to amend` is a permission prompt, `Enter to confirm · Esc to
+    cancel` plus `I trust this folder` is the trust dialog, and a lone `❯` directly under a rule is
+    the empty input box. Body markers (`Chat about this`, `Do you want to`) catch a frame whose
+    footer scrolled off. Only the last `TAIL_LINES` rows are read: a question answered ten screens
+    ago must not classify the pane.
+    `Engine.screen_prompt_kind(reg, tty)` captures and classifies; `act()` uses it to refuse
+    `option`/`multiq`/`permission`/`dismiss` whose widget is not the one on screen, with
+    `code:"screen_mismatch"` and nothing written. That closes invariant 5's oldest guess: digits
+    typed into an ordinary input box become a MESSAGE, and the registry word was the only thing
+    standing between Fleet and that. The `trust` case is sharper still — digits there would accept
+    Claude's folder-trust dialog, which Fleet must never do (invariant 21).
+    **`unknown` and `None` mean NO EVIDENCE, never "no prompt".** A session outside tmux, an
+    unreadable pane, or a mid-turn screen all return None and leave the previous behaviour exactly
+    as it was; the gate can only ever refuse, never authorize. It runs on the REQUEST path only —
+    one capture per prompt answer, never on the scan (invariant 74).
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1227,9 +1255,15 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
   box-drawing characters through `grep`/`cat -v` hits illegal byte sequences.
 - **Live interactive test protocol:** the building session asks a real AskUserQuestion; the
   user answers it FROM the dashboard. The recorded answer proves (or pinpoints) the loop.
-- **Screen ground truth:** to see what a TUI actually displays (keybinding hints, prompt
-  layout), arm a background until-loop watcher on the pending file, then `contents of session`
-  via osascript from an iTerm-child shell (TCC auto-allowed there, unlike the daemon).
+- **Screen ground truth (tmux rig).** To see what a TUI actually displays: start a SEPARATE tmux
+  server/session (never the operator's), run a disposable `claude --model haiku` in a scratch dir,
+  drive it with `tmux send-keys -t <session>:0.0`, and read frames with `tmux capture-pane -p -t
+  <session>:0.0`. Note the target form: `-t =<name>` selects a SESSION (`has-session`,
+  `new-window`), but `send-keys`/`capture-pane` want a PANE (`<name>:0.0`). A scratch dir with no
+  trusted ancestor also gives you the folder-trust dialog for free. Kill the session and remove the
+  dir afterwards. The old osascript/iTerm technique still works where tmux is absent.
+  Watch the quota: the statusline in the capture shows the weekly percentage, and each turn spends
+  it.
 - Applet rebuild: README recipe; ad-hoc re-sign may re-prompt the automation grant once.
 - **Browser specs: the service worker is OFF by default.** `reset()` in `tests/browser/fleet.spec.js`
   stubs `navigator.serviceWorker.register` unless a spec passes `{serviceWorker:true}`. A registered
@@ -1262,6 +1296,9 @@ because they are also spawned directly as scripts by absolute path.
   (KEY_TOOLS, IMAGE_UPLOAD_*, DANGER_COMMANDS, BUILTIN_COMMANDS, CLAUDE_MODELS/EFFORTS).
 - `fleetdash/placement.py` — Now-queue classification: `classify_placement`,
   `requests_reply`, `completed_handoff`, closed placement, handoff redaction (invariant 31).
+- `fleetdash/screen.py` — pure, stdlib-only classifier for a captured Claude TUI screen
+  (invariant 77). Text in, one label out; it captures nothing itself, so it can never put a
+  subprocess on a hot path. Markers come from real sandbox frames, never from memory.
 - `fleetdash/tail.py` — Tail (incremental jsonl fold + convo/files ring buffers +
   usage_stats counters).
 - `fleetdash/engine.py` — the Engine class (imports + `__init__` + class
@@ -1501,8 +1538,14 @@ TCC Automation grant (injector→iTerm2; the applet transport only).
 
 ## Roadmap / known gaps
 
-- Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
-  per variant; deny=Esc chosen because it cancels every variant).
+- Permission-prompt injection: ONE real variant now verified (sandbox, v2.1.219, 2026-07-24) — a
+  file-write prompt rendering `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for
+  this session` / `3. No` under `Esc to cancel · Tab to amend`. The default
+  `permission_keys` (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for it, and a bare digit
+  instant-selects there exactly as it does on a single-select ask (invariant 4). Other variants
+  (Bash commands, MCP tools) still have unobserved wording for row 2, so per-variant tuning remains
+  possible; deny=Esc stays the safe choice because it cancels every variant. Invariant 77's
+  classifier now makes the rendered variant observable, which is what made this testable at all.
 - Screen peek is BUILT (invariant 74): the workspace Details section reads a tmux session's live
   pane on demand, which is what a stalled session's tool output looks like when the transcript
   cannot say. Still open from W5-T2a of
