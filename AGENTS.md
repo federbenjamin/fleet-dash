@@ -1185,6 +1185,13 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     disproved (241 ms per-pane versus 5.6 ms batched, 49 panes). What survives unchanged, and
     matters more, is that the scan keeps only a derived label: raw screen text is still returned
     by this route alone, and is never cached, logged, or snapshotted.
+    A third consumer is `Engine.prompt_options` / `GET /api/prompt-options`, which reuses this
+    exact capture and every one of its four refusals, returning only the numbered option ROWS a
+    live prompt is rendering. It exists because Fleet's "always allow" button had one fixed
+    label while row 2 grants something different in every variant — a project-wide directory
+    grant, a session-only read, a settings edit (all captured on v2.1.220). It is on the REQUEST
+    path and must stay off the snapshot: those strings are screen text, and invariant 78's rule
+    is that the scan may derive a label but may not publish a terminal.
 
 75. **One native prompt has one server-owned identity, and an answered prompt is fenced.**
     A prompt can be evidenced two ways — the hook capture's `hook-<ms>` nonce and, for permissions,
@@ -1492,7 +1499,10 @@ because they are also spawned directly as scripts by absolute path.
   GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk)
-  + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74),
+  + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74)
+  + `/api/prompt-options?sid=` (token-gated: the option ROWS a live prompt is rendering —
+    the same capture and the same four refusals as `/api/screen`, parsed server-side so the
+    client never receives whole-pane text; request path only, never the snapshot),
   + token-gated `/api/act-receipt?rid=` (durable action receipts, invariant 76),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
   `/api/notification-policy`, `/api/push/config`, and `/api/push/devices`; POST `/api/act` +

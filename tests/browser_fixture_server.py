@@ -807,6 +807,17 @@ def set_scenario(name):
             "decisions": ["allow", "always", "deny", "cancel"]})
         if name == "approval-slow":
             STATE["delay_quick_response"] = 0.75
+    elif name in ("claude-permission", "claude-permission-blind"):
+        session = claude_session()
+        session.update(state="needs_you", normalized_state="needs_you",
+                       reg_status="waiting", ui_group="needs_you",
+                       reason_label="Permission needed",
+                       pending={"kind": "permission", "nonce": "cp1",
+                                "request_id": "req-cp1", "tool": "Bash",
+                                "input_summary": "touch probe.txt",
+                                "decisions": ["allow", "always", "deny"]})
+        if name.endswith("blind"):
+            STATE["prompt_options_blind"] = True
     elif name == "elicitation":
         session.update(state="needs_you", pending={"kind": "elicitation", "nonce": "e1",
             "server": "deploy", "message": "Choose deployment targets", "fields": [
@@ -1321,6 +1332,20 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True, "session_id": sid, "transport": "tmux",
                     "truncated": False, "captured_at": time.time(),
                     "lines": ["❯ 1. [ ] Red", "  2. [ ] Green", "  <script>x</script>"]})
+            if route == "/api/prompt-options":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                sid = (query.get("sid") or [""])[0]
+                if not sid.startswith("claude") or STATE.get("prompt_options_blind"):
+                    return self.json_reply({
+                        "ok": False, "code": "screen_unavailable",
+                        "error": "this session is not running in a tmux pane"})
+                return self.json_reply({
+                    "ok": True, "session_id": sid, "kind": "permission",
+                    "options": ["Yes",
+                                "Yes, and always allow access to fleet-dash/ "
+                                "from this project",
+                                "No"]})
             if route == "/api/act-receipt":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)

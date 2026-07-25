@@ -584,6 +584,30 @@ class ContextOps:
                 "lines": capture["lines"], "truncated": capture["truncated"],
                 "captured_at": time.time()}
 
+    def prompt_options(self, sid):
+        """The option rows the session's terminal is rendering for a live prompt.
+
+        Exists for one reason: every permission variant puts Yes/always/No in
+        rows 1/2/3, but row 2's WORDING differs sharply — a Bash prompt offers a
+        project-wide directory grant, a Read prompt a session-only read, an
+        Overwrite prompt a settings edit (all three captured live on v2.1.220).
+        A fixed "always allow" button describes three different powers, and the
+        dashboard never showed the sentence the user was actually agreeing to.
+
+        Request path only, and deliberately NOT part of the fleet snapshot: these
+        strings come off a terminal, and invariant 78's rule is that the scan may
+        derive a label but may not publish screen text — the snapshot is cached
+        on the device by the service worker. Every refusal `session_screen`
+        makes applies here unchanged, because this is that same capture.
+        """
+        screen = self.session_screen(sid)
+        if not screen.get("ok"):
+            return screen
+        lines = screen["lines"]
+        return {"ok": True, "session_id": str(sid),
+                "kind": screenlib.classify_screen(lines),
+                "options": screenlib.prompt_options(lines)}
+
     def screen_prompt_kind(self, reg, tty):
         """What the session's terminal is showing right now, or None.
 
