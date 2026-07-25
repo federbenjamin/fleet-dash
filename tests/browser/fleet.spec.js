@@ -1018,6 +1018,38 @@ test('the fleet poll is served compressed', async ({ page }) => {
   expect(transfer.encoded).toBeLessThan(transfer.decoded);
 });
 
+test('an unchanged card is never rewritten, so nothing moves under your finger', async ({ page }) => {
+  // Every render used to write cardTop() into every .ctop, so 48 cards parsed
+  // and re-laid out twice a second whether anything had changed or not. Measured
+  // here as DOM mutations: 8 across four idle polls with two cards, now 0.
+  await reset(page);
+  await page.evaluate(() => {
+    globalThis.__cardWrites = 0;
+    const observer = new MutationObserver(records => {
+      for (const record of records)
+        if (record.target.classList?.contains('ctop') || record.target.closest?.('.ctop'))
+          globalThis.__cardWrites += 1;
+    });
+    for (const selector of ['#sessions', '#needsyou', '#working', '#pinned']) {
+      const node = document.querySelector(selector);
+      if (node) observer.observe(node, { childList: true, subtree: true, characterData: true });
+    }
+  });
+  for (let index = 0; index < 4; index += 1) await page.evaluate(() => tick());
+  await page.waitForTimeout(200);
+  expect(await page.evaluate(() => globalThis.__cardWrites)).toBe(0);
+
+  // …and a card whose content genuinely changes still repaints
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.last_msg = { ...(session.last_msg || {}), text: 'a brand new last message' };
+    render(last, true);
+  });
+  expect(await page.evaluate(() => globalThis.__cardWrites)).toBeGreaterThan(0);
+  await expect(page.locator('[data-sid="codex:thread-one"]'))
+    .toContainText('a brand new last message');
+});
+
 test('render work coalesces to one paint per frame', async ({ page }) => {
   await reset(page, 'claude-question-slow');
   await page.evaluate(() => openSession('claude-one'));

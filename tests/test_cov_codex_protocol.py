@@ -570,7 +570,7 @@ class DirectTransportTest(unittest.TestCase):
 
 
 class StartupTest(unittest.TestCase):
-    def _ok_process(self):
+    def _ok_process(self, alive=2):
         class Proc:
             def __init__(self):
                 self.stdin = FakeStdin()
@@ -580,7 +580,7 @@ class StartupTest(unittest.TestCase):
 
             def _gen(self):
                 yield json.dumps({"id": 1, "result": {}}) + "\n"
-                self._gate.wait(2)  # stay alive through initialization
+                self._gate.wait(alive)  # stay alive through initialization
 
             def poll(self):
                 return self.returncode
@@ -592,10 +592,13 @@ class StartupTest(unittest.TestCase):
         return Proc()
 
     def test_startup_callable_runs_then_transport(self):
+        # Generous timeout on purpose: this asserts ORDER (startup callable before
+        # transport), not speed, and a 1s budget intermittently expired when the
+        # suite ran under coverage instrumentation.
         events = []
         client = CodexAppServer(
-            command=["/bin/false", "app-server"], timeout=1,
-            process_factory=lambda *a, **k: self._ok_process(),
+            command=["/bin/false", "app-server"], timeout=10,
+            process_factory=lambda *a, **k: self._ok_process(alive=30),
             startup=lambda: events.append("startup"))
         client.start()
         self.assertEqual(events, ["startup"])

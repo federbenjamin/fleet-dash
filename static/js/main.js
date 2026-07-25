@@ -100,8 +100,8 @@ function render(f,force){
   }).join('');
   const ledgerProblem=f.ledger&&f.ledger.ok===false?
     `<div class="provideralert"><b>Local data recovered</b> — ${esc(f.ledger.error||'Fleet started a clean local ledger after a storage failure.')}${f.ledger.quarantine?` Preserved as <code>${esc(f.ledger.quarantine)}</code>.`:''}</div>`:'';
-  $('#providerstate').innerHTML=ledgerProblem+runtimeWarnings+providerProblems.map(([provider,value])=>
-    `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join('');
+  setHtml($('#providerstate'),ledgerProblem+runtimeWarnings+providerProblems.map(([provider,value])=>
+    `<div class="provideralert"><b>${esc(provider)} unavailable</b> — ${esc(value.error||'provider connection failed')}. Showing last known session placement when available.</div>`).join(''));
   const ae=document.activeElement;
   const typingNew=ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')&&$('#newsess').contains(ae);
   if(force||!touching()){
@@ -125,13 +125,13 @@ function render(f,force){
       renderQueue($('#sessions'),unpinned.filter(s=>s.ui_group==='available'&&!inboxSessionIds.has(s.session_id)),
         'Available','ready for another message','available',true);
     }
-    if(!typingNew)$('#newsess').innerHTML=newSection();
+    if(!typingNew)setHtml($('#newsess'),newSection());
     if(currentRoute==='search'&&searchFilters.kind==='session')renderSearchResults();
     if(currentRoute==='workstreams')renderWorkstreams(workstreamData);
     if(currentRoute==='notifications')renderNotifications();
     renderSavedViews('now');
     renderBudgetPanel();
-    $('#rollup').innerHTML=insightsSection();
+    setHtml($('#rollup'),insightsSection());
   }
   checkSpawn(f);
   // Pass `force` through: a pointerdown keeps touching() true for 800ms, so a

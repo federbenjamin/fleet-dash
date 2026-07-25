@@ -294,8 +294,15 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
       (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'')+
       (sessionView?.sid===s.session_id&&workspaceDocked()?' paneopen':'');
     card.style.setProperty('--session-card-lines',String(frame.lines));
-    const top=card.querySelector('.ctop'),focusAnchor=cardTopFocusAnchor(top);
-    top.innerHTML=cardTop(s);restoreCardTopFocus(top,focusAnchor);
+    // Rewriting identical HTML is what made untouched cards re-layout — and
+    // move under your finger — on every 2s poll and every user action. The
+    // string is cheap; the innerHTML parse plus relayout of 48 cards is not.
+    // Skipping an unchanged write also preserves focus and scroll for free.
+    const top=card.querySelector('.ctop'),html=cardTop(s);
+    if(top.__setHtml!==html){
+      const focusAnchor=cardTopFocusAnchor(top);
+      setHtml(top,html);restoreCardTopFocus(top,focusAnchor);
+    }
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
   list.forEach((s,i)=>{

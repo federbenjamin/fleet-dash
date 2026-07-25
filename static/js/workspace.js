@@ -622,10 +622,7 @@ function renderParentWorkspaceAction(s,c,{pending=true,showFiles=false,note=''}=
   // for no change at all. Skipping an unchanged write keeps them, and is the
   // difference between a drawer that survives a poll and one that is rebuilt
   // under the pointer (invariant 60).
-  if(act.__actionHtml!==html){
-    act.__actionHtml=html;
-    keepSessionActionScroll(act,()=>{act.innerHTML=html;});
-  }
+  if(act.__setHtml!==html)keepSessionActionScroll(act,()=>{setHtml(act,html);});
   if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
 }
 function chosenWorkspaceFile(files){

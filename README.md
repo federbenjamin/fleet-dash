@@ -611,7 +611,7 @@ applet types into the iTerm session matched by tty). See
 recorded in `ledger.db` (sqlite). A separate low-priority `search_index.py --worker` process
 incrementally indexes Claude/Codex transcripts and provider-referenced artifacts into `search.db`;
 the HTTP process uses a separate WAL reader for authenticated search and exact-context requests.
-Fleet is also an installable PWA. Its root-scoped service worker refreshes the app shell from the
+The browser app repaints only what changed: an idle poll rewrites no session cards at all, so untouched cards never re-layout and nothing shifts under your finger while you are reading or tapping. Fleet is also an installable PWA. Its root-scoped service worker refreshes the app shell from the
 network first and keeps the last successful `/api/fleet` snapshot on that device. After temporary
 connection loss or a reload, Fleet opens the cached dashboard immediately as explicitly offline and
 read-only except for its device-local ordinary-message queue. Queued messages send in order after a

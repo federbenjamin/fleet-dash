@@ -1435,7 +1435,16 @@ because they are also spawned directly as scripts by absolute path.
   an element the render creates — an inline status message — must go through the `after`
   callback, not the next line**, or the deferred paint overwrites it; `settingMessage`,
   the mode/permission "changing…" notes, and `recordInputFeedback` (which must measure when
-  the UI actually changed) all do. **`render()` passes `force` down to `renderSession(force)`**:
+  the UI actually changed) all do.
+  **Never assign HTML that has not changed.** An identical `innerHTML` write still tears the
+  subtree down, re-parses it, drops focus and forces relayout. `setHtml(el, html)`
+  (`ui-utils.js`) skips it and returns whether it wrote; `reconcileCards` guards each `.ctop`
+  and `renderParentWorkspaceAction` guards `#sact` the same way, so an idle poll now performs
+  ZERO card writes (measured: 8 mutations across four polls with two cards → 0; production
+  renders 48). This is what stops untouched cards re-laying out — and moving under your
+  finger — every two seconds. It supersedes the audit's `uiRefresh(sid)` scoping: the same
+  outcome with no call-site changes and no stale cross-card aggregates.
+  A browser spec asserts the zero and that a genuinely changed card still repaints. **`render()` passes `force` down to `renderSession(force)`**:
   a `pointerdown` keeps `touching()` true for 800ms, so without it the workspace pane deferred the
   repaint that the tap itself requested — an answered permission kept its live buttons for most of
   a second. The unforced poll render still defers during a gesture, and the question drawer keeps
