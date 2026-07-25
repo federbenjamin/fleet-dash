@@ -459,6 +459,33 @@ class ScanStateTests(EngineFixture):
                        if s["session_id"] == "same")
         self.assertIsNone(session["pending"])
 
+    def test_a_quiet_fleet_never_looks_at_a_terminal(self):
+        """The eligible set is normally empty, so the scan spawns nothing
+        (invariant 78)."""
+        self.write_registry(status="idle")
+        with mock.patch.object(self.engine, "_tmux_capture_many") as capture:
+            self.engine.scan()
+        capture.assert_not_called()
+
+    def test_a_disputed_prompt_puts_its_session_on_the_watch_list(self):
+        """A hook capture while the registry disagrees is exactly the case
+        invariant 5 had to guess about."""
+        self.write_registry(status="idle")
+        self.engine.hook_pending = lambda sid, status: {
+            "kind": "question", "nonce": "n", "questions": []}
+        observed = []
+        self.engine.observe_screens = lambda rows: observed.extend(rows) or {}
+        self.engine.scan()
+        self.assertTrue(any(sid == "same" and eligible
+                            for sid, _pid, eligible in observed), observed)
+
+    def test_an_observed_label_reaches_the_session_payload(self):
+        self.write_registry(status="idle")
+        self.engine.observe_screens = lambda rows: {"same": "trust"}
+        session = next(s for s in self.engine.scan()["sessions"]
+                       if s["session_id"] == "same")
+        self.assertEqual(session["screen_state"], "trust")
+
     def test_transcript_pending_permission(self):
         self.write_registry(status="idle")
         self.append_transcript({"type": "assistant",

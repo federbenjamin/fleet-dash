@@ -101,7 +101,7 @@ act freshness re-poll waits ~32 ms instead of up to the p95 1141 ms it used to. 
 Numbers are stable identifiers (code comments cite "invariant N") — never renumber;
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
-- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75, 77
+- Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75, 77, 78
 - Applet, transports & click latency: 3, 24, 25, 73, 74
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
@@ -170,10 +170,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    same reason; the grace is wide because nothing re-surfaces a dropped capture any more. `interrupt` (Esc mid-turn) has the mirror gate: it
    requires status `busy`, or `shell` plus a freshly re-polled mid-tool transcript, so an Esc can
    never land in an idle session's input box. Close also interrupts an active shell before SIGTERM.
-   **Where a screen is readable, the guess is replaced by evidence** — invariant 77's classifier
-   refuses any prompt answer whose widget is not the one the pane is rendering. That is an extra
-   refusal, never an extra permission: the registry gates above all still apply, and a session
-   outside tmux behaves exactly as before.
+   **Where a screen is readable, the guess is replaced by evidence.** Invariant 77's classifier
+   refuses any prompt answer whose widget is not the one the pane is rendering, and invariant 78's
+   scan-side observation settles the grace period itself: a rendered question survives any age, and
+   a capture whose pane is demonstrably back at its input box is dropped immediately instead of
+   rendering for the full `GHOST_QUESTION_GRACE`. Both are extra refusals, never extra permissions:
+   the registry gates above all still apply, and a session outside tmux behaves exactly as before.
 6. **`http.server` self.path includes the query string.** Route on `path.split("?",1)[0]`.
 7. **Agent state semantics: "stalled" means frozen mid-TOOL, nothing else.** An agent is
    working only while something is in flight — a `tool_use` awaiting its result, or a
@@ -1137,8 +1139,13 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     text, and focus — invariant 30), a production session read from staging (a live terminal read
     is a capability, and staging holds none over sessions it did not start — invariant 56), and a
     session that is not in a tmux pane (the applet has no read verb at all). Adding a fifth
-    consumer of the capture is fine; widening any of these four is a boundary change. The second
-    consumer is `screen_prompt_kind` (invariant 77) and it obeys the same rule: request path only.
+    consumer of the capture is fine; widening any of these four is a boundary change.
+    Two consumers exist: `screen_prompt_kind` (invariant 77), request path only, and the scan's
+    batched observation pass (invariant 78). The scan pass is the one amendment to "never on the
+    scan path" — it was written on an ESTIMATE of per-pane subprocess cost that measurement
+    disproved (241 ms per-pane versus 5.6 ms batched, 49 panes). What survives unchanged, and
+    matters more, is that the scan keeps only a derived label: raw screen text is still returned
+    by this route alone, and is never cached, logged, or snapshotted.
 
 75. **One native prompt has one server-owned identity, and an answered prompt is fenced.**
     A prompt can be evidenced two ways — the hook capture's `hook-<ms>` nonce and, for permissions,
@@ -1207,7 +1214,8 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     the empty input box. Body markers (`Chat about this`, `Do you want to`) catch a frame whose
     footer scrolled off. Only the last `TAIL_LINES` rows are read: a question answered ten screens
     ago must not classify the pane.
-    `Engine.screen_prompt_kind(reg, tty)` captures and classifies; `act()` uses it to refuse
+    `Engine.screen_prompt_kind(reg, tty)` captures and classifies for the request path, and
+    invariant 78's `observe_screens` does the same in batch for the scan; `act()` uses the former to refuse
     `option`/`multiq`/`permission`/`dismiss` whose widget is not the one on screen, with
     `code:"screen_mismatch"` and nothing written. That closes invariant 5's oldest guess: digits
     typed into an ordinary input box become a MESSAGE, and the registry word was the only thing
@@ -1217,6 +1225,32 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     unreadable pane, or a mid-turn screen all return None and leave the previous behaviour exactly
     as it was; the gate can only ever refuse, never authorize. It runs on the REQUEST path only —
     one capture per prompt answer, never on the scan (invariant 74).
+
+78. **The scan may look at a terminal; it may not publish one.** `observe_screens`
+    (`engine_context.py`) takes one batched `capture-pane` pass per scan over the sessions Fleet
+    is *guessing* about, classifies each with invariant 77's pure classifier, and keeps a LABEL —
+    `question` / `permission` / `trust` / `input` — in `_screen_states`. Raw screen text is never
+    retained, never snapshotted, and still reachable only through the on-request `/api/screen`
+    (invariant 74). That line is load-bearing: the fleet snapshot is cached on the device by the
+    service worker (invariant 44), and terminal contents do not belong in an offline cache.
+    **Batching is what makes this affordable, and it is why invariant 74's scan-path ban was
+    wrong.** Measured 2026-07-24, tmux 3.7b, 49 panes: **241 ms** as one tmux client invocation per
+    pane, **5.6 ms** for all 49 in one invocation carrying a command sequence — the cost is forking
+    the client, not rendering the grid. `_tmux_capture_many` frames the batched output with
+    `display-message -p` markers carrying an INDEX, never a pane id: display-message expands `%`
+    and `#`, so `%12` comes back as `12` and would silently collide.
+    **Eligibility is the real budget.** Only two cases qualify: a hook capture whose registry
+    disagrees that a prompt is open (the ghost-question case, invariant 5), and a session that has
+    written no transcript at all, which is exactly what sitting on the folder-trust dialog looks
+    like. Everything else is skipped, so the eligible set is normally EMPTY and the pass spawns
+    nothing. A label is re-taken at most every `screen_observe_seconds` (60); `screen_observe: false`
+    disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
+    for a session already worth looking at — once per session, never per scan.
+    Consumers: `hook_pending` keeps a rendered question at any age and drops a capture the moment
+    the pane is demonstrably back at its input box, instead of waiting out
+    `GHOST_QUESTION_GRACE` on a guess; and a `trust` label surfaces on the card, which is REPORTING
+    only — there is no control that would answer that dialog, because accepting folder trust is
+    the user's call and always the Mac's (invariant 21).
 
 ## Dev workflow
 
@@ -1327,8 +1361,10 @@ because they are also spawned directly as scripts by absolute path.
   `engine_spawn` (spawn/handoff, iTerm applet exchange, settings).
 - `fleetdash/engine_tmux.py` — `TmuxOps`: bounded tmux-socket enumeration under
   `paths.TMUX_SOCKETS`, the cached tty→pane map, per-key `send-keys -l` delivery,
-  spawn into the operator's session, pane focus, and the read-only `capture-pane`
-  screen read (`_tmux_capture`, invariant 74). Selection and failure semantics are
+  spawn into the operator's session, pane focus, the read-only `capture-pane`
+  screen read (`_tmux_capture`, invariant 74), and its batched many-pane form
+  (`_tmux_capture_many`, invariant 78 — 5.6 ms for 49 panes against 241 ms
+  per-pane). Selection and failure semantics are
   invariant 73 and invariant 66; the module header records exactly what was verified
   against tmux 3.7b, so the encoding does not have to be re-derived.
 - `fleetdash/web_push.py` + `fleetdash/web_push_worker.js` — private key store, asynchronous

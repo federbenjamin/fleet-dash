@@ -122,6 +122,9 @@ class Engine(StagingOps,
         self._answered_requests = {}    # sid -> {request_id, at}
         self._request_identity_guard = threading.Lock()
         self._act_receipt_prune_due = 0.0
+        # sid -> {state, at}: the last screen label the scan observed
+        # (invariant 78). Labels only; raw screen text is never retained.
+        self._screen_states = {}
         # Receipt ownership is per-call-stack: only the outermost act()
         # binds one (engine_act.act), and nesting is a thread fact.
         self._act_depth = threading.local()

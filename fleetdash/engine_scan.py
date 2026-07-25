@@ -700,6 +700,7 @@ class ScanOps:
         sessions = []
         claude_tails = {}
         live_claude_ids = set()
+        screen_watch = []
         # Tails are stateful byte offsets: every fold, here and in act(), stays
         # serialized by scan_lock. Only this loop folds them, so only this loop
         # holds it (invariant 24/43); the phases after it touch no Tail.
@@ -708,7 +709,8 @@ class ScanOps:
         held_started = time.perf_counter()
         self._scan_fold_wait_ms = (held_started - fold_wait_started) * 1000
         try:
-            self._scan_claude_sessions(sessions, claude_tails, live_claude_ids, now, cfg)
+            self._scan_claude_sessions(sessions, claude_tails, live_claude_ids, now, cfg,
+                                       screen_watch)
         finally:
             self.scan_lock.release()
         # Published as `scan_lock_held_ms`: how long an act() re-poll could have
@@ -716,10 +718,18 @@ class ScanOps:
         self._scan_lock_held_ms = (time.perf_counter() - held_started) * 1000
         phase("claude")
         return self._scan_after_fold(sessions, claude_tails, live_claude_ids,
-                                     now, cfg, phase, phases)
+                                     now, cfg, phase, phases, screen_watch)
 
-    def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg):
-        """Fold every live Claude transcript. Runs under scan_lock."""
+    def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg,
+                              screen_watch=None):
+        """Fold every live Claude transcript. Runs under scan_lock.
+
+        `screen_watch` collects (session_id, pid, eligible) for the batched screen
+        observation that runs later, unlocked (invariant 78). Eligibility is
+        decided here because this is where the evidence lives; the look itself
+        must not happen under the lock.
+        """
+        watch = screen_watch if screen_watch is not None else []
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
             live_claude_ids.add(sid)
@@ -762,6 +772,10 @@ class ScanOps:
                         "spawn_agent": True, "relay_agent": True,
                         "account_usage": True, "exact_cost": True},
                 })
+                # No transcript at all is exactly what a session blocked on the
+                # folder-trust dialog looks like: Claude writes nothing until the
+                # first turn. Worth a look.
+                watch.append((sid, reg.get("pid"), True))
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
@@ -785,6 +799,11 @@ class ScanOps:
             pending = self.hook_pending(sid, reg_status)
             confirmed_waiting = self.waiting_confirmed(
                 sid, reg_status, now, pending=pending)
+            # The ghost-question case, and the only one invariant 5 ever had to
+            # guess about: a hook capture says a prompt is open while the registry
+            # says the session is not waiting on one.
+            watch.append((sid, reg.get("pid"),
+                          bool(pending) and reg_status != "waiting"))
             turn_starting = self._claude_turn_fenced(sid, reg_status, main_path, mt)
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
@@ -972,7 +991,7 @@ class ScanOps:
             })
 
     def _scan_after_fold(self, sessions, claude_tails, live_claude_ids,
-                         now, cfg, phase, phases):
+                         now, cfg, phase, phases, screen_watch=None):
         """Everything the scan does once no Tail is touched again.
 
         Runs WITHOUT scan_lock. The single later Tail read — the status strip —
@@ -983,6 +1002,15 @@ class ScanOps:
             if sid in live_claude_ids
         }
         self.prune_act_receipts(now)     # rate-limited internally (invariant 76)
+        # One batched capture-pane for the whole eligible set (invariant 78).
+        # Measured 2026-07-24: 5.6 ms for 49 panes batched, against 241 ms as one
+        # tmux invocation per pane — the cost is forking the client, not reading
+        # the grid, which is what makes a fleet-wide look affordable here.
+        screen_states = self.observe_screens(screen_watch or [])
+        for session in sessions:
+            state = screen_states.get(session.get("session_id"))
+            if state:
+                session["screen_state"] = state
         with self.config_lock:
             control_overrides = {
                 sid: value for sid, value in self._claude_control_overrides.items()

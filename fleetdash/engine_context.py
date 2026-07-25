@@ -184,6 +184,17 @@ class ContextOps:
             # second identity. `act()` still refuses any prompt answer whose
             # registry status is not `waiting`, so a capture that renders past its
             # welcome still cannot be answered.
+            # A look at the terminal beats both the registry word and the clock
+            # (invariant 78). The label is at most one observation window old, so
+            # it settles the grace period rather than replacing the timing rules:
+            # a rendered question survives any age, and a session demonstrably
+            # back at its input box is a ghost NOW, not in 45 seconds.
+            observed = self.observed_screen(sid)
+            if observed == "question":
+                return {"kind": "question", "nonce": d["nonce"],
+                        "questions": d.get("questions", []), "_ts": d.get("ts")}
+            if observed in ("input", "trust") and reg_status != "waiting":
+                return None
             if reg_status != "waiting" and age > self.GHOST_QUESTION_GRACE:
                 return None
             return {"kind": "question", "nonce": d["nonce"], "questions": d.get("questions", []),
@@ -590,6 +601,61 @@ class ContextOps:
             return None
         kind = screenlib.classify_screen(capture.get("lines") or [])
         return None if kind == screenlib.UNKNOWN else kind
+
+    def observe_screens(self, rows):
+        """One batched look at the terminals Fleet is guessing about (invariant 78).
+
+        `rows` is [(session_id, pid, eligible)] built by the scan. Only sessions
+        the scan cannot describe confidently are looked at — a hook capture whose
+        registry disagrees about a prompt, or a session that has written no
+        transcript at all and may be sitting on the folder-trust dialog.
+        Everything else is skipped, so the eligible set is normally EMPTY and this
+        whole pass costs one loop over a list of tuples.
+
+        The pass derives a LABEL and nothing else. Raw screen text stays behind
+        the on-request `/api/screen` route: the scan may look at a terminal, it
+        may not publish one (invariant 74). That distinction is load-bearing —
+        the fleet snapshot is cached on the device by the service worker, and
+        terminal contents do not belong in an offline cache.
+        """
+        now = time.time()
+        window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
+        if not self.cfg.get("screen_observe", True):
+            self._screen_states.clear()
+            return {}
+        panes = {}
+        for sid, pid, eligible in rows:
+            if not eligible or not pid:
+                continue
+            seen = self._screen_states.get(sid)
+            if seen and now - seen["at"] < window:
+                continue            # still fresh; the label carries over
+            # _tty_for_pid shells out on a cache MISS, so it is resolved only for
+            # a session already known to be worth looking at. A pid's tty never
+            # changes, so that is once per session, not once per scan.
+            tty = self._tty_for_pid(pid)
+            pane = self._tmux_target_for_tty(f"/dev/{tty}") if tty else None
+            if pane:
+                panes[sid] = pane
+        if panes:
+            captured = self._tmux_capture_many(
+                list(panes.values()), max_rows=screenlib.TAIL_LINES)
+            for sid, pane in panes.items():
+                frame = captured.get(pane["pane_id"])
+                if frame is None:
+                    continue
+                self._screen_states[sid] = {
+                    "state": screenlib.classify_screen(frame["lines"]),
+                    "at": now}
+        live = {sid for sid, _pid, _eligible in rows}
+        for sid in [key for key in self._screen_states if key not in live]:
+            self._screen_states.pop(sid, None)
+        return {sid: value["state"] for sid, value in self._screen_states.items()}
+
+    def observed_screen(self, sid):
+        """The most recent screen label for one session, or None if unobserved."""
+        seen = self._screen_states.get(sid)
+        return seen["state"] if seen else None
 
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""

@@ -219,6 +219,71 @@ class TmuxOps:
             lines.pop()             # trailing blanks are unused screen, not content
         return {"ok": True, "lines": lines, "truncated": truncated}
 
+    # One marker per pane. `display-message -p` runs inside the same command
+    # sequence and writes to the same stdout, which is the only framing
+    # capture-pane offers. The marker carries an INDEX, never the pane id:
+    # display-message expands `%` and `#` in its format string, so `%12` comes
+    # back as `12` and would silently collide.
+    CAPTURE_MARK = "\x1efleet-pane:"
+
+    def _tmux_capture_many(self, panes, max_rows=200, max_columns=400):
+        """Capture many panes in ONE tmux client invocation per socket.
+
+        Measured 2026-07-24 on tmux 3.7b, 49 panes: 241 ms as one client
+        invocation per pane, **5.6 ms** batched. The whole cost is forking the
+        tmux client, not rendering the grid — which is why a fleet-wide
+        observation pass is affordable at all (invariants 73, 74).
+
+        Returns {pane_id: {"lines": [...], "truncated": bool}} for the panes that
+        answered. A pane that vanished mid-call is simply absent; that is normal,
+        not an error.
+        """
+        out = {}
+        if not self._tmux_command():
+            return out
+        by_socket = {}
+        for pane in panes or []:
+            by_socket.setdefault(pane["socket"], []).append(pane)
+        for socket_path, group in by_socket.items():
+            group = group[:self.TMUX_MAX_PANES]
+            args = []
+            for index, pane in enumerate(group):
+                if index:
+                    args.append(";")
+                args += ["display-message", "-p", f"{self.CAPTURE_MARK}{index}",
+                         ";", "capture-pane", "-p", "-t", pane["pane_id"]]
+            result = self._tmux_run(socket_path, args,
+                                    timeout=self.TMUX_WRITE_TIMEOUT)
+            if result is None or result.returncode:
+                continue
+            for index, rows in self._split_capture(result.stdout or "").items():
+                if index >= len(group):
+                    continue
+                truncated = len(rows) > max_rows
+                lines = [_CONTROL.sub(" ", row).rstrip()[:max_columns]
+                         for row in rows[-max_rows:]]
+                while lines and not lines[-1]:
+                    lines.pop()
+                out[group[index]["pane_id"]] = {"lines": lines,
+                                                "truncated": truncated}
+        return out
+
+    @classmethod
+    def _split_capture(cls, text):
+        """Slice one batched stdout back into per-pane row lists by marker."""
+        blocks, current = {}, None
+        for line in text.split("\n"):
+            if line.startswith(cls.CAPTURE_MARK):
+                try:
+                    current = int(line[len(cls.CAPTURE_MARK):].strip())
+                except ValueError:
+                    current = None
+                    continue
+                blocks[current] = []
+            elif current is not None:
+                blocks[current].append(line)
+        return blocks
+
     def _tmux_focus_pane(self, pane):
         """Select the pane, then raise the terminal application generically.
 

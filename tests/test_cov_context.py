@@ -903,6 +903,127 @@ class ScreenPromptKindTest(EngineCovBase):
         target.assert_called_once_with("/dev/ttys1")
 
 
+class ObserveScreensTest(EngineCovBase):
+    """The scan's batched look at terminals it is guessing about (invariant 78)."""
+
+    ASK = ["❯ 1. Red", "Enter to select · ↑/↓ to navigate · Esc to cancel"]
+    IDLE = ["────────", "❯", "────────"]
+
+    def _arm(self, lines):
+        pane = {"socket": "/tmp/s", "pane_id": "%1"}
+        return (mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys9"),
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value=pane),
+                mock.patch.object(self.engine, "_tmux_capture_many",
+                                  return_value={"%1": {"lines": lines,
+                                                       "truncated": False}}))
+
+    def test_an_ineligible_fleet_never_touches_tmux(self):
+        """The normal case: nothing to look at, so nothing is spawned."""
+        with mock.patch.object(self.engine, "_tmux_capture_many") as capture, \
+                mock.patch.object(self.engine, "_tty_for_pid") as tty:
+            out = self.engine.observe_screens([(self.sid, 4242, False)])
+        self.assertEqual(out, {})
+        capture.assert_not_called()
+        tty.assert_not_called()
+
+    def test_an_eligible_session_is_labelled(self):
+        tty, target, capture = self._arm(self.ASK)
+        with tty, target, capture:
+            out = self.engine.observe_screens([(self.sid, 4242, True)])
+        self.assertEqual(out[self.sid], "question")
+        self.assertEqual(self.engine.observed_screen(self.sid), "question")
+
+    def test_a_fresh_label_is_not_re_captured(self):
+        tty, target, capture = self._arm(self.ASK)
+        with tty, target, capture as many:
+            self.engine.observe_screens([(self.sid, 4242, True)])
+            self.engine.observe_screens([(self.sid, 4242, True)])
+        self.assertEqual(many.call_count, 1)       # rate limited by the window
+
+    def test_a_stale_label_is_refreshed(self):
+        tty, target, capture = self._arm(self.ASK)
+        with tty, target, capture as many:
+            self.engine.observe_screens([(self.sid, 4242, True)])
+            self.engine._screen_states[self.sid]["at"] -= 10_000
+            self.engine.observe_screens([(self.sid, 4242, True)])
+        self.assertEqual(many.call_count, 2)
+
+    def test_labels_are_dropped_when_the_session_goes_away(self):
+        tty, target, capture = self._arm(self.ASK)
+        with tty, target, capture:
+            self.engine.observe_screens([(self.sid, 4242, True)])
+        self.assertEqual(self.engine.observe_screens([]), {})
+        self.assertIsNone(self.engine.observed_screen(self.sid))
+
+    def test_a_session_outside_tmux_is_skipped(self):
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys9"), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value=None), \
+                mock.patch.object(self.engine, "_tmux_capture_many") as capture:
+            self.assertEqual(self.engine.observe_screens([(self.sid, 4242, True)]), {})
+        capture.assert_not_called()
+
+    def test_a_session_with_no_pid_is_skipped(self):
+        with mock.patch.object(self.engine, "_tty_for_pid") as tty:
+            self.engine.observe_screens([(self.sid, None, True)])
+        tty.assert_not_called()
+
+    def test_an_unreadable_pane_leaves_no_label(self):
+        pane = {"socket": "/tmp/s", "pane_id": "%1"}
+        with mock.patch.object(self.engine, "_tty_for_pid", return_value="ttys9"), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value=pane), \
+                mock.patch.object(self.engine, "_tmux_capture_many", return_value={}):
+            self.assertEqual(self.engine.observe_screens([(self.sid, 4242, True)]), {})
+
+    def test_the_pass_can_be_switched_off(self):
+        tty, target, capture = self._arm(self.ASK)
+        with tty, target, capture:
+            self.engine.observe_screens([(self.sid, 4242, True)])
+        self.engine.cfg["screen_observe"] = False
+        with mock.patch.object(self.engine, "_tmux_capture_many") as many:
+            self.assertEqual(self.engine.observe_screens([(self.sid, 4242, True)]), {})
+        many.assert_not_called()
+        self.assertIsNone(self.engine.observed_screen(self.sid))
+
+
+class GhostGuardScreenTest(EngineCovBase):
+    """A look at the terminal settles invariant 5's grace period."""
+
+    def _capture(self, age):
+        path = os.path.join(self.base, "pending", f"{self.sid}.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            json.dump({"kind": "question", "nonce": "n", "questions": [],
+                       "ts": time.time() - age}, handle)
+
+    def test_a_rendered_question_survives_any_age(self):
+        """Without the look this capture would be hidden at 45s."""
+        self._capture(self.engine.GHOST_QUESTION_GRACE + 30)
+        self.engine._screen_states[self.sid] = {"state": "question", "at": time.time()}
+        self.assertIsNotNone(self.engine.hook_pending(self.sid, "idle"))
+
+    def test_a_session_back_at_its_input_box_is_a_ghost_immediately(self):
+        """Previously this rendered for the whole 45s grace on a guess."""
+        self._capture(2)
+        self.engine._screen_states[self.sid] = {"state": "input", "at": time.time()}
+        self.assertIsNone(self.engine.hook_pending(self.sid, "idle"))
+
+    def test_a_trust_dialog_also_means_the_question_is_gone(self):
+        self._capture(2)
+        self.engine._screen_states[self.sid] = {"state": "trust", "at": time.time()}
+        self.assertIsNone(self.engine.hook_pending(self.sid, "idle"))
+
+    def test_a_waiting_registry_still_wins_without_a_look(self):
+        self._capture(2)
+        self.engine._screen_states[self.sid] = {"state": "input", "at": time.time()}
+        self.assertIsNotNone(self.engine.hook_pending(self.sid, "waiting"))
+
+    def test_no_observation_keeps_the_timing_rule_exactly(self):
+        self._capture(2)
+        self.assertIsNotNone(self.engine.hook_pending(self.sid, "idle"))
+        self._capture(self.engine.GHOST_QUESTION_GRACE + 2)
+        self.assertIsNone(self.engine.hook_pending(self.sid, "idle"))
+
+
 class RequestIdentityTest(EngineCovBase):
     """Server-owned prompt identity and the answered fence (invariant 75)."""
 
