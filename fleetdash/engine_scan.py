@@ -821,28 +821,36 @@ class ScanOps:
             pending = self.hook_pending(sid, reg_status)
             confirmed_waiting = self.waiting_confirmed(
                 sid, reg_status, now, pending=pending)
-            # The ghost-question case, and the only one invariant 5 ever had to
-            # guess about: a hook capture says a prompt is open while the registry
-            # says the session is not waiting on one.
+            # Three cases are worth a look at the pane.
+            #  - the ghost-question case invariant 5 has always guessed about: a
+            #    hook capture says a prompt is open while the registry disagrees;
             ghost = bool(pending) and reg_status != "waiting"
-            # …and the compaction case, which needed a wider net than expected.
-            # A compaction writes NOTHING to the transcript while it runs
-            # (invariant 17) AND the registry reports the session `idle`
-            # throughout — verified live 2026-07-25, which is why "busy with a
-            # frozen transcript" detected nothing. From Fleet's own data a
-            # compacting session is indistinguishable from an idle one; that is
-            # precisely the gap this closes, and it means the pane is the only
-            # evidence. So a session Fleet still considers live is eligible, at
-            # the faster window. Cost is one batched capture-pane per window for
-            # the whole fleet — 5.6 ms at 49 panes — and it still yields a LABEL
-            # only, never screen text (invariant 78).
+            #  - the reverse, which costs SECONDS of every permission prompt: the
+            #    registry says `waiting` and no capture has arrived. Claude's
+            #    permission Notification hook fires ~6s after the prompt renders
+            #    (measured on a rig 2026-07-25: prompt on screen at t+4.5s,
+            #    capture at t+10.6s) and the transcript never holds the row while
+            #    the prompt is open. The pane has it immediately (invariant 80);
+            awaiting_capture = not pending and reg_status == "waiting"
+            #  - and a compaction, which needed a wider net than expected. A
+            #    compaction writes NOTHING to the transcript while it runs
+            #    (invariant 17) AND the registry reports the session `idle`
+            #    throughout — verified live 2026-07-25, which is why "busy with a
+            #    frozen transcript" detected nothing. From Fleet's own data a
+            #    compacting session is indistinguishable from an idle one; that
+            #    is precisely the gap it closes, and it means the pane is the
+            #    only evidence. So a session Fleet still considers live is
+            #    eligible.
             watchable = (reg_status is not None
                          and quiet < cfg["dormant_seconds"])
             frozen = watchable or self.observed_screen(sid) == "compacting"
-            watch.append((sid, reg.get("pid"), ghost or frozen,
-                          # A compaction is over in tens of seconds; the default
-                          # window would miss it entirely.
-                          cfg.get("screen_observe_busy_seconds") if frozen else None))
+            # The SHORTEST applicable window wins. Cost is one batched
+            # capture-pane per window for the whole fleet — 5.6 ms at 49 panes —
+            # and it still yields a LABEL only, never screen text (invariant 78).
+            look_window = (cfg.get("screen_prompt_seconds") if awaiting_capture else
+                           cfg.get("screen_observe_busy_seconds") if frozen else None)
+            watch.append((sid, reg.get("pid"),
+                          ghost or frozen or awaiting_capture, look_window))
             turn_starting = self._claude_turn_fenced(sid, reg_status, main_path, mt)
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
@@ -911,6 +919,15 @@ class ScanOps:
                     tid, p = permissions[-1]
                     pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
                                "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
+            # Third source, and the fastest: the pane itself. A permission prompt
+            # is visible seconds before its Notification hook fires and while the
+            # transcript still holds nothing, so with neither of those a rendered
+            # permission screen IS the evidence. Restricted to permissions on
+            # purpose — a question's PreToolUse capture is immediate, so questions
+            # have no gap to close, and their key recipe depends on shape the
+            # screen cannot be trusted to describe (invariant 4).
+            if pending is None and reg_status == "waiting":
+                pending = self._screen_permission(sid, now)
             if pending and pending.get("kind") == "question":
                 # deliver-then-ask pattern: surface files sent shortly before the question
                 q_ts = pending.pop("_ts", None) or now

@@ -207,6 +207,55 @@ class ContextOps:
                     "_ts": d.get("ts")}
         return None
 
+    # How long a screen-derived permission keeps its nonce once the pane stops
+    # showing one. Short: the only thing it has to outlast is the gap between an
+    # observation and the poll that notices the prompt is gone.
+    SCREEN_PROMPT_GRACE = 20
+
+    def _screen_permission(self, sid, now):
+        """A permission prompt Fleet can see but has no capture for yet.
+
+        Measured on a rig 2026-07-25: the prompt is on the pane at t+4.5s and the
+        Notification hook lands at t+10.6s, with the transcript holding nothing in
+        between — so for six seconds Fleet knew a session was waiting and could
+        not say what for.
+
+        The nonce is server-minted and RETAINED, because `act()` accepts an answer
+        only for a nonce this scan issued: a client cannot invent one. It is not a
+        Claude identifier and never reaches the terminal — the digits do, and only
+        after invariant 77's classifier confirms, at write time, that the pane is
+        still rendering a permission prompt. That check is the real gate here; the
+        nonce exists so the answered-fence and the client's suppression have
+        something stable to key on (invariant 75).
+        """
+        if self.observed_screen(sid) != screenlib.PERMISSION:
+            self._screen_prompts.pop(sid, None)
+            return None
+        record = self._screen_prompts.get(sid)
+        if not record or now - record["at"] > self.SCREEN_PROMPT_GRACE:
+            # The counter is what makes this an identity rather than a timestamp:
+            # a prompt that closes and reopens inside the same millisecond would
+            # otherwise reuse its nonce, and the answered fence keys on it.
+            self._screen_prompt_seq = getattr(self, "_screen_prompt_seq", 0) + 1
+            record = {"nonce": f"screen-{int(now * 1000)}-{self._screen_prompt_seq}",
+                      "at": now}
+            if len(self._screen_prompts) > self.REQUEST_IDENTITY_LIMIT:
+                self._screen_prompts.clear()
+        else:
+            record = {**record, "at": now}
+        self._screen_prompts[sid] = record
+        # `source` tells the client this prompt was read off the terminal rather
+        # than attested by a hook, so it can say so and fetch the real option
+        # rows on demand — the scan keeps a label, never screen text (invariant 78).
+        return {"kind": "permission", "nonce": record["nonce"], "source": "screen",
+                "tool": "requested tool",
+                "input_summary": ""}
+
+    def _screen_prompt_nonce(self, sid):
+        """The screen-derived nonce this scan issued for `sid`, if any."""
+        record = self._screen_prompts.get(sid)
+        return record["nonce"] if record else None
+
     # ------------------------------------------------- request identity (75)
     @staticmethod
     def _pending_source(nonce):
@@ -733,9 +782,11 @@ class ContextOps:
         panes = {}
         for row in rows:
             sid, pid, eligible = row[0], row[1], row[2]
-            # A row may name its own re-observation window. The trust/ghost cases
-            # are stable for minutes; a compaction is over in tens of seconds, so
-            # watching one at the default cadence would miss it entirely.
+            # A row may name its own re-observation window. The trust and ghost
+            # cases are stable for minutes; a compaction is over in tens of
+            # seconds, and a permission prompt has to be SEEN before its hook
+            # fires ~6s later. At the default cadence both are missed — the
+            # prompt case silently did nothing on a rig until this existed.
             window = row[3] if len(row) > 3 and row[3] else default_window
             if not eligible or not pid:
                 continue
