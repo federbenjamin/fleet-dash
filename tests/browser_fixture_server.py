@@ -879,6 +879,15 @@ def set_scenario(name):
         session["capabilities"]["interrupt"] = True
         session["capabilities"]["change_model_effort"] = False
         session["capabilities"]["change_model_effort_reason"] = "Available when Claude is idle"
+    elif name in ("active-tool", "active-tool-stalled"):
+        stalled = name.endswith("stalled")
+        session = claude_session()
+        session.update(state="stalled" if stalled else "running",
+                       normalized_state="stalled" if stalled else "running",
+                       reg_status="running", ui_group="working",
+                       reason_label="Stalled" if stalled else "Working",
+                       active_tool={"name": "Bash", "count": 2 if stalled else 1,
+                                    "seconds": 245 if stalled else 3})
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
     elif name.startswith("close-worktree"):

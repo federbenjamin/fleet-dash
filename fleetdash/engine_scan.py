@@ -720,6 +720,28 @@ class ScanOps:
         return self._scan_after_fold(sessions, claude_tails, live_claude_ids,
                                      now, cfg, phase, phases, screen_watch)
 
+    @staticmethod
+    def _active_tool(mt, state):
+        """Name the tool call a working session is blocked on, with its age.
+
+        Only for states where something is genuinely in flight — an idle session
+        can still hold a stale `pending` entry from a turn that ended without a
+        result row, and reporting that as live work would be a lie.
+
+        The age is derived from the tool_use row's own timestamp. Compaction can
+        append rows carrying earlier timestamps (invariant 17), so a negative
+        result is clamped to 0 rather than rendered as a time in the future.
+        """
+        if state not in ("running", "stalled", "stalled_or_prompt"):
+            return None
+        open_tool = mt.open_tool()
+        if not open_tool:
+            return None
+        started = iso_epoch(open_tool.get("ts"))
+        return {"name": str(open_tool["name"])[:40],
+                "count": open_tool["count"],
+                "seconds": max(0, round(time.time() - started)) if started else None}
+
     def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg,
                               screen_watch=None):
         """Fold every live Claude transcript. Runs under scan_lock.
@@ -941,6 +963,12 @@ class ScanOps:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
+                # What the turn is blocked on right now, straight from the fold.
+                # "stalled" already means frozen mid-TOOL (invariant 7) but the
+                # card never said WHICH tool, so a wedged session and a slow one
+                # looked identical. No screen read is involved, so this works on
+                # sessions outside tmux too.
+                "active_tool": self._active_tool(mt, state),
                 # Collapsed height is CSS-controlled. Keep up to 800 characters so
                 # the explicit expansion reveals a useful bounded preview.
                 "last_msg": (mt.last_message(800)

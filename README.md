@@ -28,7 +28,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
   a 118px meta rail on the right carries status, model, context %, quiet time, and live agent
-  count ("Console" design system — see `design-system/`). Pin/unpin is right-click on the header
+  count ("Console" design system — see `design-system/`). A working session also names the tool
+  call it is waiting on — `Bash · 4m`, turning red once the session counts as stalled — so a
+  wedged command and a slow build no longer look identical. It comes from the transcript, so it
+  works everywhere, and the workspace repeats it beside "Main agent working". Pin/unpin is right-click on the header
   (desktop) or long-press (mobile); pinned cards show a `⌖ pinned` marker.
 - **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
   **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
