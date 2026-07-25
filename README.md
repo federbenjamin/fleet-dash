@@ -469,7 +469,12 @@ the provider without affecting Claude sessions.
   - Multi-question asks (2+) show **one question at a time** with ‹ › arrows and an
     answered-count, a per-question "selected:" line + Other input, and one "submit all
     answers" button (single-select picks auto-advance, like the terminal).
-  - Permission request → the notification text + allow / always allow / deny buttons.
+  - Permission request → the notification text + allow / always allow / deny buttons. The middle
+    button carries **Claude's own wording** for that prompt, read off the terminal — because row 2
+    grants something different in every variant (a project-wide directory grant for a Bash
+    command, a session-only read for a file read, a settings edit for an overwrite). Outside tmux
+    Fleet cannot read it and the button stays the generic "always allow", which is the honest
+    label there.
   - A transcript fallback can remain visible for context before Claude's native terminal is ready.
     Its controls stay disabled until the live registry confirms the same prompt is actually waiting.
     If Fleet loses acknowledgement after sending any answer key, that nonce stays blocked across

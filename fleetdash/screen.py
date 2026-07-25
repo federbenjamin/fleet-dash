@@ -26,6 +26,8 @@ This module is pure text in, one label out. It never captures anything itself,
 so it cannot be the thing that puts a subprocess on a hot path.
 """
 
+import re
+
 # Bottom-anchored: only the tail of a pane describes what it is asking for now.
 TAIL_LINES = 40
 
@@ -86,6 +88,35 @@ def classify_screen(lines):
     if _idle_input(rows):
         return INPUT
     return UNKNOWN
+
+
+_OPTION_ROW = re.compile(r"^[❯>\s]*([1-9])\.\s+(.+?)\s*$")
+
+
+def prompt_options(lines, limit=9, width=160):
+    """The numbered option rows a modal prompt is rendering, in order.
+
+    Only useful for telling the user what row 2 ACTUALLY grants. Every captured
+    permission variant puts Yes/always/No in rows 1/2/3, but row 2's wording —
+    and its real scope — differs sharply between them: a Bash prompt offers a
+    project-wide directory grant, a Read prompt a session-only read, an Overwrite
+    prompt a settings edit. A fixed "always allow" label describes all three and
+    is honest about none.
+
+    Returns [] when the tail holds no option list. Text is bounded and stripped
+    of control characters by the caller's capture; treat it as untrusted display
+    data and escape it at the render site.
+    """
+    found = {}
+    for row in _tail(lines):
+        match = _OPTION_ROW.match(row)
+        if not match:
+            continue
+        # LAST sighting wins. A pane can still hold an answered prompt's rows
+        # above the live one, and the live one is always nearer the bottom;
+        # rows are read top-down, so a later index overwrites an earlier one.
+        found[int(match.group(1))] = match.group(2)[:width]
+    return [found[key] for key in sorted(found) if key <= limit]
 
 
 def _idle_input(rows):

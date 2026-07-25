@@ -1589,6 +1589,24 @@ test('a pane-derived compaction pill says it is a lower bound', async ({ page })
   await expect(pill).toHaveAttribute('title', /may have started earlier/);
 });
 
+test('the always button says what this prompt actually grants', async ({ page }) => {
+  // Every permission variant puts Yes/always/No in rows 1/2/3, but row 2's real
+  // power differs: a project-wide directory grant, a session-only read, a
+  // settings edit. One fixed label described all three and was honest about none.
+  await reset(page, 'claude-permission');
+  await openAction(page, 'claude-one');
+  const always = page.locator('#sact .pbtn.always');
+  await expect(always).toHaveText('always allow access to fleet-dash/ from this project');
+  await expect(always).toHaveAttribute('title', /Claude's own wording/);
+
+  // Off tmux Fleet genuinely cannot read the sentence, and the generic label is
+  // then the truthful one — it must not invent wording.
+  await reset(page, 'claude-permission-blind');
+  await openAction(page, 'claude-one');
+  await expect(always).toHaveText('always allow');
+  await expect(always).toHaveAttribute('title', /cannot read this terminal/);
+});
+
 test('quiet age is limited to working session cards', async ({ page }) => {
   await reset(page);
   await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
