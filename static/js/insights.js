@@ -31,15 +31,15 @@ function budgetForecastText(item){const f=(budgetData.forecasts||{})[item.id]||{
   return`Forecast: limit in ${eta} · ${f.confidence} confidence · ${f.sample_size} samples`;}
 function renderBudgetPanel(){
   const el=$('#budgets');if(!el)return;
-  if(budgetLoading&&!budgetData.budgets?.length){el.innerHTML='<div class="ctxload">Measuring budgets…</div>';return;}
-  if(!budgetData.ok){el.innerHTML=`<div class="provideralert"><b>Budgets unavailable</b> — ${esc(budgetData.error||'failed')}</div>`;return;}
+  if(budgetLoading&&!budgetData.budgets?.length){setHtml(el,'<div class="ctxload">Measuring budgets…</div>');return;}
+  if(!budgetData.ok){setHtml(el,`<div class="provideralert"><b>Budgets unavailable</b> — ${esc(budgetData.error||'failed')}</div>`);return;}
   const items=budgetData.budgets||[];
-  if(!items.length){el.innerHTML='<section class="budgetpanel emptybudget"><b>No budgets configured</b><span>Budgets alert only unless you explicitly enable “block future spawns.” Configure them in Settings.</span><button onclick="navigateTo(\'settings\')">Open Settings</button></section>';return;}
-  el.innerHTML=`<section class="budgetpanel"><div class="budgetpanelhead"><span><b>Budgets</b><small>Cumulative local usage; concurrency is current</small></span><button onclick="navigateTo('settings')">Manage</button></div>
+  if(!items.length){setHtml(el,'<section class="budgetpanel emptybudget"><b>No budgets configured</b><span>Budgets alert only unless you explicitly enable “block future spawns.” Configure them in Settings.</span><button onclick="navigateTo(\'settings\')">Open Settings</button></section>');return;}
+  setHtml(el,`<section class="budgetpanel"><div class="budgetpanelhead"><span><b>Budgets</b><small>Cumulative local usage; concurrency is current</small></span><button onclick="navigateTo('settings')">Manage</button></div>
     <div class="budgetcards">${items.map(item=>`<article class="budgetcard ${esc(item.status)}"><div><b>${esc(item.label)}</b><small>${esc(item.scope_type)}${item.scope_id?` · ${esc(item.scope_id)}`:''}</small></div>
       <strong>${esc(budgetValue(item))} <small>of ${item.metric==='usd'?fmt$(item.limit_value):item.metric==='tokens'?fmtTok(item.limit_value):Math.round(item.limit_value)}</small></strong>
       <span class="budgetmeasure">${esc(String(item.measurement_scope||'unavailable').replaceAll('_',' '))}${item.block_spawns?' · blocks future spawns':''}</span>
-      <div class="budgetbar"><i style="width:${Math.round(Math.min(1,item.ratio||0)*100)}%"></i></div><p>${esc(budgetForecastText(item))}</p></article>`).join('')}</div></section>`;
+      <div class="budgetbar"><i style="width:${Math.round(Math.min(1,item.ratio||0)*100)}%"></i></div><p>${esc(budgetForecastText(item))}</p></article>`).join('')}</div></section>`);
 }
 function budgetTargetOptions(item){
   if(item.scope_type==='fleet')return'';

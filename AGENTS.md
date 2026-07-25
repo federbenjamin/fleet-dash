@@ -1601,7 +1601,27 @@ because they are also spawned directly as scripts by absolute path.
   renders 48). This is what stops untouched cards re-laying out — and moving under your
   finger — every two seconds. It supersedes the audit's `uiRefresh(sid)` scoping: the same
   outcome with no call-site changes and no stale cross-card aggregates.
-  A browser spec asserts the zero and that a genuinely changed card still repaints. **`render()` passes `force` down to `renderSession(force)`**:
+  A browser spec asserts the zero and that a genuinely changed card still repaints.
+  `setText`, `setClass` and `setAttr` extend the same skip-if-unchanged contract to text,
+  `className` and attributes, because `textContent=` replaces the text node and
+  `setAttribute` invalidates style even when the value is identical: 507 of 687 mutation
+  records per five polls wrote a value that was already there (production, 51 sessions);
+  after routing the nav counts, Now filter chips, usage rail/panel, queue and Action Inbox
+  containers, budget panel and notification badges through them, 687 → 71.
+  **`setHtml` memoises the last string it wrote on that element, so a raw `innerHTML=` on
+  the same element makes the memo lie** — `renderPinned` wrote its skeleton raw, the later
+  `setHtml(el,'')` was skipped, and a pinned card rendered in both the pinned block and its
+  queue (invariant 28). Every write to a setHtml-managed container goes through setHtml, and
+  `reconcileCards` clears the memo when it appends a card out of band.
+  **The card frame is measured in the render's OWN frame.** `--session-card-lines` is written
+  twice — `reconcileCards` sets the configured clamp, `measurePeekOverflow` replaces it with
+  the content-hugging minimum (invariant 45/57). While that measurement had its own
+  `requestAnimationFrame` it landed a frame late (render is already inside one), so every poll
+  PAINTED every card at the full clamp and shrank it back: page height 1256 ⇄ 1471 px twice
+  per poll on 51 sessions. `render()` calls `schedulePeekOverflow(true)` to measure before the
+  paint, and the configured maximum is rewritten only when the peek could have changed (new
+  card, settings change, rebuilt `.ctop`). The resize listener keeps the deferred path and must
+  never forward its Event as that flag. **`render()` passes `force` down to `renderSession(force)`**:
   a `pointerdown` keeps `touching()` true for 800ms, so without it the workspace pane deferred the
   repaint that the tap itself requested — an answered permission kept its live buttons for most of
   a second. The unforced poll render still defers during a gesture, and the question drawer keeps
