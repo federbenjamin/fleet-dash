@@ -82,10 +82,13 @@ class EngineFixture(unittest.TestCase):
         self.claude_history = os.path.join(self.tmp.name, "history.jsonl")
         self.claude_settings = os.path.join(self.tmp.name, "settings.json")
         self.claude_usage_prefs = os.path.join(self.tmp.name, "claude-usage.plist")
+        self.tmux_sockets = os.path.join(self.tmp.name, "tmux-sockets")
         os.makedirs(self.base)
         os.makedirs(self.sessions)
         os.makedirs(self.projects)
+        os.makedirs(self.tmux_sockets)
         self.patchers = [
+            mock.patch.object(engine_paths, "TMUX_SOCKETS", self.tmux_sockets),
             mock.patch.object(engine_paths, "HOME", self.tmp.name),
             mock.patch.object(engine_paths, "BASE", self.base),
             mock.patch.object(engine_paths, "CAPTURE_BASE", self.base),
@@ -123,7 +126,11 @@ class EngineFixture(unittest.TestCase):
             json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
                        "status": "idle", "name": "Claude", "startedAt": 1}, handle)
         cfg = dict(DEFAULT_CONFIG)
-        cfg.update({"codex_enabled": False, "act_token": "secret", "ntfy_topic": ""})
+        # The legacy applet keeps these fixtures on the transport the existing
+        # `_iterm_write` patches assert against; the tmux dispatcher has its own
+        # tests that opt in explicitly (tests/test_cov_tmux.py).
+        cfg.update({"codex_enabled": False, "act_token": "secret", "ntfy_topic": "",
+                    "terminal_transport": "applet"})
         self.engine = Engine(cfg)
         self.codex = FakeCodex()
         self.engine.codex = self.codex

@@ -20,7 +20,9 @@ fleetdash/                everything server.py imports
   engine_ledger.py          spend ledger, closed sessions, history, handoffs
   engine_notify.py          notifications, Web Push, Outbox actions
   engine_spawn.py           spawn/handoff, iTerm applet exchange, settings
-  engine_transport.py       tty/process resolution, Codex terminal routes, bg attach
+  engine_tmux.py            tmux transport: pane discovery, key delivery, spawn, focus
+  engine_transport.py       tty/process resolution, Codex terminal routes, transport
+                            dispatcher (_terminal_write/_terminal_spawn), bg attach
   engine_worktree.py        worktree preview/cleanup tickets
   engine_uploads.py         phone image uploads
   engine_staging.py         staging isolation
@@ -91,7 +93,7 @@ Numbers are stable identifiers (code comments cite "invariant N") — never renu
 new invariants append. Quick map by theme (an invariant may appear in two groups):
 
 - Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68
-- Applet, transports & click latency: 3, 24, 25
+- Applet, transports & click latency: 3, 24, 25, 73
 - Session/agent state & Now placement: 7, 31–33, 49, 61, 69
 - Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
 - Codex runtime & ownership: 30, 38, 49, 65, 69
@@ -112,7 +114,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 3. **All Apple Events go through the applet.** launchd-context osascript hangs FOREVER on the
    TCC check (cannot present the dialog) — never call `osascript -e 'tell app "iTerm2" …'`
    from engine/server. The applet must keep `CFBundleIdentifier`
-   (com.benjaminfeder.fleet-dash.injector) or TCC grants can't persist.
+   (com.benjaminfeder.fleet-dash.injector) or TCC grants can't persist. This scopes to the
+   **applet transport only**: the tmux transport sends no Apple Events at all, and the target
+   state has none (the operator may switch terminal emulators — see invariant 73).
 4. **TUI key map (verified live, don't re-derive):** single-select = digit + CR. Multi-select:
    digits toggle (focus stays), Enter toggles the FOCUSED row (not submit!); submit =
    `\x1b[C` (right-arrow → "✔ Submit" tab) + CR. Enter must be raw CR — request-file flag `2`
@@ -138,7 +142,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    nonce-matched prompt kind, option count, multi flag, and Other availability from authoritative
    hook/transcript data, caps the shape, and rejects a mismatched action type before building keys. Debug
    rig: spawn a sandbox `claude --model haiku` in a new iTerm tab, make it ask, drive it via
-   scratchpad sbx2.py — never experiment on real sessions.
+   scratchpad sbx2.py — never experiment on real sessions. The recipes are transport-independent
+   and were **re-confirmed on v2.1.219, 2026-07-24** — do not re-derive them. tmux delivers the
+   same per-key steps through `send-keys -l -- <key>` (verified byte-exact on tmux 3.7b: no
+   key-name lookup, no C-escape processing, UTF-8 and embedded LF preserved) and keeps the same
+   fixed inter-key delay as the applet. Replacing that delay with settle detection is W5-T2b of
+   [`design-responsiveness-and-transport.md`](design-responsiveness-and-transport.md), not shipped.
 5. **Injection freshness:** act() re-polls the tail under scan_lock and validates the nonce
    (hook-file nonce or transcript tool_use_id) before writing keys, AND refuses prompt answers
    (option/multiq/permission/dismiss) when the registry status isn't `waiting`. The second
@@ -270,11 +279,26 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     hard-whitelisted (`agent-[A-Za-z0-9_-]{1,64}`, basename only) before any path is built, or
     `/api/agent_context` becomes an arbitrary-file read.
 20. **Spawn composes its command from ALLOWLISTED parts, never client text.** `act` type
-    `spawn` → applet verb `SPAWN` (line 1 of the request file instead of a tty) → new iTerm tab
-    running `cd <dir> && claude [--model M] [--effort E] [--worktree [name]]`. Model and effort
+    `spawn` → `_terminal_spawn` → a terminal running
+    `cd <dir> && claude [--model M] [--effort E] [--worktree [name]]`. Model and effort
     must be members of `Engine.MODELS` / `EFFORTS`, the worktree name is regex-bounded, the dir
     must exist and resolve under `$HOME`, and the path is `shlex.quote`d. Never accept a
     free-form command string — the act token would become a remote shell.
+    **Where it runs is the transport's business, what may be composed is not.** tmux wins when
+    the operator already has a session named `tmux_session` (default `fleet`) running:
+    `new-window -d -t =<session>`, with `; exec ${SHELL:-/bin/sh}` appended so the pane and its
+    scrollback outlive the session, the way the applet's terminal tab did. Otherwise this falls
+    back to applet verb `SPAWN` (line 1 of the request file instead of a tty) → a new iTerm tab.
+    **Fleet must NEVER run `tmux new-session` itself.** A tmux server inherits the environment of
+    whoever starts it, so a server started by this launchd daemon hands Claude
+    `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — proven live 2026-07-24, where the spawned pane answered
+    `zsh:1: command not found: claude`. That environment cannot be honestly reconstructed here:
+    this operator's passwd shell is zsh while their sessions run bash, and the directory holding
+    `claude` is added by a bash startup file, so neither `$SHELL`, the passwd entry, nor a login
+    shell is a safe guess. Joining a server the operator started inherits it exactly.
+    All three spawn sites go through the dispatcher — new session, Reopen
+    (invariant 23), and background-job attach (invariant 25) — or a terminal switch breaks two
+    of them silently.
 21. **Claude Code's folder-trust is INHERITED, and fleet-dash must never write it.**
     `~/.claude.json` `projects[dir].hasTrustDialogAccepted` is keyed by dir, but a git worktree
     under a trusted repo has NO entry of its own and still starts clean (verified 2026-07-14),
@@ -304,12 +328,16 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 23. **A CLOSED session has no process:** the registry can't resolve it, so `closed_context`
     reads the ledger's validated `transcript_path` (falling back to the legacy cwd mapping only for
     old rows). Its overlay is read-only — no send box, no stop, no mute. A closed Claude session may
-    expose **Reopen**: that creates a new iTerm tab with `claude --resume <exact UUID>`. Never accept
+    expose **Reopen**: that opens a new terminal running `claude --resume <exact UUID>` through
+    `_terminal_spawn` (invariant 20), never a bare iTerm tab. Never accept
     a client-supplied path or cwd. `_safe_claude_transcript` must continue to require an exact UUID
     filename directly beneath one `~/.claude/projects` directory, and `_safe_reopen_cwd` must keep
     the working directory inside HOME.
 24. **Click latency is the injection path — keep these four fixes.** Measured 2026-07-14: a
-    one-keystroke `focus` cost 850ms while a ping cost 2ms. (a) The applet delays only BETWEEN
+    one-keystroke `focus` cost 850ms while a ping cost 2ms. Clauses (a), (b) and (d) describe the
+    applet mailbox; tmux has no mailbox (each key is its own `send-keys`, p50 7.3 ms) but keeps
+    the same between-steps-only delay rule. (c) is transport-independent.
+    (a) The applet delays only BETWEEN
     steps, never after the last; (b) the delay is per-request (flag 4) — 0.4s ONLY for ask-TUI
     key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay;
     (c) `act()` takes `scan_lock` + re-polls the tail only for native-surface mutations that need
@@ -323,15 +351,25 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     (`OSAAppletStayOpen`), so `open -g` reopens the resident process (`on reopen`) instead of
     launching one. Net: 850ms → ~260ms. Any change here is re-verified in the SANDBOX with a
     real multi-question ask before shipping.
-25. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR; **flag 3 = focus** (select that
+25. **Transports and their verbs.** Three Claude transports exist and every Engine caller reaches
+    them through the `_terminal_write` / `_terminal_spawn` dispatcher (invariant 73) — never a
+    transport method directly, or a terminal switch strands whichever site was missed.
+    **tmux** (`engine_tmux.py`) is the emulator-agnostic one: `send-keys -l -- <key>` per step,
+    `new-session`/`new-window` for spawn, and focus = `select-window` + `select-pane` plus a
+    generic `open -a <terminal_app>` raise rather than an Apple Event. Its failures split the way
+    invariant 66 requires: `terminal_not_available` proves no byte was written (no tmux binary,
+    unknown pane, a refusal before the first key), while a lost result or a refusal after any key
+    is `delivery_uncertain`. **Applet verbs:** flag 0/1/2 = write text / text+LF / raw CR;
+    **flag 3 = focus** (select that
     window+tab, activate iTerm — types nothing); line 1 `SPAWN` = new tab running a composed
     command. `act` type `focus` powers the **Open in Terminal** item in the session workspace's ⋮
     overflow menu (Console locked decision: never a card button and never a standalone header
     button — Claude terminal access lives only behind ⋮; only Codex's narrowly proved exact-terminal
     **Open** keeps a `#sctrl` button per invariant 30, and focusing a Mac tab from a phone is
     meaningless). This path is only for a
-    foreground Claude process whose exact PID/tty maps to an iTerm session. A `kind:bg` registry row
-    has no iTerm route: `ClaudeBackgroundTransport` validates its eight-hex job id, starts the
+    foreground Claude process whose exact PID/tty maps to a tmux pane or an iTerm session. A
+    `kind:bg` registry row
+    has no terminal route: `ClaudeBackgroundTransport` validates its eight-hex job id, starts the
     official fixed-argv `claude attach <job>` client in a private PTY, writes only Engine-composed
     text/keys, then sends Claude's documented Ctrl-Z detach. Close uses fixed-argv
     `claude stop <job>`. Never read the private daemon roster, accept a client socket/tty/job id, or
@@ -937,7 +975,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     daemon restart, and the next turn retain durable values.
 
 66. **Unknown native delivery is never safely retryable.** The applet launch result divides
-    definitive pre-launch failure from post-launch confirmation loss. If Claude may have received
+    definitive pre-launch failure from post-launch confirmation loss, and every transport must
+    make the same split — `_native_write_failed_before_delivery` is the one place that lists the
+    proven-failure codes (`injector_not_launched`, `background_connection_lost`,
+    `terminal_not_available`). A subprocess timeout is never proof: tmux may have handed the bytes
+    to its server before the client gave up, so a lost result is uncertain even on the first key.
+    If Claude may have received
     message, image, relay, handoff, prompt keys, or a control, Fleet returns delivery uncertainty and
     does not auto-retry. Outbox records content as `confirmation_unknown`; direct surfaces tell the
     user to check the terminal and do not offer Restore/retry. Prompt uncertainty is durable and
@@ -1034,6 +1077,27 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     `ANSWER IN PANE →` exactly when docking is available (`workspaceDockable()`), staying
     `ANSWER IN CHAT →` otherwise.
 
+73. **Transport selection is per-session, server-derived, and never client-supplied.**
+    `_terminal_write(tty, steps, step_delay)` and `_terminal_spawn(command, label)` in
+    `engine_transport.py` are the ONLY terminal entry points the rest of the Engine may call.
+    They choose from state Fleet already resolved: the tty `_tty_for_pid` returned for that
+    session's PID, matched against a live tmux pane map. A client never names a transport,
+    socket, pane, tmux session, or command — that would make the act token a remote shell in a
+    second way. `terminal_transport` selects `auto` (tmux for a tty that is a live tmux pane,
+    applet otherwise; spawn joins the operator's tmux session when one exists — invariant 20),
+    `tmux` (a non-tmux session
+    exposes no terminal transport at all), or `applet` (the legacy iTerm2 path only — the revert
+    switch). `_terminal_spawn` may retry through the applet ONLY on a `terminal_not_available`
+    tmux result, which proves no window was created; a `delivery_uncertain` spawn must never
+    fall through or the fallback opens a second session. The pane map (`_tmux_panes`, 2s cache, ≤8 sockets under `paths.TMUX_SOCKETS`) is
+    refreshed only on the act/write path, **never inside `_scan`**: terminal discovery must not
+    join the two-second fleet poll. Both implementations return `_iterm_write`'s exact contract so
+    every caller keeps invariant 66's split unchanged. tmux is what survives the operator changing
+    terminal emulator — the applet's whole verb surface is `tell application "iTerm2"`, so any new
+    iTerm-bound call site is a regression, not a shortcut. Tests must never reach the developer's
+    own tmux server: `paths.TMUX_SOCKETS` is the patch point and the shared fixtures pin
+    `terminal_transport: "applet"`.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1061,8 +1125,14 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
   unanswered AskUserQuestion tool_use, poll /api/fleet, clean up. Pattern in the session
   scratchpad (`probe_pending.py`) — recreate as needed.
 - **Harmless injection probe:** `POST /api/act {"type":"noop", "session_id":…}` — full
-  daemon→selected Claude transport chain, delivers zero keystrokes. Foreground sessions use the
-  applet/iTerm path; background jobs use the official attach/detach path.
+  daemon→selected Claude transport chain, delivers zero keystrokes. A foreground session takes
+  tmux or the applet/iTerm path depending on where its tty lives (invariant 73); background jobs
+  use the official attach/detach path.
+- **tmux transport rig:** never drive a real session. `tmux -L fdrig new-session -d -s fdrig
+  -x 120 -y 40 'claude --model haiku'`, then `tmux -L fdrig send-keys -t fdrig:0.0 …` and read
+  it back with `capture-pane -p`. Targets are `session:window.pane` — a bare pane index fails
+  with "can't find pane". Write captures to a file and open them with the Read tool; piping
+  box-drawing characters through `grep`/`cat -v` hits illegal byte sequences.
 - **Live interactive test protocol:** the building session asks a real AskUserQuestion; the
   user answers it FROM the dashboard. The recorded answer proves (or pinpoints) the loop.
 - **Screen ground truth:** to see what a TUI actually displays (keybinding hints, prompt
@@ -1106,10 +1176,17 @@ because they are also spawned directly as scripts by absolute path.
   `engine_scan` (registry scan/organization/status/control state), `engine_ledger`
   (spend ledger/closed sessions/history/handoffs), `engine_context`
   (conversation/file/context projections, hook pending, effort, commands),
-  `engine_worktree` (cleanup tickets), `engine_transport` (tty/process resolution,
-  codex terminal routes, background attach), `engine_notify` (notifications/Web
+  `engine_worktree` (cleanup tickets), `engine_tmux` (the tmux transport),
+  `engine_transport` (tty/process resolution,
+  codex terminal routes, the `_terminal_write`/`_terminal_spawn` transport dispatcher,
+  background attach), `engine_notify` (notifications/Web
   Push/Outbox actions), `engine_act` (the act() injection dispatcher),
   `engine_spawn` (spawn/handoff, iTerm applet exchange, settings).
+- `fleetdash/engine_tmux.py` — `TmuxOps`: bounded tmux-socket enumeration under
+  `paths.TMUX_SOCKETS`, the cached tty→pane map, per-key `send-keys -l` delivery,
+  detached spawn, and pane focus. Selection and failure semantics are invariant 73
+  and invariant 66; the module header records exactly what was verified against
+  tmux 3.7b, so the encoding does not have to be re-derived.
 - `fleetdash/web_push.py` + `fleetdash/web_push_worker.js` — private key store, asynchronous
   durable-lease supervisor, bounded helper protocol, Web Push encryption/request
   construction, endpoint/DNS confinement, and
@@ -1271,13 +1348,23 @@ because they are also spawned directly as scripts by absolute path.
 `~/Library/LaunchAgents/…plist` (live daemons; env vars select state/capture dirs) ·
 `~/.claude/commands/subagent-spend.md` (slash command; runs `python3 -m fleetdash.engine spend`) ·
 `~/.claude/fleet-dash-prod-state` + `~/.claude/fleet-dash-capture` (production state / shared captures) ·
-TCC Automation grant (injector→iTerm2).
+`/tmp/tmux-<uid>/` (`paths.TMUX_SOCKETS`; tmux server sockets Fleet reads, and `default` where it
+spawns — shared with the operator's own tmux, never created per instance) ·
+TCC Automation grant (injector→iTerm2; the applet transport only).
 
 ## Roadmap / known gaps
 
 - Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
   per variant; deny=Esc chosen because it cancels every variant).
 - Screen-peek button (stalled-session "show me the terminal") — technique proven, UI not built.
+  Now cheap on the tmux transport: `capture-pane -p` is a read the daemon can finally perform.
+  That is W5-T2a of [`design-responsiveness-and-transport.md`](design-responsiveness-and-transport.md),
+  along with observed ghost-question/stall/compaction/trust state; T2b (settle detection and
+  pre-flight verification replacing the fixed inter-key delay) is gated on that document's drive
+  allowlist, open question 6.
+- A session started in a plain terminal tab cannot be migrated into tmux, so the applet stays
+  until the last such session turns over. It is on a countdown, not maintained in parallel: the
+  operator is moving off iTerm2 and every iTerm-bound path dies with that move.
 - Tailscale serve + installed-PWA onboarding remain user-side.
 - Fable pricing placeholder in `config.json` rates.
 - Claude VS Code sessions: no tty → view-only by design. ChatGPT Desktop/Codex VS Code transcripts
