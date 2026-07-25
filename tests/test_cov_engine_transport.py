@@ -3,7 +3,6 @@ resolution, Codex terminal route discovery, and background/close/reopen paths.""
 import os
 import signal
 import tempfile
-import threading
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -11,17 +10,13 @@ from unittest import mock
 
 from fleetdash import engine_transport as et
 from fleetdash.engine_transport import TransportOps
-from fleetdash.engine_tmux import TmuxOps
 from fleetdash.claude_background import ClaudeBackgroundError
 
 
-class Stub(TmuxOps, TransportOps):
+class Stub(TransportOps):
     def __init__(self):
         self._claude_command_cache = {}
         self._tty_cache = {}
-        self._tmux_executable = ""      # no tmux: the dispatcher stays on the applet
-        self._tmux_panes_cache = (0.0, {})
-        self._tmux_lock = threading.Lock()
         self.cfg = {}
         self.is_staging = False
         self._codex_terminal_routes_cache = (0, {})

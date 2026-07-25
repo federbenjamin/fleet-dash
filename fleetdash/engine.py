@@ -34,7 +34,6 @@ from .engine_scan import ScanOps
 from .engine_ledger import LedgerOps
 from .engine_context import ContextOps
 from .engine_worktree import WorktreeOps
-from .engine_tmux import TmuxOps
 from .engine_transport import TransportOps
 from .engine_notify import NotifyOps
 from .engine_act import ActOps
@@ -47,7 +46,6 @@ class Engine(StagingOps,
              LedgerOps,
              ContextOps,
              WorktreeOps,
-             TmuxOps,
              TransportOps,
              NotifyOps,
              ActOps,
@@ -68,12 +66,6 @@ class Engine(StagingOps,
         self._agent_eff = {}            # agent-def path -> (mtime, declared effort)
         self._tty_cache = {}            # pid -> tty (never changes; skips a ~25ms `ps`)
         self._codex_terminal_routes_cache = (0.0, {})
-        # tmux transport: the executable is resolved once ("" once proven
-        # absent) and the pane map is refreshed only on the act/write path, so
-        # the two-second fleet scan never pays for terminal discovery.
-        self._tmux_executable = None
-        self._tmux_panes_cache = (0.0, {})
-        self._tmux_lock = threading.Lock()
         self._claude_command_cache = {} # pid -> argv text (one bounded lookup per process)
         # A successful native /effort command is authoritative immediately, but
         # Claude reports effort only through the next statusline side-write.
