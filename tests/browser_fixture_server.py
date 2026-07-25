@@ -807,17 +807,25 @@ def set_scenario(name):
             "decisions": ["allow", "always", "deny", "cancel"]})
         if name == "approval-slow":
             STATE["delay_quick_response"] = 0.75
-    elif name in ("claude-permission", "claude-permission-blind"):
+    elif name in ("claude-permission", "claude-permission-blind",
+                  "claude-permission-nogrant"):
         session = claude_session()
         session.update(state="needs_you", normalized_state="needs_you",
                        reg_status="waiting", ui_group="needs_you",
                        reason_label="Permission needed",
+                       # no `decisions`: that field is Codex's statement of which
+                       # approval values its App Server accepts, and a Claude
+                       # pending has never carried it. The fixture claiming it
+                       # hid the difference the always-button gate turns on.
                        pending={"kind": "permission", "nonce": "cp1",
                                 "request_id": "req-cp1", "tool": "Bash",
-                                "input_summary": "touch probe.txt",
-                                "decisions": ["allow", "always", "deny"]})
+                                "input_summary": "touch probe.txt"})
         if name.endswith("blind"):
             STATE["prompt_options_blind"] = True
+        if name.endswith("nogrant"):
+            # the Bash variant whose command cannot be statically analyzed:
+            # Claude offers no rule to write, so row 2 is "No"
+            STATE["prompt_options_no_grant"] = True
     elif name == "elicitation":
         session.update(state="needs_you", pending={"kind": "elicitation", "nonce": "e1",
             "server": "deploy", "message": "Choose deployment targets", "fields": [
@@ -1340,12 +1348,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_reply({
                         "ok": False, "code": "screen_unavailable",
                         "error": "this session is not running in a tmux pane"})
+                grant = "Yes, and always allow access to fleet-dash/ from this project"
+                # `always_key` is the digit the SCREEN showed, which is what the
+                # client presses — the server derives it rather than assuming 2,
+                # because one captured variant puts "No" on row 2.
+                if STATE.get("prompt_options_no_grant"):
+                    return self.json_reply({
+                        "ok": True, "session_id": sid, "kind": "permission",
+                        "options": ["Yes", "No"]})
                 return self.json_reply({
                     "ok": True, "session_id": sid, "kind": "permission",
-                    "options": ["Yes",
-                                "Yes, and always allow access to fleet-dash/ "
-                                "from this project",
-                                "No"]})
+                    "options": ["Yes", grant, "No"],
+                    "always_key": "2", "always_label": grant})
             if route == "/api/act-receipt":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)

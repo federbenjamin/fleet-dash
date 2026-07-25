@@ -487,12 +487,23 @@ function alwaysTitle(s,p){
 // '' until the capture lands, so the button appears a moment after the prompt
 // rather than appearing wrong and correcting itself
 function alwaysButton(s,p,pre,locked){
+  // Codex approvals arrive as kind:'permission' too, but their `always` is a
+  // documented App Server decision value, not a keystroke Fleet has to aim at a
+  // row — the provider states which decisions it accepts, and that is
+  // authoritative. Only Claude's digit needs the screen to prove where it goes.
+  if(Array.isArray(p.decisions))
+    return p.decisions.includes('always')
+      ?`<button class="pbtn always" ${locked?'disabled':''}
+        onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>`:'';
   if(!alwaysRow(s,p))return'';
   return`<button class="pbtn always" ${locked?'disabled':''} title="${esc(alwaysTitle(s,p))}"
     onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">${esc(alwaysLabel(s,p))}</button>`;
 }
 async function ensurePromptOptions(s,p){
-  if(!p||p.kind!=='permission')return;
+  // Only Claude's prompt needs its rows read. A provider that states its own
+  // decisions has already answered the question this fetch exists to ask, and
+  // /api/prompt-options refuses a Codex thread anyway (invariant 74).
+  if(!p||p.kind!=='permission'||Array.isArray(p.decisions))return;
   const key=promptOptionKey(s,p);
   if(key in promptOptionCache||promptOptionLoads.has(key))return;
   promptOptionLoads.add(key);
