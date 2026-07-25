@@ -5,6 +5,7 @@ Uses the same lightweight Handler harness as tests/test_server.py — a
 MagicMock) and a captured ``reply`` — so nothing binds a socket or touches a
 real ``~/.claude``.
 """
+import ast
 import gzip
 import io
 import json
@@ -699,6 +700,49 @@ class MainTest(unittest.TestCase):
         eng, search_cls = self._run_main({
             "search_enabled": False, "bind": "127.0.0.1", "port": 0})
         search_cls.assert_not_called()
+
+
+class RouteResponseTest(unittest.TestCase):
+    """Every routed handler must actually write a response.
+
+    `get_tool_result` shipped to production computing its payload and then
+    falling straight into the next handler's `def`, because a merge collapsed
+    two adjacent handlers that ended on an identical `return self.reply(...)`
+    line. The route answered with an empty reply and nothing was logged, so the
+    engine-level tests all passed while the feature was dead. This is a
+    structural test on purpose: it costs one AST walk and covers all 44
+    handlers, including ones added later.
+    """
+
+    def _handlers(self):
+        with open(server.__file__, encoding="utf-8") as handle:
+            source = ast.parse(handle.read())
+        return {node.name: node for node in ast.walk(source)
+                if isinstance(node, ast.FunctionDef)}
+
+    def test_every_routed_handler_writes_a_response(self):
+        handlers = self._handlers()
+        routed = {name for _, name in
+                  list(Handler.GET_ROUTES.values()) + list(Handler.POST_ROUTES.values())}
+        self.assertTrue(routed, "the routing tables are empty")
+        silent = []
+        for name in sorted(routed):
+            node = handlers.get(name)
+            self.assertIsNotNone(node, f"route points at a missing handler: {name}")
+            body = ast.dump(node)
+            if "reply" not in body and "send_" not in body:
+                silent.append(name)
+        self.assertEqual(silent, [], "these handlers never write a response")
+
+    def test_tool_result_route_replies_with_the_engine_payload(self):
+        payload = {"ok": True, "text": "tool output", "truncated": False}
+        handler = make_handler("/api/tool-result?sid=s1&tuid=toolu_1",
+                               eng=SimpleNamespace(tool_result=lambda sid, tuid: payload))
+        handler.get_tool_result()
+        self.assertEqual(len(handler._replies), 1, "the route wrote no response")
+        code, ctype, body, _ = handler._replies[0]
+        self.assertEqual((code, ctype), (200, "application/json"))
+        self.assertEqual(json.loads(body), payload)
 
 
 if __name__ == "__main__":

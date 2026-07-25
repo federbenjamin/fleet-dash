@@ -1467,6 +1467,17 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
   replaced on a 2s tick, so `locator.boundingBox()` or `el.evaluate(el=>el.nextElementSibling…)` can
   resolve an element that is detached before it is read — a null with no error. Use `stableBox()`
   (retries) or express the relationship as a locator (`'#sctrl > .termbtn + .ovwrap'`).
+  A detached or still-mounting node reports every measurement as **0**, not null, so a geometry
+  assertion must poll (`composerHeights` + `expect.poll`) rather than read once — proven
+  2026-07-25, where the composer-geometry spec intermittently read `[0,0,0]` for a row that is
+  always 44px.
+- **A spec that leaves the chat tail must use a real gesture.** Setting `scrollTop` and dispatching
+  a synthetic `scroll` event does NOT disengage follow-tail — that is invariant 67 working as
+  designed — so the pending tail pin drags the body straight back to the bottom and every later
+  reading-anchor assertion races it. Dispatch a `WheelEvent` first and wait for `sessionFollowTail`
+  to clear, the way the follow-tail spec does. Diagnosed 2026-07-25: scrollTop went 2282 → 2802
+  (exactly `scrollHeight − clientHeight`) inside one millisecond, and the "reading anchor drifted"
+  failure was only the top-visible row changing as the viewport shrank while pinned to the bottom.
 - Headless page test: `chrome --headless=new --dump-dom http://127.0.0.1:8377/` renders with
   JS executed; grep for `class="pend"` etc.
 - The building session's own Bash runs sandboxed — anything probing PIDs (`os.kill`) or writing

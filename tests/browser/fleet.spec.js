@@ -50,6 +50,15 @@ async function stableBox(locator) {
 }
 
 
+// #sact is rebuilt on the poll tick, so a composer measured while the section
+// it belongs to is still mounting reports every child height as 0. Read it
+// through the locator each time so expect.poll can ride out that rebuild.
+function composerHeights(locator) {
+  return locator.evaluate(element => [...element.children].map(child =>
+    child.matches('.composertools') ? child.querySelector('button').getBoundingClientRect().height :
+      child.getBoundingClientRect().height));
+}
+
 async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
 }
@@ -2573,8 +2582,13 @@ test('mobile keyboard geometry is flush and preserves chat and Markdown reading 
   await page.evaluate(()=>openSession('codex:thread-one'));
   const body=page.locator('#sbody');
   await expect(body).toContainText('Conversation message 204');
-  await body.evaluate(element=>{element.scrollTop=Math.max(0,element.scrollHeight-element.clientHeight-520);
+  // A bare programmatic scroll is NOT a reader gesture, so follow-tail stays
+  // engaged (invariant 67) and the pending tail pin drags the body back to the
+  // bottom — racing this setup. Leave the tail the way a reader does.
+  await body.evaluate(element=>{element.dispatchEvent(new WheelEvent('wheel',{deltaY:-520,bubbles:true}));
+    element.scrollTop=Math.max(0,element.scrollHeight-element.clientHeight-520);
     element.dispatchEvent(new Event('scroll'));});
+  await expect.poll(()=>page.evaluate(()=>sessionFollowTail)).toBe(false);
   const visibleAnchor=async locator=>locator.evaluate(element=>{const rect=element.getBoundingClientRect();
     const rows=[...element.querySelectorAll(element.id==='sbody'?'.aconvo > *':'.mdoc > *')];
     const row=rows.find(item=>item.getBoundingClientRect().bottom>rect.top+1);return{
@@ -2648,9 +2662,8 @@ test('Chat and Files share exact composer geometry and one persistent header', a
   expect(await chatComposer.evaluate(element=>[...element.children].map(child=>
     child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
     .toEqual(['plus','message','send']);
-  const resting=await chatComposer.evaluate(element=>[...element.children].map(child=>
-    child.matches('.composertools')?child.querySelector('button').getBoundingClientRect().height:
-      child.getBoundingClientRect().height));
+  await expect.poll(()=>composerHeights(chatComposer).then(heights=>Math.min(...heights))).toBeGreaterThan(0);
+  const resting=await composerHeights(chatComposer);
   expect(Math.max(...resting)-Math.min(...resting)).toBeLessThan(.6);
   expect(resting[0]).toBe(44);
   const input=chatComposer.getByPlaceholder('send message');
@@ -2690,10 +2703,7 @@ test('Chat and Files share exact composer geometry and one persistent header', a
   expect(await viewerComposer.evaluate(element=>[...element.children].map(child=>
     child.matches('.composertools')?'plus':child.tagName==='TEXTAREA'?'message':child.textContent.trim())))
     .toEqual(['plus','message','send']);
-  const viewerResting=await viewerComposer.evaluate(element=>[...element.children].map(child=>
-    child.matches('.composertools')?child.querySelector('button').getBoundingClientRect().height:
-      child.getBoundingClientRect().height));
-  expect(viewerResting).toEqual(resting);
+  await expect.poll(()=>composerHeights(viewerComposer)).toEqual(resting);
   await expect(page.locator('#shead2')).toBeVisible();
   await expect(page.locator('#stabs [role="tab"]')).toHaveCount(4);
   const panes=await page.locator('#sfilebrowser').evaluate(element=>({
