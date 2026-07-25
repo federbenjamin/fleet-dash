@@ -202,6 +202,19 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    else idle; busy → running/stalled). Claude's `shell` registry state is active while the
    transcript remains mid-tool, but a completed `end_turn` wins over a stale detached shell child
    and returns the session to turn_done/idle.
+   **Which tool it is frozen on is projected, and comes from the transcript alone.**
+   `Tail.pending` was already the unanswered-`tool_use` map (set on tool_use, popped on its
+   tool_result, cleared on end_turn or a new prompt); `Tail.open_tool()` reads the newest entry
+   and `Engine._active_tool` renders it as `active_tool = {name, count, seconds}`. Three rules:
+   it is NOT filtered by `KEY_TOOLS` (that list decides what the conversation shows, and a
+   session wedged on a tool nobody wants in the transcript is exactly the one worth naming);
+   it is projected ONLY for `running`/`stalled`/`stalled_or_prompt`, because an idle session can
+   still hold a stale pending entry from a turn that ended without a result row; and the age
+   clamps at 0, because compaction appends rows carrying earlier timestamps (invariant 17). No
+   screen read is involved, so this works on sessions outside tmux. A backgrounded Bash returns
+   its tool_result immediately and is therefore correctly invisible here — the session is not
+   blocked on it. `renderSessionActivity`'s signature must include the tool name and age or the
+   workspace paints one value and never updates it.
    **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
    parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
    ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/

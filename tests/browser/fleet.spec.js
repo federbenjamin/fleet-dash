@@ -1555,6 +1555,27 @@ test('full chat renders main work as the newest non-interactive conversation row
   await expect(activity).toBeHidden();
 });
 
+test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }) => {
+  // "stalled" has always meant frozen mid-TOOL, but the card never said WHICH
+  // tool — so a wedged session and a slow one looked identical.
+  await reset(page);
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveCount(0);
+
+  await reset(page, 'active-tool');
+  const tool = page.locator('[data-sid="claude-one"] .ctool');
+  await expect(tool).toHaveText('Bash · 3s');
+  await expect(tool).not.toHaveClass(/crit/);
+
+  // stalled: the count of other open calls shows, and the chip goes critical
+  await reset(page, 'active-tool-stalled');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveText('Bash +1 · 4m');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveClass(/crit/);
+
+  // and the workspace says it too, beside "Main agent working"
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sactivity')).toContainText('Bash +1 · 4m');
+});
+
 test('quiet age is limited to working session cards', async ({ page }) => {
   await reset(page);
   await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);

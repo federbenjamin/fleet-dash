@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{activeToolChip,screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -164,6 +164,19 @@ function cardFrame(s){
 // rail, and on mobile an inline status row directly under the header (10a) —
 // `.cmain{display:contents}` lets flex `order` interleave it there. Alert
 // states (stalled / limit) darken the rail surface and redden the quiet clock.
+// "stalled" means frozen mid-tool (invariant 7), but until now the card never
+// said WHICH tool — so a session wedged on a hung command and one running a slow
+// build looked identical. This comes from the transcript fold, not a screen read,
+// so it works on sessions outside tmux too.
+function activeToolChip(s){
+  const t=s.active_tool;if(!t||!t.name)return'';
+  const age=t.seconds==null?'':` · ${fmtAge(t.seconds)}`;
+  const more=t.count>1?` +${t.count-1}`:'';
+  const stalled=s.state==='stalled';
+  return`<span class="mrow ctool${stalled?' crit':''}" title="${stalled?
+    'this turn has been inside this tool call with no result':
+    'the tool call this turn is waiting on'}">${esc(t.name)}${more}${age}</span>`;
+}
 function cardMetaRail(s){
   const cls=cardCls(s);
   const tone=cls==='needs'?'amber':cls==='stalled'?'red':
@@ -180,6 +193,7 @@ function cardMetaRail(s){
       ${ctx}
       ${s.quiet_s!=null&&s.ui_group!=='available'?`<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
       ${s.compacting!=null?`<span class="mrow" title="a compaction is running — the transcript is frozen until it finishes">⧉ compacting ${fmtAge(s.compacting)}</span>`:''}
+      ${activeToolChip(s)}
       ${s.running?`<span class="mrow runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
       ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}
     </div>`;
