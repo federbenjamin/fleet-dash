@@ -1050,6 +1050,30 @@ test('an unchanged card is never rewritten, so nothing moves under your finger',
     .toContainText('a brand new last message');
 });
 
+test('a Codex approval keeps its always button, which is not a keystroke', async ({ page }) => {
+  // Codex approvals arrive as kind:'permission' too, so the screen-proof gate
+  // that Claude's digit needs would have silently removed this one — its
+  // `always` is a documented App Server decision value and the provider states
+  // that it accepts it.
+  await reset(page);
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.pending = {kind: 'permission', nonce: 'cx-1', tool: 'command',
+      input_summary: 'rm -rf build/', decisions: ['allow', 'always', 'deny', 'cancel']};
+    render(last, true);
+  });
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const pend = page.locator('#sact .pend');
+  await expect(pend.locator('.pbtn.always')).toHaveCount(1);
+  await expect(pend.locator('.pbtn.always')).toHaveText('always allow');
+  // …and it never asks the screen route about a Codex thread
+  const asked = [];
+  await page.route('**/api/prompt-options**', route => { asked.push(route.request().url()); route.abort(); });
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(300);
+  expect(asked).toEqual([]);
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).
@@ -1599,12 +1623,23 @@ test('the always button says what this prompt actually grants', async ({ page })
   await expect(always).toHaveText('always allow access to fleet-dash/ from this project');
   await expect(always).toHaveAttribute('title', /Claude's own wording/);
 
-  // Off tmux Fleet genuinely cannot read the sentence, and the generic label is
-  // then the truthful one — it must not invent wording.
+  // Off tmux there is no pane to read, so the button does not render at all
+  // (operator decision 2026-07-25). `allow` is row 1 and `deny` is Esc on every
+  // captured variant; `always` is the only key that has to be aimed, and Fleet
+  // does not aim it blind.
   await reset(page, 'claude-permission-blind');
   await openAction(page, 'claude-one');
-  await expect(always).toHaveText('always allow');
-  await expect(always).toHaveAttribute('title', /cannot read this terminal/);
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
+  await expect(page.locator('#sact .pbtn.deny')).toHaveCount(1);
+
+  // …and on a variant that offers no persistent grant at all — the Bash prompt
+  // whose command cannot be statically analyzed, where row 2 is "No" — there is
+  // nothing to grant, so again no button rather than one that would deny.
+  await reset(page, 'claude-permission-nogrant');
+  await openAction(page, 'claude-one');
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
 });
 
 test('quiet age is limited to working session cards', async ({ page }) => {

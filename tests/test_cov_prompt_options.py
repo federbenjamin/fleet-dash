@@ -39,6 +39,25 @@ READ = """\
 """
 
 
+# Captured live from `tmux capture-pane -p` on 2026-07-25. The notice above the
+# options is Claude Code explaining why there is no persistent grant to offer:
+# it cannot derive a rule pattern from a command it cannot statically analyze.
+NO_ALWAYS = """\
+ Bash command
+
+   echo "$(date)" > /Users/benjaminfeder/.claude/metrics/.session-unlock
+   Run shell command
+
+ Contains shell syntax (string) that cannot be statically analyzed
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain
+"""
+
+
 class PromptOptionsTest(unittest.TestCase):
     def test_bash_variant(self):
         self.assertEqual(
@@ -69,6 +88,41 @@ class PromptOptionsTest(unittest.TestCase):
     def test_the_option_index_is_capped(self):
         rows = [f"   {n}. option {n}" for n in range(1, 10)]
         self.assertEqual(len(screen.prompt_options(rows, limit=3)), 3)
+
+
+class AlwaysOptionTest(unittest.TestCase):
+    """Which key actually grants persistent access — read, never assumed.
+
+    Fleet hardwired "2" for `always allow`. On NO_ALWAYS below, captured live on
+    v2.1.220 on 2026-07-25, row 2 is "No": the button denied the request it was
+    meant to grant forever.
+    """
+
+    def test_the_three_grant_variants_all_resolve_to_row_two(self):
+        for frame in (BASH, READ):
+            digit, text = screen.always_option(frame.splitlines())
+            self.assertEqual(digit, 2)
+            self.assertTrue(text.lower().startswith("yes,"))
+
+    def test_a_prompt_with_no_persistent_grant_resolves_to_nothing(self):
+        self.assertIsNone(screen.always_option(NO_ALWAYS.splitlines()))
+        # …and row 2 there is exactly the key the old constant would have sent
+        self.assertEqual(screen.prompt_options(NO_ALWAYS.splitlines())[1], "No")
+
+    def test_the_trust_dialog_offers_no_always(self):
+        """Its row 1 is "Yes, I trust this folder" — a yes, but not a grant row,
+        and Fleet must never answer that dialog at all (invariant 21)."""
+        trust = ("❯ 1. Yes, I trust this folder\n"
+                 "  2. No, exit\n\n Enter to confirm · Esc to cancel")
+        self.assertIsNone(screen.always_option(trust.splitlines()))
+
+    def test_the_digit_comes_from_the_screen_not_the_position(self):
+        """A pane whose first row is numbered 2 still yields the real key."""
+        rows = ["  2. Yes", "  3. Yes, and always allow access to x/", "  4. No"]
+        self.assertEqual(screen.always_option(rows), (3, "Yes, and always allow access to x/"))
+
+    def test_no_options_at_all(self):
+        self.assertIsNone(screen.always_option(["─" * 20, "❯", "─" * 20]))
 
 
 class EnginePromptOptionsTest(unittest.TestCase):

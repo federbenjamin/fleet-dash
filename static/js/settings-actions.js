@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{promptOptionKey,alwaysRow,alwaysLabel,alwaysTitle,ensurePromptOptions,uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,suppressWhileAnswering,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
+Object.assign(globalThis,{promptOptionKey,alwaysRow,alwaysLabel,alwaysTitle,alwaysButton,ensurePromptOptions,uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,suppressWhileAnswering,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
 const SETTINGS_SECTIONS=['notifications','devices','sessions','appearance','budgets','advanced'];
 const SETTINGS_LABELS={notifications:'Notifications',devices:'Devices & delivery',sessions:'Sessions',
   appearance:'Appearance',budgets:'Budgets & spawning',advanced:'Advanced'};
@@ -465,24 +465,45 @@ function stagingPendingBox(s,p){
 globalThis.promptOptionCache=globalThis.promptOptionCache||{};
 globalThis.promptOptionLoads=globalThis.promptOptionLoads||new Set();
 function promptOptionKey(s,p){return`${s.session_id}|${p&&(p.request_id||p.nonce)}`;}
+// The always-allow row is whatever the pane says it is — its wording AND its
+// key. Three captured variants offer a persistent grant on row 2, granting
+// three very different things under one fixed label; a fourth offers none at
+// all and puts "No" there. So the button renders only when a capture proved the
+// row, and not at all off tmux where there is nothing to read: allow (row 1) and
+// deny (Esc) are correct everywhere, this one never was.
 function alwaysRow(s,p){
   const hit=promptOptionCache[promptOptionKey(s,p)];
-  return hit&&hit.options&&hit.options.length>=2?hit.options[1]:'';
+  return hit&&hit.always_key?hit.always_label||'':'';
 }
 function alwaysLabel(s,p){
   const row=alwaysRow(s,p);
-  if(!row)return'always allow';
   // The row starts "Yes, and always allow …" — drop the leading Yes so the
   // button reads as an action, keeping every word that describes the grant.
   return row.replace(/^yes,\s*(and\s+)?/i,'').trim()||row;
 }
 function alwaysTitle(s,p){
-  const row=alwaysRow(s,p);
-  return row?`Claude's own wording for this choice: “${row}”`:
-    'the exact grant differs by prompt and Fleet cannot read this terminal to show it';
+  return `Claude's own wording for this choice: “${alwaysRow(s,p)}”`;
+}
+// '' until the capture lands, so the button appears a moment after the prompt
+// rather than appearing wrong and correcting itself
+function alwaysButton(s,p,pre,locked){
+  // Codex approvals arrive as kind:'permission' too, but their `always` is a
+  // documented App Server decision value, not a keystroke Fleet has to aim at a
+  // row — the provider states which decisions it accepts, and that is
+  // authoritative. Only Claude's digit needs the screen to prove where it goes.
+  if(Array.isArray(p.decisions))
+    return p.decisions.includes('always')
+      ?`<button class="pbtn always" ${locked?'disabled':''}
+        onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>`:'';
+  if(!alwaysRow(s,p))return'';
+  return`<button class="pbtn always" ${locked?'disabled':''} title="${esc(alwaysTitle(s,p))}"
+    onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">${esc(alwaysLabel(s,p))}</button>`;
 }
 async function ensurePromptOptions(s,p){
-  if(!p||p.kind!=='permission')return;
+  // Only Claude's prompt needs its rows read. A provider that states its own
+  // decisions has already answered the question this fetch exists to ask, and
+  // /api/prompt-options refuses a Codex thread anyway (invariant 74).
+  if(!p||p.kind!=='permission'||Array.isArray(p.decisions))return;
   const key=promptOptionKey(s,p);
   if(key in promptOptionCache||promptOptionLoads.has(key))return;
   promptOptionLoads.add(key);
@@ -516,7 +537,7 @@ function pendingBox(s,pre='msg'){
       <pre>${esc(p.input_summary||'')}</pre>
       <div class="pbtns">
         <button class="pbtn allow" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
-        <button class="pbtn always" ${locked?'disabled':''} title="${esc(alwaysTitle(s,p))}" onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">${esc(alwaysLabel(s,p))}</button>
+        ${alwaysButton(s,p,pre,locked)}
         <button class="pbtn deny" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','deny','${pre}')">deny</button>
         ${(p.decisions||[]).includes('cancel')?`<button class="pbtn" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','cancel','${pre}')">cancel</button>`:''}
       </div>

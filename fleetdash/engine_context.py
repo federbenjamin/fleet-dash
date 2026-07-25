@@ -604,20 +604,31 @@ class ContextOps:
         if not screen.get("ok"):
             return screen
         lines = screen["lines"]
-        return {"ok": True, "session_id": str(sid),
-                "kind": screenlib.classify_screen(lines),
-                "options": screenlib.prompt_options(lines)}
+        kind = screenlib.classify_screen(lines)
+        always = screenlib.always_option(lines) if kind == screenlib.PERMISSION else None
+        out = {"ok": True, "session_id": str(sid), "kind": kind,
+               "options": screenlib.prompt_options(lines)}
+        # Absent `always_key` is the answer, not a gap: a permission prompt for a
+        # command Claude cannot statically analyze offers no persistent grant at
+        # all, and Fleet must render no button rather than press whatever sits on
+        # row 2 — which on that variant is "No".
+        if always:
+            out["always_key"], out["always_label"] = str(always[0]), always[1]
+        return out
 
-    def screen_prompt_kind(self, reg, tty):
-        """What the session's terminal is showing right now, or None.
+    def screen_prompt_state(self, reg, tty):
+        """One look at the terminal, answering both questions act() has.
+
+        Returns `{"kind":…, "always": (digit, text) | None}` or None for no
+        evidence at all — no tmux pane, an unreadable pane, or a screen the
+        classifier does not recognize. Callers must never read None as "no
+        prompt"; it is the state Fleet has always been in.
 
         Request-path only (invariant 74): this runs when a user is about to send
         keys, never on the scan. It is deliberately given the already-resolved
-        registry row and tty so it adds no lookups of its own.
-
-        None means "no evidence" — no tmux pane, an unreadable pane, or a screen
-        the classifier does not recognize. Callers must never read that as "no
-        prompt"; it is the state Fleet has always been in.
+        registry row and tty so it adds no lookups of its own — and it answers
+        the widget question and the which-key question from the SAME capture, so
+        answering a prompt still costs exactly one `capture-pane`.
         """
         if not tty or self._is_background_claude(reg):
             return None
@@ -627,8 +638,18 @@ class ContextOps:
         capture = self._tmux_capture(pane, max_rows=screenlib.TAIL_LINES)
         if not capture.get("ok"):
             return None
-        kind = screenlib.classify_screen(capture.get("lines") or [])
-        return None if kind == screenlib.UNKNOWN else kind
+        lines = capture.get("lines") or []
+        kind = screenlib.classify_screen(lines)
+        if kind == screenlib.UNKNOWN:
+            return None
+        return {"kind": kind,
+                "always": screenlib.always_option(lines)
+                if kind == screenlib.PERMISSION else None}
+
+    def screen_prompt_kind(self, reg, tty):
+        """Just the widget label from `screen_prompt_state`, or None."""
+        state = self.screen_prompt_state(reg, tty)
+        return state["kind"] if state else None
 
     def observe_screens(self, rows):
         """One batched look at the terminals Fleet is guessing about (invariant 78).

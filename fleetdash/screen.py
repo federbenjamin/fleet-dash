@@ -93,6 +93,24 @@ def classify_screen(lines):
 _OPTION_ROW = re.compile(r"^[❯>\s]*([1-9])\.\s+(.+?)\s*$")
 
 
+def option_rows(lines, limit=9, width=160):
+    """{digit: text} for the numbered option rows a modal prompt is rendering.
+
+    The DIGIT matters, not the position: it is the key that selects that row, and
+    a caller deriving a keystroke must use the number the screen actually shows.
+    """
+    found = {}
+    for row in _tail(lines):
+        match = _OPTION_ROW.match(row)
+        if not match:
+            continue
+        # LAST sighting wins. A pane can still hold an answered prompt's rows
+        # above the live one, and the live one is always nearer the bottom;
+        # rows are read top-down, so a later index overwrites an earlier one.
+        found[int(match.group(1))] = match.group(2)[:width]
+    return {key: text for key, text in found.items() if key <= limit}
+
+
 def prompt_options(lines, limit=9, width=160):
     """The numbered option rows a modal prompt is rendering, in order.
 
@@ -107,16 +125,35 @@ def prompt_options(lines, limit=9, width=160):
     of control characters by the caller's capture; treat it as untrusted display
     data and escape it at the render site.
     """
-    found = {}
-    for row in _tail(lines):
-        match = _OPTION_ROW.match(row)
-        if not match:
-            continue
-        # LAST sighting wins. A pane can still hold an answered prompt's rows
-        # above the live one, and the live one is always nearer the bottom;
-        # rows are read top-down, so a later index overwrites an earlier one.
-        found[int(match.group(1))] = match.group(2)[:width]
-    return [found[key] for key in sorted(found) if key <= limit]
+    rows = option_rows(lines, limit=limit, width=width)
+    return [rows[key] for key in sorted(rows)]
+
+
+def always_option(lines):
+    """The row a permission prompt offers as its PERSISTENT grant, or None.
+
+    Returns `(digit, text)`. Row 1 is the one-off Yes and the last row is No, so
+    the persistent grant is the first row after the first that still reads as a
+    yes. That is exactly what separates
+
+        1. Yes   2. Yes, and always allow access to <dir>/…   3. No     → (2, …)
+        1. Yes   2. No                                                  → None
+
+    and the second form is real: Claude Code declines to offer a rule for a
+    command it cannot statically analyze (`echo "$(date)" > …`), saying so one
+    line above the options. Captured live on v2.1.220, 2026-07-25 — it is why the
+    hardwired `always` key of "2" pressed **No** on that prompt.
+
+    None therefore means "this prompt has no always to give", never "unreadable";
+    a caller that could not capture at all must not call here at all.
+    """
+    rows = option_rows(lines)
+    for digit in sorted(rows):
+        if digit == min(rows, default=1):
+            continue                      # row 1 is the one-off yes
+        if rows[digit].strip().lower().startswith("yes"):
+            return digit, rows[digit]
+    return None
 
 
 def _idle_input(rows):
