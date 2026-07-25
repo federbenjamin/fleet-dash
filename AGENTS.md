@@ -85,7 +85,14 @@ indexer process; a file lock prevents overlapping writers during launch-agent re
 child exits when its parent disappears. Keep search parsing out of the parent interpreter: a Python
 thread regressed live `/api/fleet` p95 by contending for the GIL on the 2.7 GB local corpus.
 `Engine.scan_lock` serializes ALL Tail folding (poll loop and act's freshness re-poll) — Tails
-are stateful offsets; concurrent folds double-count. `Engine.lock` guards snapshot_cache only.
+are stateful offsets; concurrent folds double-count. It is held ONLY around that folding, not
+around the whole scan: `_scan` splits into `_scan_claude_sessions` (locked) and
+`_scan_after_fold` (unlocked), with one short re-acquire for the status-strip Tail read.
+`Engine.scan_serialize` keeps one `_scan` at a time — the guarantee the wide lock used to give
+for free. `Engine.lock` guards snapshot_cache only.
+Measured live 2026-07-24 (49 sessions): the fold is 32.3 ms of a 733.9 ms scan — 4.4% — so an
+act freshness re-poll waits ~32 ms instead of up to the p95 1141 ms it used to. Anything added to
+`_scan_after_fold` that touches a Tail must take `scan_lock` around exactly that read.
 
 ## Invariants — violating these re-breaks debugged behavior
 
@@ -342,9 +349,9 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     key sequences where it is load-bearing (invariant 4), 0.05s for text/focus/interrupt/relay;
     (c) `act()` takes `scan_lock` + re-polls the tail only for native-surface mutations that need
     final freshness: prompt answers, controls, direct text/images, handoffs, and relays. Focus and
-    interrupt keep the no-tail fast path. The poll thread holds that lock while folding the whole
-    fleet, so these actions may wait out a scan, but `mt.poll()` must stay INSIDE the lock or it races
-    the fold and double-counts; (d) the
+    interrupt keep the no-tail fast path. The poll thread holds that lock only while FOLDING (the
+    architecture note above), so these actions wait ~32 ms rather than a whole scan — but
+    `mt.poll()` must stay INSIDE the lock or it races the fold and double-counts; (d) the
     result file is polled every 20ms, not 300ms. The applet owns one fixed request/result mailbox,
     so a dedicated Engine lock serializes the complete atomic request publish, `open`, and matching-
     result wait; concurrent HTTP/Outbox actions must never share that exchange. The applet is stay-open
@@ -622,7 +629,10 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     child payloads freeze with the child. Full-chat headers carry the title, one quiet identity line
     (project · branch · provider · access), and controls — operational metadata (git state, model,
     context, cost) still renders only in this status strip, never in the header.
-43. **Routine Claude conversation reads never wait for the fleet-wide Tail fold.** `_scan` publishes
+43. **Routine Claude conversation reads never wait for the fleet-wide Tail fold, and neither does
+    anything else the scan is not folding.** The lock covers `_scan_claude_sessions` and the
+    status-strip read only (see the architecture note); everything else in the scan runs unlocked.
+    `_scan` publishes
     immutable bounded main snapshots keyed by session and subagent snapshots keyed by
     `(parent_session_id, agent_id)`; `/api/context`, `/api/agent_context`, and `/api/file` read those
     projections without `scan_lock`. The locked `Tail.poll()` path is startup/fallback only, before a
