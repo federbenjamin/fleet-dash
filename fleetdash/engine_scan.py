@@ -720,6 +720,28 @@ class ScanOps:
         return self._scan_after_fold(sessions, claude_tails, live_claude_ids,
                                      now, cfg, phase, phases, screen_watch)
 
+    @staticmethod
+    def _active_tool(mt, state):
+        """Name the tool call a working session is blocked on, with its age.
+
+        Only for states where something is genuinely in flight — an idle session
+        can still hold a stale `pending` entry from a turn that ended without a
+        result row, and reporting that as live work would be a lie.
+
+        The age is derived from the tool_use row's own timestamp. Compaction can
+        append rows carrying earlier timestamps (invariant 17), so a negative
+        result is clamped to 0 rather than rendered as a time in the future.
+        """
+        if state not in ("running", "stalled", "stalled_or_prompt"):
+            return None
+        open_tool = mt.open_tool()
+        if not open_tool:
+            return None
+        started = iso_epoch(open_tool.get("ts"))
+        return {"name": str(open_tool["name"])[:40],
+                "count": open_tool["count"],
+                "seconds": max(0, round(time.time() - started)) if started else None}
+
     def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg,
                               screen_watch=None):
         """Fold every live Claude transcript. Runs under scan_lock.
@@ -802,8 +824,25 @@ class ScanOps:
             # The ghost-question case, and the only one invariant 5 ever had to
             # guess about: a hook capture says a prompt is open while the registry
             # says the session is not waiting on one.
-            watch.append((sid, reg.get("pid"),
-                          bool(pending) and reg_status != "waiting"))
+            ghost = bool(pending) and reg_status != "waiting"
+            # …and the compaction case, which needed a wider net than expected.
+            # A compaction writes NOTHING to the transcript while it runs
+            # (invariant 17) AND the registry reports the session `idle`
+            # throughout — verified live 2026-07-25, which is why "busy with a
+            # frozen transcript" detected nothing. From Fleet's own data a
+            # compacting session is indistinguishable from an idle one; that is
+            # precisely the gap this closes, and it means the pane is the only
+            # evidence. So a session Fleet still considers live is eligible, at
+            # the faster window. Cost is one batched capture-pane per window for
+            # the whole fleet — 5.6 ms at 49 panes — and it still yields a LABEL
+            # only, never screen text (invariant 78).
+            watchable = (reg_status is not None
+                         and quiet < cfg["dormant_seconds"])
+            frozen = watchable or self.observed_screen(sid) == "compacting"
+            watch.append((sid, reg.get("pid"), ghost or frozen,
+                          # A compaction is over in tens of seconds; the default
+                          # window would miss it entirely.
+                          cfg.get("screen_observe_busy_seconds") if frozen else None))
             turn_starting = self._claude_turn_fenced(sid, reg_status, main_path, mt)
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
@@ -941,6 +980,12 @@ class ScanOps:
                 "running": (f"/{mt.active_skill}" if mt.active_skill else mt.active_command)
                            if state in ("running", "stalled", "stalled_or_prompt",
                                         "needs_you") else None,
+                # What the turn is blocked on right now, straight from the fold.
+                # "stalled" already means frozen mid-TOOL (invariant 7) but the
+                # card never said WHICH tool, so a wedged session and a slow one
+                # looked identical. No screen read is involved, so this works on
+                # sessions outside tmux too.
+                "active_tool": self._active_tool(mt, state),
                 # Collapsed height is CSS-controlled. Keep up to 800 characters so
                 # the explicit expansion reveals a useful bounded preview.
                 "last_msg": (mt.last_message(800)
@@ -1008,9 +1053,23 @@ class ScanOps:
         # the grid, which is what makes a fleet-wide look affordable here.
         screen_states = self.observe_screens(screen_watch or [])
         for session in sessions:
-            state = screen_states.get(session.get("session_id"))
+            sid = session.get("session_id")
+            state = screen_states.get(sid)
             if state:
                 session["screen_state"] = state
+            # The PreCompact hook's checkpoint is the better evidence — it marks
+            # when the compaction STARTED. Projects with no such hook got no pill
+            # at all; for those the pane is the only live artifact, because the
+            # transcript stays silent until the compaction finishes (invariant 17).
+            if state == "compacting" and session.get("compacting") is None:
+                observed = self.observed_screen_seconds(sid, "compacting")
+                # Same 900s stale guard the hook path uses: a label this old is
+                # a pane Fleet has stopped being able to read, not a compaction.
+                if observed is not None and observed <= 900:
+                    session["compacting"] = observed
+                    session["compacting_source"] = "screen"
+            elif session.get("compacting") is not None:
+                session["compacting_source"] = "hook"
         with self.config_lock:
             control_overrides = {
                 sid: value for sid, value in self._claude_control_overrides.items()

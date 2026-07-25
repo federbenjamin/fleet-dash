@@ -1521,7 +1521,12 @@ class EngineProviderTest(unittest.TestCase):
         allowed = self.engine.act({"type": "permission", "session_id": "same",
                                    "nonce": "p1", "choice": "allow"})
         self.assertTrue(allowed["ok"])
-        self.assertEqual(writes[-1][1], [("1", False), ("", True)])
+        # ONE key, no trailing CR. A permission prompt instant-selects on the
+        # bare digit (verified live on 2.1.220 across the Bash, Read and
+        # Overwrite variants), so a CR would be invariant 4's phantom Enter —
+        # and Claude routinely raises a SECOND permission prompt for the same
+        # request, whose highlighted row 1 that Enter would confirm.
+        self.assertEqual(writes[-1][1], [("1", False)])
         reg["status"] = "idle"
         self.engine.hook_pending = lambda sid, status: None
         tail.pending = {}

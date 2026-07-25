@@ -30,6 +30,10 @@ class ContextOps:
     ANSWERED_FENCE_SECONDS = 20
     # Bounded identity/fence maps; sessions come and go, so cap the retained set.
     REQUEST_IDENTITY_LIMIT = 500
+    # How still a busy session's transcript has to be before its pane is worth a
+    # look. A compaction freezes the transcript completely (invariant 17) while a
+    # working turn writes constantly, so this keeps the eligible set near empty.
+    SCREEN_WATCH_QUIET_SECONDS = 8
 
     @staticmethod
     def _discard_capture(path):
@@ -638,16 +642,51 @@ class ContextOps:
                 "lines": capture["lines"], "truncated": capture["truncated"],
                 "captured_at": time.time()}
 
-    def screen_prompt_kind(self, reg, tty):
-        """What the session's terminal is showing right now, or None.
+    def prompt_options(self, sid):
+        """The option rows the session's terminal is rendering for a live prompt.
+
+        Exists for one reason: every permission variant puts Yes/always/No in
+        rows 1/2/3, but row 2's WORDING differs sharply — a Bash prompt offers a
+        project-wide directory grant, a Read prompt a session-only read, an
+        Overwrite prompt a settings edit (all three captured live on v2.1.220).
+        A fixed "always allow" button describes three different powers, and the
+        dashboard never showed the sentence the user was actually agreeing to.
+
+        Request path only, and deliberately NOT part of the fleet snapshot: these
+        strings come off a terminal, and invariant 78's rule is that the scan may
+        derive a label but may not publish screen text — the snapshot is cached
+        on the device by the service worker. Every refusal `session_screen`
+        makes applies here unchanged, because this is that same capture.
+        """
+        screen = self.session_screen(sid)
+        if not screen.get("ok"):
+            return screen
+        lines = screen["lines"]
+        kind = screenlib.classify_screen(lines)
+        always = screenlib.always_option(lines) if kind == screenlib.PERMISSION else None
+        out = {"ok": True, "session_id": str(sid), "kind": kind,
+               "options": screenlib.prompt_options(lines)}
+        # Absent `always_key` is the answer, not a gap: a permission prompt for a
+        # command Claude cannot statically analyze offers no persistent grant at
+        # all, and Fleet must render no button rather than press whatever sits on
+        # row 2 — which on that variant is "No".
+        if always:
+            out["always_key"], out["always_label"] = str(always[0]), always[1]
+        return out
+
+    def screen_prompt_state(self, reg, tty):
+        """One look at the terminal, answering both questions act() has.
+
+        Returns `{"kind":…, "always": (digit, text) | None}` or None for no
+        evidence at all — no tmux pane, an unreadable pane, or a screen the
+        classifier does not recognize. Callers must never read None as "no
+        prompt"; it is the state Fleet has always been in.
 
         Request-path only (invariant 74): this runs when a user is about to send
         keys, never on the scan. It is deliberately given the already-resolved
-        registry row and tty so it adds no lookups of its own.
-
-        None means "no evidence" — no tmux pane, an unreadable pane, or a screen
-        the classifier does not recognize. Callers must never read that as "no
-        prompt"; it is the state Fleet has always been in.
+        registry row and tty so it adds no lookups of its own — and it answers
+        the widget question and the which-key question from the SAME capture, so
+        answering a prompt still costs exactly one `capture-pane`.
         """
         if not tty or self._is_background_claude(reg):
             return None
@@ -657,8 +696,18 @@ class ContextOps:
         capture = self._tmux_capture(pane, max_rows=screenlib.TAIL_LINES)
         if not capture.get("ok"):
             return None
-        kind = screenlib.classify_screen(capture.get("lines") or [])
-        return None if kind == screenlib.UNKNOWN else kind
+        lines = capture.get("lines") or []
+        kind = screenlib.classify_screen(lines)
+        if kind == screenlib.UNKNOWN:
+            return None
+        return {"kind": kind,
+                "always": screenlib.always_option(lines)
+                if kind == screenlib.PERMISSION else None}
+
+    def screen_prompt_kind(self, reg, tty):
+        """Just the widget label from `screen_prompt_state`, or None."""
+        state = self.screen_prompt_state(reg, tty)
+        return state["kind"] if state else None
 
     def observe_screens(self, rows):
         """One batched look at the terminals Fleet is guessing about (invariant 78).
@@ -677,12 +726,17 @@ class ContextOps:
         terminal contents do not belong in an offline cache.
         """
         now = time.time()
-        window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
+        default_window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
         if not self.cfg.get("screen_observe", True):
             self._screen_states.clear()
             return {}
         panes = {}
-        for sid, pid, eligible in rows:
+        for row in rows:
+            sid, pid, eligible = row[0], row[1], row[2]
+            # A row may name its own re-observation window. The trust/ghost cases
+            # are stable for minutes; a compaction is over in tens of seconds, so
+            # watching one at the default cadence would miss it entirely.
+            window = row[3] if len(row) > 3 and row[3] else default_window
             if not eligible or not pid:
                 continue
             seen = self._screen_states.get(sid)
@@ -702,10 +756,17 @@ class ContextOps:
                 frame = captured.get(pane["pane_id"])
                 if frame is None:
                     continue
+                state = screenlib.classify_screen(frame["lines"])
+                # `since` survives while the label does, so a caller can ask how
+                # long a surface has been up. It is when Fleet FIRST SAW it, not
+                # when it started — the difference is bounded by the window above
+                # and must be described honestly wherever it is rendered.
+                seen = self._screen_states.get(sid)
                 self._screen_states[sid] = {
-                    "state": screenlib.classify_screen(frame["lines"]),
-                    "at": now}
-        live = {sid for sid, _pid, _eligible in rows}
+                    "state": state, "at": now,
+                    "since": seen["since"] if seen and seen.get("state") == state
+                             and seen.get("since") else now}
+        live = {row[0] for row in rows}
         for sid in [key for key in self._screen_states if key not in live]:
             self._screen_states.pop(sid, None)
         return {sid: value["state"] for sid, value in self._screen_states.items()}
@@ -714,6 +775,15 @@ class ContextOps:
         """The most recent screen label for one session, or None if unobserved."""
         seen = self._screen_states.get(sid)
         return seen["state"] if seen else None
+
+    def observed_screen_seconds(self, sid, state):
+        """How long `sid` has been showing `state`, or None if it is showing
+        something else. This is time since Fleet first OBSERVED the surface, so it
+        is a lower bound — never present it as when the thing started."""
+        seen = self._screen_states.get(sid)
+        if not seen or seen.get("state") != state:
+            return None
+        return max(0, round(time.time() - (seen.get("since") or seen["at"])))
 
     # One page of older conversation, in raw transcript rows read per request.
     # 600 rows folds to well under the ring cap and reads a few hundred KB from

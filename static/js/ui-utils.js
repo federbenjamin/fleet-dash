@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{setHtml,positionUsagePanel,closeUsage,toggleUsage,usageReset,ugauge,usageBar,spark,mdInline,md});
+Object.assign(globalThis,{setHtml,setText,setClass,setAttr,positionUsagePanel,closeUsage,toggleUsage,usageReset,ugauge,usageBar,spark,mdInline,md});
 globalThis.lastMove=0;globalThis.lastTap=0;
 document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
 document.addEventListener('pointerdown',()=>{lastTap=Date.now()},{passive:true});
@@ -12,6 +12,28 @@ const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
 function setHtml(element,html){
   if(!element||element.__setHtml===html)return false;
   element.__setHtml=html;element.innerHTML=html;return true;
+}
+// Same contract for text and attributes. `el.textContent=x` replaces the text
+// node even when x is identical, and `el.setAttribute` invalidates style even
+// when the value is unchanged — 2s × the whole shell, that is most of the DOM
+// churn a poll produces. Measured on 51 live sessions: 507 of 687 mutation
+// records per five polls wrote a value that was already there.
+function setText(element,value){
+  const text=String(value==null?'':value);
+  if(!element||element.textContent===text)return false;
+  element.textContent=text;return true;
+}
+function setClass(element,value){
+  const text=String(value==null?'':value);
+  if(!element||element.className===text)return false;
+  element.className=text;return true;
+}
+function setAttr(element,name,value){
+  if(!element)return false;
+  const text=value==null||value===false?null:String(value);
+  if((element.getAttribute(name)??null)===text)return false;
+  text===null?element.removeAttribute(name):element.setAttribute(name,text);
+  return true;
 }
 // scrollbar auto-hide: thumbs are transparent until the element actually scrolls
 // (class fades 700ms after the last scroll event). Deliberately NOT tied into
@@ -118,8 +140,8 @@ function usageBar(legacy,providers){
   const summaries=[];
   if(claudeWindows.length)summaries.push(`Claude ${claudeWindows.join('/')}`);
   if(Number.isFinite(activeCodex))summaries.push(`Codex ${Math.round(activeCodex)}`);
-  chip.textContent=`Usage${summaries.length?` · ${summaries.join(' · ')}`:''}`;
-  chip.title='Claude active account: 5-hour/weekly · Codex: highest active non-Spark window';
+  setText(chip,`Usage${summaries.length?` · ${summaries.join(' · ')}`:''}`);
+  setAttr(chip,'title','Claude active account: 5-hour/weekly · Codex: highest active non-Spark window');
   // Desktop rail footer: per-window usage bars (single %-used numbers,
   // amber ≥70 / red ≥90) + signed-in account. Same data as the chip summary.
   const rail=$('#railusage'),railUser=$('#railuser');
@@ -132,17 +154,17 @@ function usageBar(legacy,providers){
         rows.push(['CLAUDE WK',Math.round(Number(activeClaude.weekly_pct))]);
     }
     if(Number.isFinite(activeCodex))rows.push(['CODEX',Math.round(activeCodex)]);
-    rail.innerHTML=rows.map(([label,pct])=>{
+    setHtml(rail,rows.map(([label,pct])=>{
       const tone=pct>=90?'crit':pct>=70?'warn':'';
       return`<span class="urow"><span>${esc(label)}</span><span class="${tone}">${pct}%</span></span>`+
         `<span class="ubarline"><i class="${tone}" style="width:${Math.min(pct,100)}%"></i></span>`;
-    }).join('');
+    }).join(''));
   }
   if(railUser){
     const email=String(activeClaude?.email||codex?.email||'');
     const name=email.split('@')[0];
-    railUser.innerHTML=name?`<span class="railavatar">${esc(name.slice(0,1))}</span>
-      <span><b>${esc(name)}</b><small>signed in</small></span>`:'';
+    setHtml(railUser,name?`<span class="railavatar">${esc(name.slice(0,1))}</span>
+      <span><b>${esc(name)}</b><small>signed in</small></span>`:'');
   }
   const claudeHtml=claude&&claudeProfiles.some(p=>p&&(p.five_hour_pct!=null||p.weekly_pct!=null||p.email))||claude?.lifetime_tokens!=null
     ?`<div class="uprovider">${claudeProfiles.filter(Boolean).map((profile,index)=>`<div class="uaccount">
@@ -161,8 +183,8 @@ function usageBar(legacy,providers){
       ${codex.reset_credits?`<span class="useg"><i class="usep" aria-hidden="true">·</i><span class="umeta">${codex.reset_credits} reset credit</span></span>`:''}</div>
     ${codex.error?`<span class="umeta">${codex.stale?'stale — ':''}${esc(codex.error)}</span>`:''}
     ${codexBuckets.map(b=>ugauge(b.label,b.used_pct,usageReset(b.reset))).join('')}</div>`:'';
-  if(!claudeHtml&&!codexHtml){el.className='empty';el.innerHTML='<div class="usageempty">Usage data is unavailable.</div>';return;}
-  el.className='';el.innerHTML=claudeHtml+codexHtml;
+  if(!claudeHtml&&!codexHtml){setClass(el,'empty');setHtml(el,'<div class="usageempty">Usage data is unavailable.</div>');return;}
+  setClass(el,'');setHtml(el,claudeHtml+codexHtml);
 }
 
 function spark(pts,w=64,h=16){

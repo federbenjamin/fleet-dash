@@ -217,7 +217,8 @@ class Tail:
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
                         self.pending[b["id"]] = {"name": b.get("name"),
-                                                 "input": b.get("input"), "uuid": o.get("uuid")}
+                                                 "input": b.get("input"), "uuid": o.get("uuid"),
+                                                 "ts": ts}
                         self._stat((self._day(ts), "tool", b.get("name") or "?"))[0] += 1
                         if b.get("name") == "Skill":
                             sk = (b.get("input") or {}).get("skill") or "?"
@@ -656,6 +657,29 @@ class Tail:
         u = self.last_usage or {}
         return (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
                 + u.get("cache_read_input_tokens", 0))
+
+    def open_tool(self):
+        """The tool call this session is currently blocked on, or None.
+
+        `pending` is already the unanswered-`tool_use` map — set on every
+        tool_use, popped on its tool_result, and cleared when the turn ends or a
+        new user prompt lands — so "frozen mid-tool" (invariant 7's definition of
+        stalled) is a fact the fold already holds. All that was missing was the
+        start time and a way to ask.
+
+        Deliberately NOT filtered by KEY_TOOLS: that list decides what the
+        conversation SHOWS, and a session wedged on a tool nobody wants in the
+        transcript is exactly the one worth naming.
+
+        Insertion order is file order, so the last entry is the newest call. A
+        turn may open several at once (parallel tool calls); `count` says how
+        many, and the name is the most recent.
+        """
+        if not self.pending:
+            return None
+        newest = list(self.pending.values())[-1]
+        return {"name": newest.get("name") or "?",
+                "ts": newest.get("ts"), "count": len(self.pending)}
 
     def turn_state(self):
         """'awaiting_input' | 'running' | 'needs_answer' (AskUserQuestion pending) | 'unknown'"""

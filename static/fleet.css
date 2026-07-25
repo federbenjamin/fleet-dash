@@ -539,6 +539,10 @@ a.jump{color:var(--blue);text-decoration:none;font-size:12px;white-space:nowrap}
   display:flex;align-items:center;justify-content:space-between;gap:8px}
 /* the skill / slash command this turn is running */
 .runskill{color:var(--amber);font-weight:700;white-space:nowrap}
+/* the tool call this turn is blocked on — plain until the session is stalled,
+   where naming it is the whole point (invariant 7: stalled = frozen mid-tool) */
+.ctool{white-space:nowrap;font-variant-numeric:tabular-nums}
+.ctool.crit{color:var(--red);font-weight:600}
 .dhead .expandbtn{float:none;flex:0 0 auto}
 /* the needs-you conversation renders OUTSIDE .detail (which supplies the gutter),
    so its header carries the card's own padding + the ctxbox's top border */

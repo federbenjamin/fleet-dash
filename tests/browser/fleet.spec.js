@@ -1090,6 +1090,108 @@ test('an expanded tool result survives the two-second poll', async ({ page }) =>
   await expect(page.locator('#sbody .ctool.open .tout')).toContainText('line three');
 });
 
+test('a poll never resizes a card it did not change', async ({ page }) => {
+  // The card frame is written twice: reconcileCards sets the CONFIGURED line
+  // clamp, then measurePeekOverflow replaces it with the content-hugging
+  // minimum (invariant 45/57). While that second write landed in a LATER
+  // animation frame, every poll painted every card at the full clamp and shrank
+  // it again — measured on 51 live sessions as the page height flipping
+  // 1256 ⇄ 1471 px twice per poll, which is what the fleet judder was.
+  await reset(page);
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(120);
+  const heights = await page.evaluate(async () => {
+    const read = () => [...document.querySelectorAll('#sessions .card, #working .card, #needsyou .card')]
+      .map(card => Math.round(card.getBoundingClientRect().height)).join(',');
+    const seen = new Set([read()]);
+    for (let index = 0; index < 4; index += 1) {
+      tick();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      seen.add(read());
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      seen.add(read());
+    }
+    return [...seen];
+  });
+  expect(heights).toHaveLength(1);
+
+  // …and a card whose peek genuinely grows is still re-measured
+  const before = await page.locator('[data-sid="codex:thread-one"]').boundingBox();
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.last_msg = { ...(session.last_msg || {}), text: Array.from({length: 12},
+      (_, index) => `a much longer preview line number ${index}`).join('\n') };
+    render(last, true);
+  });
+  const after = await page.locator('[data-sid="codex:thread-one"]').boundingBox();
+  expect(after.height).toBeGreaterThan(before.height);
+});
+
+test('opening and switching the docked pane settles the queue in one layout', async ({ page }) => {
+  // The pane transitions were the worst case of the same fight: opening the pane
+  // narrows the left column, so every card is re-measured — and while the
+  // measurement landed a frame late, each card grew to the full clamp and shrank
+  // back TWICE per transition. Measured on production before the fix: 5–9
+  // distinct card geometries per action, in bursts 8ms apart.
+  await reset(page);
+  await page.setViewportSize({ width: 1500, height: 1000 });
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(150);
+
+  const layouts = async (action) => page.evaluate(async (name) => {
+    const shot = () => [...document.querySelectorAll('#route-now .card')].map(card => {
+      const box = card.getBoundingClientRect();
+      return `${card.dataset.sid}:${Math.round(box.top)}/${Math.round(box.height)}`;
+    }).join(' ');
+    const seen = [shot()];
+    globalThis.__paneAction(name);
+    for (let frame = 0; frame < 40; frame += 1) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const now = shot();
+      if (now !== seen[seen.length - 1]) seen.push(now);
+    }
+    return seen.length - 1;         // how many times the queue moved
+  }, action);
+
+  await page.evaluate(() => {
+    const ids = [...document.querySelectorAll('#route-now .card')].map(card => card.dataset.sid);
+    globalThis.__paneAction = (name) => name === 'close' ? closeSession()
+      : openSession(name === 'first' ? ids[0] : ids[ids.length - 1]);
+  });
+
+  // opening from closed legitimately reflows the column once; everything after
+  // it must not move the queue at all
+  expect(await layouts('first')).toBeLessThanOrEqual(1);
+  await page.waitForTimeout(300);
+  expect(await layouts('last')).toBe(0);
+  await page.waitForTimeout(300);
+  expect(await layouts('first')).toBe(0);
+});
+
+test('a Codex approval keeps its always button, which is not a keystroke', async ({ page }) => {
+  // Codex approvals arrive as kind:'permission' too, so the screen-proof gate
+  // that Claude's digit needs would have silently removed this one — its
+  // `always` is a documented App Server decision value and the provider states
+  // that it accepts it.
+  await reset(page);
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.pending = {kind: 'permission', nonce: 'cx-1', tool: 'command',
+      input_summary: 'rm -rf build/', decisions: ['allow', 'always', 'deny', 'cancel']};
+    render(last, true);
+  });
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const pend = page.locator('#sact .pend');
+  await expect(pend.locator('.pbtn.always')).toHaveCount(1);
+  await expect(pend.locator('.pbtn.always')).toHaveText('always allow');
+  // …and it never asks the screen route about a Codex thread
+  const asked = [];
+  await page.route('**/api/prompt-options**', route => { asked.push(route.request().url()); route.abort(); });
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(300);
+  expect(asked).toEqual([]);
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).
@@ -1593,6 +1695,69 @@ test('full chat renders main work as the newest non-interactive conversation row
   await reset(page, 'base');
   await page.evaluate(() => openSession('codex:thread-one'));
   await expect(activity).toBeHidden();
+});
+
+test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }) => {
+  // "stalled" has always meant frozen mid-TOOL, but the card never said WHICH
+  // tool — so a wedged session and a slow one looked identical.
+  await reset(page);
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveCount(0);
+
+  await reset(page, 'active-tool');
+  const tool = page.locator('[data-sid="claude-one"] .ctool');
+  await expect(tool).toHaveText('Bash · 3s');
+  await expect(tool).not.toHaveClass(/crit/);
+
+  // stalled: the count of other open calls shows, and the chip goes critical
+  await reset(page, 'active-tool-stalled');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveText('Bash +1 · 4m');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveClass(/crit/);
+
+  // and the workspace says it too, beside "Main agent working"
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sactivity')).toContainText('Bash +1 · 4m');
+});
+
+test('a pane-derived compaction pill says it is a lower bound', async ({ page }) => {
+  // The PreCompact hook knows when a compaction STARTED. The pane only knows
+  // when Fleet first saw it, and the card must not pretend otherwise.
+  await reset(page, 'compacting-hook');
+  const pill = page.locator('[data-sid="claude-one"] .ccompact');
+  await expect(pill).toHaveText('⧉ compacting 42s');
+  await expect(pill).toHaveAttribute('title', /transcript is frozen/);
+
+  await reset(page, 'compacting-screen');
+  await expect(pill).toHaveText('⧉ compacting ≥42s');
+  await expect(pill).toHaveAttribute('title', /may have started earlier/);
+});
+
+test('the always button says what this prompt actually grants', async ({ page }) => {
+  // Every permission variant puts Yes/always/No in rows 1/2/3, but row 2's real
+  // power differs: a project-wide directory grant, a session-only read, a
+  // settings edit. One fixed label described all three and was honest about none.
+  await reset(page, 'claude-permission');
+  await openAction(page, 'claude-one');
+  const always = page.locator('#sact .pbtn.always');
+  await expect(always).toHaveText('always allow access to fleet-dash/ from this project');
+  await expect(always).toHaveAttribute('title', /Claude's own wording/);
+
+  // Off tmux there is no pane to read, so the button does not render at all
+  // (operator decision 2026-07-25). `allow` is row 1 and `deny` is Esc on every
+  // captured variant; `always` is the only key that has to be aimed, and Fleet
+  // does not aim it blind.
+  await reset(page, 'claude-permission-blind');
+  await openAction(page, 'claude-one');
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
+  await expect(page.locator('#sact .pbtn.deny')).toHaveCount(1);
+
+  // …and on a variant that offers no persistent grant at all — the Bash prompt
+  // whose command cannot be statically analyzed, where row 2 is "No" — there is
+  // nothing to grant, so again no button rather than one that would deny.
+  await reset(page, 'claude-permission-nogrant');
+  await openAction(page, 'claude-one');
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
 });
 
 test('quiet age is limited to working session cards', async ({ page }) => {

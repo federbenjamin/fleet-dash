@@ -125,8 +125,9 @@ function updateNotificationBadges(){
   const unread=Number(notificationData.unread)||0,active=Number(notificationData.active)||0;
   const text=active&&unread?`${active}·${unread}`:String(active||unread||'');
   const desktop=$('#nav-notification-count'),mobile=$('#mobile-notification-count');
-  if(desktop){desktop.textContent=text;desktop.title=`${active} active · ${unread} unread`;}
-  if(mobile){mobile.textContent=String(unread||active||'');mobile.hidden=!unread&&!active;}
+  setText(desktop,text);setAttr(desktop,'title',`${active} active · ${unread} unread`);
+  setText(mobile,String(unread||active||''));
+  if(mobile&&mobile.hidden===Boolean(unread||active))mobile.hidden=!unread&&!active;
   if(unread&&typeof navigator.setAppBadge==='function')navigator.setAppBadge(unread).catch(()=>{});
   else if(!unread&&typeof navigator.clearAppBadge==='function')navigator.clearAppBadge().catch(()=>{});
 }
@@ -381,7 +382,7 @@ function renderNotifications(){
   const list=$('#notifications'),detail=$('#notificationdetail'),status=$('#notificationstatus');if(!list||!detail||!status)return;
   const counts=notificationCounts();document.querySelectorAll('[data-notification-section]').forEach(button=>{
     const section=button.dataset.notificationSection;button.classList.toggle('active',section===notificationSection);
-    button.textContent=button.textContent.split(' · ')[0]+(section==='briefing'?'':` · ${counts[section]||0}`);
+    setText(button,button.textContent.split(' · ')[0]+(section==='briefing'?'':` · ${counts[section]||0}`));
   });
   if(notificationSection==='history'){
     const workstreams=[...new Set(notificationItems.map(item=>item.workstream_id).filter(Boolean))].sort();
@@ -393,7 +394,7 @@ function renderNotifications(){
       <select aria-label="notification session" onchange="notificationHistorySession=this.value;renderNotifications()"><option value="">All sessions</option>${sessions.map(value=>`<option value="${esc(value)}" ${notificationHistorySession===value?'selected':''}>${esc(value)}</option>`).join('')}</select>
       <select aria-label="notification age" onchange="notificationHistoryAge=this.value;renderNotifications()"><option value="">Any time</option><option value="86400" ${notificationHistoryAge==='86400'?'selected':''}>Last 24 hours</option><option value="604800" ${notificationHistoryAge==='604800'?'selected':''}>Last 7 days</option><option value="2592000" ${notificationHistoryAge==='2592000'?'selected':''}>Last 30 days</option></select>
       ${notificationError?`<button onclick="loadNotifications(true,true)">${esc(notificationError)} · Retry</button>`:''}`;
-  }else status.innerHTML=`<span>${notificationData.active||0} active</span><span>${notificationData.unread||0} unread on this device</span>${notificationLoading?'<span><i class="delivery sending">◌</i> Refreshing</span>':''}${notificationError?`<button onclick="loadNotifications(true,true)">${esc(notificationError)} · Retry</button>`:''}`;
+  }else setHtml(status,`<span>${notificationData.active||0} active</span><span>${notificationData.unread||0} unread on this device</span>${notificationLoading?'<span><i class="delivery sending">◌</i> Refreshing</span>':''}${notificationError?`<button onclick="loadNotifications(true,true)">${esc(notificationError)} · Retry</button>`:''}`);
   if(notificationLoading&&!notificationItems.length&&notificationSection!=='briefing')
     list.innerHTML='<div class="notificationdetailstate"><span class="delivery sending">◌</span> Loading notifications…</div>';
   else if(notificationSection==='briefing')list.innerHTML=briefingPanelHtml(true);

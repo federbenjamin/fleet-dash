@@ -404,6 +404,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/file": ("token-text", "get_file"),
         "/api/screen": ("token", "get_screen"),
         "/api/tool-result": ("token", "get_tool_result"),
+        "/api/prompt-options": ("token", "get_prompt_options"),
         "/api/act-receipt": ("token", "get_act_receipt"),
         "/api/commands": ("token", "get_commands"),
         "/api/search": ("token", "get_search"),
@@ -588,6 +589,10 @@ class Handler(BaseHTTPRequestHandler):
         # conversation ring carries a one-line preview only, so expanding a row
         # in the chat asks for the rest here rather than the server holding it.
         out = self.eng.tool_result(self.query("sid"), self.query("tuid"))
+    def get_prompt_options(self):
+        # the option rows a live prompt is rendering; same capture and the same
+        # refusals as /api/screen, which is why it is token-gated the same way
+        out = self.eng.prompt_options(self.query("sid"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_act_receipt(self):

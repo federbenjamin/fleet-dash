@@ -476,8 +476,10 @@ class ScanStateTests(EngineFixture):
         observed = []
         self.engine.observe_screens = lambda rows: observed.extend(rows) or {}
         self.engine.scan()
-        self.assertTrue(any(sid == "same" and eligible
-                            for sid, _pid, eligible in observed), observed)
+        # rows are (sid, pid, eligible, window); the window is optional and names
+        # a faster re-look for the compaction case only.
+        self.assertTrue(any(row[0] == "same" and row[2]
+                            for row in observed), observed)
 
     def test_an_observed_label_reaches_the_session_payload(self):
         self.write_registry(status="idle")
