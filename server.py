@@ -17,7 +17,7 @@ GET /api/history paginated closed-session metadata
 GET /api/diagnostics authenticated latency, payload, and memory measurements
 """
 from collections import defaultdict, deque
-import hashlib, json, os, resource, subprocess, sys, time, threading, secrets
+import gzip, hashlib, json, os, resource, subprocess, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -655,23 +655,61 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(500, "application/json", body)
         return self.reply(500, "text/plain; charset=utf-8", b"request failed")
 
+    # The fleet snapshot is JSON re-sent every two seconds over a tailnet, and it
+    # compresses to about 18% of itself for ~1.3 ms of CPU (measured 2026-07-24:
+    # 225,852 -> 40,929 bytes). Level 4 rather than the default 6: the extra 0.6 ms
+    # per poll buys 1,354 bytes. Already-compressed image/PDF bodies are excluded.
+    GZIP_TYPES = ("application/json", "text/", "image/svg+xml",
+                  "application/javascript", "application/manifest+json")
+    GZIP_MIN_BYTES = 1400            # below one MTU compression is not worth a header
+    GZIP_LEVEL = 4
+
+    def _accepts_gzip(self):
+        for part in (self.headers.get("Accept-Encoding") or "").split(","):
+            token, _, params = part.strip().partition(";")
+            if token.lower() != "gzip":
+                continue
+            quality = ""
+            for param in params.split(";"):
+                key, _, value = param.strip().partition("=")
+                if key.lower() == "q":
+                    quality = value.strip()
+            try:
+                return float(quality) > 0 if quality else True
+            except ValueError:
+                return True
+        return False
+
     def reply(self, code, ctype, body, *, cache_control="no-store", extra_headers=None):
         elapsed_ms = ((time.perf_counter() - getattr(self, "_request_started",
                                                      time.perf_counter())) * 1000)
         route = getattr(self, "_request_route", self.path.split("?", 1)[0])
+        # metrics and X-Fleet-Payload-Bytes keep meaning the size the app produced
+        payload_bytes = len(body)
         with self.metrics_lock:
             metrics = self.route_metrics[route]
             metrics["elapsed_ms"].append(elapsed_ms)
-            metrics["payload_bytes"].append(len(body))
+            metrics["payload_bytes"].append(payload_bytes)
             metrics["statuses"].append(int(code))
+        headers = dict(extra_headers or {})
+        if (payload_bytes >= self.GZIP_MIN_BYTES and
+                any(ctype.startswith(prefix) for prefix in self.GZIP_TYPES) and
+                not any(key.lower() == "content-encoding" for key in headers) and
+                self._accepts_gzip()):
+            try:
+                body = gzip.compress(body, self.GZIP_LEVEL)
+                headers["Content-Encoding"] = "gzip"
+                headers["Vary"] = "Accept-Encoding"
+            except Exception:      # never fail a response over compression
+                body = body
         try:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
-            self.send_header("X-Fleet-Payload-Bytes", str(len(body)))
+            self.send_header("X-Fleet-Payload-Bytes", str(payload_bytes))
             self.send_header("Cache-Control", cache_control)
-            for key, value in (extra_headers or {}).items():
+            for key, value in headers.items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)

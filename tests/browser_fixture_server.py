@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic HTTP fixture for the repository-native browser suite."""
 import copy
+import gzip
 import hashlib
 import json
 import os
@@ -999,9 +1000,23 @@ class Handler(BaseHTTPRequestHandler):
     def reply(self, code, ctype, data):
         if isinstance(data, str):
             data = data.encode()
+        payload_bytes = len(data)
+        # Mirror server.py: compress the same responses the real daemon does, so
+        # the PWA/offline specs actually exercise a service worker caching and
+        # replaying a gzip-encoded snapshot.
+        encoded = False
+        if (payload_bytes >= 1400 and
+                ctype.startswith(("application/json", "text/")) and
+                "gzip" in (self.headers.get("Accept-Encoding") or "")):
+            data = gzip.compress(data, 4)
+            encoded = True
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if encoded:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("X-Fleet-Payload-Bytes", str(payload_bytes))
         self.send_header("Cache-Control", "no-store")
         if urlparse(self.path).path == "/api/file":
             self.send_header("X-Content-Type-Options", "nosniff")
