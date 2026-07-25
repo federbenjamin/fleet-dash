@@ -45,9 +45,12 @@ function applyInstance(instance){
   const staging=instance?.mode==='staging',name=instance?.name||(staging?'Fleet Staging':'Fleet Dash');
   document.documentElement.dataset.instance=staging?'staging':'production';
   const banner=$('#instancebanner');
-  if(banner){banner.hidden=!staging;banner.textContent=staging?
-    'STAGING · production sessions are view only · controls work only on staging test sessions':'';}
-  const brand=document.querySelector('.brand b');if(brand)brand.textContent=name;
+  if(banner){
+    if(banner.hidden===staging)banner.hidden=!staging;
+    setText(banner,staging?
+      'STAGING · production sessions are view only · controls work only on staging test sessions':'');
+  }
+  setText(document.querySelector('.brand b'),name);
   const apple=document.querySelector('meta[name="apple-mobile-web-app-title"]');if(apple)apple.content=name;
   return name;
 }
@@ -71,9 +74,9 @@ function render(f,force){
   const t=f.totals;
   const outSummary=f.outbox_summary||{};
   const navCount=(t.needs_me||0)+(outSummary.pending||0)+(outSummary.attention||0);
-  $('#nav-now-count').textContent=navCount||'';
-  $('#nav-now-count').title=`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`;
-  const outChip=$('#outboxchip');if(outChip)outChip.textContent=`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`;
+  setText($('#nav-now-count'),navCount||'');
+  setAttr($('#nav-now-count'),'title',`${t.needs_me||0} need you · ${outSummary.pending||0} outbox pending · ${outSummary.attention||0} outbox need review`);
+  setText($('#outboxchip'),`Outbox${outSummary.pending||outSummary.attention?` · ${(outSummary.pending||0)+(outSummary.attention||0)}`:''}`);
   const activeAgentCount=activeSubagents(f).length;
   const provisional=provisionalSessionObject();
   const nowCounts={needs_you:(t.needs_me||0)+(provisional?.ui_group==='needs_you'?1:0),
@@ -83,8 +86,8 @@ function render(f,force){
   document.querySelectorAll('[data-now-filter]').forEach(button=>{
     const active=button.dataset.nowFilter===nowState;
     button.classList.toggle('active',active);
-    button.setAttribute('aria-pressed',String(active));
-    button.textContent=nowLabels[button.dataset.nowFilter]+(button.dataset.nowFilter==='all'?'':` · ${nowCounts[button.dataset.nowFilter]||0}`);
+    setAttr(button,'aria-pressed',String(active));
+    setText(button,nowLabels[button.dataset.nowFilter]+(button.dataset.nowFilter==='all'?'':` · ${nowCounts[button.dataset.nowFilter]||0}`));
   });
   usageBar(f.usage,f.provider_usage);
   const providerProblems=Object.entries(f.providers||{}).filter(([,value])=>value&&value.ok===false);
@@ -107,11 +110,11 @@ function render(f,force){
   if(force||!touching()){
     if(nowState==='subagents'){
       ['#pinned','#actioninbox','#needsyou','#outboxsummary','#working','#sessions'].forEach(selector=>{
-        const element=$(selector);if(element){element.innerHTML='';element.className=selector==='#pinned'?'empty':'';}
+        const element=$(selector);if(element){setHtml(element,'');setClass(element,selector==='#pinned'?'empty':'');}
       });
       renderActiveSubagents(f);
     }else{
-      const subagents=$('#subagents');if(subagents){subagents.innerHTML='';subagents.className='';}
+      const subagents=$('#subagents');if(subagents){setHtml(subagents,'');setClass(subagents,'');}
       const unpinned=sessionsWithProvisional(f).filter(s=>!pinnedSessions.has(s.session_id)&&matchesNow(s));
       const inboxSessionIds=new Set((f.actions||[]).filter(action=>!pinnedSessions.has(action.session_id))
         .map(action=>action.session_id));
@@ -139,7 +142,7 @@ function render(f,force){
   // have its own repaint deferred by the very tap that requested it.
   renderSession(force);
   if(pendingWorkspaceRoute){const route=pendingWorkspaceRoute;pendingWorkspaceRoute=null;applyWorkspaceRoute(route);}
-  schedulePeekOverflow();
+  schedulePeekOverflow(true);   // same frame: a later frame paints the wrong height
   applyRouteNav(currentRoute);
   const titleCount=Math.max(Number(t.needs_me)||0,Number(notificationData.active)||0,Number(notificationData.unread)||0);
   document.title=(titleCount?`(${titleCount}) `:'')+instanceName;

@@ -1050,6 +1050,43 @@ test('an unchanged card is never rewritten, so nothing moves under your finger',
     .toContainText('a brand new last message');
 });
 
+test('a poll never resizes a card it did not change', async ({ page }) => {
+  // The card frame is written twice: reconcileCards sets the CONFIGURED line
+  // clamp, then measurePeekOverflow replaces it with the content-hugging
+  // minimum (invariant 45/57). While that second write landed in a LATER
+  // animation frame, every poll painted every card at the full clamp and shrank
+  // it again — measured on 51 live sessions as the page height flipping
+  // 1256 ⇄ 1471 px twice per poll, which is what the fleet judder was.
+  await reset(page);
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(120);
+  const heights = await page.evaluate(async () => {
+    const read = () => [...document.querySelectorAll('#sessions .card, #working .card, #needsyou .card')]
+      .map(card => Math.round(card.getBoundingClientRect().height)).join(',');
+    const seen = new Set([read()]);
+    for (let index = 0; index < 4; index += 1) {
+      tick();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      seen.add(read());
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      seen.add(read());
+    }
+    return [...seen];
+  });
+  expect(heights).toHaveLength(1);
+
+  // …and a card whose peek genuinely grows is still re-measured
+  const before = await page.locator('[data-sid="codex:thread-one"]').boundingBox();
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.last_msg = { ...(session.last_msg || {}), text: Array.from({length: 12},
+      (_, index) => `a much longer preview line number ${index}`).join('\n') };
+    render(last, true);
+  });
+  const after = await page.locator('[data-sid="codex:thread-one"]').boundingBox();
+  expect(after.height).toBeGreaterThan(before.height);
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).

@@ -36,10 +36,10 @@ function activeSubagentCard(parent,agent){
 function renderActiveSubagents(f){
   const el=$('#subagents');if(!el)return;
   const items=activeSubagents(f,true);
-  el.className='queue subagentqueue';
-  el.innerHTML=`<div class="queuehead"><b>Active subagents · ${items.length}</b><span>children working across parent sessions</span></div>
+  setClass(el,'queue subagentqueue');
+  setHtml(el,`<div class="queuehead"><b>Active subagents · ${items.length}</b><span>children working across parent sessions</span></div>
     <div class="activeagentlist">${items.length?items.map(({parent,agent})=>activeSubagentCard(parent,agent)).join(''):
-      '<div class="queueempty">No active subagents match this filter.</div>'}</div>`;
+      '<div class="queueempty">No active subagents match this filter.</div>'}</div>`);
 }
 async function toggleSessionPin(sid){
   if(pinActions.get(sid)?.busy)return;
@@ -110,18 +110,18 @@ function renderPinned(f,predicate=()=>true){
   const closedById=new Map(closed.map(item=>[item.session_id,item]));
   const items=[...pinnedSessions].map(sid=>liveById.get(sid)||closedById.get(sid))
     .filter(item=>item&&predicate(item));
-  if(!items.length){el.className='empty';el.innerHTML='';return;}
-  el.className='';
-  if(!el.querySelector('.pinhdr'))el.innerHTML='<div class="pinhdr">Pinned</div><div class="pinlist"></div>';
+  if(!items.length){setClass(el,'empty');setHtml(el,'');return;}
+  setClass(el,'');
+  if(!el.querySelector('.pinhdr'))setHtml(el,'<div class="pinhdr">Pinned</div><div class="pinlist"></div>');
   const list=el.querySelector('.pinlist'),seen=new Set();
   items.forEach(item=>{
     const sid=String(item.session_id||'');seen.add(sid);
     let slot=[...list.children].find(child=>child.dataset.pinSid===sid);
     if(!slot){slot=document.createElement('div');slot.className='pinslot';slot.dataset.pinSid=sid;list.appendChild(slot);}
     const kind=liveById.has(sid)?'live':'closed';
-    if(slot.dataset.pinKind!==kind){slot.innerHTML='';slot.dataset.pinKind=kind;}
+    if(slot.dataset.pinKind!==kind){setHtml(slot,'');slot.dataset.pinKind=kind;}
     if(kind==='live')reconcileCards(slot,[item],'');
-    else slot.innerHTML=historyRow(item,true);
+    else setHtml(slot,historyRow(item,true));
   });
   [...list.children].forEach(slot=>{if(!seen.has(slot.dataset.pinSid))slot.remove();});
   items.forEach((item,index)=>{
@@ -288,8 +288,8 @@ function restoreCardTopFocus(top,anchor){
 // innerHTML necessarily replaces that node; otherwise a poll immediately after
 // closing chat drops keyboard focus onto <body>.
 function reconcileCards(container,list,emptyMessage='no live sessions'){
-  if(!list.length){container.innerHTML=emptyMessage?`<div class="empty">${esc(emptyMessage)}</div>`:'';return;}
-  if(container.querySelector('.empty'))container.innerHTML='';
+  if(!list.length){setHtml(container,emptyMessage?`<div class="empty">${esc(emptyMessage)}</div>`:'');return;}
+  if(container.querySelector('.empty'))setHtml(container,'');
   const seen=new Set();
   list.forEach(s=>{
     seen.add(s.session_id);
@@ -298,20 +298,33 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
       card=document.createElement('div');card.dataset.sid=s.session_id;
       const top=document.createElement('div');top.className='ctop';card.appendChild(top);
       container.appendChild(card);
+      // setHtml memoises the last string it wrote here; appending a card out of
+      // band makes that memo a lie, and a later setHtml(container,'') would then
+      // be skipped and leave the card rendered in two places at once.
+      container.__setHtml=undefined;
     }
     const frame=cardFrame(s);
-    card.className='card'+(cardCls(s)?' '+cardCls(s):'')+
+    setClass(card,'card'+(cardCls(s)?' '+cardCls(s):'')+
       (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'')+
-      (sessionView?.sid===s.session_id&&workspaceDocked()?' paneopen':'');
-    card.style.setProperty('--session-card-lines',String(frame.lines));
+      (sessionView?.sid===s.session_id&&workspaceDocked()?' paneopen':''));
     // Rewriting identical HTML is what made untouched cards re-layout — and
     // move under your finger — on every 2s poll and every user action. The
     // string is cheap; the innerHTML parse plus relayout of 48 cards is not.
     // Skipping an unchanged write also preserves focus and scroll for free.
     const top=card.querySelector('.ctop'),html=cardTop(s);
-    if(top.__setHtml!==html){
+    const changed=top.__setHtml!==html;
+    if(changed){
       const focusAnchor=cardTopFocusAnchor(top);
       setHtml(top,html);restoreCardTopFocus(top,focusAnchor);
+    }
+    // --session-card-lines is the CONFIGURED maximum here; measurePeekOverflow
+    // replaces it with the content-hugging minimum (invariant 45/57). Writing
+    // the maximum back on every poll made every card grow to the clamp and
+    // shrink again — so it is written only when the peek could actually have
+    // changed: a new card, a settings change, or a rebuilt .ctop.
+    if(changed||card.__frameLines!==frame.lines){
+      card.__frameLines=frame.lines;
+      card.style.setProperty('--session-card-lines',String(frame.lines));
     }
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
