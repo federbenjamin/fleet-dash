@@ -508,9 +508,13 @@ can ship with T1:
   The trust case is a bonus the plan did not name: Fleet can now prove it is not about to answer
   that dialog (invariant 21), rather than merely intending not to.
   `hook_pending`'s ghost guard is unchanged and still heuristic — correctly, since it is on the
-  scan path.
+  scan path — until the measurement below reopened it.
 - **Stall diagnosis.** Invariant 7's "stalled" means frozen mid-tool, but Fleet cannot say *on what*
-  beyond the transcript. The pane shows the live tool output.
+  beyond the transcript. The pane shows the live tool output. STILL OPEN, and deliberately: the
+  scan keeps a derived label, not screen text (invariant 78), because the fleet snapshot is cached
+  on the device by the service worker and terminal contents do not belong in an offline cache. The
+  workspace screen peek already shows the pane on request, which is where stall diagnosis lives
+  until there is a reason to put terminal text in the poll payload.
 - **Compaction without a hook.** Invariant 17 reads the PreCompact checkpoint mtime and gives
   projects with no PreCompact hook no pill at all. The compaction is visible on screen regardless.
 - **Trust-prompt confirmation.** `is_trusted()` is a filesystem prediction
@@ -523,6 +527,15 @@ can ship with T1:
 - **Codex tty disambiguation.** `_codex_terminal_routes` scans `ps` argv and gives up when two
   distinct ttys match one thread UUID (`engine_transport.py:107-182`). tmux's pane→pid mapping is
   exact, which can resolve that case.
+
+**The scan-path ban was wrong, and measurement is what showed it.** Invariant 74 forbade captures
+on the 2 s scan on the strength of an estimate — "a capture is a subprocess; 49 of them per poll
+would add ~150 ms to a 734 ms scan". Benchmarked on tmux 3.7b with 49 panes: **241 ms** per-pane
+(worse than the estimate), but **5.6 ms** for all 49 in ONE client invocation carrying a command
+sequence, and 4.7 ms for the `list-panes` map invariant 73 also banned. The cost is forking the
+tmux client, not reading the grid. A fleet-wide look is 0.8% of a scan — cheaper than the Tail
+fold. Invariant 78 records the batched pass, its eligibility rules, and the one thing that did NOT
+change: the scan keeps a label, never the screen text.
 
 **T2b — closed-loop driving.** Blocked on open question 6, not on T2a. Replace the fixed 0.4 s with:
 

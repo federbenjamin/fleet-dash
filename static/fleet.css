@@ -1952,3 +1952,10 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   #sdetailindex a{flex:0 0 auto;border:1px solid var(--line);background:var(--card);padding:7px 11px}
   #sdetails{padding:10px}.detailsection{padding:12px}.detailsection .kv{grid-template-columns:1fr}
 }
+
+/* A session parked on a dialog Fleet must not answer (invariant 78). Styled as
+   an advisory, not an error: nothing has failed, it is waiting on the Mac. */
+.lastmsg.screenblock{
+  border-left:2px solid var(--amber);background:var(--amber-tint);
+}
+.lastmsg.screenblock .peekwho{color:var(--amber)}

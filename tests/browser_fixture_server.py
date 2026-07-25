@@ -1443,6 +1443,19 @@ class Handler(BaseHTTPRequestHandler):
                     "error": str(payload.get("error") or ""),
                     "created_at": time.time(), "updated_at": time.time()}
                 return self.json_reply({"ok": True})
+            if route == "/test/screen-state":
+                # The label the scan derives from a batched capture-pane look
+                # (invariant 78). Never screen text — only the classification.
+                session = next((item for item in STATE["sessions"]
+                                if item["session_id"] == payload.get("session_id")), None)
+                if not session:
+                    return self.json_reply({"ok": False, "error": "unknown session"}, 404)
+                state = payload.get("state")
+                if state:
+                    session["screen_state"] = str(state)
+                else:
+                    session.pop("screen_state", None)
+                return self.json_reply({"ok": True})
             if route == "/test/prompt-identity":
                 # A prompt's nonce flips when its evidence source changes (hook
                 # capture -> transcript fallback). The server-owned request_id

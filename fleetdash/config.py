@@ -61,6 +61,9 @@ DEFAULT_CONFIG = {
     "reader_width": "fit",              # full-screen chat/docs: fit | centered
     "_permission_keys_note": "keystrokes injected for permission-prompt choices; deny defaults to Esc (cancels any prompt variant)",
     "permission_keys": {"allow": "1", "always": "2", "deny": ""},
+    "_screen_observe_note": "batched capture-pane look at tmux sessions the scan cannot describe confidently; derives a label only, never screen text (invariant 78)",
+    "screen_observe": True,
+    "screen_observe_seconds": 60,
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
     "rates": {
         "haiku":  [0.80, 1.00, 0.08, 4.00],

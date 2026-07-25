@@ -593,5 +593,96 @@ class LiveTmuxTests(unittest.TestCase):
         self.assertIn("pane", out["error"])
 
 
+
+class BatchedCaptureTests(unittest.TestCase):
+    """One tmux invocation for many panes (invariant 78).
+
+    Measured 2026-07-24 on tmux 3.7b with 49 panes: 241 ms as one client
+    invocation per pane against 5.6 ms batched. The whole cost is forking the
+    client, so batching is what makes a fleet-wide observation pass affordable.
+    """
+
+    def setUp(self):
+        self.stub = TmuxStub()
+
+    def _panes(self, count, socket_path="/tmp/s"):
+        return [{"socket": socket_path, "pane_id": f"%{index}"} for index in range(count)]
+
+    def _stdout(self, blocks):
+        mark = TmuxStub.CAPTURE_MARK
+        rows = []
+        for index, lines in blocks:
+            rows.append(f"{mark}{index}")
+            rows.extend(lines)
+        return "\n".join(rows)
+
+    def _result(self, stdout):
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    def test_one_invocation_covers_every_pane(self):
+        self.stub.results = [self._result(self._stdout(
+            [(0, ["a"]), (1, ["b"]), (2, ["c"])]))]
+        got = self.stub._tmux_capture_many(self._panes(3))
+        self.assertEqual(len(self.stub.calls), 1)     # ONE subprocess, not three
+        self.assertEqual(got["%0"]["lines"], ["a"])
+        self.assertEqual(got["%2"]["lines"], ["c"])
+
+    def test_panes_are_grouped_by_socket(self):
+        panes = [{"socket": "/tmp/a", "pane_id": "%0"},
+                 {"socket": "/tmp/b", "pane_id": "%1"}]
+        self.stub.results = [self._result(self._stdout([(0, ["x"])])),
+                             self._result(self._stdout([(0, ["y"])]))]
+        got = self.stub._tmux_capture_many(panes)
+        self.assertEqual(len(self.stub.calls), 2)     # one per socket, not per pane
+        self.assertEqual(got["%0"]["lines"], ["x"])
+        self.assertEqual(got["%1"]["lines"], ["y"])
+
+    def test_a_pane_that_vanished_is_simply_absent(self):
+        self.stub.results = [self._result(self._stdout([(0, ["only"])]))]
+        got = self.stub._tmux_capture_many(self._panes(2))
+        self.assertIn("%0", got)
+        self.assertNotIn("%1", got)
+
+    def test_control_characters_are_scrubbed_and_bounded(self):
+        self.stub.results = [self._result(self._stdout([(0, ["a\x07b" + "z" * 500])]))]
+        got = self.stub._tmux_capture_many(self._panes(1), max_columns=10)
+        self.assertNotIn("\x07", got["%0"]["lines"][0])
+        self.assertLessEqual(len(got["%0"]["lines"][0]), 10)
+
+    def test_only_the_last_rows_are_kept(self):
+        rows = [f"line{index}" for index in range(10)]
+        self.stub.results = [self._result(self._stdout([(0, rows)]))]
+        got = self.stub._tmux_capture_many(self._panes(1), max_rows=3)
+        self.assertEqual(got["%0"]["lines"], ["line7", "line8", "line9"])
+        self.assertTrue(got["%0"]["truncated"])
+
+    def test_a_failed_socket_yields_nothing_for_its_panes(self):
+        self.stub.results = [SimpleNamespace(returncode=1, stdout="", stderr="boom")]
+        self.assertEqual(self.stub._tmux_capture_many(self._panes(2)), {})
+
+    def test_no_tmux_binary_yields_nothing(self):
+        self.stub._tmux_executable = ""
+        self.assertEqual(self.stub._tmux_capture_many(self._panes(2)), {})
+
+    def test_no_panes_makes_no_call(self):
+        self.assertEqual(self.stub._tmux_capture_many([]), {})
+        self.assertEqual(self.stub.calls, [])
+
+    def test_a_malformed_marker_is_ignored(self):
+        mark = TmuxStub.CAPTURE_MARK
+        self.stub.results = [self._result(f"{mark}notanumber\nrow\n{mark}0\nkept")]
+        got = self.stub._tmux_capture_many(self._panes(1))
+        self.assertEqual(got["%0"]["lines"], ["kept"])
+
+    def test_trailing_blank_rows_are_dropped(self):
+        """Unused screen below the content is not content."""
+        self.stub.results = [self._result(self._stdout([(0, ["text", "", "  ", ""])]))]
+        got = self.stub._tmux_capture_many(self._panes(1))
+        self.assertEqual(got["%0"]["lines"], ["text"])
+
+    def test_an_index_beyond_the_group_is_discarded(self):
+        self.stub.results = [self._result(self._stdout([(9, ["ghost"])]))]
+        self.assertEqual(self.stub._tmux_capture_many(self._panes(1)), {})
+
 if __name__ == "__main__":  # pragma: no cover - module entrypoint
     unittest.main()

@@ -601,7 +601,13 @@ question does not reappear — and once Fleet accepts an answer, a second device
 gets "this prompt was already answered" instead of typing a second set of keys into a terminal that
 has moved on. When a session runs in a tmux pane Fleet also looks at the screen before it types:
 if the pane is showing an ordinary input box, a different prompt, or the folder-trust dialog rather
-than the question you are answering, the keys are refused instead of sent. Every action that can
+than the question you are answering, the keys are refused instead of sent. The same look runs on
+the poll for the few sessions Fleet would otherwise be guessing about — a captured prompt the
+session no longer seems to be showing, or a freshly spawned session that has written nothing yet —
+so a session parked on Claude's folder-trust dialog now says so on its card instead of looking
+idle. Fleet reports it and stops there; accepting folder trust is always yours to do at the Mac.
+Only the classification reaches the dashboard, never the terminal text: that stays behind the
+on-request screen view. Every action that can
 move Claude's terminal also leaves a durable receipt keyed by an
 id the browser mints before it sends, so a phone whose connection drops mid-answer can ask Fleet what
 actually happened once it reconnects instead of being told only that delivery was uncertain — and
@@ -738,6 +744,8 @@ normalize to Critical.
 | `codex_remote_control` | true | enable Remote Control on the managed production daemon; staging remains private |
 | `terminal_transport` | "auto" | `auto` = tmux for a session whose tty is a live tmux pane, applet otherwise (new sessions spawn into tmux when it is installed) · `tmux` = tmux only · `applet` = the legacy iTerm2 path only |
 | `terminal_app` | "iTerm" | application "Open in Terminal" raises after selecting the tmux pane; `""` selects the pane and raises nothing |
+| `screen_observe` | true | let the 2s poll take ONE batched `capture-pane` look at the few sessions Fleet would otherwise guess about (a captured prompt the session may no longer show; a spawn that has written nothing and may be on the trust dialog). Only the classification is kept, never the screen text |
+| `screen_observe_seconds` | 60 | how long a derived screen label is reused before that session is looked at again |
 | `tmux_command` | "" | optional absolute tmux executable; otherwise PATH, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
 | `tmux_session` | "fleet" | tmux session new spawns join (`tmux attach -t fleet`); letters, digits, `_` and `-` only |
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |

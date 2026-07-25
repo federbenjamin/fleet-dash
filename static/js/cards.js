@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -222,6 +222,7 @@ function cardTop(s){
     </div>
     ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})">${s.last_msg.role==='user'?'<span class="peekwho">you ·</span>':''}<div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
     ${s.error?`<div class="lastmsg carderror"><span class="peekwho">provider ·</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
+    ${screenBlockNotice(s)}
     ${s.reply_requested&&!s.staging_observer?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
     ${pinFeedbackHtml(s.session_id)}
     ${cardResponseFeedback(s)}
@@ -229,6 +230,15 @@ function cardTop(s){
     ${cardAgentList(s)}
     </div>
     ${questionCard?'':cardMetaRail(s)}`;
+}
+// A session sitting on a dialog Fleet must not answer (invariant 78). Before
+// the scan could look at a terminal this rendered as an ordinary idle session
+// with no explanation, and the spawn simply appeared to do nothing. Fleet says
+// what is on screen and stops there: accepting folder trust is the user's call
+// and always the Mac's (invariant 21).
+function screenBlockNotice(s){
+  if(s.screen_state!=='trust')return'';
+  return`<div class="lastmsg screenblock" role="status"><span class="peekwho">terminal ·</span><span class="lmtext">Waiting on Claude's folder-trust prompt. Answer it in the terminal — Fleet never accepts trust for you.</span></div>`;
 }
 // The card's running-subagent list: every non-terminal agent, in engine tree
 // order so agentRow's depth indentation still describes the hierarchy — never

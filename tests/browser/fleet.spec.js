@@ -1050,6 +1050,26 @@ test('an unchanged card is never rewritten, so nothing moves under your finger',
     .toContainText('a brand new last message');
 });
 
+test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
+  // Before the scan could look at a terminal this rendered as an ordinary idle
+  // session and the spawn just appeared to do nothing (invariant 78).
+  await reset(page);
+  const card = page.locator('[data-sid="codex:thread-one"]');
+  await expect(card.locator('.screenblock')).toHaveCount(0);
+  await page.request.post('/test/screen-state',
+    { data: { session_id: 'codex:thread-one', state: 'trust' } });
+  await page.evaluate(() => tick());
+  await expect(card.locator('.screenblock')).toContainText('folder-trust prompt');
+  await expect(card.locator('.screenblock')).toContainText('Fleet never accepts trust for you');
+  // reporting only: no control that would answer the dialog (invariant 21)
+  await expect(card.locator('.screenblock button')).toHaveCount(0);
+
+  await page.request.post('/test/screen-state',
+    { data: { session_id: 'codex:thread-one', state: '' } });
+  await page.evaluate(() => tick());
+  await expect(card.locator('.screenblock')).toHaveCount(0);
+});
+
 test('render work coalesces to one paint per frame', async ({ page }) => {
   await reset(page, 'claude-question-slow');
   await page.evaluate(() => openSession('claude-one'));
