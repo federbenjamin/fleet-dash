@@ -576,9 +576,14 @@ costs ~140 ms.
 The `n`-key DOWN-walk should still be replaced by the right-arrow ✔ Submit tab path where invariant 4
 already proves it valid — now worth ~700 ms per question.
 
-**T3 — honesty surface.** Closed-loop pacing only works where the screen is readable, so capabilities
-diverge by transport. Needs a capability flag and UI labelling, following the existing Codex
-`access` / `read_only_reason` pattern.
+**T3 — honesty surface. SHIPPED 2026-07-24, without the capability flag.** Closed-loop pacing only
+works where the screen is readable, so what Fleet can promise about a keystroke diverges by
+transport. The plan called for a capability flag plus UI labelling on the Codex
+`access`/`read_only_reason` pattern — but a flag would have to be computed for every session on the
+scan, and the thing that PROVES which case a session is in is reading its screen, which the Details
+panel already does on demand. So the statement rides that read: "answers are checked against this
+screen" or "answers are sent on a timer", and nothing at all before the read, because until then
+Fleet genuinely does not know. Zero new server work and no guessed labels.
 
 **Non-Fleet benefit worth stating: sessions stop dying with the terminal.** Today quitting or
 crashing iTerm kills every Claude session in it. A tmux server outlives the emulator, a crash, and a

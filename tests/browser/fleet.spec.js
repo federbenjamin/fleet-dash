@@ -1137,12 +1137,43 @@ test('the Details terminal screen reads on demand and stays read-only text', asy
   expect(await page.evaluate(() =>
     getComputedStyle(document.querySelector('.screenpeek')).whiteSpace)).toBe('pre');
 
+  // what Fleet can promise about a keystroke differs by transport, and the
+  // screen read is what proves which case this is (invariant 79)
+  await expect(screen.locator('.deliverynote.verified'))
+    .toContainText('checked against this screen');
+
   // a closed session has no process, so the block is absent entirely
   await page.locator('#sclose').click();
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await page.locator('#stab-details').click();
   await expect(page.locator('#detail-terminal')).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath(`screen-peek-${testInfo.project.name}.png`) });
+});
+
+test('a terminal Fleet cannot read says so instead of implying verified delivery', async ({ page }) => {
+  // The honesty surface (invariant 79): closed-loop pacing only works where the
+  // screen is readable, so a session outside tmux must not look the same.
+  await reset(page);
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  await page.locator('#stab-details').click();
+  const screen = page.locator('#detail-terminal');
+  // Codex sessions expose no screen block at all, so drive the Claude one and
+  // make the read fail the way a non-tmux session does.
+  await page.locator('#sclose').click();
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await page.locator('#stab-details').click();
+  await page.route('**/api/screen*', route => route.fulfill({ status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, code: 'screen_unavailable',
+      error: 'this session is not running in a tmux pane' }) }));
+
+  // says nothing before the read: until then Fleet genuinely does not know
+  await expect(screen.locator('.deliverynote')).toHaveCount(0);
+  await screen.getByRole('button', { name: 'Read screen' }).click();
+  await expect(screen.locator('.deliverynote.blind')).toContainText('sent on a timer');
+  await expect(screen.locator('.deliverynote.blind')).toContainText('cannot confirm');
+  await expect(screen.locator('.deliverynote.verified')).toHaveCount(0);
+  await page.unroute('**/api/screen*');
 });
 
 test('workspace uses active agent counts, persistent desktop splits, and one parent composer height', async ({ page }, testInfo) => {

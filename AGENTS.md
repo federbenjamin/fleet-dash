@@ -1278,6 +1278,12 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     (AGENTS.md's standing rule for touching inter-key pacing): keys `2`, `→`, CR answered
     "Pick fruit → Pear" correctly in **0.106 s** against the 0.8 s the fixed delay would have
     taken. `tmux_settle: false` restores the fixed delay everywhere.
+    **The honesty surface (W5-T3).** What Fleet can promise about a keystroke now differs by
+    transport, so the workspace Details screen block states which case a session is in —
+    "answers are checked against this screen" or "answers are sent on a timer". It rides the
+    screen read rather than costing a separate probe, and renders NOTHING until that read has
+    happened, because until then Fleet genuinely does not know. Never put this on a card: it is
+    diagnostics, and the Console decision keeps terminal matters in the workspace.
 
 ## Dev workflow
 
