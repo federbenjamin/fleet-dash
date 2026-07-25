@@ -109,7 +109,7 @@ function applyRouteNav(route){
       if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
     }
   });
-  const title=$('#mobiletitle');if(title)title.textContent=route==='settings'?'Settings':(routeNames[route]||'Now');
+  setText($('#mobiletitle'),route==='settings'?'Settings':(routeNames[route]||'Now'));
 }
 function navigateTo(route,push=true,preserveNotificationDetail=false){
   closeMobileMore();

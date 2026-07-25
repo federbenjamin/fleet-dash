@@ -543,6 +543,67 @@ function cardResponseFeedback(s){
   return`<div class="quickfeedback ${status}" role="status" aria-live="polite">
     <span class="qfstate">${verb}</span><span class="qftext">${esc(normalizedMessage(item.text))}</span>${icon}</div>`;
 }
+// ---- full log: every tool call, with its result read on demand ------------
+// Expanded state is a JS global re-applied at render, never a native <details>:
+// the conversation is rebuilt on the 2s poll, which would destroy element state.
+globalThis.expandedTools=globalThis.expandedTools||new Set();
+// Conversation bodies are only rewritten when their render key changes — that
+// guard is what stops needless repaints, so expanding a row has to move the
+// key or the click does nothing visible.
+globalThis.toolViewRev=globalThis.toolViewRev||0;
+globalThis.toolResults=globalThis.toolResults||{};      // tool_id -> {text,chars,truncated,failed}
+globalThis.toolResultLoads=globalThis.toolResultLoads||new Set();
+function resultScale(m){
+  const lines=Number(m.result_lines)||0,chars=Number(m.result_chars)||0;
+  if(!chars)return'';
+  return lines>1?`${lines} lines`:`${chars} chars`;
+}
+async function loadToolResult(sid,tid){
+  if(!tid||tid in toolResults||toolResultLoads.has(tid))return;
+  toolResultLoads.add(tid);
+  try{
+    const r=await fetch(`/api/tool-result?sid=${encodeURIComponent(sid)}&tuid=${encodeURIComponent(tid)}`,
+      {headers:{'Accept':'application/json'}});
+    const d=await r.json();
+    toolResults[tid]=d&&d.ok?d:{error:(d&&d.error)||'result unavailable'};
+  }catch(e){toolResults[tid]={error:String(e.message||e)};}
+  finally{toolResultLoads.delete(tid);toolViewRev++;uiRefresh();}
+}
+function toggleTool(encodedSid,tid){
+  const sid=decodeURIComponent(encodedSid);
+  toolViewRev++;
+  if(expandedTools.has(tid)){expandedTools.delete(tid);uiRefresh();return;}
+  expandedTools.add(tid);
+  void loadToolResult(sid,tid);
+  uiRefresh();
+}
+function toolResultBody(tid){
+  if(toolResultLoads.has(tid))return'<div class="tload">reading result…</div>';
+  const hit=toolResults[tid];
+  if(!hit)return'<div class="tload">reading result…</div>';
+  if(hit.error)return`<div class="tload terr">✗ ${esc(hit.error)}</div>`;
+  return`<pre class="tout${hit.failed?' terr':''}">${esc(hit.text)}</pre>`+
+    (hit.truncated?`<div class="tmore">showing the first ${hit.text.length.toLocaleString()} of ${Number(hit.chars).toLocaleString()} characters</div>`:'');
+}
+function toolRow(m,sid){
+  const tid=m.tool_id||'';
+  const open=tid&&expandedTools.has(tid);
+  const scale=resultScale(m);
+  // A row is only tappable when there is something behind it: a result that
+  // arrived. Offering an expander that resolves to nothing is worse than none.
+  const canOpen=Boolean(tid&&Number(m.result_chars));
+  const head=`<span class="tdot">⚒</span> <b>${esc(m.name)}</b><span class="targ">${esc(m.arg||'')}</span>`+
+    (m.result?`<span class="tres${m.failed?' terr':''}">${esc(m.result)}</span>`:'')+
+    (scale?`<span class="tscale">${esc(scale)}</span>`:'')+
+    (canOpen?`<span class="tcaret">${open?'▾':'▸'}</span>`:'');
+  if(!canOpen)
+    return`<div class="ctool${m.quiet?' quiet':''}"><div class="tline">${head}</div></div>`;
+  return`<div class="ctool${m.quiet?' quiet':''}${open?' open':''}">
+    <div class="tline" role="button" tabindex="0" aria-expanded="${open?'true':'false'}"
+      onclick="toggleTool('${enc(sid)}','${esc(tid)}')"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${head}</div>
+    ${open?toolResultBody(tid):''}</div>`;
+}
 function convoMsgs(c,sid,includeOptimistic=true,scope='session',aid=''){
   const provider=String(sid||'').startsWith('codex:')?'codex':'claude';
   const canonical=(c.messages||[]).map(m=>{
@@ -551,7 +612,7 @@ function convoMsgs(c,sid,includeOptimistic=true,scope='session',aid=''){
       if(m.name==='SendUserFile')
         return`<div class="ctool cfile">${(m.files||[]).map(f=>fchip(sid,f,m.caption)).join('')}
           ${m.caption?`<div class="fcap">${esc(m.caption)}</div>`:''}</div>`;
-      return`<div class="ctool"><div class="tline"><span class="tdot">⚒</span> <b>${esc(m.name)}</b><span class="targ">${esc(m.arg||'')}</span></div></div>`;
+      return toolRow(m,sid);
     }
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
@@ -569,4 +630,4 @@ function convoBox(s,short){
   return`<div class="ctxbox"><div class="convo${short?' short':''}" data-sid="${s.session_id}">${msgs}</div></div>`;
 }
 
-Object.assign(globalThis,{ctxCache,ctxVersion,modelLabel,CLAUDE_PERMISSION_LABELS,claudePermissionLabel,providerModeActions,sessionSettingActions,enc,cpb,EVT_ICON,optimisticMessages,quickResponses,nativeRequestLocks,nativeRequestKey,normalizedMessage,OPTIMISTIC_CONFIRM_MS,SESSION_TAIL_THRESHOLD,readingAnchorRevisions});
+Object.assign(globalThis,{toolRow,toggleTool,expandedTools,toolResults,loadToolResult,toolResultBody,resultScale,ctxCache,ctxVersion,modelLabel,CLAUDE_PERMISSION_LABELS,claudePermissionLabel,providerModeActions,sessionSettingActions,enc,cpb,EVT_ICON,optimisticMessages,quickResponses,nativeRequestLocks,nativeRequestKey,normalizedMessage,OPTIMISTIC_CONFIRM_MS,SESSION_TAIL_THRESHOLD,readingAnchorRevisions});

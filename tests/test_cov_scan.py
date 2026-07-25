@@ -491,6 +491,10 @@ class ScanStateTests(EngineFixture):
         row = next(row for row in observed if row[0] == "same")
         self.assertTrue(row[2], "eligible")
         self.assertEqual(row[3], self.engine.cfg["screen_prompt_seconds"])
+        # rows are (sid, pid, eligible, window); the window is optional and names
+        # a faster re-look for the compaction case only.
+        self.assertTrue(any(row[0] == "same" and row[2]
+                            for row in observed), observed)
 
     def test_an_observed_label_reaches_the_session_payload(self):
         self.write_registry(status="idle")

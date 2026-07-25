@@ -139,7 +139,15 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    "phantom Enter": toggles row 1 of a multi, auto-answers option 1 of a single, cascades).
    Multi-select: digit writes toggle (focus stays row 1); `\x1b[B` × (n_options+1) walks to
    the Next/Submit row; one bare CR advances CLEANLY (no phantom from that row). Review pane:
-   bare digit "1" submits. Escape sequences and CRs are dropped when chunked into one write
+   bare digit "1" submits. **A PERMISSION prompt is the bare-digit case too, and used not to
+   be treated as one** (fixed 2026-07-25): `act` appended a CR after the digit, so the digit
+   answered the prompt and the CR fired ~0.4 s later into whatever had mounted — and Claude
+   routinely raises a SECOND permission prompt for the same request, whose highlighted row 1
+   that Enter confirms. Proven live on 2.1.220: the bare digit alone submits, on all three
+   captured variants. Permission answers are therefore ONE key and never a trailing CR. The
+   settle guard (invariant 79) caught the stray CR in the tmux path and reported
+   `delivery_uncertain`, which is how the bug surfaced at all; the applet path and
+   `tmux_settle: false` had no such protection. Escape sequences and CRs are dropped when chunked into one write
    with other bytes — send each key as its own write. Engine `multiq` builds this; the client
    sends `n_options` per answer for the walk. **Other + dismiss** (sandbox-proven 2026-07-14):
    the TUI numbers a "Type something" row at n+1 and "Chat about this" at n+2. Single-select
@@ -194,6 +202,19 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    else idle; busy → running/stalled). Claude's `shell` registry state is active while the
    transcript remains mid-tool, but a completed `end_turn` wins over a stale detached shell child
    and returns the session to turn_done/idle.
+   **Which tool it is frozen on is projected, and comes from the transcript alone.**
+   `Tail.pending` was already the unanswered-`tool_use` map (set on tool_use, popped on its
+   tool_result, cleared on end_turn or a new prompt); `Tail.open_tool()` reads the newest entry
+   and `Engine._active_tool` renders it as `active_tool = {name, count, seconds}`. Three rules:
+   it is NOT filtered by `KEY_TOOLS` (that list decides what the conversation shows, and a
+   session wedged on a tool nobody wants in the transcript is exactly the one worth naming);
+   it is projected ONLY for `running`/`stalled`/`stalled_or_prompt`, because an idle session can
+   still hold a stale pending entry from a turn that ended without a result row; and the age
+   clamps at 0, because compaction appends rows carrying earlier timestamps (invariant 17). No
+   screen read is involved, so this works on sessions outside tmux. A backgrounded Bash returns
+   its tool_result immediately and is therefore correctly invisible here — the session is not
+   blocked on it. `renderSessionActivity`'s signature must include the tool name and age or the
+   workspace paints one value and never updates it.
    **CANCELLED is separate, authoritative and immediate.** Older Claude builds mark it when the
    parent's Agent `tool_result` comes back `is_error: true`; `Tail.errored_tools` collects those
    ids. Newer builds can instead leave the Agent spawn result successful and emit a queued/
@@ -244,11 +265,33 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     carrying every question and the chosen answer, parsed from the tool_result's
     `"<question>"="<answer>"` pairs; it renders in FULL (never truncated) — the user reads it
     to confirm the right answers landed.
-12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
-    Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
-    2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
-    rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place result
-    mutation must still bump `convo_v` or clients never refetch.
+12. **EVERY tool call is a convo row; `KEY_TOOLS` sets prominence, not visibility**
+    (operator decision 2026-07-25, reversing the 2026-07-14 filter). Read/Grep/Glob/WebFetch/
+    WebSearch and every MCP tool were never hidden by the browser — they never reached it,
+    because `_fold` only called `_tool_add` for `KEY_TOOLS`. A name outside that set now folds
+    with `quiet: true`, which dims the row and nothing else, so a new or MCP tool needs no list
+    kept up to date. `_tool_arg` gives the newly visible tools a subject line
+    (`pattern`/`query`/`url`, then the single scalar an unknown call was given — never a guess
+    between several). Each row is still ONE line: the ring keeps a first-line
+    `result` preview plus `result_chars`/`result_lines`, and the real output is read from the
+    transcript on demand by `Engine.tool_result` / token-gated `GET /api/tool-result?sid=&tuid=`,
+    bounded to `TOOL_RESULT_INLINE` (4096). Holding it instead would be megabytes per live
+    session for output nobody opened. `tool_id` is client-supplied, so it is shape-checked —
+    and only ever compared, never used to build a path; the transcript comes from the registry
+    exactly as `session_context` resolves it. That route is deliberately NOT staging-gated: a
+    live terminal read is a capability staging lacks (invariant 74), a transcript read is not
+    (invariant 56). The ring is `maxlen=300` because tool traffic is ~92% of a real session's
+    rows and 120 left about ten entries of readable conversation.
+    **Expanded state lives in `expandedTools` + `toolViewRev`, re-applied at render** — the
+    conversation is rebuilt on the poll, so a native `<details>` would close itself every two
+    seconds, and every conversation render key (session, closed, agent) must include
+    `toolViewRev` or the expand click paints nothing.
+    **Thinking blocks cannot be shown and no code pretends otherwise:** Claude Code writes the
+    block with an empty `thinking` field and keeps only its `signature` — 3,003 of 3,003 empty
+    across the 25 newest transcripts (measured 2026-07-25), and Codex's indexed `reasoning`
+    documents average 3.3 characters. There is nothing to render from either provider.
+    Context freshness rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an
+    in-place result mutation must still bump `convo_v` or clients never refetch.
 13. **`.card` must stay `overflow:clip`, never `hidden`.** `clip` keeps the border-radius
     clipping without turning the card into a scroll container — `hidden` would create one,
     which breaks any viewport-sticky descendant and silently changes hit-testing/scroll
@@ -282,8 +325,22 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     renders below the compaction it triggered; (b) "issued but no boundary yet" is undetectable
     from the transcript — the live pill reads the **PreCompact hook's checkpoint file mtime**
     (`~/.claude/compaction/<project>/checkpoint-<sid>.md`) = compaction start, suppressed once
-    a boundary lands or after 900s. Projects with no PreCompact hook get no pill (the finished
-    event row still lands). Don't "fix" the pill by inferring from transcript silence.
+    a boundary lands or after 900s. Don't "fix" the pill by inferring from transcript silence.
+    **Without that hook the PANE is the only live evidence, and it is now read** (2026-07-25).
+    `screen.py` classifies `Compacting conversation…` as `compacting` — a marker read off 46
+    frames of a real `/compact` on v2.1.220, 43 of which carry it. That surface is NOT modal:
+    the empty input box renders beneath it, so `compacting` must be tested BEFORE `input` or a
+    compacting pane reports itself idle. The scan projects it as `compacting` +
+    `compacting_source:"screen"` only when the hook gave nothing, and the client renders `≥`
+    because the age is time since Fleet FIRST SAW it, never when the compaction started.
+    **The eligibility test cost two live attempts to get right.** "Busy with a frozen
+    transcript" detects nothing: the registry reports the session `idle` through much of a
+    compaction, so a compacting session is indistinguishable from an idle one using Fleet's own
+    data — which is exactly why this gap existed. A session the scan still considers live
+    (registered, quieter than `dormant_seconds`) is therefore eligible at
+    `screen_observe_busy_seconds` (10). And a session Fleet has already CALLED compacting stays
+    eligible regardless, or the pill stays lit after the run ends — observed live before that
+    clause existed. Still a LABEL only; raw screen text remains behind `/api/screen`.
 18. **A leading `/` opens the TUI's OWN command popup, where Enter fires the HIGHLIGHTED entry
     — not the typed text.** Injecting a bare `/foo` + CR can therefore run a *different*
     command. A trailing space closes the popup, so `act()` appends one to any `/…` text with no
@@ -940,6 +997,23 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     slow-but-progressing response on the next interval. Main, closed, and subagent context failures
     retain the last-good in-memory/device cache. Conversation revision refreshes merge the current
     tail into older loaded pages and preserve the reader's scroll anchor.
+    **A live Claude conversation pages by TRANSCRIPT BYTE OFFSET, not by an index into the
+    ring** (operator decision 2026-07-25). The ring is a 300-entry tail whose indexes shift as
+    it evicts, so an index cursor could only ever reach the ring's edge; the byte offset is
+    stable, monotonic, and already the coordinate the fold works in, so `load older` reaches the
+    session's first message. Every folded row carries `off` (its line's START — distinct from
+    `evidence_offset`, the row END that model/effort ordering uses and which is unchanged).
+    `session_context(sid, before=…)` folds a bounded backwards window
+    (`_lines_before` reads 512 KB chunks until `TRANSCRIPT_PAGE_ROWS`=600 rows, never the whole
+    file) into a throwaway `Tail` whose deque is widened to the page size. **The cursor is the
+    oldest row RETURNED, never the window start** — those differ whenever the window folds to
+    fewer rows than it read, and pointing at the window start silently skips the difference; a
+    page that folds to nothing is the file's metadata head and ends the walk. A window folded
+    alone cannot attach a result whose call sits above it, which is the accepted trade for not
+    re-folding 15 MB per page. `server.paginate_context` must pass through any projection that
+    set `paged` — slicing it by index truncates a page and replaces a meaningful cursor with a
+    meaningless one. Closed and subagent contexts keep index pagination. Measured on a 15 MB
+    live transcript: 17 pages, 2,028 rows, 0.4 s total, ~30 ms per page.
 
 63. **Full-screen overlays are stack-aware modals — except the desktop-docked session pane.**
     Search/Handoff/Outbox/Schedule/Confirm surfaces (Settings is a destination, invariant 59,
@@ -1150,6 +1224,13 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     disproved (241 ms per-pane versus 5.6 ms batched, 49 panes). What survives unchanged, and
     matters more, is that the scan keeps only a derived label: raw screen text is still returned
     by this route alone, and is never cached, logged, or snapshotted.
+    A third consumer is `Engine.prompt_options` / `GET /api/prompt-options`, which reuses this
+    exact capture and every one of its four refusals, returning only the numbered option ROWS a
+    live prompt is rendering. It exists because Fleet's "always allow" button had one fixed
+    label while row 2 grants something different in every variant — a project-wide directory
+    grant, a session-only read, a settings edit (all captured on v2.1.220). It is on the REQUEST
+    path and must stay off the snapshot: those strings are screen text, and invariant 78's rule
+    is that the scan may derive a label but may not publish a terminal.
 
 75. **One native prompt has one server-owned identity, and an answered prompt is fenced.**
     A prompt can be evidenced two ways — the hook capture's `hook-<ms>` nonce and, for permissions,
@@ -1254,6 +1335,17 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     passes `screen_prompt_seconds` (1, i.e. every scan), because at the 60s cadence the label is
     always the previous surface and the feature silently does nothing (observed on a rig before
     the per-row window existed). `screen_observe: false` disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
+    **Eligibility is the real budget.** Three cases qualify. Two are cheap and narrow: a hook
+    capture whose registry disagrees that a prompt is open (the ghost-question case, invariant 5),
+    and a session that has written no transcript at all, which is exactly what sitting on the
+    folder-trust dialog looks like. Those are re-taken at most every `screen_observe_seconds` (60).
+    The third is compaction (invariant 17), and it is genuinely wide: any session the scan still
+    considers live, at `screen_observe_busy_seconds` (10). That is not laziness — a compacting
+    session is INDISTINGUISHABLE from an idle one in Fleet's own data (the registry says `idle`,
+    the transcript is silent by design), so there is no narrower predicate to apply, and the
+    2026-07-25 attempt to use "busy with a frozen transcript" detected nothing at all. It stays
+    affordable because the pass is batched: one `capture-pane` invocation for the whole fleet,
+    5.6 ms at 49 panes, at most once per window. `screen_observe: false` disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
     for a session already worth looking at — once per session, never per scan.
     Consumers: `hook_pending` keeps a rendered question at any age and drops a capture the moment
     the pane is demonstrably back at its input box, instead of waiting out
@@ -1483,7 +1575,10 @@ because they are also spawned directly as scripts by absolute path.
   GET `/` + `/api/fleet` + `/api/context`
   + `/api/agent_context?sid=&aid=` (one subagent's convo + info; same Tail fold as a session)
   + `/api/file` + `/api/commands` (token-gated: it reads names/descriptions off disk)
-  + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74),
+  + `/api/screen?sid=` (token-gated: one live tmux pane's rendered text, invariant 74)
+  + `/api/prompt-options?sid=` (token-gated: the option ROWS a live prompt is rendering —
+    the same capture and the same four refusals as `/api/screen`, parsed server-side so the
+    client never receives whole-pane text; request path only, never the snapshot),
   + token-gated `/api/act-receipt?rid=` (durable action receipts, invariant 76),
   + token-gated `/api/search`, `/api/search/status`, `/api/search/context`, `/api/notifications`,
   `/api/notification-policy`, `/api/push/config`, and `/api/push/devices`; POST `/api/act` +
@@ -1582,7 +1677,27 @@ because they are also spawned directly as scripts by absolute path.
   renders 48). This is what stops untouched cards re-laying out — and moving under your
   finger — every two seconds. It supersedes the audit's `uiRefresh(sid)` scoping: the same
   outcome with no call-site changes and no stale cross-card aggregates.
-  A browser spec asserts the zero and that a genuinely changed card still repaints. **`render()` passes `force` down to `renderSession(force)`**:
+  A browser spec asserts the zero and that a genuinely changed card still repaints.
+  `setText`, `setClass` and `setAttr` extend the same skip-if-unchanged contract to text,
+  `className` and attributes, because `textContent=` replaces the text node and
+  `setAttribute` invalidates style even when the value is identical: 507 of 687 mutation
+  records per five polls wrote a value that was already there (production, 51 sessions);
+  after routing the nav counts, Now filter chips, usage rail/panel, queue and Action Inbox
+  containers, budget panel and notification badges through them, 687 → 71.
+  **`setHtml` memoises the last string it wrote on that element, so a raw `innerHTML=` on
+  the same element makes the memo lie** — `renderPinned` wrote its skeleton raw, the later
+  `setHtml(el,'')` was skipped, and a pinned card rendered in both the pinned block and its
+  queue (invariant 28). Every write to a setHtml-managed container goes through setHtml, and
+  `reconcileCards` clears the memo when it appends a card out of band.
+  **The card frame is measured in the render's OWN frame.** `--session-card-lines` is written
+  twice — `reconcileCards` sets the configured clamp, `measurePeekOverflow` replaces it with
+  the content-hugging minimum (invariant 45/57). While that measurement had its own
+  `requestAnimationFrame` it landed a frame late (render is already inside one), so every poll
+  PAINTED every card at the full clamp and shrank it back: page height 1256 ⇄ 1471 px twice
+  per poll on 51 sessions. `render()` calls `schedulePeekOverflow(true)` to measure before the
+  paint, and the configured maximum is rewritten only when the peek could have changed (new
+  card, settings change, rebuilt `.ctop`). The resize listener keeps the deferred path and must
+  never forward its Event as that flag. **`render()` passes `force` down to `renderSession(force)`**:
   a `pointerdown` keeps `touching()` true for 800ms, so without it the workspace pane deferred the
   repaint that the tap itself requested — an answered permission kept its live buttons for most of
   a second. The unforced poll render still defers during a gesture, and the question drawer keeps
@@ -1639,14 +1754,18 @@ TCC Automation grant (injector→iTerm2; the applet transport only).
 
 ## Roadmap / known gaps
 
-- Permission-prompt injection: ONE real variant now verified (sandbox, v2.1.219, 2026-07-24) — a
-  file-write prompt rendering `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for
-  this session` / `3. No` under `Esc to cancel · Tab to amend`. The default
-  `permission_keys` (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for it, and a bare digit
-  instant-selects there exactly as it does on a single-select ask (invariant 4). Other variants
-  (Bash commands, MCP tools) still have unobserved wording for row 2, so per-variant tuning remains
-  possible; deny=Esc stays the safe choice because it cancels every variant. Invariant 77's
-  classifier now makes the rendered variant observable, which is what made this testable at all.
+- Permission-prompt injection: THREE real variants verified live on **v2.1.220, 2026-07-25** in a
+  disposable tmux rig — a **Bash command** (`❯ 1. Yes` / `2. Yes, and always allow access to
+  <dir>/ from this project` / `3. No`, footer `Esc to cancel · Tab to amend · ctrl+e to explain`),
+  a **file Read** (row 2 `Yes, allow reading from <dir>/ during this session`) and a **file
+  Overwrite** (row 2 `Yes, and allow Claude to edit its own settings for this session`), the last
+  two under a bare `Esc to cancel · Tab to amend`. All three classify as `permission`, and all
+  three put Yes/always/No in rows 1/2/3, so the default `permission_keys`
+  (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for every one and no per-variant key
+  tuning is needed. What DOES vary is what row 2 actually grants — a project-wide directory
+  grant, a session-only read, a settings edit — so a fixed "always" label in the UI describes
+  three different powers. MCP-tool wording is still unobserved. Invariant 77's classifier is what
+  made any of this testable.
 - Screen peek is BUILT (invariant 74): the workspace Details section reads a tmux session's live
   pane on demand, which is what a stalled session's tool output looks like when the transcript
   cannot say. Still open from W5-T2a of

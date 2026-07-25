@@ -1,12 +1,14 @@
 """Conversation/file/context projections, hook pending, effort, commands
 (invariants 1, 10, 11, 43)."""
 import json, os, re, sys, glob, time, copy, hashlib, uuid
+from collections import deque
 
 
 from . import paths as pathcfg
 from .paths import capture_base  # legacy alias; reads paths.* at call time
 from . import screen as screenlib
 from .config import CLAUDE_EFFORTS
+from .tail import Tail
 from .config import (IMG_EXTS, DANGER_COMMANDS, BUILTIN_COMMANDS, model_family, usd, cwd_to_project_dir, iso_epoch)
 
 
@@ -28,6 +30,10 @@ class ContextOps:
     ANSWERED_FENCE_SECONDS = 20
     # Bounded identity/fence maps; sessions come and go, so cap the retained set.
     REQUEST_IDENTITY_LIMIT = 500
+    # How still a busy session's transcript has to be before its pane is worth a
+    # look. A compaction freezes the transcript completely (invariant 17) while a
+    # working turn writes constantly, so this keeps the eligible set near empty.
+    SCREEN_WATCH_QUIET_SECONDS = 8
 
     @staticmethod
     def _discard_capture(path):
@@ -392,6 +398,62 @@ class ContextOps:
             return None, None
         return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
 
+    # How much of one tool result the browser may pull in when a row is expanded.
+    # Beyond this the row says so and stops; the ring never held this text at all,
+    # so nothing here is a cache — it is a bounded read of the transcript.
+    TOOL_RESULT_INLINE = 4096
+
+    def tool_result(self, sid, tool_id):
+        """The full-ish output of one tool call, read from the transcript.
+
+        The conversation ring holds a one-line preview per tool row, because
+        holding the real thing would be megabytes per live session for output
+        nobody has opened. Expanding a row asks for it here instead.
+
+        `tool_id` is client-supplied, so it is shape-checked before it is
+        compared — and it is only ever compared, never used to build a path. The
+        transcript comes from the registry, exactly as `session_context` resolves
+        it, so this route can read no file that route could not.
+        """
+        # Deliberately NOT staging-gated. A live terminal read is a capability
+        # and staging holds none over sessions it did not start (invariant 74);
+        # a transcript read is not, and staging may read the shared transcripts
+        # (invariant 56). This route must match `session_context`, which is the
+        # same file through the same resolver.
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(tool_id or "")):
+            return {"ok": False, "error": "invalid tool reference"}
+        reg, path = self._reg_main_path(sid)
+        if not reg or not os.path.isfile(path):
+            return {"ok": False, "error": "session not live"}
+        found = None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    # cheap reject before parsing: the id must appear literally
+                    if tool_id not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    content = (row.get("message") or {}).get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for block in content:
+                        if (isinstance(block, dict) and block.get("type") == "tool_result"
+                                and block.get("tool_use_id") == tool_id):
+                            found = block            # last occurrence wins
+        except OSError as error:
+            return {"ok": False, "error": f"transcript unreadable: {error}"}
+        if found is None:
+            return {"ok": False, "error": "no result recorded for this call"}
+        text = Tail._result_text(found)
+        return {"ok": True, "session_id": str(sid), "tool_id": str(tool_id),
+                "failed": bool(found.get("is_error")),
+                "text": text[:self.TOOL_RESULT_INLINE],
+                "chars": len(text),
+                "truncated": len(text) > self.TOOL_RESULT_INLINE}
+
     def agent_effort(self, agent_type, cwd, parent_effort):
         """Effort for a subagent.
 
@@ -629,16 +691,51 @@ class ContextOps:
                 "lines": capture["lines"], "truncated": capture["truncated"],
                 "captured_at": time.time()}
 
-    def screen_prompt_kind(self, reg, tty):
-        """What the session's terminal is showing right now, or None.
+    def prompt_options(self, sid):
+        """The option rows the session's terminal is rendering for a live prompt.
+
+        Exists for one reason: every permission variant puts Yes/always/No in
+        rows 1/2/3, but row 2's WORDING differs sharply — a Bash prompt offers a
+        project-wide directory grant, a Read prompt a session-only read, an
+        Overwrite prompt a settings edit (all three captured live on v2.1.220).
+        A fixed "always allow" button describes three different powers, and the
+        dashboard never showed the sentence the user was actually agreeing to.
+
+        Request path only, and deliberately NOT part of the fleet snapshot: these
+        strings come off a terminal, and invariant 78's rule is that the scan may
+        derive a label but may not publish screen text — the snapshot is cached
+        on the device by the service worker. Every refusal `session_screen`
+        makes applies here unchanged, because this is that same capture.
+        """
+        screen = self.session_screen(sid)
+        if not screen.get("ok"):
+            return screen
+        lines = screen["lines"]
+        kind = screenlib.classify_screen(lines)
+        always = screenlib.always_option(lines) if kind == screenlib.PERMISSION else None
+        out = {"ok": True, "session_id": str(sid), "kind": kind,
+               "options": screenlib.prompt_options(lines)}
+        # Absent `always_key` is the answer, not a gap: a permission prompt for a
+        # command Claude cannot statically analyze offers no persistent grant at
+        # all, and Fleet must render no button rather than press whatever sits on
+        # row 2 — which on that variant is "No".
+        if always:
+            out["always_key"], out["always_label"] = str(always[0]), always[1]
+        return out
+
+    def screen_prompt_state(self, reg, tty):
+        """One look at the terminal, answering both questions act() has.
+
+        Returns `{"kind":…, "always": (digit, text) | None}` or None for no
+        evidence at all — no tmux pane, an unreadable pane, or a screen the
+        classifier does not recognize. Callers must never read None as "no
+        prompt"; it is the state Fleet has always been in.
 
         Request-path only (invariant 74): this runs when a user is about to send
         keys, never on the scan. It is deliberately given the already-resolved
-        registry row and tty so it adds no lookups of its own.
-
-        None means "no evidence" — no tmux pane, an unreadable pane, or a screen
-        the classifier does not recognize. Callers must never read that as "no
-        prompt"; it is the state Fleet has always been in.
+        registry row and tty so it adds no lookups of its own — and it answers
+        the widget question and the which-key question from the SAME capture, so
+        answering a prompt still costs exactly one `capture-pane`.
         """
         if not tty or self._is_background_claude(reg):
             return None
@@ -648,8 +745,18 @@ class ContextOps:
         capture = self._tmux_capture(pane, max_rows=screenlib.TAIL_LINES)
         if not capture.get("ok"):
             return None
-        kind = screenlib.classify_screen(capture.get("lines") or [])
-        return None if kind == screenlib.UNKNOWN else kind
+        lines = capture.get("lines") or []
+        kind = screenlib.classify_screen(lines)
+        if kind == screenlib.UNKNOWN:
+            return None
+        return {"kind": kind,
+                "always": screenlib.always_option(lines)
+                if kind == screenlib.PERMISSION else None}
+
+    def screen_prompt_kind(self, reg, tty):
+        """Just the widget label from `screen_prompt_state`, or None."""
+        state = self.screen_prompt_state(reg, tty)
+        return state["kind"] if state else None
 
     def observe_screens(self, rows):
         """One batched look at the terminals Fleet is guessing about (invariant 78).
@@ -668,23 +775,23 @@ class ContextOps:
         terminal contents do not belong in an offline cache.
         """
         now = time.time()
-        window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
+        default_window = max(5, int(self.cfg.get("screen_observe_seconds", 60) or 60))
         if not self.cfg.get("screen_observe", True):
             self._screen_states.clear()
             return {}
         panes = {}
         for row in rows:
             sid, pid, eligible = row[0], row[1], row[2]
-            # A row may name its own re-look window. The trust and ghost cases
-            # are stable for minutes, but a permission prompt has to be SEEN
-            # before its hook fires ~6s later, and at the default 60s cadence the
-            # label is always the previous surface — which is exactly how the
-            # first version of this silently did nothing on a rig.
-            fresh = row[3] if len(row) > 3 and row[3] else window
+            # A row may name its own re-observation window. The trust and ghost
+            # cases are stable for minutes; a compaction is over in tens of
+            # seconds, and a permission prompt has to be SEEN before its hook
+            # fires ~6s later. At the default cadence both are missed — the
+            # prompt case silently did nothing on a rig until this existed.
+            window = row[3] if len(row) > 3 and row[3] else default_window
             if not eligible or not pid:
                 continue
             seen = self._screen_states.get(sid)
-            if seen and now - seen["at"] < fresh:
+            if seen and now - seen["at"] < window:
                 continue            # still fresh; the label carries over
             # _tty_for_pid shells out on a cache MISS, so it is resolved only for
             # a session already known to be worth looking at. A pid's tty never
@@ -700,9 +807,16 @@ class ContextOps:
                 frame = captured.get(pane["pane_id"])
                 if frame is None:
                     continue
+                state = screenlib.classify_screen(frame["lines"])
+                # `since` survives while the label does, so a caller can ask how
+                # long a surface has been up. It is when Fleet FIRST SAW it, not
+                # when it started — the difference is bounded by the window above
+                # and must be described honestly wherever it is rendered.
+                seen = self._screen_states.get(sid)
                 self._screen_states[sid] = {
-                    "state": screenlib.classify_screen(frame["lines"]),
-                    "at": now}
+                    "state": state, "at": now,
+                    "since": seen["since"] if seen and seen.get("state") == state
+                             and seen.get("since") else now}
         live = {row[0] for row in rows}
         for sid in [key for key in self._screen_states if key not in live]:
             self._screen_states.pop(sid, None)
@@ -713,8 +827,107 @@ class ContextOps:
         seen = self._screen_states.get(sid)
         return seen["state"] if seen else None
 
-    def session_context(self, sid):
-        """Recent conversation turns + SendUserFile deliveries for one session."""
+    def observed_screen_seconds(self, sid, state):
+        """How long `sid` has been showing `state`, or None if it is showing
+        something else. This is time since Fleet first OBSERVED the surface, so it
+        is a lower bound — never present it as when the thing started."""
+        seen = self._screen_states.get(sid)
+        if not seen or seen.get("state") != state:
+            return None
+        return max(0, round(time.time() - (seen.get("since") or seen["at"])))
+
+    # One page of older conversation, in raw transcript rows read per request.
+    # 600 rows folds to well under the ring cap and reads a few hundred KB from
+    # the tail of the file — never the whole transcript, which runs to 15 MB.
+    TRANSCRIPT_PAGE_ROWS = 600
+    TRANSCRIPT_PAGE_CHUNK = 512 * 1024
+
+    @classmethod
+    def _lines_before(cls, path, before):
+        """The complete JSONL lines immediately preceding byte `before`.
+
+        Returns `(lines, start)`. Reading BACKWARDS in chunks is what makes
+        paging affordable: a session's transcript is tens of megabytes and the
+        reader only ever wants the few hundred rows above where it already is.
+        """
+        start, chunks, rows = before, [], 0
+        with open(path, "rb") as handle:
+            while start > 0 and rows < cls.TRANSCRIPT_PAGE_ROWS:
+                size = min(cls.TRANSCRIPT_PAGE_CHUNK, start)
+                start -= size
+                handle.seek(start)
+                chunk = handle.read(size)
+                rows += chunk.count(b"\n")
+                chunks.insert(0, chunk)
+        blob = b"".join(chunks)
+        if start > 0:
+            # the first line in the blob began before `start`, so it is partial
+            cut = blob.find(b"\n")
+            if cut < 0:
+                return [], before
+            start += cut + 1
+            blob = blob[cut + 1:]
+        lines = blob.splitlines()
+        if len(lines) > cls.TRANSCRIPT_PAGE_ROWS:
+            dropped = lines[:len(lines) - cls.TRANSCRIPT_PAGE_ROWS]
+            start += sum(len(line) + 1 for line in dropped)
+            lines = lines[len(dropped):]
+        return lines, start
+
+    def _older_page(self, path, before):
+        """Fold the transcript window ending at `before` into conversation rows.
+
+        A window folded on its own cannot attach a result whose call sits above
+        it, and does not merge with an assistant row outside it. That is the
+        honest trade for not re-folding 15 MB per page: the boundary row is
+        slightly less complete than it is in the live tail.
+        """
+        try:
+            before = max(0, min(int(before), os.path.getsize(path)))
+        except (TypeError, ValueError, OSError):
+            return None
+        if before <= 0:
+            return {"ok": True, "paged": True, "messages": [], "files": [],
+                    "next_cursor": None}
+        lines, start = self._lines_before(path, before)
+        window = Tail(path)
+        # The live ring is a bounded TAIL; a page is a window, and dropping its
+        # oldest entries would leave a hole between what this page shows and
+        # where its cursor points. Fold the whole window.
+        window.convo = deque(maxlen=self.TRANSCRIPT_PAGE_ROWS)
+        offset = start
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except Exception:
+                # a line that will not parse still advances the cursor by its
+                # own length, or every offset after it is wrong
+                offset += len(line) + 1
+                continue
+            window._fold(row, row_start=offset)
+            offset += len(line) + 1
+        messages = [dict(entry) for entry in window.convo]
+        # The cursor is where the OLDEST ROW RETURNED begins — never the window
+        # start. Those differ whenever the window folds to fewer rows than it
+        # read, and pointing at the window start would silently skip the
+        # difference on the next page. `off` of 0 is the first row in the file
+        # and correctly ends the walk.
+        # A window that folds to nothing is the head of the file — session
+        # metadata rows that are not conversation. Ending the walk there is what
+        # stops the reader being offered one more empty page.
+        cursor = next((row["off"] for row in messages if row.get("off")), None)
+        return {"ok": True, "paged": True, "messages": messages, "files": [],
+                "next_cursor": cursor if messages else None}
+
+    def session_context(self, sid, before=None, limit=50):
+        """Recent conversation turns + SendUserFile deliveries for one session.
+
+        Claude sessions are paged by TRANSCRIPT BYTE OFFSET (`next_cursor`), not
+        by an index into the live ring: the ring is a 300-entry tail and indexes
+        into it shift as it evicts. The offset is stable, monotonic, and already
+        the coordinate the fold works in — so "load older" reaches the first
+        message of the session instead of stopping at the ring's edge.
+        """
         if str(sid).startswith("codex:"):
             with self.lock:
                 known = any(item.get("session_id") == sid and
@@ -728,6 +941,11 @@ class ContextOps:
             return {"ok": False, "error": "session not live"}
         if not os.path.isfile(path):
             return {"ok": True, "messages": [], "files": [], "starting": True}
+        if before is not None:
+            page = self._older_page(path, before)
+            if page is None:
+                return {"ok": False, "error": "invalid conversation cursor"}
+            return page
         snapshot = self._claude_context_snapshots.get(sid)
         if snapshot is not None:
             msgs = copy.deepcopy(snapshot.get("messages") or [])
@@ -754,7 +972,15 @@ class ContextOps:
         out_files = []
         for f in reversed(files):       # newest delivery first
             out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
-        return {"ok": True, "messages": msgs, "files": out_files}
+        # The live page is the newest `limit` of the ring; its cursor is where
+        # the oldest row it returns began in the file. Rows inserted by timestamp
+        # rather than appended (a compaction's event row, invariant 17) carry no
+        # offset, so the cursor comes from the oldest row that has one — a page
+        # boundary that repeats a row is recoverable, one that skips is not.
+        page = msgs[-max(1, int(limit or 50)):] if msgs else []
+        cursor = next((row["off"] for row in page if row.get("off")), None)
+        return {"ok": True, "paged": True, "messages": page, "files": out_files,
+                "next_cursor": cursor}
 
     def _agent_paths(self, sid, aid):
         """Resolve a subagent transcript. aid is client-supplied — hard-whitelist

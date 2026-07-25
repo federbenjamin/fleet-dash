@@ -85,7 +85,11 @@ class ScreenPromptActTest(EngineFixture):
         self.engine._screen_states = {"same": {"state": screenlib.PERMISSION,
                                                "at": time.time()}}
         pending = self.engine._screen_permission("same", time.time())
-        self.engine.screen_prompt_kind = lambda reg, tty: screen_kind
+        # act() takes ONE capture that answers both the widget question and the
+        # which-key question, so the stub is the state, not just the label.
+        self.engine.screen_prompt_state = lambda reg, tty: (
+            {"kind": screen_kind, "always": (2, "Yes, and always allow")}
+            if screen_kind else None)
         return pending["nonce"]
 
     def test_a_screen_nonce_is_answerable(self):

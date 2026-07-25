@@ -186,6 +186,12 @@ def fresh_state():
     codex.update(agents_running=0, agents_total=1)
     context = [{"role": "user", "text": "Audit parity"},
                {"role": "assistant", "text": "Working through the matrix."},
+               # a quiet tool with a result to expand, and a loud one without
+               {"role": "tool", "name": "Read", "arg": "~/fleet-dash/tail.py",
+                "quiet": True, "tool_id": "tu-read", "result": "line one",
+                "result_lines": 3, "result_chars": 28},
+               {"role": "tool", "name": "Write", "arg": "~/fleet-dash/out.txt",
+                "tool_id": "tu-none"},
                {"role": "event", "kind": "reasoning", "title": "Reasoning",
                 "detail": "Compared protocol states", "level": "info"}]
     repo = {"ok": True, "state": "ok", "root": "/Users/test/fleet-dash",
@@ -241,6 +247,8 @@ def fresh_state():
             "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
+            "tool_results": {"tu-read": "line one\nline two\nline three",
+                             "tu-big": "x" * 9000},
             "scenario": "base", "codex_error": None,
             "evidence": {
                 "claude-one": [
@@ -816,6 +824,25 @@ def set_scenario(name):
             "decisions": ["allow", "always", "deny", "cancel"]})
         if name == "approval-slow":
             STATE["delay_quick_response"] = 0.75
+    elif name in ("claude-permission", "claude-permission-blind",
+                  "claude-permission-nogrant"):
+        session = claude_session()
+        session.update(state="needs_you", normalized_state="needs_you",
+                       reg_status="waiting", ui_group="needs_you",
+                       reason_label="Permission needed",
+                       # no `decisions`: that field is Codex's statement of which
+                       # approval values its App Server accepts, and a Claude
+                       # pending has never carried it. The fixture claiming it
+                       # hid the difference the always-button gate turns on.
+                       pending={"kind": "permission", "nonce": "cp1",
+                                "request_id": "req-cp1", "tool": "Bash",
+                                "input_summary": "touch probe.txt"})
+        if name.endswith("blind"):
+            STATE["prompt_options_blind"] = True
+        if name.endswith("nogrant"):
+            # the Bash variant whose command cannot be statically analyzed:
+            # Claude offers no rule to write, so row 2 is "No"
+            STATE["prompt_options_no_grant"] = True
     elif name == "elicitation":
         session.update(state="needs_you", pending={"kind": "elicitation", "nonce": "e1",
             "server": "deploy", "message": "Choose deployment targets", "fields": [
@@ -888,6 +915,24 @@ def set_scenario(name):
         session["capabilities"]["interrupt"] = True
         session["capabilities"]["change_model_effort"] = False
         session["capabilities"]["change_model_effort_reason"] = "Available when Claude is idle"
+    elif name in ("active-tool", "active-tool-stalled"):
+        stalled = name.endswith("stalled")
+        session = claude_session()
+        session.update(state="stalled" if stalled else "running",
+                       normalized_state="stalled" if stalled else "running",
+                       reg_status="running", ui_group="working",
+                       reason_label="Stalled" if stalled else "Working",
+                       active_tool={"name": "Bash", "count": 2 if stalled else 1,
+                                    "seconds": 245 if stalled else 3})
+    elif name in ("compacting-hook", "compacting-screen"):
+        session = claude_session()
+        screen = name.endswith("screen")
+        session.update(state="running", normalized_state="running",
+                       reg_status="running", ui_group="working",
+                       reason_label="Working", compacting=42,
+                       compacting_source="screen" if screen else "hook")
+        if screen:
+            session["screen_state"] = "compacting"
     elif name == "handoff-failure":
         STATE["fail_handoff_once"] = True
     elif name.startswith("close-worktree"):
@@ -1299,6 +1344,17 @@ class Handler(BaseHTTPRequestHandler):
                         "can_resume_and_send": False,
                         "resume_disabled_reason": "Fixture session is view only",
                         "status_line": fixture_status_line("claude", frozen=True)}})
+            if route == "/api/tool-result":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                tuid = (query.get("tuid") or [""])[0]
+                body = STATE.get("tool_results", {}).get(tuid)
+                if body is None:
+                    return self.json_reply({"ok": False,
+                                            "error": "no result recorded for this call"})
+                return self.json_reply({"ok": True, "tool_id": tuid, "failed": False,
+                                        "text": body[:4096], "chars": len(body),
+                                        "truncated": len(body) > 4096})
             if route == "/api/screen":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
@@ -1317,6 +1373,26 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True, "session_id": sid, "transport": "tmux",
                     "truncated": False, "captured_at": time.time(),
                     "lines": lines})
+            if route == "/api/prompt-options":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                sid = (query.get("sid") or [""])[0]
+                if not sid.startswith("claude") or STATE.get("prompt_options_blind"):
+                    return self.json_reply({
+                        "ok": False, "code": "screen_unavailable",
+                        "error": "this session is not running in a tmux pane"})
+                grant = "Yes, and always allow access to fleet-dash/ from this project"
+                # `always_key` is the digit the SCREEN showed, which is what the
+                # client presses — the server derives it rather than assuming 2,
+                # because one captured variant puts "No" on row 2.
+                if STATE.get("prompt_options_no_grant"):
+                    return self.json_reply({
+                        "ok": True, "session_id": sid, "kind": "permission",
+                        "options": ["Yes", "No"]})
+                return self.json_reply({
+                    "ok": True, "session_id": sid, "kind": "permission",
+                    "options": ["Yes", grant, "No"],
+                    "always_key": "2", "always_label": grant})
             if route == "/api/act-receipt":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)

@@ -403,7 +403,8 @@ class ActOps:
                 # invariant 5 has been guessing from. A `trust` screen is the
                 # sharpest case: injecting digits there would answer Claude's
                 # folder-trust dialog, which Fleet must never do (invariant 21).
-                screen_kind = self.screen_prompt_kind(reg, self._tty_for_pid(reg.get("pid")))
+                screen_state = self.screen_prompt_state(reg, self._tty_for_pid(reg.get("pid")))
+                screen_kind = screen_state["kind"] if screen_state else None
                 # For a prompt Fleet read off the pane, that classifier is not a
                 # corroborating check — it is the ONLY evidence the prompt exists.
                 # An unreadable pane therefore refuses, where a hook-attested
@@ -562,13 +563,40 @@ class ActOps:
                         steps.append(("", True))
                 else:
                     pk = self.cfg.get("permission_keys", {})
-                    if action.get("choice") not in pk:
+                    choice = action.get("choice")
+                    if choice not in pk:
                         return {"ok": False, "error": "unknown choice"}
-                    # an empty key means Esc (deny cancels any prompt variant)
-                    key = pk[action.get("choice")] or "\x1b"
+                    if choice == "always":
+                        # "always allow" is the one choice whose key is NOT fixed.
+                        # Three captured variants put a persistent grant on row 2
+                        # and a fourth — a Bash command Claude cannot statically
+                        # analyze — puts "No" there, so the hardwired "2" DENIED
+                        # instead of granting (v2.1.220, 2026-07-25). Row 1 (yes)
+                        # and Esc (deny) are correct on every variant; this one
+                        # has to be read off the screen or not sent at all.
+                        # No evidence is a refusal, not a fallback: a session
+                        # outside tmux has no pane to read, and guessing there is
+                        # what produced the bug. `allow` and `deny` still work.
+                        always = (screen_state or {}).get("always")
+                        if not always:
+                            return {"ok": False, "code": "always_unavailable",
+                                    "error": "this prompt offers no always-allow option"
+                                    if screen_state else
+                                    "Fleet cannot read this terminal, so it will not guess "
+                                    "which key grants access — use allow or deny"}
+                        key = str(always[0])
+                    else:
+                        # an empty key means Esc (deny cancels any prompt variant)
+                        key = pk[choice] or "\x1b"
+                    # ONE key, never a trailing CR (invariant 4's phantom Enter).
+                    # A bare digit instant-selects on a permission prompt exactly
+                    # as it does on a single-select ask — verified live against
+                    # 2.1.220 on all three captured variants. The CR this used to
+                    # append was redundant, and it fired ~0.4s later into whatever
+                    # had mounted by then: when Claude raises a SECOND permission
+                    # prompt (routine — one request often needs several), Enter
+                    # confirms its highlighted row 1 and silently answers "Yes".
                     steps = [(key, False)]
-                    if key != "\x1b":
-                        steps.append(("", True))
             elif typ == "focus":        # bring that session's iTerm tab to the front
                 steps = [("__FOCUS__", False)]
             elif typ == "interrupt":    # Esc mid-turn = the terminal's stop key
