@@ -599,7 +599,11 @@ between progress prose and the next tool call. Each prompt gets a server-owned i
 the same request even when its evidence flips from the hook capture to the transcript — an answered
 question does not reappear — and once Fleet accepts an answer, a second device (or a second tap)
 gets "this prompt was already answered" instead of typing a second set of keys into a terminal that
-has moved on. Answers are injected through whichever terminal
+has moved on. Every action that can move Claude's terminal also leaves a durable receipt keyed by an
+id the browser mints before it sends, so a phone whose connection drops mid-answer can ask Fleet what
+actually happened once it reconnects instead of being told only that delivery was uncertain — and
+resending the same id returns the recorded outcome rather than typing a second time. Receipts are
+internal and pruned after 24 hours. Answers are injected through whichever terminal
 transport owns that session — tmux `send-keys` when its tty is a live tmux pane, otherwise
 `FleetDashInjector.app` (a TCC-authorized applet: daemon writes a request file, `open -g`, the
 applet types into the iTerm session matched by tty). See

@@ -1,6 +1,26 @@
 const { test, expect } = require('@playwright/test');
 
-async function reset(page, scenario = 'base') {
+async function withoutServiceWorker(page) {
+  await page.addInitScript(() => {
+    // Init scripts run in EVERY frame, and merely READING
+    // navigator.serviceWorker throws SecurityError inside the sandboxed
+    // artifact iframe (sandbox="allow-scripts", no allow-same-origin).
+    try {
+      if (navigator.serviceWorker) navigator.serviceWorker.register = async () => {
+        throw new Error('service worker disabled: this test owns its network mocking');
+      };
+    } catch (_) { /* sandboxed frame: it has no worker to disable */ }
+  });
+}
+
+// A registered service worker intercepts fetches before Playwright's page.route
+// sees them, and it can win registration during the setup idle callback — so a
+// spec that mocks an API endpoint intermittently exercised the REAL fixture
+// instead of its mock (proven 2026-07-24: an act mocked to fail was answered for
+// real by the fixture). Only the specs actually testing the PWA need the worker,
+// so it is off by default and opted into explicitly.
+async function reset(page, scenario = 'base', { serviceWorker = false } = {}) {
+  if (!serviceWorker) await withoutServiceWorker(page);
   await page.request.post('/test/reset', { data: { scenario } });
   await page.goto('/?token=abcdef123456');
   await expect(page.locator('#route-now')).toBeVisible();
@@ -16,6 +36,19 @@ function usageTrigger(page) {
 async function refresh(page) {
   await page.evaluate(() => tick());
 }
+
+// The workspace action dock is rebuilt on a poll tick, so a single
+// boundingBox() call can resolve a node that is detached before it is measured
+// and return null. Retry until the element is measurable.
+async function stableBox(locator) {
+  let box = null;
+  await expect.poll(async () => {
+    box = await locator.boundingBox();
+    return Boolean(box);
+  }).toBe(true);
+  return box;
+}
+
 
 async function fixtureState(page) {
   return (await page.request.get('/test/state')).json();
@@ -1305,7 +1338,7 @@ test('large conversations load newest-first in bounded pages without losing olde
 });
 
 test('loaded conversation pages survive tail refresh and an offline reload', async ({ page, context }) => {
-  await reset(page,'large-conversation');
+  await reset(page, 'large-conversation', { serviceWorker: true });
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   for(let index=0;index<4;index++)await page.locator('#sbody .oldermsgs').click();
   await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
@@ -1484,7 +1517,9 @@ test('an exact existing Codex terminal exposes Open without Attach', async ({ pa
   const open = page.locator('#sctrl > .termbtn');
   await expect(open).toHaveText('Open');
   await expect(open).toBeEnabled();
-  expect(await open.evaluate(el => el.nextElementSibling.classList.contains('ovwrap'))).toBe(true);
+  // as a locator, not a handle: the header is rebuilt on a poll tick and a
+  // resolved element can be detached before evaluate() reaches it
+  await expect(page.locator('#sctrl > .termbtn + .ovwrap')).toHaveCount(1);
   await open.click();
   await expect.poll(async () => (await fixtureState(page)).actions.at(-1)?.type).toBe('focus');
   await expect(page.getByRole('button', { name: 'Attach' })).toHaveCount(0);
@@ -1938,13 +1973,13 @@ test('fullscreen question drawer preserves reading position and resizes from nea
   await page.locator('#sact').getByRole('button',{name:/Target 18/}).click();
   await expect.poll(()=>scroll.evaluate(element=>element.scrollTop)).toBeGreaterThan(readingTop-3);
 
-  const initial=await drawer.boundingBox();
-  const gripBox=await grip.boundingBox();
+  const initial=await stableBox(drawer);
+  const gripBox=await stableBox(grip);
   await page.mouse.move(gripBox.x+gripBox.width/2,gripBox.y+gripBox.height/2);
   await page.mouse.down();
   await page.mouse.move(gripBox.x+gripBox.width/2,1,{steps:8});
   await page.mouse.up();
-  const expanded=await drawer.boundingBox();
+  const expanded=await stableBox(drawer);
   expect(expanded.height).toBeGreaterThan(initial.height+20);
   const geometry=await page.evaluate(()=>{
     const view=document.querySelector('#sview').getBoundingClientRect();
@@ -2518,7 +2553,7 @@ test('an ambiguous offline flush stays durable and never retries automatically',
 });
 
 test('images selected offline survive reload and flush exactly once after reconnection', async ({ page,context }) => {
-  await reset(page);
+  await reset(page, 'base', { serviceWorker: true });
   await page.evaluate(() => navigator.serviceWorker.ready);
   await expect.poll(() => page.evaluate(async () => Boolean(await caches.match('/api/fleet')))).toBe(true);
   await page.reload();
@@ -3509,7 +3544,7 @@ test('push fallback opens exact current state and direct close stays inside Noti
 });
 
 test('PWA caches the local shell and fleet snapshot without credentials', async ({ page }) => {
-  await reset(page, 'base');
+  await reset(page, 'base', { serviceWorker: true });
   const manifest = await (await page.request.get('/static/manifest.webmanifest')).json();
   expect(manifest).toMatchObject({id: '/', start_url: '/#now', scope: '/', display: 'standalone'});
   expect(manifest.icons.map(icon => icon.sizes)).toEqual(['192x192', '512x512', '512x512']);
@@ -3615,7 +3650,7 @@ test('PWA caches the local shell and fleet snapshot without credentials', async 
 });
 
 test('connection loss reloads the cached dashboard, keeps drafts, and flushes queued messages once', async ({ page, context }) => {
-  await reset(page, 'base');
+  await reset(page, 'base', { serviceWorker: true });
   await page.evaluate(() => navigator.serviceWorker.ready);
   await expect.poll(() => page.evaluate(async () => Boolean(await caches.match('/api/fleet')))).toBe(true);
   await page.reload();
@@ -3657,6 +3692,72 @@ test('connection loss reloads the cached dashboard, keeps drafts, and flushes qu
   } finally {
     await context.setOffline(false);
   }
+});
+
+test('a lost response is resolved from its durable receipt on reconnect', async ({ page }) => {
+  // Before this, a dropped connection mid-act ended the story: "delivery
+  // uncertain" with nothing durable behind it (invariant 76).
+  await reset(page, 'base');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sbody .aconvo')).toBeVisible();
+
+  // the request reaches Fleet; only the response is lost
+  await page.route('**/api/act', async route => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    await page.request.post('/test/act-receipt', { data: {
+      client_request_id: body.client_request_id, session_id: body.session_id,
+      action_type: 'text', state: 'delivered' } });
+    await route.abort('failed');
+  });
+  const composer = page.locator('textarea[data-draft-key="composer:codex:thread-one"]');
+  await composer.fill('did this land?');
+  await page.locator('#sact').getByRole('button', { name: 'send' }).click();
+
+  const stored = () => page.evaluate(() =>
+    JSON.parse(localStorage.getItem('fleet.actReceipts.v1') || '[]'));
+  await expect.poll(async () => (await stored()).length).toBe(1);
+  expect((await stored())[0].sid).toBe('codex:thread-one');
+  // the pending record carries identity only — never the message text
+  expect(JSON.stringify(await stored())).not.toContain('did this land?');
+
+  await page.unroute('**/api/act');
+  await page.evaluate(() => { setFleetOffline(false); return tick(); });
+  await expect.poll(async () => (await stored()).length).toBe(0);
+  await expect(page.locator('#sbody')).not.toContainText('Delivery unconfirmed');
+  // the aborted request's console error can land after the last assertion
+  await expect.poll(() => {
+    page.__failures = page.__failures.filter(message =>
+      !/net::ERR_FAILED|Failed to fetch/i.test(message));
+    return page.__failures.length;
+  }).toBe(0);
+});
+
+test('an unknown receipt never becomes a claim that the action failed', async ({ page }) => {
+  // A missing receipt is ambiguous: the request may never have arrived, or its
+  // receipt may have been pruned. Fleet stops tracking and leaves what the user
+  // was already shown rather than inventing a verdict (invariant 66).
+  await reset(page, 'base');
+  await page.evaluate(() => openSession('codex:thread-one'));
+  await expect(page.locator('#sbody .aconvo')).toBeVisible();
+  await page.route('**/api/act', route => route.abort('failed'));
+  const composer = page.locator('textarea[data-draft-key="composer:codex:thread-one"]');
+  await composer.fill('never arrived');
+  await page.locator('#sact').getByRole('button', { name: 'send' }).click();
+  await expect.poll(async () => (await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('fleet.actReceipts.v1') || '[]'))).length).toBe(1);
+  await expect(page.locator('#sbody')).toContainText('Delivery unconfirmed');
+
+  await page.unroute('**/api/act');
+  await page.evaluate(() => { setFleetOffline(false); return tick(); });
+  await expect.poll(async () => (await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('fleet.actReceipts.v1') || '[]'))).length).toBe(0);
+  await expect(page.locator('#sbody')).toContainText('Delivery unconfirmed');
+  // the aborted request's console error can land after the last assertion
+  await expect.poll(() => {
+    page.__failures = page.__failures.filter(message =>
+      !/net::ERR_FAILED|Failed to fetch/i.test(message));
+    return page.__failures.length;
+  }).toBe(0);
 });
 
 test('budget editor, manual legacy ntfy, honest token scope, and spawn forecast work together', async ({ page }, testInfo) => {

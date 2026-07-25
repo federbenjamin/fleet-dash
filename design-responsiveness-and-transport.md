@@ -1,6 +1,6 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W5-T1, the first half of W5-T2a, W3 part 1, W4 and W2 shipped 2026-07-24; W1, W3 part 2
+Status: **W5-T1, the first half of W5-T2a, W1, W3 part 1, W4 and W2 shipped 2026-07-24; W3 part 2
 and W5-T2b/T3 remain proposed.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
@@ -251,6 +251,34 @@ of the scan, measured live on 49 sessions. Per-session locks would take that 32 
 considerably more concurrency surface, so they stay unbuilt until something shows 32 ms matters.
 `Engine.scan_serialize` preserves the one-scan-at-a-time guarantee the wide lock gave for free, and
 `scan_lock_held_ms` is published in `/api/diagnostics` so the number stays visible.
+
+**The receipt half SHIPPED 2026-07-24 — without the async worker, because the measurement removed
+its reason.** With W5-T1 in place, a full `noop` act (the whole daemon→transport chain, zero
+keystrokes) costs a median **3.0 ms through tmux** (1.7 ms min, 200.9 ms max, n=12) against **296.1 ms
+through the applet** (231.1 / 718.1). Measured on staging the same day by forcing
+`terminal_transport` to each value in turn. "Validate, enqueue, return in ~10 ms" is slower than
+just doing the work once the terminal switch lands, and it would rewrite ~20 client call sites to
+poll for something they already have in the response.
+
+Durability was always the other half of the plan and it stands alone. The browser mints a
+`client_request_id` BEFORE the request — the failure this exists for is losing the RESPONSE, so a
+server-generated id would arrive too late — the server binds one `act_receipts` row to it, and
+`GET /api/act-receipt?rid=` is how a reconnected device asks. Replaying the same id returns the
+recorded outcome instead of typing again, which is also an idempotency guarantee the direct path
+never had.
+
+Two things the plan did not anticipate:
+
+- **A missing receipt is ambiguous, not a verdict.** The request may never have reached the daemon,
+  its receipt may have been pruned, or the ledger may have refused the write while the keys landed.
+  The client stops tracking it and leaves whatever the user was already shown, rather than claiming
+  a delivery did not happen. That keeps the feature strictly additive to invariant 66.
+- **The receipt state comes from `act()`'s own verdict**, not from
+  `_native_write_failed_before_delivery`. That classifier is for transport results; applied to every
+  act return it labels ordinary pre-delivery refusals (empty text, stale nonce, capability gate) as
+  uncertain and sends the user to check a terminal that received nothing.
+
+Full contract: invariant 76.
 
 This *improves* invariant 66 rather than weakening it: today a dropped connection mid-fetch yields
 "delivery uncertain" with nothing durable behind it. A receipt survives reload, backgrounding,

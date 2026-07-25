@@ -359,6 +359,17 @@ class GetHandlerTest(unittest.TestCase):
         self.assertEqual(json.loads(body)["lines"], ["x"])
         self.assertEqual(Handler.GET_ROUTES["/api/screen"], ("token", "get_screen"))
 
+    def test_get_act_receipt_is_token_gated(self):
+        status, _, body, _kw = self.call(
+            "get_act_receipt", "/api/act-receipt?rid=act-abcdef123456",
+            act_receipt=lambda rid: {"ok": True, "found": True,
+                                     "receipt": {"client_request_id": rid,
+                                                 "state": "delivered"}})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["receipt"]["state"], "delivered")
+        self.assertEqual(Handler.GET_ROUTES["/api/act-receipt"],
+                         ("token", "get_act_receipt"))
+
     def test_get_commands_insights_briefing_budgets(self):
         self.assertEqual(self.call("get_commands", "/api/commands?sid=s",
             commands=lambda sid: {"ok": True})[0], 200)

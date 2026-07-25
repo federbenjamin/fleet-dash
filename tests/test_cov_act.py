@@ -515,6 +515,82 @@ class PermissionAnswerTests(EngineFixture):
         self.assertFalse(self.engine._request_answered("same", "p1"))
 
 
+class ActReceiptTests(EngineFixture):
+    """The receipt binding around act() itself (invariant 76)."""
+
+    def _arm_text(self):
+        self.write_registry(status="idle")
+        self.engine.hook_pending = lambda sid, status: None
+        self.engine.compacting_secs = lambda *a, **k: None
+        self.engine._tty_cache[PID] = "ttys-test"
+        self.engine._iterm_write = mock.Mock(return_value={"ok": True})
+
+    def test_a_delivered_action_records_and_reports_its_receipt(self):
+        self._arm_text()
+        out = self.engine.act({"type": "text", "session_id": "same", "text": "hi",
+                               "client_request_id": "act-abcdef123456"})
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["receipt_state"], "delivered")
+        self.assertEqual(
+            self.engine.act_receipt("act-abcdef123456")["receipt"]["state"], "delivered")
+
+    def test_the_same_request_id_never_types_twice(self):
+        """This is the whole point: a browser that lost its response may retry."""
+        self._arm_text()
+        first = self.engine.act({"type": "text", "session_id": "same", "text": "hi",
+                                 "client_request_id": "act-abcdef123456"})
+        second = self.engine.act({"type": "text", "session_id": "same", "text": "hi",
+                                  "client_request_id": "act-abcdef123456"})
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(self.engine._iterm_write.call_count, 1)
+
+    def test_a_pre_delivery_refusal_is_recorded_as_failed_not_uncertain(self):
+        """act() refuses an empty text before touching the transport; recording
+        that as uncertain would tell the user to go check a terminal that never
+        received anything."""
+        self._arm_text()
+        out = self.engine.act({"type": "text", "session_id": "same", "text": "",
+                               "client_request_id": "act-abcdef123456"})
+        self.assertFalse(out["ok"])
+        self.assertEqual(
+            self.engine.act_receipt("act-abcdef123456")["receipt"]["state"], "failed")
+
+    def test_an_uncertain_delivery_is_recorded_as_uncertain(self):
+        self._arm_text()
+        self.engine._iterm_write = mock.Mock(
+            return_value={"ok": False, "error": "no result file"})
+        self.engine.act({"type": "option", "session_id": "same", "nonce": "n",
+                         "client_request_id": "act-abcdef123456"})
+        state = self.engine.act_receipt("act-abcdef123456")["receipt"]["state"]
+        self.assertIn(state, ("uncertain", "failed"))
+
+    def test_a_nested_send_does_not_collide_with_the_outer_receipt(self):
+        """`send_message` forwards its client_request_id to a nested direct send,
+        and act() re-enters itself under the Claude mutation lock. Only the
+        outermost call owns the receipt."""
+        self._arm_text()
+        self.engine.scan()          # _send_now_or_queue reads the snapshot cache
+        out = self.engine.act({"type": "send_message", "session_id": "same",
+                               "text": "hi", "client_request_id": "act-abcdef123456"})
+        self.assertNotEqual(out.get("code"), "in_flight", out)
+        self.assertTrue(out.get("ok") or out.get("queued"), out)
+
+    def test_a_raising_dispatcher_records_uncertainty_and_still_raises(self):
+        self._arm_text()
+        with mock.patch.object(self.engine, "_act_dispatch",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.engine.act({"type": "text", "session_id": "same", "text": "hi",
+                                 "client_request_id": "act-abcdef123456"})
+        self.assertEqual(
+            self.engine.act_receipt("act-abcdef123456")["receipt"]["state"], "uncertain")
+
+    def test_a_non_dict_action_is_still_refused(self):
+        self.assertFalse(self.engine.act("not an action")["ok"])
+
+
 class ControlChangeTests(EngineFixture):
     def _arm_idle(self):
         self.write_registry(status="idle")

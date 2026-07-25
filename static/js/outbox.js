@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{outboxWhen,outboxTarget,loadOutbox,reconcileOutboxOptimistic,renderOutboxCompact,openOutbox,closeOutbox,setOutboxFilter,visibleOutboxItems,outboxRow,renderOutboxFull,mergeOutboxResult,outboxAction,confirmDeleteOutbox,localInputAt,defaultScheduleTime,scheduleButton,closeComposerMenus,syncComposerToolsOpen,toggleComposerMenu,openComposerSchedule,composerTools,canCompose,renderComposer,openSchedule,editOutbox,closeSchedule,scheduleSet,scheduleSpawnChange,scheduleUsageOptions,renderSchedule,submitSchedule});
+Object.assign(globalThis,{resolvePendingReceipts,applyReceiptOutcome,outboxWhen,outboxTarget,loadOutbox,reconcileOutboxOptimistic,renderOutboxCompact,openOutbox,closeOutbox,setOutboxFilter,visibleOutboxItems,outboxRow,renderOutboxFull,mergeOutboxResult,outboxAction,confirmDeleteOutbox,localInputAt,defaultScheduleTime,scheduleButton,closeComposerMenus,syncComposerToolsOpen,toggleComposerMenu,openComposerSchedule,composerTools,canCompose,renderComposer,openSchedule,editOutbox,closeSchedule,scheduleSet,scheduleSpawnChange,scheduleUsageOptions,renderSchedule,submitSchedule});
 globalThis.outboxData={ok:true,items:[],summary:{pending:0,attention:0},usage_options:[]};;
 globalThis.outboxLoading=false;globalThis.outboxLoadPromise=null;globalThis.outboxLoadedAt=0;globalThis.outboxAccess='unknown';globalThis.outboxFilter='current';globalThis.scheduleView=null;
 const outboxActions=new Map();
@@ -318,6 +318,54 @@ async function submitSchedule(){
   if(v.inputId)clearDraft(composerDraftKey(v.sid),relayDraftKey(v.sid,v.agentId));
   if(v.kind==='new_session')clearDraft('new:directory','new:worktree','new:message');
   dismissOverlay();await loadOutbox(true);render(last,true);
+}
+
+// ---- durable action receipts (invariant 76) -------------------------------
+// A dropped connection mid-`act` used to end the story: Fleet said "delivery
+// uncertain" and nothing durable said otherwise. The server now records what
+// happened under the id the browser minted before the request, so a reconnected
+// device can ask.
+globalThis.actReceiptResolving=false;
+async function resolvePendingReceipts(){
+  if(actReceiptResolving||!actReceipts.length||fleetOffline)return;
+  actReceiptResolving=true;
+  try{
+    for(const entry of actReceipts.slice()){
+      let body=null;
+      try{
+        const response=await fetch(`/api/act-receipt?rid=${encodeURIComponent(entry.rid)}`);
+        body=await response.json();
+      }catch(_){return;}                      // still offline: try again next poll
+      if(!body||!body.ok){forgetActReceipt(entry.rid);continue;}
+      // A missing receipt is genuinely AMBIGUOUS — the request may never have
+      // reached the daemon, or its receipt may have been pruned, or the ledger
+      // may have refused the write while the keys still landed. Fleet must not
+      // turn that into "it did not arrive": stop tracking and leave whatever the
+      // user was already shown (invariant 66).
+      if(!body.found){forgetActReceipt(entry.rid);continue;}
+      applyReceiptOutcome(entry,body.receipt||{});
+      forgetActReceipt(entry.rid);
+    }
+  }finally{actReceiptResolving=false;uiRefresh();}
+}
+function applyReceiptOutcome(entry,receipt){
+  if(entry.optimisticId==null)return;
+  if(receipt.state==='delivered'){
+    const item=optimisticList(entry.sid).find(row=>row.id===entry.optimisticId);
+    if(!item)return;
+    // Fleet did reach the provider. That is NOT the same as confirmed: the
+    // canonical transcript row still owns the final state (invariant 34), so
+    // the row returns to waiting rather than jumping to confirmed.
+    delete item.error;item.status='sending';armOptimisticTimeout(item);
+    if(!paintOptimisticItem(item))uiRefresh();
+    return;
+  }
+  if(receipt.state==='failed')
+    return updateOptimistic(entry.sid,entry.optimisticId,false,
+      receipt.error||'Fleet never delivered this — it can be sent again');
+  // running or uncertain: the terminal may already have the keys
+  markOptimisticUncertain(entry.sid,entry.optimisticId,
+    receipt.error||'Delivery uncertain — check the terminal before sending again');
 }
 
 // ---- deterministic in-app briefing ---------------------------------------

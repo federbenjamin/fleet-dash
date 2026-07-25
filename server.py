@@ -397,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/history": ("open", "get_history"),
         "/api/file": ("token-text", "get_file"),
         "/api/screen": ("token", "get_screen"),
+        "/api/act-receipt": ("token", "get_act_receipt"),
         "/api/commands": ("token", "get_commands"),
         "/api/search": ("token", "get_search"),
         "/api/search/status": ("token", "get_search_status"),
@@ -565,6 +566,11 @@ class Handler(BaseHTTPRequestHandler):
     def get_screen(self):
         # reads a live terminal's rendered screen -> token-gated like /api/file
         out = self.eng.session_screen(self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_act_receipt(self):
+        # how a browser that lost its response learns whether the action landed
+        out = self.eng.act_receipt(self.query("rid"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_commands(self):

@@ -596,8 +596,16 @@ async function saveSessionSettings(s,model,effort){
     uiRefresh();
   }
 }
+// Every action that can move Claude's native surface gets a durable receipt
+// (invariant 76). Mirrors Engine.ACT_RECEIPT_TYPES; read-only probes are absent
+// on purpose, because replaying one costs nothing.
+const RECEIPT_ACT_TYPES=new Set(['option','multiq','permission','dismiss','elicitation',
+  'dismiss_then_send','send_message','text','image_text','handoff_text','relay',
+  'interrupt','close','session_settings','permission_mode']);
 async function act(sid,payload,pre='msg',optimisticId=null){
   const requestStarted=performance.now();
+  const receiptId=RECEIPT_ACT_TYPES.has(payload.type)?
+    (payload.client_request_id||actRequestId()):null;
   const isQuick=['permission','dismiss','elicitation'].includes(payload.type);
   const quickId=isQuick?beginQuickResponse(sid,payload):null;
   const setMessage=text=>{if(pre===false||pre==null)return null;
@@ -611,7 +619,8 @@ async function act(sid,payload,pre='msg',optimisticId=null){
   if(payload.type!=='ping')setMessage('sending…');
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session_id:sid,...payload})});
+      body:JSON.stringify({session_id:sid,...payload,
+        ...(receiptId?{client_request_id:receiptId}:{})})});
     const d=await r.json();
     if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
       performance.now()-requestStarted);
@@ -642,6 +651,9 @@ async function act(sid,payload,pre='msg',optimisticId=null){
   }catch(e){
     if(payload.type!=='ping')perfRecord(`native_${String(payload.type).replace(/[^a-z0-9_]+/gi,'_')}_ms`,
       performance.now()-requestStarted);
+    // The response is what was lost, not necessarily the request. Remember the
+    // id so a reconnected device can ask the daemon what actually happened.
+    if(receiptId)rememberActReceipt({rid:receiptId,sid,type:payload.type,optimisticId});
     const nativeAnswer=['option','multiq'].includes(payload.type);
     const error=nativeAnswer?
       'Delivery uncertain — the connection dropped before Fleet received a result. Check the terminal before answering again.':
@@ -1173,4 +1185,4 @@ function slashPick(sid,pre,name){
   inp.focus();
 }
 
-Object.assign(globalThis,{SETTINGS_SECTIONS,SETTINGS_LABELS,policyRuleOpen,policyApplyCurrent,policySaving,settingQueues,settingIntents,closePreviewCache,commandSendLocks,cmdCache,cmdLoads,cmdErrors});
+Object.assign(globalThis,{RECEIPT_ACT_TYPES,SETTINGS_SECTIONS,SETTINGS_LABELS,policyRuleOpen,policyApplyCurrent,policySaving,settingQueues,settingIntents,closePreviewCache,commandSendLocks,cmdCache,cmdLoads,cmdErrors});
