@@ -397,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/history": ("open", "get_history"),
         "/api/file": ("token-text", "get_file"),
         "/api/screen": ("token", "get_screen"),
+        "/api/prompt-options": ("token", "get_prompt_options"),
         "/api/act-receipt": ("token", "get_act_receipt"),
         "/api/commands": ("token", "get_commands"),
         "/api/search": ("token", "get_search"),
@@ -566,6 +567,12 @@ class Handler(BaseHTTPRequestHandler):
     def get_screen(self):
         # reads a live terminal's rendered screen -> token-gated like /api/file
         out = self.eng.session_screen(self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_prompt_options(self):
+        # the option rows a live prompt is rendering; same capture and the same
+        # refusals as /api/screen, which is why it is token-gated the same way
+        out = self.eng.prompt_options(self.query("sid"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_act_receipt(self):

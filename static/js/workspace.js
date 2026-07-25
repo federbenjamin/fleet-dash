@@ -581,13 +581,21 @@ function sessionActivityHtml(s){
   const mainWorking=['running','stalled'].includes(s.state);
   if(!mainWorking)return'';
   const mainSlow=s.state==='stalled';
+  // Name the tool the turn is blocked on. "Main agent working" alone cannot
+  // distinguish a slow build from a wedged command, and that distinction is the
+  // whole reason someone opens this panel.
+  const t=s.active_tool,detail=t&&t.name?
+    `${esc(t.name)}${t.count>1?` +${t.count-1}`:''}${t.seconds==null?'':` · ${fmtAge(t.seconds)}`}`:'';
   return`<div class="mainworkingrow${mainSlow?' slow':''}" role="status" aria-live="polite">
     <span class="crole">${esc(s.provider||'agent')}</span><span class="cbody"><i class="workpulse${mainSlow?' slow':''}" aria-hidden="true"></i>
-      <span>Main agent working</span></span></div>`;
+      <span>Main agent working${detail?` · ${detail}`:''}</span></span></div>`;
 }
 function renderSessionActivity(s){
   const host=$('#sactivity');if(!host)return;
-  const html=sessionActivityHtml(s),key=s.state;
+  // The tool and its age are part of the signature: keying on state alone would
+  // paint "Bash · 4s" once and never update it.
+  const t=s.active_tool||{},html=sessionActivityHtml(s),
+    key=[s.state,t.name||'',t.count||0,t.seconds==null?'':t.seconds].join('|');
   if(host.dataset.renderKey===key&&Boolean(host.innerHTML)===Boolean(html))return;
   host.innerHTML=html;host.dataset.renderKey=key;
 }

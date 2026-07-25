@@ -1128,6 +1128,30 @@ test('opening and switching the docked pane settles the queue in one layout', as
   expect(await layouts('first')).toBe(0);
 });
 
+test('a Codex approval keeps its always button, which is not a keystroke', async ({ page }) => {
+  // Codex approvals arrive as kind:'permission' too, so the screen-proof gate
+  // that Claude's digit needs would have silently removed this one — its
+  // `always` is a documented App Server decision value and the provider states
+  // that it accepts it.
+  await reset(page);
+  await page.evaluate(() => {
+    const session = last.sessions.find(item => item.session_id === 'codex:thread-one');
+    session.pending = {kind: 'permission', nonce: 'cx-1', tool: 'command',
+      input_summary: 'rm -rf build/', decisions: ['allow', 'always', 'deny', 'cancel']};
+    render(last, true);
+  });
+  await page.evaluate(() => openSession('codex:thread-one'));
+  const pend = page.locator('#sact .pend');
+  await expect(pend.locator('.pbtn.always')).toHaveCount(1);
+  await expect(pend.locator('.pbtn.always')).toHaveText('always allow');
+  // …and it never asks the screen route about a Codex thread
+  const asked = [];
+  await page.route('**/api/prompt-options**', route => { asked.push(route.request().url()); route.abort(); });
+  await page.evaluate(() => tick());
+  await page.waitForTimeout(300);
+  expect(asked).toEqual([]);
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).
@@ -1631,6 +1655,69 @@ test('full chat renders main work as the newest non-interactive conversation row
   await reset(page, 'base');
   await page.evaluate(() => openSession('codex:thread-one'));
   await expect(activity).toBeHidden();
+});
+
+test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }) => {
+  // "stalled" has always meant frozen mid-TOOL, but the card never said WHICH
+  // tool — so a wedged session and a slow one looked identical.
+  await reset(page);
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveCount(0);
+
+  await reset(page, 'active-tool');
+  const tool = page.locator('[data-sid="claude-one"] .ctool');
+  await expect(tool).toHaveText('Bash · 3s');
+  await expect(tool).not.toHaveClass(/crit/);
+
+  // stalled: the count of other open calls shows, and the chip goes critical
+  await reset(page, 'active-tool-stalled');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveText('Bash +1 · 4m');
+  await expect(page.locator('[data-sid="claude-one"] .ctool')).toHaveClass(/crit/);
+
+  // and the workspace says it too, beside "Main agent working"
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect(page.locator('#sactivity')).toContainText('Bash +1 · 4m');
+});
+
+test('a pane-derived compaction pill says it is a lower bound', async ({ page }) => {
+  // The PreCompact hook knows when a compaction STARTED. The pane only knows
+  // when Fleet first saw it, and the card must not pretend otherwise.
+  await reset(page, 'compacting-hook');
+  const pill = page.locator('[data-sid="claude-one"] .ccompact');
+  await expect(pill).toHaveText('⧉ compacting 42s');
+  await expect(pill).toHaveAttribute('title', /transcript is frozen/);
+
+  await reset(page, 'compacting-screen');
+  await expect(pill).toHaveText('⧉ compacting ≥42s');
+  await expect(pill).toHaveAttribute('title', /may have started earlier/);
+});
+
+test('the always button says what this prompt actually grants', async ({ page }) => {
+  // Every permission variant puts Yes/always/No in rows 1/2/3, but row 2's real
+  // power differs: a project-wide directory grant, a session-only read, a
+  // settings edit. One fixed label described all three and was honest about none.
+  await reset(page, 'claude-permission');
+  await openAction(page, 'claude-one');
+  const always = page.locator('#sact .pbtn.always');
+  await expect(always).toHaveText('always allow access to fleet-dash/ from this project');
+  await expect(always).toHaveAttribute('title', /Claude's own wording/);
+
+  // Off tmux there is no pane to read, so the button does not render at all
+  // (operator decision 2026-07-25). `allow` is row 1 and `deny` is Esc on every
+  // captured variant; `always` is the only key that has to be aimed, and Fleet
+  // does not aim it blind.
+  await reset(page, 'claude-permission-blind');
+  await openAction(page, 'claude-one');
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
+  await expect(page.locator('#sact .pbtn.deny')).toHaveCount(1);
+
+  // …and on a variant that offers no persistent grant at all — the Bash prompt
+  // whose command cannot be statically analyzed, where row 2 is "No" — there is
+  // nothing to grant, so again no button rather than one that would deny.
+  await reset(page, 'claude-permission-nogrant');
+  await openAction(page, 'claude-one');
+  await expect(page.locator('#sact .pbtn.always')).toHaveCount(0);
+  await expect(page.locator('#sact .pbtn.allow')).toHaveCount(1);
 });
 
 test('quiet age is limited to working session cards', async ({ page }) => {

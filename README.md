@@ -28,7 +28,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
   a 118px meta rail on the right carries status, model, context %, quiet time, and live agent
-  count ("Console" design system — see `design-system/`). Pin/unpin is right-click on the header
+  count ("Console" design system — see `design-system/`). A working session also names the tool
+  call it is waiting on — `Bash · 4m`, turning red once the session counts as stalled — so a
+  wedged command and a slow build no longer look identical. It comes from the transcript, so it
+  works everywhere, and the workspace repeats it beside "Main agent working". Pin/unpin is right-click on the header
   (desktop) or long-press (mobile); pinned cards show a `⌖ pinned` marker.
 - **Notifications is the durable interruption desk:** **Needs action**, **Updates**, **Snoozed**,
   **Problems**, **Briefing**, and **History** are views over one canonical event stream. The rail and
@@ -466,7 +469,12 @@ the provider without affecting Claude sessions.
   - Multi-question asks (2+) show **one question at a time** with ‹ › arrows and an
     answered-count, a per-question "selected:" line + Other input, and one "submit all
     answers" button (single-select picks auto-advance, like the terminal).
-  - Permission request → the notification text + allow / always allow / deny buttons.
+  - Permission request → the notification text + allow / always allow / deny buttons. The middle
+    button carries **Claude's own wording** for that prompt, read off the terminal — because row 2
+    grants something different in every variant (a project-wide directory grant for a Bash
+    command, a session-only read for a file read, a settings edit for an overwrite). Outside tmux
+    Fleet cannot read it and the button stays the generic "always allow", which is the honest
+    label there.
   - A transcript fallback can remain visible for context before Claude's native terminal is ready.
     Its controls stay disabled until the live registry confirms the same prompt is actually waiting.
     If Fleet loses acknowledgement after sending any answer key, that nonce stays blocked across
@@ -908,9 +916,11 @@ same request/result files. The staging applet receives its own one-time iTerm au
 - **A compaction writes nothing to the transcript while it runs** — the `/compact` rows and the
   boundary all flush at the end (and the command rows land *after* the boundary, carrying
   earlier timestamps, so events are ordered by timestamp, not file order). The live "compacting"
-  pill therefore reads the **PreCompact hook's checkpoint file** mtime; a project with no
-  PreCompact hook shows no pill (its finished-compaction event still lands). The TUI's
-  `Compacting… 43%` progress bar is screen-only and needs screen-peek to mirror.
+  pill therefore reads the **PreCompact hook's checkpoint file** mtime where one exists. Without
+  that hook — which is the common case, including on this machine — Fleet now reads the TUI's own
+  `Compacting conversation…` line from the tmux pane instead, so the pill works everywhere a
+  session runs in tmux. A pane-derived pill shows `≥42s` rather than `42s`, because the pane can
+  only say how long Fleet has been *watching* it compact, not when it started.
 - **Typing `/` in the TUI opens its own command popup, where Enter fires the *highlighted*
   entry** — so injecting a bare `/foo` + Enter can run a different command. A trailing space
   closes that popup, and the daemon appends one to any `/…` message before submitting.
