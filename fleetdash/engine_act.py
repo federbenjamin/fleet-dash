@@ -544,9 +544,15 @@ class ActOps:
                         return {"ok": False, "error": "unknown choice"}
                     # an empty key means Esc (deny cancels any prompt variant)
                     key = pk[action.get("choice")] or "\x1b"
+                    # ONE key, never a trailing CR (invariant 4's phantom Enter).
+                    # A bare digit instant-selects on a permission prompt exactly
+                    # as it does on a single-select ask — verified live against
+                    # 2.1.220 on all three captured variants. The CR this used to
+                    # append was redundant, and it fired ~0.4s later into whatever
+                    # had mounted by then: when Claude raises a SECOND permission
+                    # prompt (routine — one request often needs several), Enter
+                    # confirms its highlighted row 1 and silently answers "Yes".
                     steps = [(key, False)]
-                    if key != "\x1b":
-                        steps.append(("", True))
             elif typ == "focus":        # bring that session's iTerm tab to the front
                 steps = [("__FOCUS__", False)]
             elif typ == "interrupt":    # Esc mid-turn = the terminal's stop key

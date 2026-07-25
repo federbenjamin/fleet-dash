@@ -139,7 +139,15 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    "phantom Enter": toggles row 1 of a multi, auto-answers option 1 of a single, cascades).
    Multi-select: digit writes toggle (focus stays row 1); `\x1b[B` × (n_options+1) walks to
    the Next/Submit row; one bare CR advances CLEANLY (no phantom from that row). Review pane:
-   bare digit "1" submits. Escape sequences and CRs are dropped when chunked into one write
+   bare digit "1" submits. **A PERMISSION prompt is the bare-digit case too, and used not to
+   be treated as one** (fixed 2026-07-25): `act` appended a CR after the digit, so the digit
+   answered the prompt and the CR fired ~0.4 s later into whatever had mounted — and Claude
+   routinely raises a SECOND permission prompt for the same request, whose highlighted row 1
+   that Enter confirms. Proven live on 2.1.220: the bare digit alone submits, on all three
+   captured variants. Permission answers are therefore ONE key and never a trailing CR. The
+   settle guard (invariant 79) caught the stray CR in the tmux path and reported
+   `delivery_uncertain`, which is how the bug surfaced at all; the applet path and
+   `tmux_settle: false` had no such protection. Escape sequences and CRs are dropped when chunked into one write
    with other bytes — send each key as its own write. Engine `multiq` builds this; the client
    sends `n_options` per answer for the walk. **Other + dismiss** (sandbox-proven 2026-07-14):
    the TUI numbers a "Type something" row at n+1 and "Chat about this" at n+2. Single-select
@@ -1608,14 +1616,18 @@ TCC Automation grant (injector→iTerm2; the applet transport only).
 
 ## Roadmap / known gaps
 
-- Permission-prompt injection: ONE real variant now verified (sandbox, v2.1.219, 2026-07-24) — a
-  file-write prompt rendering `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for
-  this session` / `3. No` under `Esc to cancel · Tab to amend`. The default
-  `permission_keys` (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for it, and a bare digit
-  instant-selects there exactly as it does on a single-select ask (invariant 4). Other variants
-  (Bash commands, MCP tools) still have unobserved wording for row 2, so per-variant tuning remains
-  possible; deny=Esc stays the safe choice because it cancels every variant. Invariant 77's
-  classifier now makes the rendered variant observable, which is what made this testable at all.
+- Permission-prompt injection: THREE real variants verified live on **v2.1.220, 2026-07-25** in a
+  disposable tmux rig — a **Bash command** (`❯ 1. Yes` / `2. Yes, and always allow access to
+  <dir>/ from this project` / `3. No`, footer `Esc to cancel · Tab to amend · ctrl+e to explain`),
+  a **file Read** (row 2 `Yes, allow reading from <dir>/ during this session`) and a **file
+  Overwrite** (row 2 `Yes, and allow Claude to edit its own settings for this session`), the last
+  two under a bare `Esc to cancel · Tab to amend`. All three classify as `permission`, and all
+  three put Yes/always/No in rows 1/2/3, so the default `permission_keys`
+  (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for every one and no per-variant key
+  tuning is needed. What DOES vary is what row 2 actually grants — a project-wide directory
+  grant, a session-only read, a settings edit — so a fixed "always" label in the UI describes
+  three different powers. MCP-tool wording is still unobserved. Invariant 77's classifier is what
+  made any of this testable.
 - Screen peek is BUILT (invariant 74): the workspace Details section reads a tmux session's live
   pane on demand, which is what a stalled session's tool output looks like when the transcript
   cannot say. Still open from W5-T2a of
