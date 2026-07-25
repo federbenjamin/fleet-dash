@@ -1,7 +1,9 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W1, W2, W3, W4, W5-T1 and the first half of W5-T2a shipped 2026-07-24; the remaining
-W5-T2a consumers and W5-T2b/T3 are still proposed.** Written 2026-07-24 after a
+Status: **W1, W2, W3, W4, W5-T1 and two of W5-T2a's consumers (screen peek, and the act() screen
+gate that replaces invariant 5's ghost-question guess) shipped 2026-07-24. The remaining T2a
+consumers need a scan-path capture, which invariant 74 forbids; W5-T2b/T3 is still blocked on open
+question 6.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -680,10 +682,13 @@ this plan is a comfort improvement; T1 is the difference between Fleet controlli
    observing the surfaces first: `/clear`, `/model`, the bypass-permissions warning and OAuth
    prompts have not been captured, and the trust dialog needs a deliberate yes/no rather than a
    default. Blocks W5-T2b only — not T1, and not the read-only T2a.
-7. **Known roadmap gap now closable** — "permission-prompt injection untested against a real dialog
-   (`permission_keys` may need tuning per variant)" was untestable because Fleet could not see which
-   variant rendered. T2a makes the variant observable and T2b makes the keys verifiable. Worth
-   scheduling deliberately rather than leaving as a standing gap.
+7. **Known roadmap gap now PARTLY closed** — "permission-prompt injection untested against a real
+   dialog (`permission_keys` may need tuning per variant)". The sandbox capture on 2026-07-24 gave
+   one real variant: `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for this
+   session` / `3. No`, footer `Esc to cancel · Tab to amend`. The shipped mapping
+   (`allow:"1"`, `always:"2"`, `deny:` Esc) is correct for it, and a bare digit instant-selects.
+   Remaining: the Bash and MCP variants, whose row-2 wording is unobserved. T2a made the variant
+   observable, which is what made even this much testable.
 
 *(iTerm2's `-CC` control-mode integration was an open question in an earlier draft. D11 removes it:
 it is as iTerm-bound as the applet.)*

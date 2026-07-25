@@ -1538,8 +1538,14 @@ TCC Automation grant (injector→iTerm2; the applet transport only).
 
 ## Roadmap / known gaps
 
-- Permission-prompt injection untested against a real dialog (`permission_keys` may need tuning
-  per variant; deny=Esc chosen because it cancels every variant).
+- Permission-prompt injection: ONE real variant now verified (sandbox, v2.1.219, 2026-07-24) — a
+  file-write prompt rendering `❯ 1. Yes` / `2. Yes, and allow Claude to edit its own settings for
+  this session` / `3. No` under `Esc to cancel · Tab to amend`. The default
+  `permission_keys` (`allow:"1"`, `always:"2"`, `deny:""`→Esc) is correct for it, and a bare digit
+  instant-selects there exactly as it does on a single-select ask (invariant 4). Other variants
+  (Bash commands, MCP tools) still have unobserved wording for row 2, so per-variant tuning remains
+  possible; deny=Esc stays the safe choice because it cancels every variant. Invariant 77's
+  classifier now makes the rendered variant observable, which is what made this testable at all.
 - Screen peek is BUILT (invariant 74): the workspace Details section reads a tmux session's live
   pane on demand, which is what a stalled session's tool output looks like when the transcript
   cannot say. Still open from W5-T2a of
