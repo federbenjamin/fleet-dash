@@ -633,6 +633,23 @@ function schedulePeekOverflow(now){
 }
 // the listener receives an Event — never forward it as the `now` flag
 window.addEventListener('resize',()=>schedulePeekOverflow());
+// A peek's line count depends on the width of the column it is in, and that
+// column changes width without the WINDOW changing at all: the docked pane
+// opening, closing, or being dragged by the splitter. Without this the cards
+// kept the previous column's line counts until some later render happened to
+// re-measure them — 522ms of visibly wrong heights after closing the pane,
+// ending in a snap. Writing --session-card-lines cannot change this element's
+// width, so this observer cannot feed itself.
+if(typeof ResizeObserver==='function'){
+  globalThis.lastQueueWidth=0;
+  const watchQueueWidth=new ResizeObserver(entries=>{
+    const width=Math.round(entries[0]?.contentRect?.width||0);
+    if(width===lastQueueWidth)return;
+    lastQueueWidth=width;schedulePeekOverflow();
+  });
+  const queueColumn=document.querySelector('#appmain');
+  if(queueColumn)watchQueueWidth.observe(queueColumn);
+}
 
 // ---- budgets and forecasts ------------------------------------------------
 
