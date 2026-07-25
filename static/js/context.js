@@ -36,9 +36,11 @@ async function ensureCtx(sid,v){
       next_cursor:d.next_cursor,message_total:d.message_total});
     delete ctxCache[sid].stale;delete ctxCache[sid].error;delete ctxCache[sid].retryAt;
     persistConversation('session',sid,'',ctxCache[sid]);
-    render(last);
+    // NOT forced: a completed background fetch must not repaint through the
+    // touch/scroll guard. N sessions moving in one poll now cost one paint.
+    scheduleRender(false);
   }catch(e){ctxCache[sid]={...(c||{}),v,fetching:false,stale:Boolean(c),
-    messages:c?.messages||[],files:c?.files||[],error:String(e.message||e),retryAt:Date.now()+5000};render(last);}
+    messages:c?.messages||[],files:c?.files||[],error:String(e.message||e),retryAt:Date.now()+5000};scheduleRender(false);}
 }
 function conversationCache(scope,sid,aid=''){
   if(scope==='closed')return closedCtx[sid];
@@ -286,8 +288,8 @@ function addOptimistic(sid,text,kind='text',status='sending',queueId=null,baseCo
     recordInputFeedback(feedbackStarted,'send');
     requestAnimationFrame(()=>render(last,true));
   }else{
-    uiRefresh();
-    recordInputFeedback(feedbackStarted,'send');
+    // measure when the UI actually changed, not when the paint was scheduled
+    uiRefresh(()=>recordInputFeedback(feedbackStarted,'send'));
   }
   return item.id;
 }
@@ -484,7 +486,9 @@ function beginQuickResponse(sid,payload){
   const feedbackStarted=performance.now();
   const item={id:++optimisticSequence,sid,nonce:payload.nonce,text:quickResponseLabel(payload),
     status:'sending',created:Date.now()};
-  quickResponses.set(sid,item);uiRefresh();recordInputFeedback(feedbackStarted,'quick_response');return item.id;
+  quickResponses.set(sid,item);
+  uiRefresh(()=>recordInputFeedback(feedbackStarted,'quick_response'));
+  return item.id;
 }
 function finishQuickResponse(sid,id,ok,error){
   const item=quickResponses.get(sid);

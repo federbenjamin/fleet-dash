@@ -14,7 +14,10 @@ globalThis.notificationPolicySaveError='';
 globalThis.globalPolicySaving=false;globalThis.globalPolicyStatus='';
 globalThis.notificationGuideOpen=false;
 const policyRuleOpen=new Set(),policyApplyCurrent=new Set(),policySaving=new Map();
-function uiRefresh(){render(last,true);if(settingsOpen)renderSettings();}
+// Coalesced: one forced paint per frame, with `after` run once it has happened
+// (see scheduleRender in main.js). Anything that writes into an element the
+// render creates must go through `after` rather than run on the next line.
+function uiRefresh(after){scheduleRender(true,after);}
 async function loadNotificationPolicy(force=false){
   if(notificationPolicyLoading)return;
   if(!force&&notificationPolicy.global)return;
@@ -228,9 +231,14 @@ function queueSetting(key,payload,onSuccess,onFailure,messageId='setmsg',refresh
   settingQueues.set(key,request);
   return request.then(data=>{
     if(settingIntents.get(key)!==intent)return data;
-    onSuccess(data);refreshSection?uiRefresh():render(last,true);settingMessage(messageId,'saved ✓');return data;
+    onSuccess(data);
+    const saved=()=>settingMessage(messageId,'saved ✓');
+    if(refreshSection)uiRefresh(saved);else{render(last,true);saved();}
+    return data;
   }).catch(error=>{
-    if(settingIntents.get(key)===intent){onFailure();refreshSection?uiRefresh():render(last,true);settingMessage(messageId,'✗ '+String(error.message||error));}
+    if(settingIntents.get(key)===intent){onFailure();
+      const failed=()=>settingMessage(messageId,'✗ '+String(error.message||error));
+      if(refreshSection)uiRefresh(failed);else{render(last,true);failed();}}
     return{ok:false,error:String(error.message||error)};
   }).finally(()=>{if(settingQueues.get(key)===request)settingQueues.delete(key);});
 }
@@ -482,9 +490,9 @@ async function setSessionMode(sid,mode,pre='msg'){
   const s=((last&&last.sessions)||[]).find(x=>x.session_id===sid);
   if(!s||s.provider!=='codex'||providerModeActions.has(sid))return;
   const previous=s.collaboration_mode||'default';
-  providerModeActions.set(sid,{kind:'mode'});s.collaboration_mode=mode;uiRefresh();
   const message=()=>document.getElementById(pre+'-'+sid)||document.getElementById(pre);
-  if(message())message().textContent='changing mode…';
+  providerModeActions.set(sid,{kind:'mode'});s.collaboration_mode=mode;
+  uiRefresh(()=>{if(message())message().textContent='changing mode…';});
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:sid,type:'mode',mode})});
@@ -511,9 +519,9 @@ async function applyClaudePermissionMode(s,mode,pre){
   if(providerModeActions.has(s.session_id))return;
   const previous=s.permission_mode;
   if(previous===mode)return;
-  providerModeActions.set(s.session_id,{kind:'permission'});s.permission_mode=mode;uiRefresh();
   const message=()=>document.getElementById(pre+'-'+s.session_id)||document.getElementById(pre);
-  if(message())message().textContent='changing permissions…';
+  providerModeActions.set(s.session_id,{kind:'permission'});s.permission_mode=mode;
+  uiRefresh(()=>{if(message())message().textContent='changing permissions…';});
   try{
     const r=await fetch('/api/act',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session_id:s.session_id,type:'permission_mode',mode})});

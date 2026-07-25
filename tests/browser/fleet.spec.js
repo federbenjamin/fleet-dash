@@ -921,6 +921,49 @@ test('session placement evidence lives in the Details section', async ({ page },
   await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
 });
 
+test('render work coalesces to one paint per frame', async ({ page }) => {
+  await reset(page, 'claude-question-slow');
+  await page.evaluate(() => openSession('claude-one'));
+  await expect(page.locator('#sact .optbtn').first()).toBeVisible();
+
+  // render() already records every paint it performs, so count those rather
+  // than the scheduling calls
+  await page.evaluate(() => { fleetPerf.samples.render_ms = []; });
+
+  // one answer tap used to run render() at least four times
+  await page.locator('#sact .optbtn').first().click();
+  await expect(page.locator('#sbody .optimistic')).toHaveCount(1);
+  const paints = await page.evaluate(async () => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return fleetPerf.samples.render_ms.length;
+  });
+  expect(paints).toBeGreaterThan(0);
+  expect(paints).toBeLessThanOrEqual(2);
+
+  // several schedules in one frame collapse into a single paint, and an explicit
+  // action still overrides the scroll/touch render guard even when a background
+  // fetch scheduled the frame first: the force values union
+  const batched = await page.evaluate(async () => {
+    fleetPerf.samples.render_ms = [];
+    scheduleRender(false); scheduleRender(false); uiRefresh(); scheduleRender(false);
+    const forcedBeforePaint = renderForce;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return { forcedBeforePaint, paints: fleetPerf.samples.render_ms.length };
+  });
+  expect(batched).toEqual({ forcedBeforePaint: true, paints: 1 });
+
+  // an `after` callback runs once the paint has happened
+  const ordering = await page.evaluate(async () => {
+    const order = [];
+    fleetPerf.samples.render_ms = [];
+    uiRefresh(() => order.push('after:' + fleetPerf.samples.render_ms.length));
+    order.push('sync:' + fleetPerf.samples.render_ms.length);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return order;
+  });
+  expect(ordering).toEqual(['sync:0', 'after:1']);
+});
+
 test('the Details terminal screen reads on demand and stays read-only text', async ({ page }, testInfo) => {
   await reset(page);
   await page.locator('[data-sid="claude-one"] .shead').click();

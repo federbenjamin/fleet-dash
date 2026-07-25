@@ -1331,6 +1331,18 @@ because they are also spawned directly as scripts by absolute path.
   (`mqSel[sid] = {nonce, qi, a, other}`, ‹ › nav, single-select picks auto-advance `qi`).
   User-action handlers call `uiRefresh()` (forced card render + forced viewer-bar render) —
   a plain `render(last,true)` leaves the viewer bar un-repainted under the touch guard.
+  **`uiRefresh()` and `scheduleRender(force,after)` coalesce to ONE paint per frame**
+  (`main.js`; `uiRefresh` is `scheduleRender(true)`). One answer tap used to call `render()`
+  four or more times and every completed `/api/context` fetch called it again, so N sessions
+  moving in one poll meant N full rebuilds. A frame's `force` values UNION, so an explicit
+  action still overrides the touch/scroll guard even if a background fetch scheduled the frame
+  first — which is why `ensureCtx` must schedule UNFORCED (`scheduleRender(false)`) or a
+  background fetch repaints through the guard and kills scroll momentum. rAF is when the
+  browser paints anyway, so nothing is delayed, only deduplicated. **Anything that writes into
+  an element the render creates — an inline status message — must go through the `after`
+  callback, not the next line**, or the deferred paint overwrites it; `settingMessage`,
+  the mode/permission "changing…" notes, and `recordInputFeedback` (which must measure when
+  the UI actually changed) all do.
   The render guard covers desktop too: `wheel` feeds the same `lastMove` window as
   `touchmove` (a poll re-render mid-wheel kills scroll momentum). Scrollbar auto-hide is a
   separate `scroll`-capture listener toggling `.scrolling` — deliberately NOT fed into

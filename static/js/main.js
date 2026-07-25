@@ -14,8 +14,31 @@ import './settings-actions.js';
 import './history-spawn.js';
 import './insights.js';
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{applyInstance,setFleetOffline,render,tick,scheduleFleetPoll});
+Object.assign(globalThis,{applyInstance,setFleetOffline,render,scheduleRender,flushScheduledRender,tick,scheduleFleetPoll});
 globalThis.last=null;
+// One paint per frame. A single answer tap used to call render() four or more
+// times, and every completed /api/context fetch called it again, so N sessions
+// moving in one poll meant N full rebuilds. Callers coalesce here instead; the
+// frame's `force` values union, so an explicit user action still overrides the
+// touch/scroll render guard even if a background fetch scheduled first.
+// rAF is when the browser paints anyway, so nothing is delayed — only repeated.
+globalThis.renderFrame=0;globalThis.renderForce=false;globalThis.renderAfter=[];
+function scheduleRender(force,after){
+  if(typeof after==='function')renderAfter.push(after);
+  if(force)renderForce=true;
+  if(renderFrame)return;
+  renderFrame=requestAnimationFrame(flushScheduledRender);
+}
+function flushScheduledRender(){
+  renderFrame=0;
+  const force=renderForce,callbacks=renderAfter;
+  renderForce=false;renderAfter=[];
+  render(last,force);
+  if(typeof settingsOpen!=='undefined'&&settingsOpen)renderSettings();
+  // run AFTER the paint: these write into elements the render just created
+  // (inline status messages) or measure when the UI actually changed
+  for(const callback of callbacks){try{callback();}catch(error){console.error(error);}}
+}
 globalThis.pollSequence=0;globalThis.pollApplied=0;globalThis.pollController=null;globalThis.pollInFlight=null;globalThis.pollTimer=null;
 globalThis.fleetOffline=false;
 function applyInstance(instance){
