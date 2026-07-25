@@ -303,8 +303,22 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     renders below the compaction it triggered; (b) "issued but no boundary yet" is undetectable
     from the transcript — the live pill reads the **PreCompact hook's checkpoint file mtime**
     (`~/.claude/compaction/<project>/checkpoint-<sid>.md`) = compaction start, suppressed once
-    a boundary lands or after 900s. Projects with no PreCompact hook get no pill (the finished
-    event row still lands). Don't "fix" the pill by inferring from transcript silence.
+    a boundary lands or after 900s. Don't "fix" the pill by inferring from transcript silence.
+    **Without that hook the PANE is the only live evidence, and it is now read** (2026-07-25).
+    `screen.py` classifies `Compacting conversation…` as `compacting` — a marker read off 46
+    frames of a real `/compact` on v2.1.220, 43 of which carry it. That surface is NOT modal:
+    the empty input box renders beneath it, so `compacting` must be tested BEFORE `input` or a
+    compacting pane reports itself idle. The scan projects it as `compacting` +
+    `compacting_source:"screen"` only when the hook gave nothing, and the client renders `≥`
+    because the age is time since Fleet FIRST SAW it, never when the compaction started.
+    **The eligibility test cost two live attempts to get right.** "Busy with a frozen
+    transcript" detects nothing: the registry reports the session `idle` through much of a
+    compaction, so a compacting session is indistinguishable from an idle one using Fleet's own
+    data — which is exactly why this gap existed. A session the scan still considers live
+    (registered, quieter than `dormant_seconds`) is therefore eligible at
+    `screen_observe_busy_seconds` (10). And a session Fleet has already CALLED compacting stays
+    eligible regardless, or the pill stays lit after the run ends — observed live before that
+    clause existed. Still a LABEL only; raw screen text remains behind `/api/screen`.
 18. **A leading `/` opens the TUI's OWN command popup, where Enter fires the HIGHLIGHTED entry
     — not the typed text.** Injecting a bare `/foo` + CR can therefore run a *different*
     command. A trailing space closes the popup, so `act()` appends one to any `/…` text with no
@@ -1264,12 +1278,17 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     the client, not rendering the grid. `_tmux_capture_many` frames the batched output with
     `display-message -p` markers carrying an INDEX, never a pane id: display-message expands `%`
     and `#`, so `%12` comes back as `12` and would silently collide.
-    **Eligibility is the real budget.** Only two cases qualify: a hook capture whose registry
-    disagrees that a prompt is open (the ghost-question case, invariant 5), and a session that has
-    written no transcript at all, which is exactly what sitting on the folder-trust dialog looks
-    like. Everything else is skipped, so the eligible set is normally EMPTY and the pass spawns
-    nothing. A label is re-taken at most every `screen_observe_seconds` (60); `screen_observe: false`
-    disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
+    **Eligibility is the real budget.** Three cases qualify. Two are cheap and narrow: a hook
+    capture whose registry disagrees that a prompt is open (the ghost-question case, invariant 5),
+    and a session that has written no transcript at all, which is exactly what sitting on the
+    folder-trust dialog looks like. Those are re-taken at most every `screen_observe_seconds` (60).
+    The third is compaction (invariant 17), and it is genuinely wide: any session the scan still
+    considers live, at `screen_observe_busy_seconds` (10). That is not laziness — a compacting
+    session is INDISTINGUISHABLE from an idle one in Fleet's own data (the registry says `idle`,
+    the transcript is silent by design), so there is no narrower predicate to apply, and the
+    2026-07-25 attempt to use "busy with a frozen transcript" detected nothing at all. It stays
+    affordable because the pass is batched: one `capture-pane` invocation for the whole fleet,
+    5.6 ms at 49 panes, at most once per window. `screen_observe: false` disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
     for a session already worth looking at — once per session, never per scan.
     Consumers: `hook_pending` keeps a rendered question at any age and drops a capture the moment
     the pane is demonstrably back at its input box, instead of waiting out
