@@ -1050,6 +1050,22 @@ test('an unchanged card is never rewritten, so nothing moves under your finger',
     .toContainText('a brand new last message');
 });
 
+test('a permission read off the terminal says so, and fills in from the pane', async ({ page }) => {
+  // Claude's permission hook fires ~6s after the prompt renders and the
+  // transcript holds nothing meanwhile, so the pane is the only early evidence.
+  // The scan publishes a LABEL, never screen text (invariant 78) — the request's
+  // own words are fetched per prompt from the on-request screen route.
+  await reset(page, 'screen-permission');
+  await page.evaluate(() => openSession('claude-one'));
+  const pend = page.locator('#sact .pend');
+  await expect(pend).toContainText('seen on the terminal');
+  // it is answerable straight away, not disabled until the hook lands
+  await expect(pend.locator('.pbtn.allow')).toBeEnabled();
+  await expect(pend.locator('.pbtn.deny')).toBeEnabled();
+  // and the body fills in from the fetched pane
+  await expect(pend.locator('pre')).toContainText('Do you want to proceed?');
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).

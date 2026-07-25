@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,suppressWhileAnswering,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
+Object.assign(globalThis,{promptScreenKey,ensureScreenPrompt,uiRefresh,loadNotificationPolicy,selectSettingsSection,enterSettingsRoute,leaveSettingsRoute,openSettings,closeSettings,settingsHasEditableFocus,flushFocusedSettingsRender,renderSettings,settingsSectionDescription,settingNumber,timeValue,timeMinutes,cadenceSummary,durationShort,durationParts,policyDurationField,savePolicyDuration,notificationPolicySettingsHtml,policyRuleHtml,saveGlobalPolicy,saveKindPolicy,deviceSettingsHtml,setSessionMuteQuery,sessionSettingsHtml,unmuteSettingsSession,unpinSettingsSession,appearanceSettingsHtml,budgetSectionHtml,advancedSettingsHtml,settingMessage,queueSetting,setNum,setBool,setStr,testLegacyNtfy,toggleMute,mqBlock,mqToggle,mqNav,mqOther,mqSend,elicitationBlock,elicitText,elicitBool,elicitValue,elicitSet,sendElicitation,cardPending,openSessionQ,stagingPendingBox,pendingBox,setSessionMode,setClaudePermissionMode,applyClaudePermissionMode,changeSessionModel,changeSessionEffort,saveSessionSettings,act,pendingQuestion,answerLabel,answerPreview,sendOption,toggleOpt,sendMulti,sendOther,suppressWhileAnswering,sendDismiss,focusSession,askConfirm,closeConfirm,sendInterrupt,closeWorktreeFiles,closeProviderCopy,renderCloseWorktree,confirmForceClose,closeSessionSurfaceAfterClose,executeCloseSession,sendCloseSession,stopAgentParent,copyTxt,sendPerm,imageType,chooseImages,renderImageDrafts,removeImageDraft,uploadImages,sendText,clearSentComposerCapture,queueOfflineText,removeOfflineMessage,flushOfflineMessages,slashClose,slashInput,retryCommands,slashPick});
 const SETTINGS_SECTIONS=['notifications','devices','sessions','appearance','budgets','advanced'];
 const SETTINGS_LABELS={notifications:'Notifications',devices:'Devices & delivery',sessions:'Sessions',
   appearance:'Appearance',budgets:'Budgets & spawning',advanced:'Advanced'};
@@ -456,6 +456,27 @@ function stagingPendingBox(s,p){
   return`<div class="pend stagingreadonly"><div class="ptool"><span class="ptlabel">production request · view only in staging</span></div>
     <div class="qtext">${esc(p.message||'This request can only be changed in production.')}</div></div>`;
 }
+// A screen-derived permission is a LABEL in the snapshot and nothing more: the
+// scan may look at a terminal but may not publish one, because the snapshot is
+// cached on this device by the service worker (invariant 78). So the request's
+// own words are fetched per prompt, once, from the on-request screen route.
+globalThis.screenPromptCache=globalThis.screenPromptCache||{};
+globalThis.screenPromptLoads=globalThis.screenPromptLoads||new Set();
+function promptScreenKey(s,p){return`${s.session_id}|${p&&(p.request_id||p.nonce)}`;}
+async function ensureScreenPrompt(s,p){
+  const key=promptScreenKey(s,p);
+  if(key in screenPromptCache||screenPromptLoads.has(key))return;
+  screenPromptLoads.add(key);
+  try{
+    const r=await fetch(`/api/screen?sid=${encodeURIComponent(s.session_id)}`,
+      {headers:{'Accept':'application/json'}});
+    const d=await r.json();
+    // Only a capture that still shows a permission prompt describes THIS one.
+    screenPromptCache[key]=d&&d.ok&&Array.isArray(d.lines)
+      ?{lines:d.lines.slice(-14)}:{lines:null};
+  }catch(_){screenPromptCache[key]={lines:null};}
+  finally{screenPromptLoads.delete(key);uiRefresh();}
+}
 function pendingBox(s,pre='msg'){
   const p=s.pending; if(!p)return'';
   if(requestKey(p)&&answered[s.session_id]===requestKey(p))return'';   // sent: dismiss instantly
@@ -471,9 +492,20 @@ function pendingBox(s,pre='msg'){
   }
   if(p.kind==='permission'){
     const locked=nativePromptLocked(s,p);
+    // A prompt read off the terminal arrives seconds before Claude's hook fires,
+    // so it carries no tool name or input yet. The screen text is not in the
+    // fleet snapshot by design (invariant 78) — it is fetched per request, so
+    // the body fills in a moment after the request itself appears.
+    const fromScreen=p.source==='screen';
+    if(fromScreen)void ensureScreenPrompt(s,p);
+    const seen=fromScreen?screenPromptCache[promptScreenKey(s,p)]:null;
+    const body=fromScreen
+      ?(seen&&seen.lines?`<pre>${esc(seen.lines.join('\n'))}</pre>`
+        :'<div class="ctxload">reading the request from the terminal…</div>')
+      :`<pre>${esc(p.input_summary||'')}</pre>`;
     return`<div class="pend">
-      <div class="ptool">permission: ${esc(p.tool)} — ${esc(nativePromptLabel(s))}</div>
-      <pre>${esc(p.input_summary||'')}</pre>
+      <div class="ptool">permission: ${esc(fromScreen?'seen on the terminal':p.tool)} — ${esc(nativePromptLabel(s))}</div>
+      ${body}
       <div class="pbtns">
         <button class="pbtn allow" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','allow','${pre}')">allow</button>
         <button class="pbtn always" ${locked?'disabled':''} onclick="sendPerm('${s.session_id}','${p.nonce}','always','${pre}')">always allow</button>

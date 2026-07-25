@@ -341,7 +341,18 @@ class ActOps:
             elif typ in ("option", "permission", "multiq", "dismiss"):
                 nonce = action.get("nonce")
                 hp = self.hook_pending(sid, reg.get("status"))
-                if not ((hp and hp.get("nonce") == nonce) or nonce in mt.pending):
+                # A permission Fleet read off the pane has neither a capture nor a
+                # transcript row — that IS the gap it exists to close. It is
+                # accepted only for a nonce THIS SERVER minted for THIS session
+                # (so a client cannot invent one), only while the registry still
+                # says `waiting`, and only for `permission`: a question's keys
+                # depend on shape the screen cannot be trusted to describe
+                # (invariant 4). The screen classifier below is what actually
+                # authorizes the write.
+                screen_nonce = (typ == "permission" and reg.get("status") == "waiting"
+                                and nonce and nonce == self._screen_prompt_nonce(sid))
+                if not (screen_nonce or (hp and hp.get("nonce") == nonce)
+                        or nonce in mt.pending):
                     return {"ok": False, "error": "stale: the prompt changed — refresh"}
                 with self._claude_delivery_uncertain_guard:
                     uncertain_nonce = self._claude_delivery_uncertain.get(sid)
@@ -378,6 +389,8 @@ class ActOps:
                         questions = (pending_tool.get("input") or {}).get("questions")
                     else:
                         pending_kind = "permission"
+                elif screen_nonce:
+                    pending_kind = "permission"
 
                 if typ in ("option", "multiq") and pending_kind != "question":
                     return {"ok": False, "error": "this prompt is not a question"}
@@ -391,6 +404,15 @@ class ActOps:
                 # sharpest case: injecting digits there would answer Claude's
                 # folder-trust dialog, which Fleet must never do (invariant 21).
                 screen_kind = self.screen_prompt_kind(reg, self._tty_for_pid(reg.get("pid")))
+                # For a prompt Fleet read off the pane, that classifier is not a
+                # corroborating check — it is the ONLY evidence the prompt exists.
+                # An unreadable pane therefore refuses, where a hook-attested
+                # prompt would proceed exactly as it always has.
+                if screen_nonce and screen_kind is None:
+                    return {"ok": False, "code": "screen_unreadable",
+                            "error": "this request was read from the terminal and the "
+                                     "terminal can no longer be read — refresh before "
+                                     "answering"}
                 if screen_kind is not None:
                     allowed_screens = ({"question", "permission"} if typ == "dismiss"
                                        else {"question"} if typ in ("option", "multiq")

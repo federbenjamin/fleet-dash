@@ -1243,12 +1243,17 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     the client, not rendering the grid. `_tmux_capture_many` frames the batched output with
     `display-message -p` markers carrying an INDEX, never a pane id: display-message expands `%`
     and `#`, so `%12` comes back as `12` and would silently collide.
-    **Eligibility is the real budget.** Only two cases qualify: a hook capture whose registry
-    disagrees that a prompt is open (the ghost-question case, invariant 5), and a session that has
+    **Eligibility is the real budget.** Three cases qualify: a hook capture whose registry
+    disagrees that a prompt is open (the ghost-question case, invariant 5); a session that has
     written no transcript at all, which is exactly what sitting on the folder-trust dialog looks
-    like. Everything else is skipped, so the eligible set is normally EMPTY and the pass spawns
-    nothing. A label is re-taken at most every `screen_observe_seconds` (60); `screen_observe: false`
-    disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
+    like; and the REVERSE of the first — a registry saying `waiting` with no capture yet, which is
+    every permission prompt for its first several seconds (invariant 80).
+    Everything else is skipped, so the eligible set is normally EMPTY and the pass spawns
+    nothing. A label is re-taken at most every `screen_observe_seconds` (60), **or at whatever
+    shorter window the watch row names in its fourth element** — the waiting-with-no-capture case
+    passes `screen_prompt_seconds` (1, i.e. every scan), because at the 60s cadence the label is
+    always the previous surface and the feature silently does nothing (observed on a rig before
+    the per-row window existed). `screen_observe: false` disables the pass entirely. `_tty_for_pid` shells out on a cache miss, so it is resolved only
     for a session already worth looking at — once per session, never per scan.
     Consumers: `hook_pending` keeps a rendered question at any age and drops a capture the moment
     the pane is demonstrably back at its input box, instead of waiting out
@@ -1284,6 +1289,32 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     screen read rather than costing a separate probe, and renders NOTHING until that read has
     happened, because until then Fleet genuinely does not know. Never put this on a card: it is
     diagnostics, and the Console decision keeps terminal matters in the workspace.
+
+80. **A permission prompt Fleet can SEE is a prompt Fleet can answer, before any hook says so.**
+    Claude's permission Notification hook fires several seconds after the prompt renders, and the
+    transcript holds nothing at all while it is open — measured on a rig 2026-07-25: prompt on the
+    pane at t+4.5 s, capture at t+10.6 s, transcript rows unchanged throughout. That gap was every
+    permission prompt, every time. `_screen_permission` (`engine_context.py`) mints a
+    `screen-<ms>-<seq>` nonce for a session whose registry says `waiting`, that has no hook or
+    transcript pending, and whose observed label (invariant 78) is `permission`. Verified end to
+    end on a staging-owned rig: the request appeared at t+12.0 s against the hook's t+14.6 s, was
+    answered from that identity, and the pane returned to its input box.
+    **The nonce is not evidence — the screen is.** It is server-minted and RETAINED, so `act()`
+    accepts it only for a nonce this scan issued for this session; a client cannot invent one. It
+    never reaches the terminal. What authorizes the write is invariant 77's classifier confirming,
+    at write time, that the pane is still rendering a permission prompt — and for this source that
+    check is MANDATORY: an unreadable pane returns `screen_unreadable` where a hook-attested prompt
+    would proceed. The nonce exists so the answered fence (invariant 75) and the client's
+    suppression have something stable to key on; the sequence counter is why a prompt that closes
+    and reopens inside one millisecond cannot reuse an identity.
+    **Permissions only, on purpose.** A question's PreToolUse capture is immediate, so questions
+    have no gap to close, and their key recipe depends on option count, multi-select and Other
+    availability that the screen cannot be trusted to describe (invariant 4). A screen nonce is
+    refused for `option`/`multiq` exactly as an invented one is.
+    **The scan still publishes a label, never screen text** (invariant 78): the pending carries
+    `source:"screen"` and no tool name or input, and the client fetches the request's own words
+    from the on-request `/api/screen` per prompt. The fleet snapshot is cached on the device by the
+    service worker, and terminal contents do not belong in an offline cache.
 
 ## Dev workflow
 

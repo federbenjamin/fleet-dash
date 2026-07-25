@@ -476,8 +476,21 @@ class ScanStateTests(EngineFixture):
         observed = []
         self.engine.observe_screens = lambda rows: observed.extend(rows) or {}
         self.engine.scan()
-        self.assertTrue(any(sid == "same" and eligible
-                            for sid, _pid, eligible in observed), observed)
+        self.assertTrue(any(row[0] == "same" and row[2] for row in observed), observed)
+
+    def test_waiting_with_no_capture_is_watched_every_scan(self):
+        """The reverse case, and the one that costs seconds of every permission
+        prompt: the registry says `waiting` and no hook capture has arrived. It
+        needs its own short re-look window — at the default 60s cadence the label
+        is always the previous surface."""
+        self.write_registry(status="waiting")
+        self.engine.hook_pending = lambda sid, status: None
+        observed = []
+        self.engine.observe_screens = lambda rows: observed.extend(rows) or {}
+        self.engine.scan()
+        row = next(row for row in observed if row[0] == "same")
+        self.assertTrue(row[2], "eligible")
+        self.assertEqual(row[3], self.engine.cfg["screen_prompt_seconds"])
 
     def test_an_observed_label_reaches_the_session_payload(self):
         self.write_registry(status="idle")

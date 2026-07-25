@@ -125,6 +125,10 @@ class Engine(StagingOps,
         # sid -> {state, at}: the last screen label the scan observed
         # (invariant 78). Labels only; raw screen text is never retained.
         self._screen_states = {}
+        # sid -> the screen-derived permission nonce this scan issued. act()
+        # accepts a screen-sourced answer only for a nonce recorded here, so a
+        # client cannot invent one (invariant 75).
+        self._screen_prompts = {}
         # Receipt ownership is per-call-stack: only the outermost act()
         # binds one (engine_act.act), and nesting is a thread fact.
         self._act_depth = threading.local()

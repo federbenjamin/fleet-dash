@@ -799,11 +799,21 @@ class ScanOps:
             pending = self.hook_pending(sid, reg_status)
             confirmed_waiting = self.waiting_confirmed(
                 sid, reg_status, now, pending=pending)
-            # The ghost-question case, and the only one invariant 5 ever had to
-            # guess about: a hook capture says a prompt is open while the registry
-            # says the session is not waiting on one.
+            # Two cases are worth a look at the pane.
+            #  - the ghost-question case invariant 5 has always guessed about: a
+            #    hook capture says a prompt is open while the registry disagrees;
+            #  - and the reverse, which costs SECONDS of every permission prompt:
+            #    the registry says `waiting` and no capture has arrived. Claude's
+            #    permission Notification hook fires ~6s after the prompt renders
+            #    (measured 2026-07-25 on a rig: prompt on screen at t+4.5s,
+            #    capture at t+10.6s) and the transcript never holds the row while
+            #    the prompt is open. The pane has it immediately.
+            awaiting_capture = not pending and reg_status == "waiting"
             watch.append((sid, reg.get("pid"),
-                          bool(pending) and reg_status != "waiting"))
+                          (bool(pending) and reg_status != "waiting") or awaiting_capture,
+                          # every scan while a prompt is open and unexplained: the
+                          # default 60s cadence cannot beat a 6s hook
+                          self.cfg.get("screen_prompt_seconds") if awaiting_capture else None))
             turn_starting = self._claude_turn_fenced(sid, reg_status, main_path, mt)
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
@@ -872,6 +882,15 @@ class ScanOps:
                     tid, p = permissions[-1]
                     pending = {"kind": "permission", "nonce": tid, "tool": p["name"],
                                "input_summary": json.dumps(p.get("input"), indent=1)[:1500]}
+            # Third source, and the fastest: the pane itself. A permission prompt
+            # is visible seconds before its Notification hook fires and while the
+            # transcript still holds nothing, so with neither of those a rendered
+            # permission screen IS the evidence. Restricted to permissions on
+            # purpose — a question's PreToolUse capture is immediate, so questions
+            # have no gap to close, and their key recipe depends on shape the
+            # screen cannot be trusted to describe (invariant 4).
+            if pending is None and reg_status == "waiting":
+                pending = self._screen_permission(sid, now)
             if pending and pending.get("kind") == "question":
                 # deliver-then-ask pattern: surface files sent shortly before the question
                 q_ts = pending.pop("_ts", None) or now

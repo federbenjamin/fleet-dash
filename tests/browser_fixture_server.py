@@ -730,7 +730,16 @@ def set_scenario(name):
     STATE["scenario"] = name
     session = claude_session() if (name.startswith("claude-question") or
         name.startswith("mobile-needs-you") or name.startswith("close-worktree") or
-        name in ("notification-request", "send-while-busy", "claude-prompt-gate")) else codex_session()
+        name in ("notification-request", "send-while-busy", "claude-prompt-gate",
+                 "screen-permission")) else codex_session()
+    if name == "screen-permission":
+        # a permission Fleet read off the pane: no tool name, no input
+        # summary, and its words fetched from the screen route instead
+        session.update(state="needs_you", normalized_state="needs_you",
+            reg_status="waiting", ui_group="needs_you",
+            pending={"kind": "permission", "nonce": "screen-1785000000000-1",
+                     "source": "screen", "tool": "requested tool",
+                     "input_summary": ""})
     if name == "claude-starting":
         session = claude_session()
         session.update(title="New Claude session", name="New Claude session",
@@ -1299,10 +1308,15 @@ class Handler(BaseHTTPRequestHandler):
                         "ok": False, "code": "screen_unavailable",
                         "error": "this session is not running in a tmux pane — only "
                                  "the tmux transport can read a terminal screen"})
+                lines = (["  touch probe.txt", "", " Do you want to proceed?",
+                          " ❯ 1. Yes", "   2. No", "",
+                          " Esc to cancel · Tab to amend"]
+                         if STATE["scenario"] == "screen-permission" else
+                         ["❯ 1. [ ] Red", "  2. [ ] Green", "  <script>x</script>"])
                 return self.json_reply({
                     "ok": True, "session_id": sid, "transport": "tmux",
                     "truncated": False, "captured_at": time.time(),
-                    "lines": ["❯ 1. [ ] Red", "  2. [ ] Green", "  <script>x</script>"]})
+                    "lines": lines})
             if route == "/api/act-receipt":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
