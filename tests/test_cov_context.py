@@ -93,11 +93,35 @@ class ContextCovTest(EngineCovBase):
         self.assertFalse(os.path.exists(path))       # removed
 
     def test_hook_pending_question_ghost_guard(self):
-        with open(self._pending_path(self.sid), "w") as h:
-            json.dump({"kind": "question", "nonce": "n", "questions": [],
-                       "ts": time.time() - 8}, h)
-        # not waiting, older than 5s but younger than 15s -> hidden, not removed
+        """The guard is a grace period for Claude's status flicker, not a decision.
+
+        It was 5s while a transcript fallback could re-surface a dropped capture
+        under a second identity. That fallback is gone (invariant 1), so firing
+        early now loses the question outright — hence the wider grace. act() still
+        refuses to answer a prompt whose registry status is not `waiting`.
+        """
+        path = self._pending_path(self.sid)
+        write = lambda age: json.dump(
+            {"kind": "question", "nonce": "n", "questions": [], "ts": time.time() - age},
+            open(path, "w"))
+
+        write(8)     # would have been dropped by the old 5s guard
+        self.assertIsNotNone(self.engine.hook_pending(self.sid, "idle"))
+        write(self.engine.GHOST_QUESTION_GRACE + 2)
         self.assertIsNone(self.engine.hook_pending(self.sid, "idle"))
+        self.assertTrue(os.path.exists(path))        # hidden, not removed
+        # a waiting session keeps its question at any age
+        write(self.engine.GHOST_QUESTION_GRACE + 2)
+        self.assertIsNotNone(self.engine.hook_pending(self.sid, "waiting"))
+
+    def test_hook_pending_collects_a_capture_left_by_a_dead_session(self):
+        """PostToolUse clears a question capture, so only a dead session leaves one."""
+        path = self._pending_path(self.sid)
+        with open(path, "w") as handle:
+            json.dump({"kind": "question", "nonce": "n", "questions": [],
+                       "ts": time.time() - self.engine.STALE_CAPTURE_SECONDS - 60}, handle)
+        self.assertIsNone(self.engine.hook_pending(self.sid, "waiting"))
+        self.assertFalse(os.path.exists(path))
 
     def test_hook_pending_permission_valid(self):
         with open(self._pending_path(self.sid), "w") as h:
@@ -823,6 +847,139 @@ class ContextCovTest(EngineCovBase):
             out = self.engine.session_screen(self.sid)
         self.assertEqual(out["code"], "screen_unavailable")
         self.assertIn("can't find pane", out["error"])
+
+
+class RequestIdentityTest(EngineCovBase):
+    """Server-owned prompt identity and the answered fence (invariant 75)."""
+
+    def _question(self, nonce, header="Pick", label="one"):
+        return {"kind": "question", "nonce": nonce,
+                "questions": [{"question": header,
+                               "options": [{"label": label}]}]}
+
+    def _permission(self, nonce, tool="Bash", summary="npm test"):
+        return {"kind": "permission", "nonce": nonce, "tool": tool,
+                "input_summary": summary}
+
+    def test_one_prompt_keeps_one_id_across_repeated_scans(self):
+        first = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 100.0)
+        again = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 102.0)
+        self.assertTrue(first["request_id"].startswith("req-"))
+        self.assertEqual(first["request_id"], again["request_id"])
+
+    def test_a_permission_survives_the_hook_to_transcript_nonce_flip(self):
+        """The capture expires at 15s and the transcript fallback takes over with
+        a different nonce. Same prompt, so the same identity — otherwise an
+        answered permission reappears under a second id."""
+        hook = self.engine._apply_request_identity(
+            self.sid, self._permission("hook-9", tool="requested tool",
+                                       summary="Claude needs permission"), 100.0)
+        transcript = self.engine._apply_request_identity(
+            self.sid, self._permission("toolu_abc"), 120.0)
+        self.assertEqual(hook["request_id"], transcript["request_id"])
+
+    def test_a_different_question_from_the_same_source_mints_a_new_id(self):
+        first = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1", header="Ship it?"), 100.0)
+        second = self.engine._apply_request_identity(
+            self.sid, self._question("hook-2", header="Delete it?"), 101.0)
+        self.assertNotEqual(first["request_id"], second["request_id"])
+
+    def test_a_second_permission_from_the_same_source_mints_a_new_id(self):
+        first = self.engine._apply_request_identity(
+            self.sid, self._permission("toolu_1", summary="npm test"), 100.0)
+        second = self.engine._apply_request_identity(
+            self.sid, self._permission("toolu_2", summary="rm -rf /"), 101.0)
+        self.assertNotEqual(first["request_id"], second["request_id"])
+
+    def test_a_resolved_prompt_retires_its_identity(self):
+        first = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 100.0)
+        self.assertIsNone(self.engine._apply_request_identity(self.sid, None, 101.0))
+        # the very same question asked again is a NEW request
+        reasked = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 102.0)
+        self.assertNotEqual(first["request_id"], reasked["request_id"])
+
+    def test_an_answered_prompt_stops_rendering_until_the_provider_catches_up(self):
+        pending = self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 100.0)
+        self.assertTrue(self.engine._record_answered_request(self.sid, "hook-1"))
+        self.assertTrue(self.engine._request_answered(self.sid, "hook-1"))
+        self.assertIsNone(self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 101.0))
+        # …and the fence follows the identity across a nonce flip
+        self.assertIsNone(self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 102.0))
+        self.assertEqual(pending["request_id"],
+                         self.engine._request_ids[self.sid]["request_id"])
+
+    def test_a_new_question_is_never_fenced_by_the_previous_answer(self):
+        self.engine._apply_request_identity(
+            self.sid, self._question("hook-1", header="Ship it?"), 100.0)
+        self.engine._record_answered_request(self.sid, "hook-1")
+        fresh = self.engine._apply_request_identity(
+            self.sid, self._question("hook-2", header="Delete it?"), 101.0)
+        self.assertIsNotNone(fresh)
+
+    def test_the_fence_expires_so_an_unresolved_prompt_returns(self):
+        self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 100.0)
+        self.engine._record_answered_request(self.sid, "hook-1")
+        with mock.patch.object(self.engine, "ANSWERED_FENCE_SECONDS", 0):
+            back = self.engine._apply_request_identity(
+                self.sid, self._question("hook-1"), time.time() + 5)
+        self.assertIsNotNone(back)
+        self.assertFalse(self.engine._request_answered(self.sid, "hook-1"))
+
+    def test_an_expired_fence_stops_refusing_answers(self):
+        """act() must not refuse forever a prompt the provider never resolved."""
+        self.engine._apply_request_identity(
+            self.sid, self._question("hook-1"), 100.0)
+        self.engine._record_answered_request(self.sid, "hook-1")
+        self.assertTrue(self.engine._request_answered(self.sid, "hook-1"))
+        self.engine._answered_requests[self.sid]["at"] -= (
+            self.engine.ANSWERED_FENCE_SECONDS + 5)
+        self.assertFalse(self.engine._request_answered(self.sid, "hook-1"))
+        self.assertNotIn(self.sid, self.engine._answered_requests)
+
+    def test_an_unseen_nonce_is_never_fenced(self):
+        """Without a record there is no identity to fence, and refusing an answer
+        on a guess would strand a genuinely open prompt."""
+        self.assertFalse(self.engine._record_answered_request(self.sid, "hook-9"))
+        self.assertFalse(self.engine._request_answered(self.sid, "hook-9"))
+        self.engine._apply_request_identity(self.sid, self._question("hook-1"), 100.0)
+        self.assertFalse(self.engine._request_answered(self.sid, "hook-2"))
+
+    def test_the_fence_is_dropped_when_its_prompt_is_replaced(self):
+        self.engine._apply_request_identity(
+            self.sid, self._question("hook-1", header="Ship it?"), 100.0)
+        self.engine._record_answered_request(self.sid, "hook-1")
+        self.engine._apply_request_identity(
+            self.sid, self._question("hook-2", header="Delete it?"), 101.0)
+        self.assertFalse(self.engine._request_answered(self.sid, "hook-1"))
+
+    def test_identity_records_stay_bounded(self):
+        self.engine.REQUEST_IDENTITY_LIMIT = 3
+        for index in range(5):
+            self.engine._apply_request_identity(
+                f"s{index}", self._question(f"hook-{index}"), 100.0)
+        self.assertLessEqual(len(self.engine._request_ids),
+                             self.engine.REQUEST_IDENTITY_LIMIT)
+
+    def test_a_malformed_question_shape_still_yields_a_signature(self):
+        pending = {"kind": "question", "nonce": "hook-1",
+                   "questions": ["raw", {"question": "ok", "options": "nope"}]}
+        self.assertIsNotNone(
+            self.engine._apply_request_identity(self.sid, pending, 100.0))
+
+    def test_nonce_history_per_prompt_is_capped(self):
+        for index in range(20):
+            self.engine._apply_request_identity(
+                self.sid, self._permission(f"toolu_{index}", summary="same"), 100.0)
+        self.assertLessEqual(len(self.engine._request_ids[self.sid]["nonces"]), 8)
 
 
 if __name__ == "__main__":

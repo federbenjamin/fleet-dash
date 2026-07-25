@@ -148,7 +148,7 @@ function cardCls(s){
 // stays content-sized so a fixed frame can never hide a control.
 function cardUsesFixedPeekHeight(s){
   if(s.provisional||expandedPeeks.has(s.session_id))return false;
-  const pending=s.pending&&(!s.pending.nonce||answered[s.session_id]!==s.pending.nonce);
+  const pending=s.pending&&(!requestKey(s.pending)||answered[s.session_id]!==requestKey(s.pending));
   // the running-agent list renders on any card with live agents, so the fixed
   // frame must lift wherever it appears or the list is clipped (invariant 45)
   const running=(s.agents||[]).some(a=>!terminalAgentStates.has(a.state));

@@ -113,6 +113,12 @@ class Engine(StagingOps,
         self._image_cleanup_skip = 0
         self.db = None
         self.pending_seen = {}          # pending nonce -> first-observed timestamp
+        # Server-owned prompt identity (invariant 75). A prompt can be evidenced
+        # by two different nonces; these map both onto one stable request_id and
+        # fence a request that has already been answered.
+        self._request_ids = {}          # sid -> identity record
+        self._answered_requests = {}    # sid -> {request_id, at}
+        self._request_identity_guard = threading.Lock()
         self.lock = threading.Lock()
         self.db_lock = threading.RLock()
         self.scan_lock = threading.Lock()   # tails are stateful; one folder at a time

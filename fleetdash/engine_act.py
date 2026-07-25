@@ -322,6 +322,12 @@ class ActOps:
                             "code": "delivery_uncertain"}
                 if uncertain_nonce:
                     self._clear_claude_delivery_uncertain(sid)
+                # Two devices can render the same prompt. The first accepted
+                # answer fences it (invariant 75) so the second cannot type a
+                # second set of digits into a TUI that already moved on.
+                if self._request_answered(sid, nonce):
+                    return {"ok": False, "code": "duplicate",
+                            "error": "this prompt was already answered"}
 
                 # The browser's question shape is display data, never terminal-key
                 # authority. Rebuild the exact shape from the nonce-matched hook or
@@ -664,6 +670,12 @@ class ActOps:
                                 "check the Claude terminal, then refresh" +
                                 ("; retry protection could not be saved durably"
                                  if durable_warning else ""))}
+        if (typ in ("option", "multiq", "permission", "dismiss") and
+                (result.get("ok") or not
+                 self._native_write_failed_before_delivery(result))):
+            # Accepted, or possibly accepted: either way no other device may
+            # answer this prompt again (invariant 75).
+            self._record_answered_request(sid, str(action.get("nonce") or ""))
         if (not result.get("ok") and
                 not self._native_write_failed_before_delivery(result) and
                 typ in ("session_settings", "permission_mode")):
