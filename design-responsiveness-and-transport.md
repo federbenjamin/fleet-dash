@@ -1,7 +1,7 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W5-T1, the first half of W5-T2a, W1, W3 part 1, W4 and W2 shipped 2026-07-24; W3 part 2
-and W5-T2b/T3 remain proposed.** Written 2026-07-24 after a
+Status: **W1, W2, W3, W4, W5-T1 and the first half of W5-T2a shipped 2026-07-24; the remaining
+W5-T2a consumers and W5-T2b/T3 are still proposed.** Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -354,6 +354,17 @@ A browser spec asserts one paint per answer tap (was four or more), the `force` 
 2. **Scope.** `uiRefresh(sid)` repaints the affected card and the open pane only; every call site
    already knows its session. Cross-card aggregates (Now counts, nav badge, Outbox summary) need a
    cheap global pass.
+
+**Part 2 SHIPPED 2026-07-24 — and NOT by scoping.** The point of scoping was "untouched cards never
+re-layout", and the cause of that re-layout is `reconcileCards` writing `cardTop(s)` into every
+`.ctop` whether or not it changed. Comparing the string first gets the whole benefit with no call
+sites threaded, no stale cross-card aggregates, and no new failure mode: measured 8 DOM mutations
+across four idle polls with two cards → **0**, and production renders 48 cards. `setHtml(el,html)`
+in `ui-utils.js` is the shared guard; `#sact`, `#providerstate`, `#newsess` and `#rollup` use it
+too. Skipping the write also preserves focus and scroll for free, which the scoped version would
+have had to re-implement.
+
+Keyed diffing (2C) remains deferred and is now clearly unnecessary for this symptom.
 
 Keyed diffing (option 2C) stays **deferred** — it is a rendering-architecture rewrite and is
 incompatible with invariant 71's inline-`onclick` contract.

@@ -1,11 +1,18 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{positionUsagePanel,closeUsage,toggleUsage,usageReset,ugauge,usageBar,spark,mdInline,md});
+Object.assign(globalThis,{setHtml,positionUsagePanel,closeUsage,toggleUsage,usageReset,ugauge,usageBar,spark,mdInline,md});
 globalThis.lastMove=0;globalThis.lastTap=0;
 document.addEventListener('touchstart',()=>{lastTap=Date.now()},{passive:true});
 document.addEventListener('pointerdown',()=>{lastTap=Date.now()},{passive:true});
 document.addEventListener('touchmove',()=>{lastMove=Date.now()},{passive:true});
 document.addEventListener('wheel',()=>{lastMove=Date.now()},{passive:true});
 const touching=()=>Date.now()-lastMove<1500||Date.now()-lastTap<800;
+// Write HTML only when it actually changed. An identical innerHTML assignment
+// still tears down and re-parses the subtree, dropping focus and forcing
+// relayout — twice a second, for nothing.
+function setHtml(element,html){
+  if(!element||element.__setHtml===html)return false;
+  element.__setHtml=html;element.innerHTML=html;return true;
+}
 // scrollbar auto-hide: thumbs are transparent until the element actually scrolls
 // (class fades 700ms after the last scroll event). Deliberately NOT tied into
 // lastMove — programmatic scrolls (sticky-bottom restores) fire scroll events
