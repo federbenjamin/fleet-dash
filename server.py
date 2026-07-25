@@ -589,6 +589,8 @@ class Handler(BaseHTTPRequestHandler):
         # conversation ring carries a one-line preview only, so expanding a row
         # in the chat asks for the rest here rather than the server holding it.
         out = self.eng.tool_result(self.query("sid"), self.query("tuid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
     def get_prompt_options(self):
         # the option rows a live prompt is rendering; same capture and the same
         # refusals as /api/screen, which is why it is token-gated the same way
