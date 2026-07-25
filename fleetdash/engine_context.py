@@ -5,6 +5,7 @@ import json, os, re, sys, glob, time, copy, hashlib, uuid
 
 from . import paths as pathcfg
 from .paths import capture_base  # legacy alias; reads paths.* at call time
+from . import screen as screenlib
 from .config import CLAUDE_EFFORTS
 from .config import (IMG_EXTS, DANGER_COMMANDS, BUILTIN_COMMANDS, model_family, usd, cwd_to_project_dir, iso_epoch)
 
@@ -567,6 +568,28 @@ class ContextOps:
         return {"ok": True, "session_id": sid, "transport": "tmux",
                 "lines": capture["lines"], "truncated": capture["truncated"],
                 "captured_at": time.time()}
+
+    def screen_prompt_kind(self, reg, tty):
+        """What the session's terminal is showing right now, or None.
+
+        Request-path only (invariant 74): this runs when a user is about to send
+        keys, never on the scan. It is deliberately given the already-resolved
+        registry row and tty so it adds no lookups of its own.
+
+        None means "no evidence" — no tmux pane, an unreadable pane, or a screen
+        the classifier does not recognize. Callers must never read that as "no
+        prompt"; it is the state Fleet has always been in.
+        """
+        if not tty or self._is_background_claude(reg):
+            return None
+        pane = self._tmux_target_for_tty(f"/dev/{tty}" if not str(tty).startswith("/") else tty)
+        if not pane:
+            return None
+        capture = self._tmux_capture(pane, max_rows=screenlib.TAIL_LINES)
+        if not capture.get("ok"):
+            return None
+        kind = screenlib.classify_screen(capture.get("lines") or [])
+        return None if kind == screenlib.UNKNOWN else kind
 
     def session_context(self, sid):
         """Recent conversation turns + SendUserFile deliveries for one session."""

@@ -494,10 +494,19 @@ can ship with T1:
 - **Screen-peek ships essentially free.** AGENTS.md line 1280 lists it as "technique proven, UI not
   built"; it becomes ~10 server lines and a `<pre>`. It was blocked on the daemon being unable to
   read a screen at all, which tmux fixes.
-- **Ghost-question detection stops being a heuristic.** Invariant 5 currently guesses via registry
-  status plus a 5 s timeout because a PreToolUse capture can outlive a hook-blocked ask. With a
-  capture Fleet just looks: is the ask widget rendered? This removes a guess from the exact path
-  that produces finding 4's reappearing prompt.
+- **Ghost-question detection stops being a heuristic. SHIPPED 2026-07-24, at the act() gate rather
+  than in `hook_pending`.** Invariant 74 forbids captures on the scan path, and `hook_pending` runs
+  per session per poll — a subprocess there would undo W1 entirely. The place where the guess
+  actually costs something is the moment keys are written, and that is a request. `act()` now
+  classifies the pane before any prompt answer and refuses a mismatch (`screen_mismatch`), so
+  digits can no longer land in an ordinary input box and become a message. The classifier
+  (`fleetdash/screen.py`, invariant 77) was written against real `capture-pane` frames from a
+  disposable sandbox, not from memory; the footer line turned out to be the discriminator, because
+  the ask, the permission prompt and the folder-trust dialog all render the same numbered list.
+  The trust case is a bonus the plan did not name: Fleet can now prove it is not about to answer
+  that dialog (invariant 21), rather than merely intending not to.
+  `hook_pending`'s ghost guard is unchanged and still heuristic — correctly, since it is on the
+  scan path.
 - **Stall diagnosis.** Invariant 7's "stalled" means frozen mid-tool, but Fleet cannot say *on what*
   beyond the transcript. The pane shows the live tool output.
 - **Compaction without a hook.** Invariant 17 reads the PreCompact checkpoint mtime and gives
@@ -505,7 +514,10 @@ can ship with T1:
 - **Trust-prompt confirmation.** `is_trusted()` is a filesystem prediction
   (`engine_spawn.py:286`); a capture confirms the session is actually sitting on the dialog. This is
   read-only, so it sidesteps §4.1's policy question entirely — Fleet reports accurately without
-  answering.
+  answering. PARTLY DONE: the classifier recognizes the dialog (a real frame is in
+  `tests/test_cov_screen.py`) and `act()` refuses to type at it, but nothing yet reports "this
+  spawn is waiting on trust" in the UI — that needs a check some seconds after spawn, which is a
+  scan-path capture and therefore blocked on invariant 74.
 - **Codex tty disambiguation.** `_codex_terminal_routes` scans `ps` argv and gives up when two
   distinct ttys match one thread UUID (`engine_transport.py:107-182`). tmux's pane→pid mapping is
   exact, which can resolve that case.

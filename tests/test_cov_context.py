@@ -849,6 +849,60 @@ class ContextCovTest(EngineCovBase):
         self.assertIn("can't find pane", out["error"])
 
 
+class ScreenPromptKindTest(EngineCovBase):
+    """Direct screen evidence for the act() freshness gate (invariant 77)."""
+
+    ASK = ["❯ 1. Red", "  2. Green", "Enter to select · ↑/↓ to navigate · Esc to cancel"]
+
+    def _reg(self):
+        return {"pid": 4242, "sessionId": self.sid}
+
+    def test_no_tty_yields_no_evidence(self):
+        self.assertIsNone(self.engine.screen_prompt_kind(self._reg(), ""))
+
+    def test_a_background_job_is_never_read(self):
+        """Its PTY bytes are readiness evidence that must not cross an API."""
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=True):
+            self.assertIsNone(self.engine.screen_prompt_kind(self._reg(), "ttys1"))
+
+    def test_a_session_outside_tmux_yields_no_evidence(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=False), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value=None):
+            self.assertIsNone(self.engine.screen_prompt_kind(self._reg(), "ttys1"))
+
+    def test_an_unreadable_pane_yields_no_evidence(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=False), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value="%1"), \
+                mock.patch.object(self.engine, "_tmux_capture",
+                                  return_value={"ok": False, "error": "gone"}):
+            self.assertIsNone(self.engine.screen_prompt_kind(self._reg(), "ttys1"))
+
+    def test_an_unrecognized_screen_is_no_evidence_not_no_prompt(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=False), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty", return_value="%1"), \
+                mock.patch.object(self.engine, "_tmux_capture",
+                                  return_value={"ok": True, "lines": ["… working"],
+                                                "truncated": False}):
+            self.assertIsNone(self.engine.screen_prompt_kind(self._reg(), "ttys1"))
+
+    def test_a_visible_question_is_reported(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=False), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty",
+                                  return_value="%1") as target, \
+                mock.patch.object(self.engine, "_tmux_capture",
+                                  return_value={"ok": True, "lines": self.ASK,
+                                                "truncated": False}):
+            self.assertEqual(self.engine.screen_prompt_kind(self._reg(), "ttys1"), "question")
+        target.assert_called_once_with("/dev/ttys1")
+
+    def test_an_absolute_tty_is_not_double_prefixed(self):
+        with mock.patch.object(self.engine, "_is_background_claude", return_value=False), \
+                mock.patch.object(self.engine, "_tmux_target_for_tty",
+                                  return_value=None) as target:
+            self.engine.screen_prompt_kind(self._reg(), "/dev/ttys1")
+        target.assert_called_once_with("/dev/ttys1")
+
+
 class RequestIdentityTest(EngineCovBase):
     """Server-owned prompt identity and the answered fence (invariant 75)."""
 
