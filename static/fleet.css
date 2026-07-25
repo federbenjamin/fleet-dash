@@ -929,6 +929,24 @@ td.r,th.r{text-align:right}
 .ctool .tline .targ{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .ctool .tdot{color:var(--fg-dim-1);flex:none}
 .aconvo .ctool{margin:0}
+/* Every tool call is a row now, so the reading and searching around the work
+   has to sit visually below it: `quiet` dims, it never hides. */
+.ctool.quiet .tline{color:var(--fg-dim-4,var(--dim))}
+.ctool.quiet .tline b{color:var(--fg-dim-2,var(--fg-dim-1));font-weight:400}
+.ctool .tline[role="button"]{cursor:pointer;border-radius:4px;padding:1px 4px;margin-left:-4px}
+.ctool .tline[role="button"]:hover,.ctool .tline[role="button"]:focus-visible{
+  background:var(--bg-raise,rgba(255,255,255,.05));color:var(--fg-dim-1)}
+.ctool .tres{flex:none;max-width:38%;overflow:hidden;text-overflow:ellipsis;color:var(--fg-dim-2,var(--dim))}
+.ctool .tscale,.ctool .tcaret{flex:none;color:var(--fg-dim-3,var(--dim));font-size:10px}
+.ctool .terr{color:var(--red)}
+.ctool.open .tline{color:var(--fg-dim-1)}
+.ctool .tout{margin:4px 0 8px 18px;padding:8px 10px;max-height:340px;overflow:auto;
+  background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  font:400 11px/1.5 var(--font-mono);color:var(--fg-dim-1);
+  white-space:pre-wrap;word-break:break-word;overscroll-behavior:contain}
+.ctool .tload,.ctool .tmore{margin:2px 0 6px 18px;font:400 10px var(--font-mono);color:var(--dim)}
+.ctool.thinking .tdot{color:var(--blue)}
+.ctool.thinking .tline b{color:var(--blue)}
 .ctool.cfile{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0 6px 4px}
 .fcap{flex-basis:100%;font-size:11px;color:var(--dim)}
 .frow{display:flex;align-items:center;gap:8px;padding:4px 0}

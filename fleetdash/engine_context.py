@@ -7,6 +7,7 @@ from . import paths as pathcfg
 from .paths import capture_base  # legacy alias; reads paths.* at call time
 from . import screen as screenlib
 from .config import CLAUDE_EFFORTS
+from .tail import Tail
 from .config import (IMG_EXTS, DANGER_COMMANDS, BUILTIN_COMMANDS, model_family, usd, cwd_to_project_dir, iso_epoch)
 
 
@@ -342,6 +343,62 @@ class ContextOps:
         if not reg:
             return None, None
         return reg, os.path.join(cwd_to_project_dir(reg.get("cwd", "")), f"{sid}.jsonl")
+
+    # How much of one tool result the browser may pull in when a row is expanded.
+    # Beyond this the row says so and stops; the ring never held this text at all,
+    # so nothing here is a cache — it is a bounded read of the transcript.
+    TOOL_RESULT_INLINE = 4096
+
+    def tool_result(self, sid, tool_id):
+        """The full-ish output of one tool call, read from the transcript.
+
+        The conversation ring holds a one-line preview per tool row, because
+        holding the real thing would be megabytes per live session for output
+        nobody has opened. Expanding a row asks for it here instead.
+
+        `tool_id` is client-supplied, so it is shape-checked before it is
+        compared — and it is only ever compared, never used to build a path. The
+        transcript comes from the registry, exactly as `session_context` resolves
+        it, so this route can read no file that route could not.
+        """
+        # Deliberately NOT staging-gated. A live terminal read is a capability
+        # and staging holds none over sessions it did not start (invariant 74);
+        # a transcript read is not, and staging may read the shared transcripts
+        # (invariant 56). This route must match `session_context`, which is the
+        # same file through the same resolver.
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(tool_id or "")):
+            return {"ok": False, "error": "invalid tool reference"}
+        reg, path = self._reg_main_path(sid)
+        if not reg or not os.path.isfile(path):
+            return {"ok": False, "error": "session not live"}
+        found = None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    # cheap reject before parsing: the id must appear literally
+                    if tool_id not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    content = (row.get("message") or {}).get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for block in content:
+                        if (isinstance(block, dict) and block.get("type") == "tool_result"
+                                and block.get("tool_use_id") == tool_id):
+                            found = block            # last occurrence wins
+        except OSError as error:
+            return {"ok": False, "error": f"transcript unreadable: {error}"}
+        if found is None:
+            return {"ok": False, "error": "no result recorded for this call"}
+        text = Tail._result_text(found)
+        return {"ok": True, "session_id": str(sid), "tool_id": str(tool_id),
+                "failed": bool(found.get("is_error")),
+                "text": text[:self.TOOL_RESULT_INLINE],
+                "chars": len(text),
+                "truncated": len(text) > self.TOOL_RESULT_INLINE}
 
     def agent_effort(self, agent_type, cwd, parent_effort):
         """Effort for a subagent.

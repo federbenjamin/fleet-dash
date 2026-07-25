@@ -244,11 +244,33 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     carrying every question and the chosen answer, parsed from the tool_result's
     `"<question>"="<answer>"` pairs; it renders in FULL (never truncated) — the user reads it
     to confirm the right answers landed.
-12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
-    Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
-    2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
-    rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place result
-    mutation must still bump `convo_v` or clients never refetch.
+12. **EVERY tool call is a convo row; `KEY_TOOLS` sets prominence, not visibility**
+    (operator decision 2026-07-25, reversing the 2026-07-14 filter). Read/Grep/Glob/WebFetch/
+    WebSearch and every MCP tool were never hidden by the browser — they never reached it,
+    because `_fold` only called `_tool_add` for `KEY_TOOLS`. A name outside that set now folds
+    with `quiet: true`, which dims the row and nothing else, so a new or MCP tool needs no list
+    kept up to date. `_tool_arg` gives the newly visible tools a subject line
+    (`pattern`/`query`/`url`, then the single scalar an unknown call was given — never a guess
+    between several). Each row is still ONE line: the ring keeps a first-line
+    `result` preview plus `result_chars`/`result_lines`, and the real output is read from the
+    transcript on demand by `Engine.tool_result` / token-gated `GET /api/tool-result?sid=&tuid=`,
+    bounded to `TOOL_RESULT_INLINE` (4096). Holding it instead would be megabytes per live
+    session for output nobody opened. `tool_id` is client-supplied, so it is shape-checked —
+    and only ever compared, never used to build a path; the transcript comes from the registry
+    exactly as `session_context` resolves it. That route is deliberately NOT staging-gated: a
+    live terminal read is a capability staging lacks (invariant 74), a transcript read is not
+    (invariant 56). The ring is `maxlen=300` because tool traffic is ~92% of a real session's
+    rows and 120 left about ten entries of readable conversation.
+    **Expanded state lives in `expandedTools` + `toolViewRev`, re-applied at render** — the
+    conversation is rebuilt on the poll, so a native `<details>` would close itself every two
+    seconds, and every conversation render key (session, closed, agent) must include
+    `toolViewRev` or the expand click paints nothing.
+    **Thinking blocks cannot be shown and no code pretends otherwise:** Claude Code writes the
+    block with an empty `thinking` field and keeps only its `signature` — 3,003 of 3,003 empty
+    across the 25 newest transcripts (measured 2026-07-25), and Codex's indexed `reasoning`
+    documents average 3.3 characters. There is nothing to render from either provider.
+    Context freshness rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an
+    in-place result mutation must still bump `convo_v` or clients never refetch.
 13. **`.card` must stay `overflow:clip`, never `hidden`.** `clip` keeps the border-radius
     clipping without turning the card into a scroll container — `hidden` would create one,
     which breaks any viewport-sticky descendant and silently changes hit-testing/scroll

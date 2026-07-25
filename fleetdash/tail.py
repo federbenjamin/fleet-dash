@@ -31,7 +31,13 @@ class Tail:
         self.git_branch = None
         self.ai_title = None
         self.pending = {}               # tool_use_id -> {name, input, uuid} awaiting a result
-        self.convo = deque(maxlen=120)  # recent turns + key-tool calls
+        # Recent turns + EVERY tool call. Raised from 120 when
+        # the fold stopped filtering by KEY_TOOLS: tool traffic is ~92% of a real
+        # session's rows, so the old ring held roughly ten entries of readable
+        # conversation once the reads and searches were in it. This is the live
+        # tail only — reaching further back is the transcript's job, not the
+        # ring's, and it is paged there rather than held in memory per session.
+        self.convo = deque(maxlen=300)
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
         # Durable delivery whitelist: files/convo are ring buffers, so a
@@ -220,8 +226,12 @@ class Tail:
                                     self._file_add(fp, inp.get("caption", ""), ts)
                         if b.get("name") == "AskUserQuestion":
                             self._qa_add(b, ts)
-                        if b.get("name") in KEY_TOOLS:
-                            self._tool_add(b, ts)
+                        # EVERY tool call becomes a row. KEY_TOOLS no longer decides
+                        # visibility — it decides prominence (`_tool_add`): the reads,
+                        # searches, fetches and MCP calls were never hidden by the
+                        # browser, they never reached it at all, and a log missing
+                        # them is not the terminal's log.
+                        self._tool_add(b, ts)
                 txt = "\n\n".join(b.get("text", "") for b in content
                                   if isinstance(b, dict) and b.get("type") == "text").strip()
                 if txt:
@@ -243,9 +253,16 @@ class Tail:
                                         p.get("name") or "?"))[1] += self._chars(b)
                         ref = self._tool_refs.pop(b.get("tool_use_id"), None)
                         if ref is not None:
+                            full = self._result_text(b)
                             ref["result"] = self._result_summary(b, ref.get("name"))
                             ref["failed"] = bool(b.get("is_error"))
                             ref["completed_at"] = ts
+                            # How much there is beyond the one-line preview. The
+                            # browser needs this to know whether the row can be
+                            # expanded at all — asking and getting nothing back
+                            # is worse than showing no affordance.
+                            ref["result_chars"] = len(full)
+                            ref["result_lines"] = full.count("\n") + 1 if full else 0
                             self.convo_rev += 1
                         qa = self._qa_refs.pop(b.get("tool_use_id"), None)
                         if qa is not None:
@@ -294,6 +311,12 @@ class Tail:
     def _tool_add(self, b, ts):
         name, inp = b.get("name"), b.get("input") or {}
         entry = {"role": "tool", "name": name, "ts": ts}
+        # `quiet` is a rendering hint, never a filter: KEY_TOOLS are the calls
+        # that changed something or spawned work, everything else is the reading
+        # and searching around them. Anything unknown — a new tool, any MCP tool
+        # — is quiet by default, so this needs no list kept up to date.
+        if name not in KEY_TOOLS:
+            entry["quiet"] = True
         if name == "SendUserFile":
             entry["files"] = [p for p in (inp.get("files") or [])[:6] if isinstance(p, str)]
             entry["caption"] = inp.get("caption", "")
@@ -304,6 +327,10 @@ class Tail:
         self.convo.append(entry)
         self.convo_rev += 1
         if b.get("id"):
+            # The id is what the browser asks for when you expand a result. The
+            # ring holds a one-line preview only: 400 rows × a 4 KB result would
+            # be megabytes per session held live for output nobody has opened.
+            entry["tool_id"] = b["id"]
             self._tool_refs[b["id"]] = entry
             if len(self._tool_refs) > 300:
                 for k in list(self._tool_refs)[:150]:
@@ -318,17 +345,33 @@ class Tail:
         elif name == "Skill":
             v = inp.get("skill") or ""
         else:
-            v = inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or ""
-        v = str(v).replace(pathcfg.HOME, "~")
+            # Now that every tool is a row, the tools that were never rendered
+            # need a subject line of their own. `pattern`/`query`/`url` cover
+            # Grep, Glob, WebSearch and WebFetch; the trailing fallback keeps an
+            # unknown or MCP tool from rendering a bare name with nothing after
+            # it, by showing the one scalar the call was given when there is
+            # exactly one — never a guess between several.
+            v = (inp.get("file_path") or inp.get("notebook_path") or inp.get("path")
+                 or inp.get("pattern") or inp.get("query") or inp.get("url") or "")
+            if not v and isinstance(inp, dict):
+                scalars = [str(value) for value in inp.values()
+                           if isinstance(value, (str, int, float)) and str(value).strip()]
+                v = scalars[0] if len(scalars) == 1 else ""
+        v = str(v).replace(pathcfg.HOME, "~").replace("\n", " ").strip()
         return v[:90] + ("…" if len(v) > 90 else "")
 
     @staticmethod
-    def _result_summary(b, name=None):
+    def _result_text(b):
+        """The tool result as one string, whatever shape the block arrived in."""
         c = b.get("content")
         if isinstance(c, list):
             c = " ".join(x.get("text", "") for x in c
                          if isinstance(x, dict) and x.get("type") == "text")
-        txt = str(c or "").strip().split("\n")[0]
+        return str(c or "")
+
+    @classmethod
+    def _result_summary(cls, b, name=None):
+        txt = cls._result_text(b).strip().split("\n")[0]
         if not b.get("is_error") and name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
             if "updated successfully" in txt:
                 txt = "updated ✓"

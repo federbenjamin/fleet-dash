@@ -830,7 +830,7 @@ async function renderClosed(){
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
   const wantBottom=sessionOpened||old.atBottom;sessionOpened=false;
   const optimistic=visibleOptimistic(sid,c.messages||[]).map(item=>`${item.id}:${item.status}:${item.error||''}`).join('|');
-  const bodyKey=`closed:${c.messages?.length??-1}:${c.next_cursor??''}:${c.olderError||''}:${c.error||''}:${optimistic}`;
+  const bodyKey=`closed:${c.messages?.length??-1}:${c.next_cursor??''}:${c.olderError||''}:${c.error||''}:${optimistic}:${toolViewRev}`;
   if(body.dataset.renderKey!==bodyKey){
     if(c.error&&!c.messages.length)body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;
     else if(!c.messages.length)body.innerHTML='<div class="ctxload">no conversation recorded</div>';
@@ -895,7 +895,7 @@ function renderSession(force){
   const optimisticItems=visibleOptimistic(s.session_id,(c&&c.messages)||[]);
   const optimisticRevision=optimisticItems.map(item=>`${item.id}:${item.status}:${item.imageCount||0}:${item.error||''}`).join('|');
   const canonicalKey=`session:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}`;
-  const bodyKey=`${canonicalKey}:${optimisticRevision}`;
+  const bodyKey=`${canonicalKey}:${optimisticRevision}:${toolViewRev}`;
   const receiptOnlyChange=Boolean(body.dataset.canonicalKey===canonicalKey&&body.dataset.renderKey!==bodyKey);
   const wantBottom=opened||(sessionFollowTail&&!receiptOnlyChange);
   if(body.dataset.renderKey!==bodyKey){
@@ -972,7 +972,7 @@ function renderAgent(force){
   if(!force&&touching())return;
   const body=$('#abody');
   const old={top:body.scrollTop,atBottom:body.scrollTop+body.clientHeight>=body.scrollHeight-12};
-  const bodyKey=`agent:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${c?.error||''}`;
+  const bodyKey=`agent:${c?.v??'loading'}:${c?.messages?.length??-1}:${c?.next_cursor??''}:${c?.olderError||''}:${c?.error||''}:${toolViewRev}`;
   if(body.dataset.renderKey!==bodyKey){
     if(!c||!c.messages){body.innerHTML='<div class="ctxload">loading conversation…</div>';}
     else if(c.error&&!c.messages.length){body.innerHTML=`<div class="ctxload">✗ ${esc(c.error)}</div>`;}

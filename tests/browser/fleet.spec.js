@@ -1050,6 +1050,46 @@ test('an unchanged card is never rewritten, so nothing moves under your finger',
     .toContainText('a brand new last message');
 });
 
+test('every tool call is in the chat, and its output is one tap away', async ({ page }) => {
+  // KEY_TOOLS used to decide which calls became conversation rows at all, so a
+  // Read was not hidden by the browser — it never reached it. Now the filter
+  // only decides prominence, and the result lives behind the row.
+  await reset(page);
+  await page.evaluate(() => openSession('claude-one'));
+  const quiet = page.locator('#sbody .ctool.quiet');
+  await expect(quiet).toContainText('Read');
+  await expect(quiet).toContainText('~/fleet-dash/tail.py');
+  await expect(quiet).toContainText('3 lines');
+  // the loud tool keeps its full-weight row
+  await expect(page.locator('#sbody .ctool:not(.quiet) .tline b').filter({ hasText: 'Write' }))
+    .toHaveCount(1);
+
+  // collapsed until asked
+  await expect(page.locator('#sbody .ctool .tout')).toHaveCount(0);
+  await quiet.locator('.tline').click();
+  await expect(page.locator('#sbody .ctool.open .tout')).toContainText('line three');
+
+  // …and it closes again
+  await page.locator('#sbody .ctool.open .tline').click();
+  await expect(page.locator('#sbody .ctool .tout')).toHaveCount(0);
+
+  // a call with no result recorded offers no expander to press
+  const loud = page.locator('#sbody .ctool:not(.quiet)').filter({ hasText: 'Write' });
+  await expect(loud.locator('.tcaret')).toHaveCount(0);
+  await expect(loud.locator('.tline[role="button"]')).toHaveCount(0);
+});
+
+test('an expanded tool result survives the two-second poll', async ({ page }) => {
+  // The conversation is rebuilt on every poll, so expanded state cannot live in
+  // the DOM — a native <details> here would close itself twice a second.
+  await reset(page);
+  await page.evaluate(() => openSession('claude-one'));
+  await page.locator('#sbody .ctool.quiet .tline').click();
+  await expect(page.locator('#sbody .ctool.open .tout')).toContainText('line three');
+  for (let index = 0; index < 3; index += 1) await page.evaluate(() => tick());
+  await expect(page.locator('#sbody .ctool.open .tout')).toContainText('line three');
+});
+
 test('a session parked on the folder-trust dialog says so, and offers no way to answer it', async ({ page }) => {
   // Before the scan could look at a terminal this rendered as an ordinary idle
   // session and the spawn just appeared to do nothing (invariant 78).

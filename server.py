@@ -397,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/history": ("open", "get_history"),
         "/api/file": ("token-text", "get_file"),
         "/api/screen": ("token", "get_screen"),
+        "/api/tool-result": ("token", "get_tool_result"),
         "/api/act-receipt": ("token", "get_act_receipt"),
         "/api/commands": ("token", "get_commands"),
         "/api/search": ("token", "get_search"),
@@ -566,6 +567,13 @@ class Handler(BaseHTTPRequestHandler):
     def get_screen(self):
         # reads a live terminal's rendered screen -> token-gated like /api/file
         out = self.eng.session_screen(self.query("sid"))
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
+    def get_tool_result(self):
+        # one tool call's output, read from the transcript on demand. The
+        # conversation ring carries a one-line preview only, so expanding a row
+        # in the chat asks for the rest here rather than the server holding it.
+        out = self.eng.tool_result(self.query("sid"), self.query("tuid"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_act_receipt(self):
