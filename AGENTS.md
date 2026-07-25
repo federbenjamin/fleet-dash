@@ -265,11 +265,33 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     carrying every question and the chosen answer, parsed from the tool_result's
     `"<question>"="<answer>"` pairs; it renders in FULL (never truncated) — the user reads it
     to confirm the right answers landed.
-12. **Convo tool lines show `KEY_TOOLS` only** (engine.py constant — user decision: hide
-    Read/Grep/Glob/task bookkeeping), rendered as ONE line, no result line (user decision
-    2026-07-14; results are still captured engine-side via `_tool_refs`). Context freshness
-    rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an in-place result
-    mutation must still bump `convo_v` or clients never refetch.
+12. **EVERY tool call is a convo row; `KEY_TOOLS` sets prominence, not visibility**
+    (operator decision 2026-07-25, reversing the 2026-07-14 filter). Read/Grep/Glob/WebFetch/
+    WebSearch and every MCP tool were never hidden by the browser — they never reached it,
+    because `_fold` only called `_tool_add` for `KEY_TOOLS`. A name outside that set now folds
+    with `quiet: true`, which dims the row and nothing else, so a new or MCP tool needs no list
+    kept up to date. `_tool_arg` gives the newly visible tools a subject line
+    (`pattern`/`query`/`url`, then the single scalar an unknown call was given — never a guess
+    between several). Each row is still ONE line: the ring keeps a first-line
+    `result` preview plus `result_chars`/`result_lines`, and the real output is read from the
+    transcript on demand by `Engine.tool_result` / token-gated `GET /api/tool-result?sid=&tuid=`,
+    bounded to `TOOL_RESULT_INLINE` (4096). Holding it instead would be megabytes per live
+    session for output nobody opened. `tool_id` is client-supplied, so it is shape-checked —
+    and only ever compared, never used to build a path; the transcript comes from the registry
+    exactly as `session_context` resolves it. That route is deliberately NOT staging-gated: a
+    live terminal read is a capability staging lacks (invariant 74), a transcript read is not
+    (invariant 56). The ring is `maxlen=300` because tool traffic is ~92% of a real session's
+    rows and 120 left about ten entries of readable conversation.
+    **Expanded state lives in `expandedTools` + `toolViewRev`, re-applied at render** — the
+    conversation is rebuilt on the poll, so a native `<details>` would close itself every two
+    seconds, and every conversation render key (session, closed, agent) must include
+    `toolViewRev` or the expand click paints nothing.
+    **Thinking blocks cannot be shown and no code pretends otherwise:** Claude Code writes the
+    block with an empty `thinking` field and keeps only its `signature` — 3,003 of 3,003 empty
+    across the 25 newest transcripts (measured 2026-07-25), and Codex's indexed `reasoning`
+    documents average 3.3 characters. There is nothing to render from either provider.
+    Context freshness rides `Tail.convo_rev` (a counter), NOT the last entry's timestamp — an
+    in-place result mutation must still bump `convo_v` or clients never refetch.
 13. **`.card` must stay `overflow:clip`, never `hidden`.** `clip` keeps the border-radius
     clipping without turning the card into a scroll container — `hidden` would create one,
     which breaks any viewport-sticky descendant and silently changes hit-testing/scroll
@@ -975,6 +997,23 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     slow-but-progressing response on the next interval. Main, closed, and subagent context failures
     retain the last-good in-memory/device cache. Conversation revision refreshes merge the current
     tail into older loaded pages and preserve the reader's scroll anchor.
+    **A live Claude conversation pages by TRANSCRIPT BYTE OFFSET, not by an index into the
+    ring** (operator decision 2026-07-25). The ring is a 300-entry tail whose indexes shift as
+    it evicts, so an index cursor could only ever reach the ring's edge; the byte offset is
+    stable, monotonic, and already the coordinate the fold works in, so `load older` reaches the
+    session's first message. Every folded row carries `off` (its line's START — distinct from
+    `evidence_offset`, the row END that model/effort ordering uses and which is unchanged).
+    `session_context(sid, before=…)` folds a bounded backwards window
+    (`_lines_before` reads 512 KB chunks until `TRANSCRIPT_PAGE_ROWS`=600 rows, never the whole
+    file) into a throwaway `Tail` whose deque is widened to the page size. **The cursor is the
+    oldest row RETURNED, never the window start** — those differ whenever the window folds to
+    fewer rows than it read, and pointing at the window start silently skips the difference; a
+    page that folds to nothing is the file's metadata head and ends the walk. A window folded
+    alone cannot attach a result whose call sits above it, which is the accepted trade for not
+    re-folding 15 MB per page. `server.paginate_context` must pass through any projection that
+    set `paged` — slicing it by index truncates a page and replaces a meaningful cursor with a
+    meaningless one. Closed and subagent contexts keep index pagination. Measured on a 15 MB
+    live transcript: 17 pages, 2,028 rows, 0.4 s total, ~30 ms per page.
 
 63. **Full-screen overlays are stack-aware modals — except the desktop-docked session pane.**
     Search/Handoff/Outbox/Schedule/Confirm surfaces (Settings is a destination, invariant 59,

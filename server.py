@@ -368,6 +368,12 @@ class Handler(BaseHTTPRequestHandler):
     def paginate_context(self, out):
         if not isinstance(out, dict) or not out.get("ok"):
             return out
+        # A projection that paged itself owns its own cursor. Claude sessions
+        # page by transcript BYTE OFFSET so "load older" can leave the live ring
+        # entirely; slicing that result by index here would truncate a page and
+        # replace a meaningful cursor with a meaningless one.
+        if out.get("paged"):
+            return out
         messages = list(out.get("messages") or [])
         try:
             limit = max(1, min(100, int(self.query("limit") or 50)))
@@ -397,6 +403,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/history": ("open", "get_history"),
         "/api/file": ("token-text", "get_file"),
         "/api/screen": ("token", "get_screen"),
+        "/api/tool-result": ("token", "get_tool_result"),
         "/api/prompt-options": ("token", "get_prompt_options"),
         "/api/act-receipt": ("token", "get_act_receipt"),
         "/api/commands": ("token", "get_commands"),
@@ -544,7 +551,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_context(self):
-        out = self.paginate_context(self.eng.session_context(self.query("sid")))
+        cursor = self.query("cursor")
+        try:
+            limit = max(1, min(200, int(self.query("limit") or 50)))
+            before = int(cursor) if cursor not in ("", None) else None
+        except (TypeError, ValueError):
+            return self.reply(400, "application/json", json.dumps(
+                {"ok": False, "error": "invalid conversation pagination"}).encode())
+        out = self.paginate_context(
+            self.eng.session_context(self.query("sid"), before=before, limit=limit))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_closed_context(self):
@@ -569,6 +584,11 @@ class Handler(BaseHTTPRequestHandler):
         out = self.eng.session_screen(self.query("sid"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
+    def get_tool_result(self):
+        # one tool call's output, read from the transcript on demand. The
+        # conversation ring carries a one-line preview only, so expanding a row
+        # in the chat asks for the rest here rather than the server holding it.
+        out = self.eng.tool_result(self.query("sid"), self.query("tuid"))
     def get_prompt_options(self):
         # the option rows a live prompt is rendering; same capture and the same
         # refusals as /api/screen, which is why it is token-gated the same way

@@ -186,6 +186,12 @@ def fresh_state():
     codex.update(agents_running=0, agents_total=1)
     context = [{"role": "user", "text": "Audit parity"},
                {"role": "assistant", "text": "Working through the matrix."},
+               # a quiet tool with a result to expand, and a loud one without
+               {"role": "tool", "name": "Read", "arg": "~/fleet-dash/tail.py",
+                "quiet": True, "tool_id": "tu-read", "result": "line one",
+                "result_lines": 3, "result_chars": 28},
+               {"role": "tool", "name": "Write", "arg": "~/fleet-dash/out.txt",
+                "tool_id": "tu-none"},
                {"role": "event", "kind": "reasoning", "title": "Reasoning",
                 "detail": "Compared protocol states", "level": "info"}]
     repo = {"ok": True, "state": "ok", "root": "/Users/test/fleet-dash",
@@ -241,6 +247,8 @@ def fresh_state():
             "ledger": {"ok": True, "recovered": False},
             "contexts": {"claude-one": copy.deepcopy(context),
                          "codex:thread-one": copy.deepcopy(context)},
+            "tool_results": {"tu-read": "line one\nline two\nline three",
+                             "tu-big": "x" * 9000},
             "scenario": "base", "codex_error": None,
             "evidence": {
                 "claude-one": [
@@ -1327,6 +1335,17 @@ class Handler(BaseHTTPRequestHandler):
                         "can_resume_and_send": False,
                         "resume_disabled_reason": "Fixture session is view only",
                         "status_line": fixture_status_line("claude", frozen=True)}})
+            if route == "/api/tool-result":
+                if not authorized(self):
+                    return self.json_reply({"ok": False, "error": "bad token"}, 403)
+                tuid = (query.get("tuid") or [""])[0]
+                body = STATE.get("tool_results", {}).get(tuid)
+                if body is None:
+                    return self.json_reply({"ok": False,
+                                            "error": "no result recorded for this call"})
+                return self.json_reply({"ok": True, "tool_id": tuid, "failed": False,
+                                        "text": body[:4096], "chars": len(body),
+                                        "truncated": len(body) > 4096})
             if route == "/api/screen":
                 if not authorized(self):
                     return self.json_reply({"ok": False, "error": "bad token"}, 403)
