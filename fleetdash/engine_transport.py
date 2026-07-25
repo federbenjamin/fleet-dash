@@ -1,10 +1,5 @@
-"""Claude process/tty resolution, Codex terminal routes, the terminal transport
-dispatcher, and the background Claude attach transport (invariants 25, 30).
-
-`_terminal_write` / `_terminal_spawn` are the only entry points the rest of the
-Engine uses. They choose between tmux (`engine_tmux`) and the legacy iTerm2
-applet (`_iterm_write`) from state Fleet already resolved server-side, so a
-terminal switch changes one selection rule rather than eight call sites."""
+"""Claude process/tty resolution, Codex terminal routes, background Claude
+attach transport (invariants 25, 30)."""
 import os, re, time, shlex, signal, subprocess, uuid
 from .claude_background import ClaudeBackgroundTransport, ClaudeBackgroundError
 
@@ -230,49 +225,7 @@ class TransportOps:
         """Return whether the transport proves that no native input was written."""
         return (not (result or {}).get("ok") and
                 (result or {}).get("code") in
-                ("injector_not_launched", "background_connection_lost",
-                 "terminal_not_available"))
-
-    # ------------------------------------------------- transport dispatcher
-    def _terminal_transport_mode(self):
-        mode = str(self.cfg.get("terminal_transport") or "auto").strip().lower()
-        return mode if mode in ("auto", "tmux", "applet") else "auto"
-
-    def _terminal_write(self, tty, steps, step_delay=None):
-        """Route one native write to the transport that owns this tty.
-
-        Selection is server-derived from the tty Fleet already resolved for the
-        session's PID; a client never names a transport, socket, or pane. Both
-        implementations return the same contract, so every caller keeps invariant
-        66's proven-failure versus uncertain split unchanged.
-        """
-        mode = self._terminal_transport_mode()
-        if mode != "applet":
-            pane = self._tmux_target_for_tty(tty)
-            if pane:
-                return self._tmux_write(pane, steps, step_delay=step_delay)
-            if mode == "tmux":
-                return {"ok": False, "code": "terminal_not_available",
-                        "error": "this session is not running in a tmux pane"}
-        return self._iterm_write(tty, steps, step_delay=step_delay)
-
-    def _terminal_spawn(self, command, label="claude"):
-        """Start an Engine-composed command in a new terminal.
-
-        tmux wins when the operator has a tmux session waiting, because a window
-        added to their server inherits their shell environment and survives a
-        terminal switch. Fleet never starts that server itself (`_tmux_spawn`
-        explains why), so `terminal_not_available` here means no window was
-        created and the applet may still try. `delivery_uncertain` must never fall
-        through: a second attempt could open a second session (invariant 66).
-        """
-        mode = self._terminal_transport_mode()
-        if mode != "applet":
-            result = self._tmux_spawn(command, label=label)
-            if result.get("ok") or mode == "tmux" or \
-                    not self._native_write_failed_before_delivery(result):
-                return result
-        return self._iterm_write("SPAWN", [(command, False)])
+                ("injector_not_launched", "background_connection_lost"))
 
     @staticmethod
     def _background_job_id(reg):
@@ -315,7 +268,7 @@ class TransportOps:
             return {"ok": False, "error": "session working directory no longer exists"}
         command = (f"cd {shlex.quote(cwd)} && {shlex.quote(executable)} attach "
                    f"{shlex.quote(job_id)}")
-        result = self._terminal_spawn(command, label="attach")
+        result = self._iterm_write("SPAWN", [(command, False)])
         if result.get("ok"):
             result.update(command=command, transport="claude_attach",
                           session_id=reg.get("sessionId"))
@@ -357,8 +310,8 @@ class TransportOps:
         if reg.get("status") in ("busy", "shell", "waiting"):
             tty = self._tty_for_pid(pid)
             if tty:
-                result = self._terminal_write(f"/dev/{tty}", [("\x1b", False)],
-                                              step_delay=0.05)
+                result = self._iterm_write(f"/dev/{tty}", [("\x1b", False)],
+                                           step_delay=0.05)
                 interrupted = bool(result.get("ok"))
                 if not interrupted:
                     interrupt_error = result.get("error") or "interrupt failed"
@@ -379,7 +332,7 @@ class TransportOps:
         return result
 
     def reopen_claude_session(self, sid):
-        """Open a saved Claude transcript in a new terminal.
+        """Open a saved Claude transcript in a new iTerm tab.
 
         Both the UUID and transcript path come from the ledger, but are validated
         again here because this action crosses the local file/terminal boundary.
@@ -407,7 +360,7 @@ class TransportOps:
                     "error": "the session working directory no longer exists or is outside home"}
         command = (f"cd {shlex.quote(cwd)} && claude --resume "
                    f"{shlex.quote(str(sid))}")
-        result = self._terminal_spawn(command, label="resume")
+        result = self._iterm_write("SPAWN", [(command, False)])
         if result.get("ok"):
             result.update(reopened=True, session_id=sid, cwd=cwd, command=command)
         return result

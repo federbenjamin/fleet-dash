@@ -34,16 +34,6 @@ DEFAULT_CONFIG = {
     "codex_enabled": True,
     "codex_command": "",
     "codex_remote_control": True,
-    # Terminal control transport. tmux is emulator-agnostic and survives a
-    # terminal switch; the AppleScript applet only ever speaks to iTerm2.
-    #   auto   — tmux for a session whose tty is a live tmux pane, applet
-    #            otherwise; new sessions spawn into tmux when it is installed
-    #   tmux   — tmux only; a non-tmux session exposes no terminal transport
-    #   applet — the legacy iTerm2 applet only
-    "terminal_transport": "auto",
-    "terminal_app": "iTerm",            # app raised on focus; "" never raises one
-    "tmux_command": "",                 # optional absolute tmux executable
-    "tmux_session": "fleet",            # detached tmux session new spawns join
     "search_enabled": True,
     "search_discover_seconds": 2,
     "search_batch_rows": 250,

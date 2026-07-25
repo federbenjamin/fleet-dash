@@ -501,7 +501,7 @@ class NotifyOps:
             tty = self._tty_for_pid(reg["pid"])
             if not tty:
                 return {"ok": False, "error": "session has no terminal (VS Code / headless)"}
-            result = self._terminal_write(f"/dev/{tty}", steps, step_delay=0.05)
+            result = self._iterm_write(f"/dev/{tty}", steps, step_delay=0.05)
         if result.get("ok"):
             self._record_claude_turn_fence(sid, baseline)
         return result
@@ -665,7 +665,7 @@ class NotifyOps:
         # Keep the same TUI popup guard as Claude terminal injection.
         if text.startswith("/") and " " not in text:
             text += " "
-        result = self._terminal_write(route["tty"], [(text, True)], step_delay=0.05)
+        result = self._iterm_write(route["tty"], [(text, True)], step_delay=0.05)
         if result.get("ok"):
             result.update(transport="codex_terminal",
                           session_id=str(action.get("session_id") or ""),

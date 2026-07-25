@@ -565,8 +565,7 @@ class ActOps:
             if background_claude:
                 return (self._focus_background_claude(reg) if typ == "focus" else
                         self._write_background_claude(reg, write_steps, step_delay))
-            return self._terminal_write(f"/dev/{tty}", write_steps,
-                                        step_delay=step_delay)
+            return self._iterm_write(f"/dev/{tty}", write_steps, step_delay=step_delay)
 
         if typ == "session_settings" and len(steps) > 1:
             # `/model` and `/effort` are separate Claude commands, not one
