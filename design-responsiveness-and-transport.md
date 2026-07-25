@@ -1,9 +1,10 @@
 # Design: Fleet responsiveness and the Claude control transport
 
-Status: **W1, W2, W3, W4, W5-T1 and two of W5-T2a's consumers (screen peek, and the act() screen
-gate that replaces invariant 5's ghost-question guess) shipped 2026-07-24. The remaining T2a
-consumers need a scan-path capture, which invariant 74 forbids; W5-T2b/T3 is still blocked on open
-question 6.** Written 2026-07-24 after a
+Status: **W1, W2, W3, W4, W5-T1, W5-T2a and W5-T2b shipped 2026-07-24.** Open question 6 is
+answered — closed-loop delivery drives Claude's ask selector and its tool-permission prompt, and
+nothing else (operator decision). What remains open is stall diagnosis (deliberately: it would put
+terminal text in the poll payload) and compaction-without-a-hook (no captured frame yet).
+Written 2026-07-24 after a
 measurement session against production (port 8377, 48 live sessions) and a sandboxed Claude Code
 v2.1.219 rig.
 
@@ -537,7 +538,24 @@ tmux client, not reading the grid. A fleet-wide look is 0.8% of a scan — cheap
 fold. Invariant 78 records the batched pass, its eligibility rules, and the one thing that did NOT
 change: the scan keeps a label, never the screen text.
 
-**T2b — closed-loop driving.** Blocked on open question 6, not on T2a. Replace the fixed 0.4 s with:
+**T2b — closed-loop driving. SHIPPED 2026-07-24 for the two surfaces the operator allowed** —
+Claude's ask selector and its tool-permission prompt (open question 6 answered: asks + tool
+permission prompts). Everything else, and every applet write, keeps the fixed delay, so an
+uncaptured surface is never driven.
+
+Measured on a real Claude TUI before implementing: a key changes the pane in **5–33 ms** and the
+screen settles by **31–61 ms**; a single-pane capture costs 5.1 ms. Driving a real multi-select
+answer (`2`, `→`, CR) through the shipped `_tmux_write` took **0.106 s** against the 0.8 s the fixed
+delay would have taken, and Claude recorded the right answer — "Pick fruit → Pear".
+
+**One correction to the plan below.** "Proceed once the capture is byte-identical for two
+consecutive polls" is not sufficient, and the reason is measurable: an already-stable poll loop
+confirms in 32 ms while a key can take 33 ms to produce its first visible change. A detector that
+only looks for stability therefore settles instantly, having observed nothing at all. `_tmux_settle`
+requires a CHANGE from the pre-key frame first; `unchanged`, `timeout` and `unreadable` all fall
+back to the fixed delay, so the worst case is exactly the old behaviour.
+
+Full contract: invariant 79. The original plan:
 
 - **Settle detection.** Send a key, poll every ~15 ms, proceed once the capture is byte-identical for
   two consecutive polls. Two-stable-polls rather than one-change, because partial redraws produce

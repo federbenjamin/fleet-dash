@@ -601,7 +601,11 @@ question does not reappear — and once Fleet accepts an answer, a second device
 gets "this prompt was already answered" instead of typing a second set of keys into a terminal that
 has moved on. When a session runs in a tmux pane Fleet also looks at the screen before it types:
 if the pane is showing an ordinary input box, a different prompt, or the folder-trust dialog rather
-than the question you are answering, the keys are refused instead of sent. The same look runs on
+than the question you are answering, the keys are refused instead of sent. Answering is also
+faster there: instead of waiting a fixed 0.4 seconds between keystrokes, Fleet watches the pane and
+sends the next key as soon as the screen has actually finished redrawing — a real three-key answer
+took 0.106 s against 0.8 s — and re-checks between keys that the same prompt is still showing,
+stopping rather than typing the rest at whatever replaced it. The same look runs on
 the poll for the few sessions Fleet would otherwise be guessing about — a captured prompt the
 session no longer seems to be showing, or a freshly spawned session that has written nothing yet —
 so a session parked on Claude's folder-trust dialog now says so on its card instead of looking
@@ -746,6 +750,7 @@ normalize to Critical.
 | `terminal_app` | "iTerm" | application "Open in Terminal" raises after selecting the tmux pane; `""` selects the pane and raises nothing |
 | `screen_observe` | true | let the 2s poll take ONE batched `capture-pane` look at the few sessions Fleet would otherwise guess about (a captured prompt the session may no longer show; a spawn that has written nothing and may be on the trust dialog). Only the classification is kept, never the screen text |
 | `screen_observe_seconds` | 60 | how long a derived screen label is reused before that session is looked at again |
+| `tmux_settle` | true | pace question/permission key sequences by watching the pane settle instead of a fixed 0.4s wait, and re-check between keys that the same prompt is still on screen; `false` restores the fixed delay |
 | `tmux_command` | "" | optional absolute tmux executable; otherwise PATH, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
 | `tmux_session` | "fleet" | tmux session new spawns join (`tmux attach -t fleet`); letters, digits, `_` and `-` only |
 | `search_enabled` | true | start the isolated local transcript indexer and authenticated Search APIs |

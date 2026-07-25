@@ -64,6 +64,8 @@ DEFAULT_CONFIG = {
     "_screen_observe_note": "batched capture-pane look at tmux sessions the scan cannot describe confidently; derives a label only, never screen text (invariant 78)",
     "screen_observe": True,
     "screen_observe_seconds": 60,
+    "_tmux_settle_note": "pace ask/permission key sequences by watching the pane settle instead of a fixed 0.4s, and re-verify the surface between keys (invariant 79); false restores the fixed delay",
+    "tmux_settle": True,
     "_rates_note": "per-1M USD: [input, cache_write, cache_read, output]. fable = PLACEHOLDER (opus rates) - correct when pricing is published.",
     "rates": {
         "haiku":  [0.80, 1.00, 0.08, 4.00],

@@ -238,7 +238,7 @@ class TransportOps:
         mode = str(self.cfg.get("terminal_transport") or "auto").strip().lower()
         return mode if mode in ("auto", "tmux", "applet") else "auto"
 
-    def _terminal_write(self, tty, steps, step_delay=None):
+    def _terminal_write(self, tty, steps, step_delay=None, expect=None):
         """Route one native write to the transport that owns this tty.
 
         Selection is server-derived from the tty Fleet already resolved for the
@@ -250,7 +250,12 @@ class TransportOps:
         if mode != "applet":
             pane = self._tmux_target_for_tty(tty)
             if pane:
-                return self._tmux_write(pane, steps, step_delay=step_delay)
+                # `expect` is the surface these keys were composed for. Only tmux
+                # can act on it (settle detection + per-key re-verification,
+                # invariant 79); the applet has no read verb, so it keeps the
+                # fixed delay it has always used.
+                return self._tmux_write(pane, steps, step_delay=step_delay,
+                                        expect=expect)
             if mode == "tmux":
                 return {"ok": False, "code": "terminal_not_available",
                         "error": "this session is not running in a tmux pane"}
