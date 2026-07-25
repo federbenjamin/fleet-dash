@@ -188,6 +188,9 @@ test('switching chats replaces a closed chat route and relay uses the normal sen
 
   await reset(page, 'subagent');
   await page.evaluate(() => openSession('codex:thread-one'));
+  // measure once the conversation has landed: only the open pane fetches now, so
+  // a composer measured mid-load is measured against a different layout
+  await expect(page.locator('#sbody .ctxload')).toHaveCount(0);
   const mainSendWidth = await page.locator('#sact .freetext.composer .pbtn.send').evaluate(button =>
     button.getBoundingClientRect().width);
   await openSubagent(page, 'codex:thread-one', 'agent-child-one');
@@ -919,6 +922,50 @@ test('session placement evidence lives in the Details section', async ({ page },
     await expect(page.locator('#sdetailindex')).toHaveCSS('overflow-x','auto');
   }
   await page.screenshot({ path: testInfo.outputPath(`state-evidence-${testInfo.project.name}.png`) });
+});
+
+test('idle cards never fetch a conversation; a pending one still does', async ({ page }) => {
+  await reset(page);
+  const contextCalls = [];
+  await page.route('**/api/context**', route => {
+    contextCalls.push(new URL(route.request().url()).searchParams.get('sid'));
+    return route.continue();
+  });
+
+  // start from cold caches, or "no fetch" could just mean "already cached"
+  const chill = async () => {
+    await page.evaluate(async () => {
+      localStorage.removeItem('fleet.contextCache.v1');
+      for (const sid of Object.keys(ctxCache)) delete ctxCache[sid];
+      await tick(true);
+    });
+  };
+
+  // a queue full of idle cards: the peek is last_msg from the poll, so nothing
+  // on a card needs the conversation
+  await chill();
+  await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(contextCalls).toEqual([]);
+
+  // opening one fetches exactly that session
+  await page.locator('[data-sid="claude-one"] .shead').click();
+  await expect.poll(() => contextCalls).toContain('claude-one');
+  expect(new Set(contextCalls)).toEqual(new Set(['claude-one']));
+  await page.locator('#sclose').click();
+
+  // A card with a pending request keeps fetching, because answering it inline
+  // creates a receipt whose baseCount must be computed against real messages.
+  // An unpinned needs-you session is an Action Inbox row and opens the pane to
+  // answer; a PINNED one renders as a card and answers in place, so that is the
+  // path this guard exists for.
+  await reset(page, 'claude-question-slow');
+  await page.evaluate(() => toggleSessionPin('claude-one'));
+  await expect(page.locator('#pinned [data-sid="claude-one"]')).toBeVisible();
+  contextCalls.length = 0;
+  await chill();
+  await expect.poll(() => contextCalls).toContain('claude-one');
+  await page.unroute('**/api/context**');
 });
 
 test('the fleet poll is served compressed', async ({ page }) => {
@@ -3233,6 +3280,9 @@ test('an omitted fleet row cannot close or erase an open conversation', async ({
   await reset(page,'base');
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   await expect(page.locator('#sview')).toBeVisible();
+  // the contract is about an OPEN conversation, so wait for it to load: cards no
+  // longer pre-warm the context cache, only the open pane fetches
+  await expect(page.locator('#sbody')).toContainText('Working through the matrix');
   const fleet=await(await page.request.get('/api/fleet')).json();
   const omitted=structuredClone(fleet);omitted.sessions=omitted.sessions.filter(item=>item.session_id!=='codex:thread-one');
   // Apply the exact transient snapshot deterministically. A background poll is
