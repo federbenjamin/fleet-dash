@@ -447,6 +447,9 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoff
 .cmeta{width:var(--w-meta-rail);flex:none;border-left:1px solid var(--line-peek);
   background:var(--meta-rail-bg);padding:12px;display:flex;flex-direction:column;gap:7px;
   font:400 10.5px var(--font-mono);color:var(--fg-dim-1)}
+/* Compatibility for tabs that rendered the short-lived grouped card markup
+   before the n16 shell arrived. New cards keep every metadata item direct. */
+.cmeta-primary,.cmeta-secondary{display:contents}
 .cmeta.alert{background:var(--meta-rail-alert-bg)}
 .mrow{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .cstat{display:flex;align-items:center;gap:6px;font-weight:600}
@@ -1759,11 +1762,13 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
     border-left:0;border-top:1px solid var(--line-peek);border-bottom:1px solid var(--line-peek);
     background:transparent;font-size:10.5px;line-height:1.35}
   .card>.ctop>.cmeta.alert{background:transparent}
-  .cmeta>.cstat,.cmeta>.ccontext,.cmeta>.cquiet{order:0;flex:0 0 auto}
-  .cmeta>.cmodel{order:0;flex:1 1 72px}
-  .cmeta>:is(.ccompact,.ctool,.runskill,.cagents){order:2;flex:0 1 auto;margin-top:7px}
-  .cmeta>:is(.ctool,.runskill){flex:1 1 120px}
-  .cmeta:has(>:is(.ccompact,.ctool,.runskill,.cagents))::before{content:"";order:1;
+  .cmeta>:is(.cstat,.ccontext,.cquiet),
+  .cmeta-primary>:is(.cstat,.ccontext,.cquiet){order:0;flex:0 0 auto}
+  .cmeta>.cmodel,.cmeta-primary>.cmodel{order:0;flex:1 1 72px}
+  .cmeta>:is(.ccompact,.ctool,.runskill,.cagents),
+  .cmeta-secondary>:is(.ccompact,.ctool,.runskill,.cagents){order:2;flex:0 1 auto;margin-top:7px}
+  .cmeta>:is(.ctool,.runskill),.cmeta-secondary>:is(.ctool,.runskill){flex:1 1 120px}
+  .cmeta:has(:is(.ccompact,.ctool,.runskill,.cagents))::before{content:"";order:1;
     flex:0 0 100%;height:1px;margin-top:7px;background:var(--line-peek)}
   .cmeta .mrow{white-space:nowrap}
   .cmeta .railbar{display:none}

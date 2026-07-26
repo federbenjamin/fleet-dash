@@ -249,6 +249,25 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
   expect(now.directPrimary).toBe(true);
   expect(now.contextBarDisplay).toBe('none');
   expect(now.titleSize).toBeGreaterThanOrEqual(15);
+  const legacyRows=await page.evaluate(()=>{
+    const source=document.querySelector('[data-sid="codex:thread-one"]');
+    const clone=source.cloneNode(true),meta=clone.querySelector('.cmeta');
+    clone.removeAttribute('data-sid');
+    clone.style.cssText=`position:absolute;visibility:hidden;left:0;top:0;width:${source.getBoundingClientRect().width}px`;
+    const primary=document.createElement('div');primary.className='cmeta-primary';
+    const secondary=document.createElement('div');secondary.className='cmeta-secondary';
+    for(const item of [...meta.children]){
+      if(item.matches('.cstat,.cmodel,.ccontext,.cquiet'))primary.append(item);
+      else secondary.append(item);
+    }
+    meta.append(primary);if(secondary.childElementCount)meta.append(secondary);
+    document.body.append(clone);
+    const tops=[...primary.children].map(item=>Math.round(item.getBoundingClientRect().top));
+    const result={primaryRows:new Set(tops).size,wrapperDisplay:getComputedStyle(primary).display};
+    clone.remove();return result;
+  });
+  expect(legacyRows.primaryRows).toBe(1);
+  expect(legacyRows.wrapperDisplay).toBe('contents');
 
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
   const workbenchGeometry=async()=>page.evaluate(()=>{
