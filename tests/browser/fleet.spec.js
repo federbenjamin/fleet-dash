@@ -220,20 +220,29 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
   await reset(page, 'subagent');
   const now=await page.evaluate(()=>{
     const card=document.querySelector('[data-sid="codex:thread-one"]');
-    const main=card.querySelector('.cmain'),meta=card.querySelector('.cmeta');
-    const mainStyle=getComputedStyle(main),metaStyle=getComputedStyle(meta);
+    const top=card.querySelector('.ctop'),head=card.querySelector('.shead'),
+      meta=card.querySelector('.cmeta'),primary=meta.querySelector('.cmeta-primary'),
+      peek=card.querySelector('.sessionpeek');
+    const primaryTops=[...primary.children].map(child=>Math.round(child.getBoundingClientRect().top));
     return{
       documentWidth:document.documentElement.scrollWidth,viewport:innerWidth,
       cardLeft:card.getBoundingClientRect().left,cardRight:card.getBoundingClientRect().right,
-      mainPadding:parseFloat(mainStyle.paddingLeft),metaColumns:metaStyle.gridTemplateColumns.split(' ').length,
+      cardPadding:parseFloat(getComputedStyle(top).paddingLeft),
+      headBottom:head.getBoundingClientRect().bottom,metaTop:meta.getBoundingClientRect().top,
+      metaBottom:meta.getBoundingClientRect().bottom,peekTop:peek?.getBoundingClientRect().top||null,
+      primaryRows:new Set(primaryTops).size,
+      contextBarDisplay:getComputedStyle(meta.querySelector('.railbar')).display,
       titleSize:parseFloat(getComputedStyle(card.querySelector('.stitle')).fontSize),
     };
   });
   expect(now.documentWidth).toBeLessThanOrEqual(now.viewport);
   expect(now.cardLeft).toBeGreaterThanOrEqual(12);
   expect(now.cardRight).toBeLessThanOrEqual(now.viewport-12);
-  expect(now.mainPadding).toBeGreaterThanOrEqual(13);
-  expect(now.metaColumns).toBe(2);
+  expect(now.cardPadding).toBeGreaterThanOrEqual(13);
+  expect(now.metaTop).toBeGreaterThanOrEqual(now.headBottom);
+  if(now.peekTop!==null)expect(now.metaBottom).toBeLessThanOrEqual(now.peekTop);
+  expect(now.primaryRows).toBe(1);
+  expect(now.contextBarDisplay).toBe('none');
   expect(now.titleSize).toBeGreaterThanOrEqual(15);
 
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
@@ -1825,7 +1834,7 @@ test('full chat renders main work as the newest non-interactive conversation row
   await expect(activity).toBeHidden();
 });
 
-test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }) => {
+test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }, testInfo) => {
   // "stalled" has always meant frozen mid-TOOL, but the card never said WHICH
   // tool — so a wedged session and a slow one looked identical.
   await reset(page);
@@ -1835,6 +1844,15 @@ test('a working card names the tool it is blocked on, and a stalled one flags it
   const tool = page.locator('[data-sid="claude-one"] .ctool');
   await expect(tool).toHaveText('Bash · 3s');
   await expect(tool).not.toHaveClass(/crit/);
+  if(testInfo.project.name.startsWith('mobile')){
+    const rows=await page.locator('[data-sid="claude-one"] .cmeta').evaluate(meta=>({
+      primaryBottom:meta.querySelector('.cmeta-primary').getBoundingClientRect().bottom,
+      secondaryTop:meta.querySelector('.cmeta-secondary').getBoundingClientRect().top,
+      toolParent:meta.querySelector('.ctool').parentElement.className,
+    }));
+    expect(rows.secondaryTop).toBeGreaterThanOrEqual(rows.primaryBottom);
+    expect(rows.toolParent).toBe('cmeta-secondary');
+  }
 
   // stalled: the count of other open calls shows, and the chip goes critical
   await reset(page, 'active-tool-stalled');
@@ -4407,14 +4425,14 @@ test('Console mobile pass: complete card metadata, file navigation, bottom bar',
   const mobile = testInfo.project.name.startsWith('mobile');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   if (mobile) {
-    // The complete desktop metadata set becomes a stable grid after the card content.
+    // Primary metadata sits between the header and peek; active details get a second row.
     const boxes = await codex.evaluate(card => ({
       head: card.querySelector('.shead').getBoundingClientRect().toJSON(),
       meta: card.querySelector('.cmeta').getBoundingClientRect().toJSON(),
       peek: card.querySelector('.sessionpeek')?.getBoundingClientRect().toJSON() || null,
     }));
     expect(boxes.meta.top).toBeGreaterThanOrEqual(boxes.head.bottom - 1);
-    if (boxes.peek) expect(boxes.meta.top).toBeGreaterThanOrEqual(boxes.peek.bottom - 1);
+    if (boxes.peek) expect(boxes.meta.bottom).toBeLessThanOrEqual(boxes.peek.top + 1);
     await expect(page.locator('#bottomnav [data-route="notifications"] small')).toHaveText('Notifs');
   }
   await codex.locator('.shead').click();

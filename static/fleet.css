@@ -447,6 +447,7 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoff
 .cmeta{width:var(--w-meta-rail);flex:none;border-left:1px solid var(--line-peek);
   background:var(--meta-rail-bg);padding:12px;display:flex;flex-direction:column;gap:7px;
   font:400 10.5px var(--font-mono);color:var(--fg-dim-1)}
+.cmeta-primary,.cmeta-secondary{display:contents}
 .cmeta.alert{background:var(--meta-rail-alert-bg)}
 .mrow{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .cstat{display:flex;align-items:center;gap:6px;font-weight:600}
@@ -1750,18 +1751,26 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .queue:first-child{margin-top:0}
   .queuehead{padding:0 3px 10px}
   .card{margin-bottom:10px;border-radius:10px}
-  .card>.ctop{display:grid;grid-template-columns:minmax(0,1fr)}
-  .card .cmain,.card.needs .cmain{padding:14px}
-  .card>.ctop>.cmeta{width:auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
-    gap:8px 14px;border-left:0;border-top:1px solid var(--line-peek);padding:10px 14px;
-    background:var(--meta-rail-bg);font-size:11px;line-height:1.35}
-  .card>.ctop>.cmeta.alert{background:var(--meta-rail-alert-bg)}
+  .card>.ctop{display:flex;flex-direction:column;padding:14px}
+  .card .cmain,.card.needs .cmain{display:contents;padding:0}
+  .card .cmain>*{order:2}
+  .card .cmain>.shead{order:0}
+  .card>.ctop>.cmeta{order:1;width:auto;display:block;margin-top:9px;padding:8px 0;
+    border-left:0;border-top:1px solid var(--line-peek);border-bottom:1px solid var(--line-peek);
+    background:transparent;font-size:10.5px;line-height:1.35}
+  .card>.ctop>.cmeta.alert{background:transparent}
+  .cmeta-primary{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;
+    align-items:center;gap:8px}
+  .cmeta-secondary{display:flex;align-items:center;gap:10px;min-width:0;margin-top:7px;
+    padding-top:7px;border-top:1px solid var(--line-peek);overflow:hidden}
+  .cmeta-secondary .mrow{flex:0 1 auto}
+  .cmeta-secondary :is(.ctool,.runskill){flex:1 1 auto}
   .cmeta .mrow{white-space:nowrap}
-  .cmeta .railbar{grid-column:1/-1;margin-top:0}
+  .cmeta .railbar{display:none}
   .shead{gap:7px}
   .sname .stitle{font-size:15px;line-height:1.35}
   .sname small{font-size:10.5px;line-height:1.45}
-  .lastmsg{margin-top:10px;padding-top:10px;font-size:12px}
+  .lastmsg{margin-top:8px;padding-top:4px;border-top:0;font-size:12px}
   .searchbar{top:var(--mobile-head-h);margin-left:-1px;margin-right:-1px}
   .notificationbar{top:var(--mobile-head-h);margin-left:-1px;margin-right:-1px}
   #notificationlayout,#notificationlayout.detail-open{display:block}

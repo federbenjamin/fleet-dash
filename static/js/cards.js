@@ -148,11 +148,10 @@ function cardCls(s){
   if(s.ui_group==='history')return'dorm';
   return s.reason_label==='Slow'?'stalled':'';
 }
-// The Console card's meta strip: status dot+label, model, context bar, quiet
-// time, live agent count. One DOM node, two presentations: the desktop right
-// rail, and on mobile an inline status row directly under the header (10a) —
-// `.cmain{display:contents}` lets flex `order` interleave it there. Alert
-// states (stalled / limit) darken the rail surface and redden the quiet clock.
+// The Console card's meta strip: status dot+label, model, context, quiet time,
+// and conditional live-work details. Desktop presents one right rail. Mobile
+// keeps the four primary facts directly below the header and adds a second row
+// only while a tool, compaction, skill, or subagent is active.
 // "stalled" means frozen mid-tool (invariant 7), but until now the card never
 // said WHICH tool — so a session wedged on a hung command and one running a slow
 // build looked identical. This comes from the transcript fold, not a screen read,
@@ -173,21 +172,24 @@ function cardMetaRail(s){
   const label=String(s.reason_label||stateLabel[s.state]||s.state||'').toLowerCase();
   const running=(s.agents||[]).filter(a=>!terminalAgentStates.has(a.state)).length;
   const ctx=s.ctx_pct==null?
-    (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow">${fmtTok(s.ctx_tokens)} tok</span>`):
-    `<span class="mrow">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
-  return`<div class="cmeta${cls==='stalled'?' alert':''}">
-      <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
-      <span class="mrow cmodel">${modelLabel(s)}</span>
-      ${ctx}
-      ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
-        `<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
-      ${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
+    (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow ccontext">${fmtTok(s.ctx_tokens)} tok</span>`):
+    `<span class="mrow ccontext">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
+  const secondary=`${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
         'seen on the terminal — Fleet has been watching it compact for at least this long, and it may have started earlier':
         'a compaction is running — the transcript is frozen until it finishes'}">⧉ compacting ${
         s.compacting_source==='screen'?'≥':''}${fmtAge(s.compacting)}</span>`:''}
       ${activeToolChip(s)}
       ${s.running?`<span class="mrow runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
-      ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}
+      ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}`;
+  return`<div class="cmeta${cls==='stalled'?' alert':''}">
+      <div class="cmeta-primary">
+        <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
+        <span class="mrow cmodel">${modelLabel(s)}</span>
+        ${ctx}
+        ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
+          `<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
+      </div>
+      ${secondary.trim()?`<div class="cmeta-secondary">${secondary}</div>`:''}
     </div>`;
 }
 // The volatile top of the card — rebuilt every poll (header, peek, pending,

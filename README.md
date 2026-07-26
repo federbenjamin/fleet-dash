@@ -52,8 +52,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
   Search, Workstreams, Insights, and Settings. At 390×844 and other narrow widths it becomes
   a fixed bottom bar (mono-caps labels, amber active destination and unread badge); Insights and
-  Settings live under More. Mobile session cards render their status — state, model, context,
-  quiet time, agent count — as an inline row directly under the card header. The URL hash preserves destinations
+  Settings live under More. Mobile session cards render state, model, context text, and quiet time
+  in one row directly under the card header; active tools, compaction, skills, and agents add a
+  second row only while present. The mobile row omits the desktop context gauge. The URL hash preserves destinations
   across refresh and browser/native back gestures (legacy `#history` links land on Search
   TYPE=SESSION). Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
