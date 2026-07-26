@@ -223,6 +223,66 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertTrue(context["read_only"])
         self.assertEqual(context["messages"][-1]["text"], "Working now")
 
+    def test_managed_thread_uses_rollout_only_when_app_server_omits_settings(self):
+        class Observer:
+            def observe(self, thread_id):
+                self.seen = thread_id
+                return {"model": "gpt-5.6-sol", "effort": "xhigh",
+                        "messages": [{"role": "assistant",
+                                      "text": "rollout text must not replace App Server"}],
+                        "agents": [{"native_session_id": "child-one",
+                                    "model": "gpt-5.6-terra", "effort": "high"}],
+                        "revision": "rollout:settings"}
+
+        thread = {**self.thread("managed"), "model": "", "effort": None,
+                  "turns": [{"id": "turn", "status": "completed",
+                             "items": [{"type": "agentMessage",
+                                        "text": "App Server message"},
+                                       {"type": "collabAgentToolCall",
+                                        "receiverThreadIds": ["child-one"],
+                                        "agentsStates": {
+                                            "child-one": {"status": "completed"}}}]}]}
+        client = FixtureClient([thread])
+        client.details["managed"] = dict(thread)
+        observer = Observer()
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, stall_seconds=30,
+                               external_observer=observer,
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
+        adapter._remember("managed", "default")
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertEqual((session["model"], session["effort"]),
+                         ("gpt-5.6-sol", "xhigh"))
+        self.assertEqual((session["agents"][0]["model"],
+                          session["agents"][0]["effort"]),
+                         ("gpt-5.6-terra", "high"))
+        self.assertEqual(session["last_msg"]["text"], "App Server message")
+        self.assertFalse(session["observed_external"])
+
+    def test_managed_saved_settings_beat_an_older_rollout_fallback(self):
+        class Observer:
+            def observe(self, thread_id):
+                return {"model": "gpt-5.4", "effort": "medium",
+                        "messages": [], "agents": [], "revision": "rollout:old"}
+
+        thread = {**self.thread("managed"), "model": "", "effort": None}
+        client = FixtureClient([thread])
+        client.details["managed"] = dict(thread)
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: 1000, external_observer=Observer(),
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
+        adapter._remember("managed", "default", {
+            "model": "gpt-5.6-sol", "effort": "high", "unmaterialized": False})
+        adapter._refresh()
+
+        session = adapter.sessions()[0]
+        self.assertEqual((session["model"], session["effort"]),
+                         ("gpt-5.6-sol", "high"))
+
     def test_completed_external_rollout_remains_available_until_dormant(self):
         class Observer:
             def observe(self, thread_id):

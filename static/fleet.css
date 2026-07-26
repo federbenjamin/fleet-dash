@@ -822,14 +822,18 @@ td.r,th.r{text-align:right}
 .cmsg .cbody p:last-child,.cmsg .cbody>*:last-child{margin-bottom:2px}
 .cmsg.user .cbody{background:var(--surface-raised);border:1px solid var(--line-soft)}
 .cmsg.assistant .cbody{background:var(--surface-input);border:1px solid var(--line)}
-/* Console chat (full conversation surfaces): user bubbles right, provider
-   bubbles left under a small mono provider label, receipts under the bubble */
-.aconvo .cmsg{display:flex;flex-direction:column;gap:4px;margin:0}
-.aconvo .cmsg.user{align-self:flex-end;align-items:flex-end;max-width:min(540px,92%)}
+/* Console chat (full conversation surfaces): every row uses the shared reading
+   rail so Fit/Centered changes the actual messages, not only their container. */
+.aconvo .cmsg{display:flex;align-self:stretch;align-items:stretch;flex-direction:column;
+  gap:4px;width:100%;max-width:none;margin:0}
+.aconvo .cmsg .cbody{box-sizing:border-box;width:100%;min-width:0}
+.aconvo .cmsg.user{align-self:stretch;align-items:stretch;max-width:none}
 .aconvo .cmsg.user .crole{display:none}
 .aconvo .cmsg.user .cbody{border-radius:10px 10px 3px 10px;padding:10px 14px;
   font:400 13.5px/1.5 var(--font-ui);color:var(--fg)}
-.aconvo .cmsg.assistant{align-self:flex-start;align-items:flex-start;max-width:min(620px,100%)}
+.aconvo .cmsg.user .receiptline{align-self:flex-end}
+.aconvo .cmsg.assistant{align-self:stretch;align-items:stretch;max-width:none}
+.aconvo .cmsg.assistant .crole{align-self:flex-start}
 .aconvo .cmsg.assistant .cbody{border-radius:10px 10px 10px 3px;padding:10px 14px;
   font-size:13.5px;color:var(--fg-bright)}
 .receiptline{display:flex;align-items:center;gap:6px;font:400 9.5px var(--font-mono);color:var(--fg-dim-1)}
@@ -1098,9 +1102,9 @@ html.keyboard-open body::after{content:"";position:fixed;inset:0;z-index:49;poin
 #sbody{flex:1;min-width:0;min-height:0;overflow:auto;padding:14px;overscroll-behavior:contain}
 #sactivity:empty{display:none}
 #sactivity{flex:0 0 auto;padding:0 14px 8px;background:transparent}
-.mainworkingrow{display:grid;max-width:none;margin:8px 0 0;gap:3px;color:var(--dim)}
+.mainworkingrow{display:grid;width:100%;max-width:none;margin:8px 0 0;gap:3px;color:var(--dim)}
 .mainworkingrow .crole{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.4px}
-.mainworkingrow .cbody{display:flex;align-items:center;gap:9px;width:max-content;max-width:100%;border:1px solid var(--line);
+.mainworkingrow .cbody{display:flex;box-sizing:border-box;align-items:center;gap:9px;width:100%;max-width:none;border:1px solid var(--line);
   border-radius:8px;background:var(--card);padding:8px 10px;font-size:12.5px}
 .workpulse{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(63,185,80,.45);
   animation:workpulse 1.7s ease-out infinite}.workpulse.slow{background:var(--amber);box-shadow:none;animation:none}

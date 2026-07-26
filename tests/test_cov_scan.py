@@ -398,6 +398,15 @@ class ScanStateTests(EngineFixture):
         session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
         self.assertIn(session["state"], ("stalled", "stalled_or_prompt"))
 
+    def test_quiet_busy_prose_is_running_not_stalled(self):
+        self.engine.cfg["stall_seconds"] = 1
+        self.write_registry(status="busy")
+        self._age_transcript(100)
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["state"], "running")
+        self.assertIsNone(session["active_tool"])
+
     def test_dormant_state(self):
         self.engine.cfg["dormant_seconds"] = 1
         self.write_registry(status="idle")
@@ -676,6 +685,27 @@ class ScanExceptionTests(EngineFixture):
                        "status": "idle", "name": "Dead"}, handle)
         ids = {r.get("sessionId") for r in self.engine.live_sessions()}
         self.assertNotIn("dead", ids)
+
+    def test_transcriptless_registry_reused_by_background_spare_is_skipped(self):
+        sid = "stale-registry"
+        with open(os.path.join(self.sessions, "spare.json"), "w") as handle:
+            json.dump({"sessionId": sid, "pid": PID, "cwd": self.cwd,
+                       "status": "idle", "name": sid}, handle)
+        with mock.patch.object(self.engine, "_claude_process_command",
+                               return_value="claude bg-spare --bg-spare socket"):
+            ids = {row.get("sessionId") for row in self.engine.live_sessions()}
+        self.assertNotIn(sid, ids)
+
+    def test_transcriptless_registry_with_exact_session_process_is_kept(self):
+        sid = "initializing-session"
+        with open(os.path.join(self.sessions, "initializing.json"), "w") as handle:
+            json.dump({"sessionId": sid, "pid": PID, "cwd": self.cwd,
+                       "status": "idle", "name": sid}, handle)
+        command = f"claude --session-id {sid} --fork-session"
+        with mock.patch.object(self.engine, "_claude_process_command",
+                               return_value=command):
+            ids = {row.get("sessionId") for row in self.engine.live_sessions()}
+        self.assertIn(sid, ids)
 
     def test_codex_usage_exception(self):
         self.codex.account_usage = mock.Mock(side_effect=RuntimeError("codex"))

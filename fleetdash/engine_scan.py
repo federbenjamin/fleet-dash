@@ -1,6 +1,6 @@
 """Registry scan, session organization, status lines, provider state, and
 Claude control-override reconciliation (invariants 5, 7, 22, 31, 40, 42)."""
-import json, os, re, sys, glob, time, sqlite3, secrets, threading, plistlib, hashlib, copy, queue
+import json, os, re, sys, glob, time, sqlite3, secrets, threading, plistlib, hashlib, copy, queue, shlex
 from collections import deque
 from .repo_center import RepositoryOutcomeCenter, observed_test_outcome
 
@@ -25,6 +25,29 @@ class ScanOps:
                     d = json.load(handle)
                 os.kill(d["pid"], 0)
             except Exception:
+                continue
+            # A dead registry PID can be recycled into Claude's background spare.
+            # `os.kill(pid, 0)` proves only that *some* process exists, and used
+            # to publish that spare as a model="other" session forever. Inspect
+            # only transcript-less startup rows; established sessions already
+            # have exact transcript identity.
+            sid = str(d.get("sessionId") or "")
+            cwd = str(d.get("cwd") or "")
+            transcript = os.path.join(cwd_to_project_dir(cwd), f"{sid}.jsonl")
+            if sid and not os.path.isfile(transcript):
+                command = self._claude_process_command(d)
+                try:
+                    argv = shlex.split(command)
+                except ValueError:
+                    argv = command.split()
+                if any(arg == "bg-spare" or arg == "--bg-spare" for arg in argv):
+                    continue
+                for index, arg in enumerate(argv[:-1]):
+                    if arg == "--session-id" and argv[index + 1] != sid:
+                        break
+                else:
+                    out.append(d)
+                    continue
                 continue
             out.append(d)
         return out
@@ -892,7 +915,8 @@ class ScanOps:
                     state = "idle"
             elif agents_running:
                 state = "running"
-            elif quiet > cfg["stall_seconds"] and turn != "awaiting_input":
+            elif (quiet > cfg["stall_seconds"] and turn != "awaiting_input"
+                  and mt.open_tool()):
                 state = "stalled"
             else:
                 state = "running"

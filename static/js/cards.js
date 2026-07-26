@@ -179,7 +179,8 @@ function cardMetaRail(s){
       <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
       <span class="mrow cmodel">${modelLabel(s)}</span>
       ${ctx}
-      ${s.quiet_s!=null&&s.ui_group!=='available'?`<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
+      ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
+        `<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
       ${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
         'seen on the terminal — Fleet has been watching it compact for at least this long, and it may have started earlier':
         'a compaction is running — the transcript is frozen until it finishes'}">⧉ compacting ${
