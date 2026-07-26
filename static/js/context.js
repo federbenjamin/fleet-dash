@@ -109,7 +109,11 @@ function scheduleOlderConversationObservation(){
 const modelLabel=s=>{
   const saved=sessionSettingActions.get(s?.session_id);
   const optimistic=sessionSettingActionPending(s?.session_id,saved)?saved:null;
-  const model=optimistic?.model||s.model||s.family||'?';
+  const family=String(s?.family||'');
+  const familyModel=!['codex','other'].includes(family)?family:'';
+  const unresolved=String(s?.convo_v||'').startsWith('starting:');
+  const model=optimistic?.model||s?.model||familyModel||
+    (unresolved?'Detecting…':'Model unavailable');
   const effort=optimistic&&Object.prototype.hasOwnProperty.call(optimistic,'effort')
     ?optimistic.effort:s.effort;
   return esc(model)+(effort?` · ${esc(effort)}`:'');

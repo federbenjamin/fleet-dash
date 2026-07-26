@@ -1436,6 +1436,17 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   const fit = await chat.evaluate(el => ({ width: el.getBoundingClientRect().width,
     available: el.parentElement.clientWidth - 28 }));
   expect(Math.abs(fit.width - fit.available)).toBeLessThan(2);
+  const fitRows = await chat.locator(':scope > .cmsg, :scope > .ctool, :scope > .cevt')
+    .evaluateAll(rows => rows.map(row => ({
+      row: row.getBoundingClientRect().width,
+      body: row.matches('.cmsg') ? row.querySelector('.cbody')?.getBoundingClientRect().width : null,
+      rail: row.parentElement.getBoundingClientRect().width,
+    })));
+  expect(fitRows.length).toBeGreaterThanOrEqual(4);
+  for (const row of fitRows) {
+    expect(Math.abs(row.row - row.rail)).toBeLessThan(2);
+    if (row.body != null) expect(Math.abs(row.body - row.rail)).toBeLessThan(2);
+  }
   await page.locator('#sclose').click();
 
   // Settings is a left-column destination (never a full-screen overlay): it
@@ -1473,6 +1484,16 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
     return { width: rect.width, left: rect.left-parent.left, right: parent.right-rect.right };});
   expect(centeredChat.width).toBeLessThanOrEqual(760);
   expect(Math.abs(centeredChat.left - centeredChat.right)).toBeLessThan(2);
+  const centeredRows = await chat.locator(':scope > .cmsg, :scope > .ctool, :scope > .cevt')
+    .evaluateAll(rows => rows.map(row => ({
+      row: row.getBoundingClientRect().width,
+      body: row.matches('.cmsg') ? row.querySelector('.cbody')?.getBoundingClientRect().width : null,
+      rail: row.parentElement.getBoundingClientRect().width,
+    })));
+  for (const row of centeredRows) {
+    expect(Math.abs(row.row - row.rail)).toBeLessThan(2);
+    if (row.body != null) expect(Math.abs(row.body - row.rail)).toBeLessThan(2);
+  }
   await page.locator('#sclose').click();
 
   await openFixtureFile(page,'codex:thread-one','artifact.md');
@@ -1707,6 +1728,15 @@ test('full chat renders main work as the newest non-interactive conversation row
   await expect(activity.locator('.mainworkingrow')).toBeVisible();
   await expect(activity.locator('button,summary,details')).toHaveCount(0);
   await expect(activity).not.toContainText('active subagent');
+  const workingWidths = await activity.locator('.mainworkingrow').evaluate(el => ({
+    row: el.getBoundingClientRect().width,
+    body: el.querySelector('.cbody').getBoundingClientRect().width,
+    available: el.parentElement.clientWidth-
+      parseFloat(getComputedStyle(el.parentElement).paddingLeft)-
+      parseFloat(getComputedStyle(el.parentElement).paddingRight),
+  }));
+  expect(Math.abs(workingWidths.row-workingWidths.available)).toBeLessThan(2);
+  expect(Math.abs(workingWidths.body-workingWidths.row)).toBeLessThan(2);
 
   await reset(page, 'cross-client-active');
   await page.evaluate(() => openSession('codex:thread-one'));
@@ -1789,7 +1819,23 @@ test('quiet age is limited to working session cards', async ({ page }) => {
   await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
 
   await reset(page, 'send-while-busy');
+  await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveCount(0);
+
+  await reset(page, 'active-tool');
   await expect(page.locator('[data-sid="claude-one"] .cquiet')).toHaveText('quiet 3s');
+});
+
+test('missing provider settings never masquerade as a model name', async ({ page }) => {
+  await reset(page);
+  expect(await page.evaluate(() => modelLabel({
+    provider:'codex',family:'codex',model:'',convo_v:'rollout:1'})))
+    .toBe('Model unavailable');
+  expect(await page.evaluate(() => modelLabel({
+    provider:'claude',family:'other',model:'',convo_v:'starting:42:idle'})))
+    .toBe('Detecting…');
+  expect(await page.evaluate(() => modelLabel({
+    provider:'codex',family:'codex',model:'gpt-5.6-sol',effort:'high'})))
+    .toBe('gpt-5.6-sol · high');
 });
 
 test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {

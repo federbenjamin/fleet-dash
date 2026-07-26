@@ -27,11 +27,12 @@ the provider's native control path. Built 2026-07-13; still evolving.
   opens beside the rail); on mobile the Now header keeps a compact summary chip such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
-  an adaptive 136–164px meta rail on the right carries status, model, context %, quiet time, and live agent
+  an adaptive 136–164px meta rail on the right carries status, model, context %, tool-quiet time, and live agent
   count without clipping ("Console" design system — see `design-system/`). The configured card
   preview line count is a maximum: short previews hug their text, longer previews clamp, and the
   whole non-control card surface opens Chat. There is no separate three-dot expansion control.
-  A working session also names the tool
+  Quiet time appears only while a tool is actually open; ordinary provider work with no open tool
+  remains Working instead of being mislabeled stalled. A working session also names the tool
   call it is waiting on — `Bash · 4m`, turning red once the session counts as stalled — so a
   wedged command and a slow build no longer look identical. It comes from the transcript, so it
   works everywhere, and the workspace repeats it beside "Main agent working". Pin/unpin is right-click on the header
@@ -194,8 +195,9 @@ External sessions retain the ordinary **Working** and **Available** lifecycle la
 
 - Threads created by Fleet Dash are remembered in `codex_threads.json`, including their runtime
   ownership, mode, model, effort, and last normalized conversation, and resume after daemon
-  restarts. Codex's `thread/list` and `thread/read` responses omit model and effort, so Fleet uses
-  those saved selections after a daemon restart or compaction instead of losing the ability to send
+  restarts. Codex's `thread/list` and `thread/read` responses can omit model and effort, so Fleet
+  falls back to saved selections and then the exact local rollout's `turn_context`, instead of
+  rendering the provider family as though `codex` were a model or losing the ability to send
   the next Plan-mode turn. Every new
   Fleet Codex session immediately sends a visible, normal `hi` turn. That creates the rollout the
   runtime needs instead of leaving an empty, unresumable thread shell. Fleet never starts or resumes
@@ -448,8 +450,9 @@ the provider without affecting Claude sessions.
   therefore use the exact `＋ | message | Send` row, image drafts, Send behavior, and delivery
   feedback. Its resting controls are one 44px row; newline input grows upward to four lines.
   Session chat, Markdown, subagent chat, and the main-agent working signal share the persisted
-  reading-width setting. **Fit the screen** uses the available reader width; **Centered** caps those
-  reading surfaces at 760px. Question, status, and composer controls keep their restrained widths.
+  reading-width setting. **Fit the screen** makes every message, tool, event, and working row use
+  the available reader rail; **Centered** caps that same complete rail at 760px. Question, status,
+  and composer controls keep their restrained widths.
 - **Tap a card** → opens the session workspace on Chat. Files, Subagents, and Details remain tabs in
   that same workspace, with the draft and reading state preserved while switching.
 - **Why this is here** appears in every expanded card and as a **Why here?** control in full chat.

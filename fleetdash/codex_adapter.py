@@ -521,12 +521,14 @@ class CodexAdapter:
                 managed.add(tid)
                 is_managed = True
             observation = None
+            settings_observation = None
             if (not is_managed and self.external_observer and
                     (tid in tracked_external or tid in recent_external)):
                 try:
                     observation = self.external_observer.observe(tid)
                 except Exception as exc:
                     observation = {"error": str(exc), "messages": []}
+                settings_observation = observation
             detail_error = None
             if is_managed:
                 retry_at = self._detail_retry_after.get(tid, 0)
@@ -539,6 +541,18 @@ class CodexAdapter:
                 else:
                     detail_error = detail_failures.get(tid)
             live = self.client.thread_state.setdefault(tid, {})
+            # thread/list and thread/read can omit settings even for a managed,
+            # actively connected thread. The exact local rollout still records
+            # turn_context model/effort, so use it only as a settings fallback;
+            # App Server remains authoritative for lifecycle, messages, and
+            # mutation ownership.
+            if (is_managed and self.external_observer and
+                    (not (live.get("model") or thread.get("model")) or
+                     not (live.get("effort") or thread.get("effort")))):
+                try:
+                    settings_observation = self.external_observer.observe(tid)
+                except Exception:
+                    settings_observation = None
             pending = self._pending(tid, live.get("pending"))
             updated = thread.get("updatedAt") or thread.get("createdAt")
             turn_lifecycle = _latest_turn_lifecycle(thread)
@@ -605,14 +619,16 @@ class CodexAdapter:
             # as the durable restart/compaction fallback for owned threads.
             # For owned live threads, App Server's state is newer than a
             # thread/read projection built before a settings update completed.
-            model = ((live.get("model") or thread.get("model")) if is_managed else
+            model = ((live.get("model") or thread.get("model") or
+                      persisted_meta.get("model") or
+                      (settings_observation or {}).get("model")) if is_managed else
                      ((observation or {}).get("model") or thread.get("model") or
-                      live.get("model"))) or \
-                    persisted_meta.get("model") or ""
+                      live.get("model") or persisted_meta.get("model"))) or ""
             if is_managed:
                 effort = (live.get("effort") if "effort" in live else
-                          thread.get("effort") if "effort" in thread else
-                          persisted_meta.get("effort"))
+                          thread.get("effort") if thread.get("effort") else
+                          persisted_meta.get("effort") or
+                          (settings_observation or {}).get("effort"))
             else:
                 effort = ((observation or {}).get("effort") if observation else None) or \
                          (thread.get("effort") if "effort" in thread else
@@ -654,6 +670,18 @@ class CodexAdapter:
             agents = _agents(thread, tid)
             if (observation or {}).get("agents"):
                 agents = observation["agents"]
+            elif is_managed and (settings_observation or {}).get("agents"):
+                observed_agents = {
+                    item.get("native_session_id") or
+                    str(item.get("agent_id") or "").removeprefix("agent-"): item
+                    for item in settings_observation["agents"]
+                }
+                for agent in agents:
+                    observed_agent = observed_agents.get(agent.get("agent_id")) or {}
+                    if not agent.get("model") and observed_agent.get("model"):
+                        agent["model"] = observed_agent["model"]
+                    if not agent.get("effort") and observed_agent.get("effort"):
+                        agent["effort"] = observed_agent["effort"]
             previous_agents = {
                 item.get("agent_id"): item
                 for item in ((previous_by_tid.get(tid) or {}).get("agents") or [])
