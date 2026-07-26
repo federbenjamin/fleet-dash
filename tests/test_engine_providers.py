@@ -90,7 +90,33 @@ def codex_session():
                 "close": True, "exact_cost": False, "focus_terminal": False}}
 
 
+def freshen_rows(path):
+    """Restamp a fixture transcript so its newest row is `now`.
+
+    Quiet time comes from the newest FOLDED row, not the file's mtime
+    (invariant 81), so a fixture whose rows are dated 2026-07-15 describes a
+    session that has been silent for days — which is a dormant card, not the
+    live one these tests mean. Row order is preserved (one second apart)
+    because the convo fold inserts events by timestamp.
+    """
+    with open(path) as handle:
+        rows = [json.loads(line) for line in handle.read().splitlines()
+                if line.strip()]
+    stamped = [row for row in rows if row.get("timestamp")]
+    now = time.time()
+    for offset, row in enumerate(stamped):
+        when = now - (len(stamped) - 1 - offset)
+        row["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                         time.gmtime(when))
+    with open(path, "w") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
 class EngineProviderTest(unittest.TestCase):
+    def freshen_transcript(self, path=None):
+        freshen_rows(path or self.transcript)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = os.path.join(self.tmp.name, "fleet")
@@ -145,6 +171,7 @@ class EngineProviderTest(unittest.TestCase):
         with open(os.path.join(self.sessions, "same.json"), "w") as handle:
             json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
                        "status": "idle", "name": "Claude", "startedAt": 1}, handle)
+        self.freshen_transcript()
         cfg = dict(DEFAULT_CONFIG)
         cfg.update({"codex_enabled": False, "act_token": "secret", "ntfy_topic": "",
                     "terminal_transport": "applet",
@@ -3126,7 +3153,9 @@ class EngineProviderTest(unittest.TestCase):
             "limit_value": 1, "block_spawns": True,
         }]})
         snapshot = self.engine.scan()
-        self.assertGreater(snapshot["sessions"][0].get("total_tokens") or 0, 1)
+        existing = next(item for item in snapshot["sessions"]
+                        if item["provider"] == "claude")
+        self.assertGreater(existing.get("total_tokens") or 0, 1)
         budget_action = next(item for item in snapshot["actions"]
                              if item.get("kind") == "budget")
         self.assertIsNone(budget_action["session_id"])
@@ -3646,13 +3675,20 @@ class EngineProviderTest(unittest.TestCase):
                 for row in rows:
                     handle.write(json.dumps(row) + "\n")
 
+        # Relative to now: an agent's quiet time is measured from its newest row
+        # (invariant 81), so fixed 2026-07-16 stamps would make the resumed agent
+        # days old — stalled rather than the running one this asserts on.
+        def stamp(offset):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z",
+                                 time.gmtime(time.time() + offset))
+
         killed_id = "agent-killed123"
         resumed_id = "agent-resumed123"
-        write_agent(killed_id, [{"type": "user", "timestamp": "2026-07-16T20:39:44.478Z",
+        write_agent(killed_id, [{"type": "user", "timestamp": stamp(-3),
             "message": {"role": "user", "content": [{"type": "text",
                 "text": "[Request interrupted by user]"}]}}])
         write_agent(resumed_id, [{"type": "assistant",
-            "timestamp": "2026-07-16T20:39:45.000Z", "message": {
+            "timestamp": stamp(-1), "message": {
                 "role": "assistant", "stop_reason": "tool_use",
                 "content": [{"type": "tool_use", "id": "still-running",
                              "name": "Bash", "input": {}}]}}])
@@ -3666,7 +3702,7 @@ class EngineProviderTest(unittest.TestCase):
                           "<status>killed</status>\n"
                           "</task-notification>")
                 handle.write(json.dumps({"type": "attachment",
-                    "timestamp": "2026-07-16T20:39:44.480Z",
+                    "timestamp": stamp(-2),
                     "attachment": {"type": "queued_command",
                                    "commandMode": "task-notification",
                                    "prompt": prompt}}) + "\n")

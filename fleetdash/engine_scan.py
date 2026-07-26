@@ -811,8 +811,7 @@ class ScanOps:
                 "delivered_paths": dict(mt.delivered_paths),
             }
             self.drain_stats(mt)
-            mtime = os.path.getmtime(main_path)
-            quiet = now - mtime
+            quiet = self.transcript_quiet(mt, main_path, now)
 
             reg_status = reg.get("status")  # 'busy' | 'shell' | 'idle' | 'waiting' | None
             # Hooks are positive evidence. The bare registry flag is debounced:
@@ -1960,6 +1959,26 @@ class ScanOps:
             "lifetime_scope": "local_transcripts",
         }
 
+    @staticmethod
+    def transcript_quiet(tail, path, now):
+        """Seconds since this transcript last carried real conversation activity.
+
+        NOT `now - mtime` (invariant 81). Claude rewrites a finished transcript
+        in place long after its final row — measured 2026-07-25, one session
+        reported 12 minutes of quiet while its newest row was 20 hours old, and
+        every quiet-keyed rule (stall, dormant, the screen-observation window)
+        was blinded by it. The fold's own clock is the honest one; the mtime
+        remains the fallback for a file that has produced no timestamped row and
+        has not grown since the daemon started.
+        """
+        activity = getattr(tail, "activity_ep", 0.0) or 0.0
+        if not activity:
+            try:
+                activity = os.path.getmtime(path)
+            except OSError:
+                return 0.0
+        return max(0.0, now - min(activity, now))
+
     def scan_agents(self, subdir, now, parent_idle=False, parent=None):
         out = []
         cfg = self.cfg
@@ -1978,6 +1997,8 @@ class ScanOps:
                 meta = {}
             t = self.tail_for(jl)
             grew = t.poll()
+            # (quiet is computed from the fold below, not the file's mtime —
+            # invariant 81)
             self._claude_agent_context_snapshots[(parent_sid, agent_id)] = {
                 "revision": t.convo_rev,
                 "messages": copy.deepcopy(list(t.convo)),
@@ -1985,8 +2006,7 @@ class ScanOps:
                 "status_metrics": copy.deepcopy(t.status_metrics(cfg)),
             }
             self.drain_stats(t)
-            mtime = os.path.getmtime(jl)
-            quiet = now - mtime
+            quiet = self.transcript_quiet(t, jl, now)
 
             # An agent is WORKING only while something is in flight: a tool_use waiting
             # on its result, or a tool_result it hasn't answered yet. If its last row is
@@ -2019,6 +2039,17 @@ class ScanOps:
                 if notice_ep is not None and (child_ep is None or notice_ep >= child_ep):
                     state = "done" if notice.get("status") == "completed" else "ended"
                     done = True
+            # An interrupted agent says so IN ITS OWN TRANSCRIPT — Claude writes
+            # `[Request interrupted by user]` as the next row — and until
+            # 2026-07-25 nothing here read it. The other two signals cannot cover
+            # it: an ASYNC agent's parent tool_result is the spawn
+            # acknowledgement ("Async agent launched successfully", is_error
+            # unset), and no task-notification is emitted for an Esc. The agent
+            # that exposed this had two rows, zero assistant output and $0.00,
+            # and sat "running" for 20 hours pinning its session in Working;
+            # 54 of 3,529 local subagent transcripts end this way.
+            elif t.interrupted_tail:
+                state, done = "ended", True
             elif not done and parent_idle and quiet > 2 * cfg["agent_done_quiet_seconds"]:
                 state = "ended"         # canceled/interrupted: no end_turn will ever come
                 done = True             # finalize its spend in the ledger

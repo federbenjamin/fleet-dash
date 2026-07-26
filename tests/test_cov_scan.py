@@ -367,7 +367,22 @@ class TurnFenceTests(EngineFixture):
 
 class ScanStateTests(EngineFixture):
     def _age_transcript(self, seconds):
+        """Make the transcript look `seconds` old to the scan.
+
+        Touching the file is no longer enough: quiet comes from the newest
+        FOLDED row, not the mtime (invariant 81), so the last row has to carry
+        the age too — which is also what a real quiet session looks like."""
         old = time.time() - seconds
+        with open(self.transcript) as handle:
+            rows = [json.loads(line) for line in handle.read().splitlines()
+                    if line.strip()]
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(old))
+        for row in rows:
+            if row.get("timestamp"):
+                row["timestamp"] = stamp
+        with open(self.transcript, "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
         os.utime(self.transcript, (old, old))
 
     def test_stalled_or_prompt_state(self):
@@ -390,6 +405,51 @@ class ScanStateTests(EngineFixture):
         fleet = self.engine.scan()
         session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
         self.assertEqual(session["state"], "dormant")
+
+    def test_a_touched_transcript_is_not_activity(self):
+        """A rewritten mtime must not make a silent session look busy.
+
+        Claude rewrites a finished transcript in place — its trailing
+        `bridge-session` record — hours after the last row. Production 2026-07-25
+        held a session in Working for 20 hours partly on that: it reported 12
+        minutes of quiet while its newest row was 20 hours old. Quiet comes from
+        the fold (invariant 81), so a touch changes nothing.
+        """
+        self.engine.cfg["dormant_seconds"] = 1
+        self.write_registry(status="idle")
+        self._age_transcript(6000)
+        os.utime(self.transcript, None)          # the phantom touch, byte-identical
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["state"], "dormant")
+        self.assertGreater(session["quiet_s"], 5000)
+
+    def test_growth_after_the_first_read_is_activity_without_a_timestamp(self):
+        """A row carrying no timestamp still proves the session moved."""
+        tail = self.engine.tail_for(self.transcript)
+        tail.poll()
+        self.append_transcript({"type": "bridge-session", "sessionId": "same"})
+        tail.poll()
+        self.assertGreater(tail.activity_ep, time.time() - 5)
+        self.assertLess(self.engine.transcript_quiet(tail, self.transcript,
+                                                     time.time()), 5)
+
+    def test_quiet_falls_back_to_mtime_without_a_folded_clock(self):
+        old = time.time() - 900
+        os.utime(self.transcript, (old, old))
+        tail = self.engine.tail_for(self.transcript)      # never polled
+        self.assertAlmostEqual(
+            self.engine.transcript_quiet(tail, self.transcript, time.time()),
+            900, delta=5)
+        self.assertEqual(
+            self.engine.transcript_quiet(tail, self.transcript + ".gone",
+                                         time.time()), 0.0)
+
+    def test_a_clock_ahead_of_now_never_reports_negative_quiet(self):
+        tail = self.engine.tail_for(self.transcript)
+        tail.activity_ep = time.time() + 600
+        self.assertEqual(
+            self.engine.transcript_quiet(tail, self.transcript, time.time()), 0.0)
 
     def test_a_transcript_question_is_never_a_pending_request(self):
         """Questions come only from the hook capture (invariant 1).
@@ -679,6 +739,77 @@ class ScanAgentsTests(EngineFixture):
         agents = self.engine.scan_agents(subdir, time.time() + 100,
                                          parent_idle=True)
         self.assertEqual(agents[0]["state"], "ended")
+
+    def _write_interrupted(self, subdir, aid, trailing=None):
+        with open(os.path.join(subdir, aid + ".meta.json"), "w") as handle:
+            json.dump({"agentType": "review-lens", "description": "d",
+                       "toolUseId": "tool-" + aid}, handle)
+        rows = [{"type": "user", "timestamp": "2026-07-16T00:00:00Z",
+                 "message": {"role": "user", "content": "the task"}},
+                {"type": "user", "timestamp": "2026-07-16T00:00:01Z",
+                 "message": {"role": "user", "content": [
+                     {"type": "text", "text": "[Request interrupted by user]"}]}}]
+        if trailing:
+            rows.append(trailing)
+        with open(os.path.join(subdir, aid + ".jsonl"), "w") as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+
+    def test_interrupted_agent_is_ended_even_under_a_busy_parent(self):
+        """The agent's own transcript records the stop; read it.
+
+        Production 2026-07-25: an async agent was interrupted 45 ms after launch,
+        wrote `[Request interrupted by user]`, produced no assistant row and
+        $0.00 — and sat "running" for 20 hours, pinning its session in Working.
+        Neither other terminal signal can see it: the parent's Agent tool_result
+        is the async-spawn acknowledgement and stays successful, and an Esc emits
+        no task-notification. 54 of 3,529 local subagent transcripts end this way.
+        """
+        subdir = self._subdir()
+        self._write_interrupted(subdir, "agent-esc")
+        agents = self.engine.scan_agents(subdir, time.time(), parent_idle=False)
+        self.assertEqual(agents[0]["state"], "ended")
+
+    def test_an_agent_resumed_after_its_interruption_is_not_ended(self):
+        """An agent can be resumed through SendMessage; only the NEWEST row counts."""
+        subdir = self._subdir()
+        self._write_interrupted(subdir, "agent-resumed", trailing={
+            "type": "assistant", "timestamp": "2026-07-16T00:00:02Z",
+            "message": {"role": "assistant", "model": "claude-sonnet",
+                        "stop_reason": "tool_use", "usage": {"input_tokens": 5},
+                        "content": [{"type": "tool_use", "id": "x",
+                                     "name": "Bash", "input": {}}]}})
+        tail = self.engine.tail_for(
+            os.path.join(subdir, "agent-resumed.jsonl"))
+        tail.poll()
+        agents = self.engine.scan_agents(subdir, tail.activity_ep + 1,
+                                         parent_idle=False)
+        self.assertEqual(agents[0]["state"], "running")
+
+    def test_an_interrupted_agent_leaves_its_session_out_of_working(self):
+        """The whole failure, end to end: ghost agent -> Working forever."""
+        self.write_registry(status="busy")          # frozen when the session parked
+        subdir = self._subdir()
+        self._write_interrupted(subdir, "agent-ghost")
+        self._age_transcript(4 * 3600)
+        fleet = self.engine.scan()
+        session = next(s for s in fleet["sessions"] if s["session_id"] == "same")
+        self.assertEqual(session["agents_running"], 0)
+        self.assertEqual((session["state"], session["ui_group"]),
+                         ("dormant", "history"))
+
+    def _age_transcript(self, seconds):
+        old = time.time() - seconds
+        with open(self.transcript) as handle:
+            rows = [json.loads(line) for line in handle.read().splitlines()
+                    if line.strip()]
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(old))
+        with open(self.transcript, "w") as handle:
+            for row in rows:
+                if row.get("timestamp"):
+                    row["timestamp"] = stamp
+                handle.write(json.dumps(row) + "\n")
+        os.utime(self.transcript, (old, old))
 
 
 class ScanLockScopeTests(EngineFixture):

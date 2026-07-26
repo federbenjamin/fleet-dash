@@ -13,7 +13,8 @@ fleetdash/                everything server.py imports
   config.py                 DEFAULT_CONFIG, load_config, pricing, shared constants
   placement.py              Now-queue classification + reply-request detection
   screen.py                 pure TUI screen classifier (question/permission/trust/input)
-  tail.py                   Tail: incremental transcript fold (offsets, convo/files, usage)
+  tail.py                   Tail: incremental transcript fold (offsets, convo/files, usage,
+                            activity clock)
   engine.py                 Engine = __init__ + constants + spend CLI
   engine_scan.py            registry scan, session organization, status, control state
   engine_act.py             act(): the injection dispatcher
@@ -103,8 +104,8 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
 
 - Native prompt capture & injection (Claude TUI): 1–5, 9, 14, 18, 40, 65, 66, 68, 75, 77, 78
 - Applet, transports & click latency: 3, 24, 25, 73, 74, 79
-- Session/agent state & Now placement: 7, 31–33, 49, 61, 69
-- Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43
+- Session/agent state & Now placement: 7, 31–33, 49, 61, 69, 81
+- Transcript folding, effort & usage accounting: 11, 12, 15–17, 22, 42, 43, 81
 - Codex runtime & ownership: 30, 38, 49, 65, 69
 - Security boundaries (files, spawn, trust, uploads, staging, closed sessions):
   10, 19–21, 23, 41, 54, 56, 74
@@ -224,6 +225,20 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
    A task id can resume, so a terminal notice applies only when its timestamp is at or after the
    child transcript's newest row; later child output supersedes it. The *presence* of the parent's
    ordinary Agent `tool_result` still proves nothing because a background agent gets one at spawn.
+   **INTERRUPTED is a third terminal signal, and it is written in the CHILD's own transcript.**
+   Claude records an Esc as a `[Request interrupted by user]` row in the transcript whose turn it
+   stopped, and for a subagent that is the ONLY durable record: an async agent's parent
+   `tool_result` is the spawn acknowledgement ("Async agent launched successfully", `is_error`
+   unset), and an Esc emits no `<task-notification>`. `Tail.interrupted_tail` is true only while
+   such a row is the NEWEST one — an agent can be resumed through SendMessage, and one interrupted
+   agent in the local corpus has rows after its marker — and `scan_agents` maps it straight to
+   `ended`. Until 2026-07-25 nothing read it, and the cost was the whole failure this invariant
+   exists to prevent: an agent interrupted 45 ms after launch (2 rows, no assistant output, $0.00)
+   counted as running for 20 hours and pinned its session in Working, because `parent_idle` was the
+   only rule that could still have finalized it and the parent's registry row had frozen at `busy`
+   when the session parked into a background job. 54 of 3,529 local subagent transcripts end this
+   way. In a MAIN transcript the same marker is routinely followed by the operator's next
+   instruction, so it is never session state.
 8. **Legacy ntfy is manual-test-only.** Provider scans and daemon startup never dispatch ntfy.
    The single token-gated test route emits fixed generic copy only when the explicit legacy switch
    and topic are configured; it has no click URL, automatic category, fallback, or duplicate path.
@@ -1408,6 +1423,24 @@ new invariants append. Quick map by theme (an invariant may appear in two groups
     from the on-request `/api/screen` per prompt. The fleet snapshot is cached on the device by the
     service worker, and terminal contents do not belong in an offline cache.
 
+81. **A transcript's mtime is not its activity.** Claude rewrites a finished transcript IN PLACE
+    long after its last row — the trailing `bridge-session` record, byte size and line count
+    unchanged. Measured 2026-07-25 across the transcripts touched that day, 6 of 8 carried an
+    mtime 3.8–22.9 hours past their newest row. `quiet_s` was `now - getmtime`, so a session
+    silent for 20 hours reported 12 minutes and EVERY quiet-keyed rule was blinded at once:
+    `stall_seconds`, `dormant_seconds` (a session could therefore never fall to History), the
+    `turn_done_window`, and the screen-observation window (invariant 78).
+    `Tail.activity_ep` is the honest clock — the max row timestamp ever folded, plus the wall
+    clock of any growth AFTER the Tail's first read — and `Engine.transcript_quiet` is the only
+    way to ask, for sessions (`_scan_claude_sessions`) and agents (`scan_agents`) alike. Three
+    details are load-bearing. It is a MAX because compaction appends rows carrying earlier
+    timestamps (invariant 17) and a clock that walks backwards would call a compacting session
+    long-silent. The first read must NOT stamp growth: a daemon restart folds the whole file at
+    once and would report every day-old session as live. And real growth counts even when the new
+    row carries no timestamp, which is the case the bridge-session rewrite would otherwise miss in
+    the other direction. The mtime survives as the fallback for a file that has produced no
+    timestamped row and has not grown since startup.
+
 ## Dev workflow
 
 - Coverage: `scripts/coverage.sh [--show-missing]` runs the full unittest suite under
@@ -1501,7 +1534,8 @@ because they are also spawned directly as scripts by absolute path.
   (invariant 77). Text in, one label out; it captures nothing itself, so it can never put a
   subprocess on a hot path. Markers come from real sandbox frames, never from memory.
 - `fleetdash/tail.py` — Tail (incremental jsonl fold + convo/files ring buffers +
-  usage_stats counters).
+  usage_stats counters + the activity clock quiet time rides, invariant 81, and the
+  interruption marker that ends a subagent, invariant 7).
 - `fleetdash/engine.py` — the Engine class (imports + `__init__` + class
   constants) composed from ten topical mixins, plus the spend CLI
   (`PYTHONPATH=~/.claude/fleet-dash python3 -m fleetdash.engine spend --cwd|--session`,
