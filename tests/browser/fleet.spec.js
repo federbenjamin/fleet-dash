@@ -221,9 +221,10 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
   const now=await page.evaluate(()=>{
     const card=document.querySelector('[data-sid="codex:thread-one"]');
     const top=card.querySelector('.ctop'),head=card.querySelector('.shead'),
-      meta=card.querySelector('.cmeta'),primary=meta.querySelector('.cmeta-primary'),
+      meta=card.querySelector('.cmeta'),
       peek=card.querySelector('.sessionpeek');
-    const primaryTops=[...primary.children].map(child=>Math.round(child.getBoundingClientRect().top));
+    const primary=[...meta.querySelectorAll(':scope>:is(.cstat,.cmodel,.ccontext,.cquiet)')];
+    const primaryTops=primary.map(child=>Math.round(child.getBoundingClientRect().top));
     return{
       documentWidth:document.documentElement.scrollWidth,viewport:innerWidth,
       cardLeft:card.getBoundingClientRect().left,cardRight:card.getBoundingClientRect().right,
@@ -231,6 +232,8 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
       headBottom:head.getBoundingClientRect().bottom,metaTop:meta.getBoundingClientRect().top,
       metaBottom:meta.getBoundingClientRect().bottom,peekTop:peek?.getBoundingClientRect().top||null,
       primaryRows:new Set(primaryTops).size,
+      wrapperCount:meta.querySelectorAll('.cmeta-primary,.cmeta-secondary').length,
+      directPrimary:primary.every(item=>item.parentElement===meta),
       contextBarDisplay:getComputedStyle(meta.querySelector('.railbar')).display,
       titleSize:parseFloat(getComputedStyle(card.querySelector('.stitle')).fontSize),
     };
@@ -242,6 +245,8 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
   expect(now.metaTop).toBeGreaterThanOrEqual(now.headBottom);
   if(now.peekTop!==null)expect(now.metaBottom).toBeLessThanOrEqual(now.peekTop);
   expect(now.primaryRows).toBe(1);
+  expect(now.wrapperCount).toBe(0);
+  expect(now.directPrimary).toBe(true);
   expect(now.contextBarDisplay).toBe('none');
   expect(now.titleSize).toBeGreaterThanOrEqual(15);
 
@@ -1846,12 +1851,12 @@ test('a working card names the tool it is blocked on, and a stalled one flags it
   await expect(tool).not.toHaveClass(/crit/);
   if(testInfo.project.name.startsWith('mobile')){
     const rows=await page.locator('[data-sid="claude-one"] .cmeta').evaluate(meta=>({
-      primaryBottom:meta.querySelector('.cmeta-primary').getBoundingClientRect().bottom,
-      secondaryTop:meta.querySelector('.cmeta-secondary').getBoundingClientRect().top,
+      primaryBottom:meta.querySelector('.cstat').getBoundingClientRect().bottom,
+      secondaryTop:meta.querySelector('.ctool').getBoundingClientRect().top,
       toolParent:meta.querySelector('.ctool').parentElement.className,
     }));
     expect(rows.secondaryTop).toBeGreaterThanOrEqual(rows.primaryBottom);
-    expect(rows.toolParent).toBe('cmeta-secondary');
+    expect(rows.toolParent).toMatch(/cmeta/);
   }
 
   // stalled: the count of other open calls shows, and the chip goes critical

@@ -447,7 +447,6 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoff
 .cmeta{width:var(--w-meta-rail);flex:none;border-left:1px solid var(--line-peek);
   background:var(--meta-rail-bg);padding:12px;display:flex;flex-direction:column;gap:7px;
   font:400 10.5px var(--font-mono);color:var(--fg-dim-1)}
-.cmeta-primary,.cmeta-secondary{display:contents}
 .cmeta.alert{background:var(--meta-rail-alert-bg)}
 .mrow{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .cstat{display:flex;align-items:center;gap:6px;font-weight:600}
@@ -1755,16 +1754,17 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .card .cmain,.card.needs .cmain{display:contents;padding:0}
   .card .cmain>*{order:2}
   .card .cmain>.shead{order:0}
-  .card>.ctop>.cmeta{order:1;width:auto;display:block;margin-top:9px;padding:8px 0;
+  .card>.ctop>.cmeta{order:1;width:auto;display:flex;flex-flow:row wrap;align-items:center;
+    gap:0 8px;margin-top:9px;padding:8px 0;
     border-left:0;border-top:1px solid var(--line-peek);border-bottom:1px solid var(--line-peek);
     background:transparent;font-size:10.5px;line-height:1.35}
   .card>.ctop>.cmeta.alert{background:transparent}
-  .cmeta-primary{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;
-    align-items:center;gap:8px}
-  .cmeta-secondary{display:flex;align-items:center;gap:10px;min-width:0;margin-top:7px;
-    padding-top:7px;border-top:1px solid var(--line-peek);overflow:hidden}
-  .cmeta-secondary .mrow{flex:0 1 auto}
-  .cmeta-secondary :is(.ctool,.runskill){flex:1 1 auto}
+  .cmeta>.cstat,.cmeta>.ccontext,.cmeta>.cquiet{order:0;flex:0 0 auto}
+  .cmeta>.cmodel{order:0;flex:1 1 72px}
+  .cmeta>:is(.ccompact,.ctool,.runskill,.cagents){order:2;flex:0 1 auto;margin-top:7px}
+  .cmeta>:is(.ctool,.runskill){flex:1 1 120px}
+  .cmeta:has(>:is(.ccompact,.ctool,.runskill,.cagents))::before{content:"";order:1;
+    flex:0 0 100%;height:1px;margin-top:7px;background:var(--line-peek)}
   .cmeta .mrow{white-space:nowrap}
   .cmeta .railbar{display:none}
   .shead{gap:7px}

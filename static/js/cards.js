@@ -174,22 +174,19 @@ function cardMetaRail(s){
   const ctx=s.ctx_pct==null?
     (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow ccontext">${fmtTok(s.ctx_tokens)} tok</span>`):
     `<span class="mrow ccontext">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
-  const secondary=`${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
+  return`<div class="cmeta${cls==='stalled'?' alert':''}">
+      <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
+      <span class="mrow cmodel">${modelLabel(s)}</span>
+      ${ctx}
+      ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
+        `<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
+      ${s.compacting!=null?`<span class="mrow ccompact" title="${s.compacting_source==='screen'?
         'seen on the terminal — Fleet has been watching it compact for at least this long, and it may have started earlier':
         'a compaction is running — the transcript is frozen until it finishes'}">⧉ compacting ${
         s.compacting_source==='screen'?'≥':''}${fmtAge(s.compacting)}</span>`:''}
       ${activeToolChip(s)}
       ${s.running?`<span class="mrow runskill" title="the skill or slash command this turn is running">${esc(s.running)}</span>`:''}
-      ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}`;
-  return`<div class="cmeta${cls==='stalled'?' alert':''}">
-      <div class="cmeta-primary">
-        <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
-        <span class="mrow cmodel">${modelLabel(s)}</span>
-        ${ctx}
-        ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
-          `<span class="mrow cquiet${cls==='stalled'?' crit':''}">quiet ${fmtAge(s.quiet_s)}</span>`:''}
-      </div>
-      ${secondary.trim()?`<div class="cmeta-secondary">${secondary}</div>`:''}
+      ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}
     </div>`;
 }
 // The volatile top of the card — rebuilt every poll (header, peek, pending,
