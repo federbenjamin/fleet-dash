@@ -660,6 +660,10 @@ class EngineProviderTest(unittest.TestCase):
                          "stop_reason": "tool_use", "usage": {}, "content": [{
                              "type": "tool_use", "id": "send-file", "name": "SendUserFile",
                              "input": {"files": [delivered], "caption": "Durable plan"}}]}},
+            {"type": "user", "timestamp": "2026-07-15T00:00:02.500Z",
+             "message": {"role": "user", "content": [{
+                 "type": "tool_result", "tool_use_id": "send-file",
+                 "content": "File sent successfully"}]}},
             {"type": "file-history-snapshot", "timestamp": "2026-07-15T00:00:03Z",
              "snapshot": {"trackedFileBackups": {
                  delivered: {"backupFileName": backup_name},
@@ -680,11 +684,10 @@ class EngineProviderTest(unittest.TestCase):
         context = self.engine.session_context(sid)
         self.assertTrue(context["ok"])
         self.assertNotIn("path", context["files"][0])
-        self.assertEqual(context["files"][0]["file_id"],
-                         self.engine.file_id(sid, delivered))
+        retained_id = self.engine.artifact_file_id(sid, None, "send-file", 0)
+        self.assertEqual(context["files"][0]["file_id"], retained_id)
         self.assertFalse(context["files"][0]["missing"])
-        ctype, data, error = self.engine.file_content(
-            sid, self.engine.file_id(sid, delivered))
+        ctype, data, error = self.engine.file_content(sid, retained_id)
         self.assertIsNone(error)
         self.assertEqual(ctype, "text/plain; charset=utf-8")
         self.assertEqual(data, b"# recovered plan\n")

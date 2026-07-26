@@ -9,7 +9,7 @@
 
   /* structure — fixed widths from the locked layout */
   --w-rail: 136px;           /* left nav rail */
-  --w-meta-rail: 118px;      /* session-card meta rail (desktop only) */
+  --w-meta-rail: clamp(136px, 18%, 164px); /* adaptive session-card meta rail */
   --w-settings-rail: 210px;  /* settings section rail */
   --w-workspace-min: 650px;  /* splitter bounds for the right pane */
   --w-workspace-max: 1200px;

@@ -142,7 +142,6 @@ function render(f,force){
   // have its own repaint deferred by the very tap that requested it.
   renderSession(force);
   if(pendingWorkspaceRoute){const route=pendingWorkspaceRoute;pendingWorkspaceRoute=null;applyWorkspaceRoute(route);}
-  schedulePeekOverflow(true);   // same frame: a later frame paints the wrong height
   applyRouteNav(currentRoute);
   const titleCount=Math.max(Number(t.needs_me)||0,Number(notificationData.active)||0,Number(notificationData.unread)||0);
   document.title=(titleCount?`(${titleCount}) `:'')+instanceName;

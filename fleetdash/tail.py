@@ -62,7 +62,20 @@ class Tail:
         self.convo = deque(maxlen=300)
         self._row_start = None          # byte offset of the row being folded
         self.convo_rev = 0              # bumps on ANY convo change (results mutate in place)
+        # Claude can write a prompt/command branch and then abandon it before the
+        # provider accepts the turn. The next prompt starts from the abandoned
+        # row's parent, so Claude's own UI hides that branch. Keep the current
+        # prompt segment long enough to make the same decision instead of
+        # linearly publishing a command Claude never ran.
+        self._prompt_segment = None
+        self._prompt_segment_uuids = set()
+        self._prompt_segment_entries = []
+        self._prompt_segment_accepted = False
         self.files = deque(maxlen=10)   # SendUserFile deliveries: {path, caption, ts}
+        # Successful deliveries waiting for the scan loop to commit their bytes
+        # to the durable artifact store. A tool_use alone is only an attempt;
+        # its matching non-error tool_result is the delivery acknowledgement.
+        self.file_deliveries = []
         # Durable delivery whitelist: files/convo are ring buffers, so a
         # delivered path can age out while its file-history backup survives.
         # This bounded insertion-ordered map keeps it selectable (invariant 10:
@@ -144,6 +157,7 @@ class Tail:
         # client can ask for what came BEFORE them; `evidence_offset` is the
         # row's END and stays what it was — model/effort evidence ordering.
         self._row_start = row_start
+        self._prompt_segment_update(o)
         ts = o.get("timestamp")
         if ts:
             self.first_ts = self.first_ts or ts
@@ -257,11 +271,6 @@ class Tail:
                             self._stat((self._day(ts), "skill", sk))[0] += 1
                             self.active_skill = sk
                             self.skill_since_usage = sk
-                        if b.get("name") == "SendUserFile":
-                            inp = b.get("input") or {}
-                            for fp in (inp.get("files") or [])[:6]:
-                                if isinstance(fp, str):
-                                    self._file_add(fp, inp.get("caption", ""), ts)
                         if b.get("name") == "AskUserQuestion":
                             self._qa_add(b, ts)
                         # EVERY tool call becomes a row. KEY_TOOLS no longer decides
@@ -292,8 +301,25 @@ class Tail:
                         if p:           # result size = context the tool injected
                             self._stat((self._day(ts), "tool",
                                         p.get("name") or "?"))[1] += self._chars(b)
+                            if p.get("name") == "SendUserFile" and not b.get("is_error"):
+                                inp = p.get("input") or {}
+                                delivered = []
+                                for fp in (inp.get("files") or [])[:6]:
+                                    if isinstance(fp, str):
+                                        self._file_add(fp, inp.get("caption", ""), ts)
+                                        delivered.append(fp)
+                                if delivered:
+                                    self.file_deliveries.append({
+                                        "tool_id": str(b.get("tool_use_id") or ""),
+                                        "files": delivered,
+                                        "caption": str(inp.get("caption") or ""),
+                                        "ts": ts,
+                                    })
                         ref = self._tool_refs.pop(b.get("tool_use_id"), None)
                         if ref is not None:
+                            if b.get("is_error") and ref.get("name") == "SendUserFile":
+                                ref.pop("files", None)
+                                ref.pop("caption", None)
                             full = self._result_text(b)
                             ref["result"] = self._result_summary(b, ref.get("name"))
                             ref["failed"] = bool(b.get("is_error"))
@@ -307,7 +333,10 @@ class Tail:
                             self.convo_rev += 1
                         qa = self._qa_refs.pop(b.get("tool_use_id"), None)
                         if qa is not None:
-                            self._qa_resolve(qa, b)
+                            if b.get("is_error"):
+                                self._convo_remove(qa)
+                            else:
+                                self._qa_resolve(qa, b)
             elif kind == "prompt":
                 self.pending.clear()    # new user turn
                 self.active_skill = self.active_command = None
@@ -328,6 +357,53 @@ class Tail:
                                                      "[SYSTEM NOTIFICATION", "<task-notification")):
                         self._convo_add("user", utxt, ts)
             self.last_shape = ("user", kind, ctypes)
+
+    def _prompt_segment_update(self, o):
+        """Retire an unaccepted prompt branch when Claude starts beside it.
+
+        `promptId` groups the rows Claude writes for one submitted command or
+        human prompt. A later prompt whose parent is inside that group continues
+        from it; a later prompt whose parent bypasses the group supersedes it.
+        Only pre-acceptance branches are removed. Once assistant output or local
+        command stdout exists, interruption/rewind history remains visible.
+        """
+        prompt_id = o.get("promptId")
+        row_uuid = o.get("uuid")
+        parent_uuid = o.get("parentUuid")
+        if prompt_id and prompt_id != self._prompt_segment:
+            if self._prompt_segment is not None:
+                continued = parent_uuid in self._prompt_segment_uuids
+                if not self._prompt_segment_accepted and not continued:
+                    doomed = {id(entry) for entry in self._prompt_segment_entries}
+                    if doomed:
+                        before = len(self.convo)
+                        self.convo = deque(
+                            (entry for entry in self.convo if id(entry) not in doomed),
+                            maxlen=self.convo.maxlen)
+                        if len(self.convo) != before:
+                            self.convo_rev += 1
+            self._prompt_segment = prompt_id
+            self._prompt_segment_uuids = set()
+            self._prompt_segment_entries = []
+            self._prompt_segment_accepted = False
+        if self._prompt_segment is None:
+            return
+        if row_uuid and (prompt_id == self._prompt_segment or
+                         parent_uuid in self._prompt_segment_uuids):
+            self._prompt_segment_uuids.add(row_uuid)
+        message = o.get("message")
+        role = message.get("role") if isinstance(message, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        belongs = (prompt_id == self._prompt_segment or
+                   parent_uuid in self._prompt_segment_uuids or
+                   row_uuid in self._prompt_segment_uuids)
+        local_stdout = isinstance(content, str) and content.startswith(
+            "<local-command-stdout>")
+        if belongs and (role == "assistant" or local_stdout or (
+                o.get("type") == "system" and
+                o.get("subtype") == "local_command")):
+            self._prompt_segment_accepted = True
+            self._prompt_segment_entries = []
 
     def _agent_terminal_event(self, raw, ts):
         """Fold Claude's bounded task-notification XML into terminal agent state."""
@@ -490,8 +566,9 @@ class Tail:
     def _qa_add(self, b, ts):
         qs = [{"header": q.get("header", ""), "q": q.get("question", ""), "a": None}
               for q in ((b.get("input") or {}).get("questions") or [])[:8]]
-        e = {"role": "event", "kind": "qa", "title": "You answered", "level": "info",
-             "detail": "", "qa": qs, "ts": ts}
+        e = self._with_offset(
+            {"role": "event", "kind": "qa", "title": "You answered", "level": "info",
+             "detail": "", "qa": qs, "ts": ts})
         self.convo.append(e)
         self.convo_rev += 1
         if b.get("id"):
@@ -521,9 +598,19 @@ class Tail:
                     q["a"] = leftovers.pop(0)
         self.convo_rev += 1
 
+    def _convo_remove(self, entry):
+        before = len(self.convo)
+        self.convo = deque(
+            (item for item in self.convo if item is not entry),
+            maxlen=self.convo.maxlen)
+        if len(self.convo) != before:
+            self.convo_rev += 1
+
     def _with_offset(self, entry):
         if self._row_start is not None:
             entry["off"] = self._row_start
+        if self._prompt_segment is not None and not self._prompt_segment_accepted:
+            self._prompt_segment_entries.append(entry)
         return entry
 
     def _convo_add(self, role, text, ts):
@@ -741,4 +828,3 @@ class Tail:
 
 
 # ------------------------------------------------------------------- scanner
-

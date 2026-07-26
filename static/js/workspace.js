@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{deliveryHonestyHtml,workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,sessionScreenHtml,loadSessionScreen,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
+Object.assign(globalThis,{deliveryHonestyHtml,workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,syncQuestionDrawerGeometry,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,sessionScreenHtml,loadSessionScreen,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,loadWorkspaceFileInventory,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
 globalThis.sessionView=null;            // one session workspace: section + optional file/agent selection
 // Console two-pane shell: on wide desktops the workspace docks as a persistent
 // right pane beside the queue (never a modal there); ⤢ expands it to the full
@@ -90,6 +90,7 @@ globalThis.sessionOpened=false;         // just-opened: force-scroll to bottom o
 globalThis.questionResizeActive=null;
 // epoch until which a just-finished resize still owns the action dock
 globalThis.questionResizeSettling=0;
+const workspaceFileInventories=new Map();
 const questionScrollPositions=new Map();
 globalThis.questionPanelStore=(()=>{try{
   const value=JSON.parse(localStorage.getItem(QUESTION_PANEL_STORE_KEY)||'{}');
@@ -125,12 +126,37 @@ function questionPanelMaxHeight(){
   const view=$('#sview')?.getBoundingClientRect(),head=$('#shead2')?.getBoundingClientRect();
   const dock=$('#sact .composer-dock')?.getBoundingClientRect();
   const extras=$('#sact .session-extras')?.getBoundingClientRect();
-  return Math.max(180,Math.floor((view?.height||innerHeight)-(head?.height||52)-
+  const visualHeight=parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue('--fleet-visual-height'))||innerHeight;
+  const minimum=innerWidth<=720?120:180;
+  return Math.max(minimum,Math.floor((view?.height||visualHeight)-(head?.height||52)-
     (dock?.height||76)-(extras?.height||0)-18));
 }
 function questionPanelHeight(sid,nonce){
-  const state=questionPanelState(sid,nonce),fallback=Math.min(420,Math.round(innerHeight*.44));
-  return Math.max(180,Math.min(questionPanelMaxHeight(),state.height||fallback));
+  const state=questionPanelState(sid,nonce);
+  const visualHeight=parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue('--fleet-visual-height'))||innerHeight;
+  const fallback=Math.min(420,Math.round(visualHeight*.44));
+  const minimum=innerWidth<=720?120:180;
+  return Math.max(minimum,Math.min(questionPanelMaxHeight(),state.height||fallback));
+}
+function syncQuestionDrawerGeometry(){
+  const drawer=$('#sact .question-drawer:not(.collapsed)');
+  if(!drawer||questionResizeActive)return;
+  const s=workspaceSessionModel?.(),p=s?.pending;
+  if(!s||p?.kind!=='question')return;
+  const scroll=drawer.querySelector('.question-scroll'),scrollTop=scroll?.scrollTop||0;
+  const state=questionPanelState(s.session_id,p.nonce);
+  const height=questionPanelHeight(s.session_id,p.nonce);
+  if(state.height){drawer.style.height=`${height}px`;drawer.style.removeProperty('max-height');}
+  else{drawer.style.maxHeight=`${height}px`;drawer.style.removeProperty('height');}
+  const resizer=drawer.querySelector('.question-resizer');
+  if(resizer){
+    resizer.setAttribute('aria-valuemax',String(questionPanelMaxHeight()));
+    resizer.setAttribute('aria-valuenow',String(height));
+    resizer.setAttribute('aria-valuetext',`${height} pixels`);
+  }
+  if(scroll)scroll.scrollTop=scrollTop;
 }
 function toggleQuestionPanel(encodedSid,encodedNonce){
   const sid=decodeURIComponent(encodedSid),nonce=decodeURIComponent(encodedNonce);
@@ -140,7 +166,7 @@ function toggleQuestionPanel(encodedSid,encodedNonce){
 }
 function setQuestionPanelHeight(sid,nonce,height){
   const state=questionPanelState(sid,nonce),max=questionPanelMaxHeight();
-  state.height=Math.max(180,Math.min(max,Math.round(height)));state.collapsed=false;
+  state.height=Math.max(innerWidth<=720?120:180,Math.min(max,Math.round(height)));state.collapsed=false;
   persistQuestionPanels();renderSession(true);
 }
 function questionResizeKey(event,encodedSid,encodedNonce){
@@ -174,8 +200,9 @@ function startQuestionResize(event,encodedSid,encodedNonce){
     window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);
     window.removeEventListener('pointercancel',finish);questionResizeActive=null;
     state.collapsed=state.height<=112;
-    state.height=state.collapsed?Math.max(180,Math.min(max,Math.round(startHeight))):
-      Math.max(180,state.height);
+    const minimum=innerWidth<=720?120:180;
+    state.height=state.collapsed?Math.max(minimum,Math.min(max,Math.round(startHeight))):
+      Math.max(minimum,state.height);
     persistQuestionPanels();
     if(state.collapsed){renderSession(true);return;}
     // An ordinary resize already has the correct live DOM. Rebuilding the
@@ -643,6 +670,7 @@ function renderParentWorkspaceAction(s,c,{pending=true,showFiles=false,note=''}=
   // difference between a drawer that survives a poll and one that is rebuilt
   // under the pointer (invariant 60).
   if(act.__setHtml!==html)keepSessionActionScroll(act,()=>{setHtml(act,html);});
+  syncQuestionDrawerGeometry();
   if(canCompose(s)){resizeComposer(document.getElementById('sft-'+s.session_id));void renderImageDrafts(s.session_id);}
 }
 function chosenWorkspaceFile(files){
@@ -658,6 +686,10 @@ function renderWorkspaceFileDocument(file){
   const format=viewerFormat(file.name,file.kind),url='/api/file?sid='+encodeURIComponent(sessionView.sid)+'&fid='+encodeURIComponent(file.file_id);
   $('#vtitle').innerHTML=`<span class="vfname">${format==='image'?'🖼':'📄'} ${esc(file.name)}${file.caption?` <small>${esc(file.caption)}</small>`:''}</span>`;
   if(file.missing){body.innerHTML='<div class="workspaceempty"><b>File unavailable</b><p>The retained transcript names this file, but neither the file nor its saved delivery copy remains.</p></div>';return;}
+  if(Number(file.size)>8_000_000){
+    body.innerHTML=`<div class="workspaceempty"><b>Preview limited to 8 MB</b><p>This retained artifact is ${esc(fmtBytes(file.size))}.</p><a class="pbtn" href="${url}&download=1" download="${esc(file.name)}">Download file</a></div>`;
+    return;
+  }
   if(format==='image'){body.innerHTML=`<div class="ctxload">loading image…</div><img hidden src="${url}" alt="${esc(file.name)}"
     onload="this.hidden=false;this.previousElementSibling?.remove()" onerror="this.previousElementSibling.textContent='✗ image unavailable';this.remove()">`;return;}
   if(format==='pdf'){showViewerFrame(body,'pdfpreview',`PDF preview: ${file.name}`,{src:url,sandbox:false});return;}
@@ -672,9 +704,46 @@ function renderWorkspaceFileDocument(file){
     else body.innerHTML=format==='markdown'?'<div class="mdoc">'+md(text)+'</div>':'<pre class="raw">'+esc(text)+'</pre>';
   }).catch(error=>{if(sessionView?.fileId===file.file_id)body.textContent='✗ '+error;});
 }
+async function loadWorkspaceFileInventory(sid){
+  let inventory=workspaceFileInventories.get(sid);
+  if(inventory?.loading||inventory?.complete)return;
+  inventory=inventory||{files:[],seen:new Set(),cursor:0,loading:false,complete:false,error:''};
+  inventory.loading=true;inventory.error='';workspaceFileInventories.set(sid,inventory);
+  if(sessionView?.sid===sid&&sessionView.section==='files')renderWorkspaceFiles(true);
+  try{
+    do{
+      const cursor=inventory.cursor?`&cursor=${encodeURIComponent(inventory.cursor)}`:'';
+      const response=await fetch(`/api/session_files?sid=${encodeURIComponent(sid)}&limit=200${cursor}`,
+        {cache:'no-store'});
+      const data=await response.json();
+      if(!response.ok||!data.ok)throw new Error(data.error||'file inventory unavailable');
+      for(const file of data.files||[]){
+        if(!inventory.seen.has(file.file_id)){
+          inventory.seen.add(file.file_id);inventory.files.push(file);
+        }
+      }
+      inventory.cursor=data.next_cursor||0;
+      if(sessionView?.sid===sid&&sessionView.section==='files')renderWorkspaceFiles(true);
+    }while(inventory.cursor&&sessionView?.sid===sid&&sessionView.section==='files');
+    inventory.complete=!inventory.cursor;
+  }catch(error){inventory.error=String(error.message||error);}
+  finally{
+    inventory.loading=false;
+    if(sessionView?.sid===sid&&sessionView.section==='files')renderWorkspaceFiles(true);
+  }
+}
 function renderWorkspaceFiles(force=false){
   if(!sessionView||sessionView.section!=='files')return;
-  const c=workspaceContext(),files=(c&&c.files)||[],list=$('#sfilelist');
+  const c=workspaceContext(),inventory=workspaceFileInventories.get(sessionView.sid);
+  if(inventory&&c?.files?.length){
+    const fresh=c.files.filter(file=>file.file_id&&!inventory.seen.has(file.file_id));
+    if(fresh.length){
+      fresh.forEach(file=>inventory.seen.add(file.file_id));
+      inventory.files.unshift(...fresh);
+    }
+  }
+  const files=inventory?.files.length?inventory.files:(c&&c.files)||[],list=$('#sfilelist');
+  if(!inventory)void loadWorkspaceFileInventory(sessionView.sid);
   if(!c||c.fetching&&!c.messages){list.innerHTML='<div class="ctxload">loading file inventory…</div>';return;}
   if(!files.length){list.innerHTML='<div class="workspaceempty"><b>No retained files</b><p>This session has no validated file records.</p></div>';
     $('#vtitle').textContent='Files';$('#vbody').innerHTML='<div class="workspaceempty"><b>Nothing to preview</b></div>';
@@ -683,7 +752,7 @@ function renderWorkspaceFiles(force=false){
   const selected=chosenWorkspaceFile(files);sessionView.fileId=selected?.file_id||null;viewerPath=sessionView.fileId;
   if(selected)rememberSessionFile(sessionView.sid,selected.file_id);
   const keepListTop=list.scrollTop;  // #sfilelist is itself the scroll container; innerHTML swap resets it every poll
-  list.innerHTML=`<header class="workspaceasidehead"><b>${files.length} file${files.length===1?'':'s'}</b><small>session-owned inventory</small></header>
+  list.innerHTML=`<header class="workspaceasidehead"><b>${files.length} file${files.length===1?'':'s'}</b><small>${inventory?.loading?'loading full inventory…':inventory?.error?esc(inventory.error):'durably saved inventory'}</small></header>
     <div class="workspacelist">${files.map(file=>`<button class="workspaceitem ${file.file_id===selected?.file_id?'selected':''}" ${file.missing||!file.file_id?'disabled':''}
       onclick="viewFile('${enc(sessionView.sid)}','${enc(file.file_id)}')"><span>${file.kind==='image'?'🖼':'📄'}</span><b>${esc(file.name)}</b><small>${esc(file.caption||'')}</small></button>`).join('')}</div>`;
   list.scrollTop=keepListTop;
@@ -1059,4 +1128,4 @@ function agentRow(a,buildTap){
 // Pins are one shared server-side watchlist. Cards relocate to the top; they are
 // never duplicated in their normal action group.
 
-Object.assign(globalThis,{workspaceScrolls,LAST_FILE_STORE_KEY,questionScrollPositions,questionPanelKey,closedCtx,reopenedSessions,evidenceCache,screenCache,WORKSPACE_SWIPE_MIN_PX,WORKSPACE_EDGE_SWIPE_PX,terminalAgentStates,closedResumeRequests,closedResumeWarned,agentCache,agentCacheKey,agentRelays});
+Object.assign(globalThis,{workspaceScrolls,LAST_FILE_STORE_KEY,workspaceFileInventories,questionScrollPositions,questionPanelKey,closedCtx,reopenedSessions,evidenceCache,screenCache,WORKSPACE_SWIPE_MIN_PX,WORKSPACE_EDGE_SWIPE_PX,terminalAgentStates,closedResumeRequests,closedResumeWarned,agentCache,agentCacheKey,agentRelays});

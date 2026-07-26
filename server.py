@@ -20,7 +20,7 @@ from collections import defaultdict, deque
 import gzip, hashlib, json, os, resource, subprocess, sys, time, threading, secrets
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fleetdash.config import load_config  # noqa: E402
@@ -393,6 +393,7 @@ class Handler(BaseHTTPRequestHandler):
     GET_ROUTES = {
         "/api/fleet": ("open", "get_fleet"),
         "/api/context": ("open", "get_context"),
+        "/api/session_files": ("open", "get_session_files"),
         "/api/closed_context": ("open", "get_closed_context"),
         "/api/agent_context": ("open", "get_agent_context"),
         "/api/insights": ("open", "get_insights"),
@@ -562,6 +563,12 @@ class Handler(BaseHTTPRequestHandler):
             self.eng.session_context(self.query("sid"), before=before, limit=limit))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
+    def get_session_files(self):
+        out = self.eng.session_files(
+            self.query("sid"), self.query("aid") or None,
+            self.query("cursor") or 0, self.query("limit") or 100)
+        return self.reply(200, "application/json", json.dumps(out).encode())
+
     def get_closed_context(self):
         out = self.paginate_context(self.eng.closed_context(self.query("sid")))
         return self.reply(200, "application/json", json.dumps(out).encode())
@@ -573,11 +580,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_file(self):
         # reads file bytes off disk -> token-gated like /api/act
+        if self.query("download") == "1":
+            downloadable = self.eng.artifact_download(
+                self.query("sid"), self.query("fid"))
+            if downloadable is None:
+                return self.reply(404, "text/plain", b"not a retained artifact")
+            ctype, path, name, size, err = downloadable
+            if err:
+                return self.reply(404, "text/plain", err.encode())
+            return self.reply_file(
+                path, size, ctype, {"Content-Disposition":
+                    "attachment; filename*=UTF-8''" + quote(name, safe="")})
         ctype, data, err = self.eng.file_content(self.query("sid"), self.query("fid"))
         if err:
             return self.reply(404, "text/plain", err.encode())
         return self.reply(200, ctype, data,
                           extra_headers={"X-Content-Type-Options": "nosniff"})
+
+    def reply_file(self, path, size, ctype, extra_headers=None):
+        elapsed_ms = ((time.perf_counter() - getattr(
+            self, "_request_started", time.perf_counter())) * 1000)
+        route = getattr(self, "_request_route", self.path.split("?", 1)[0])
+        with self.metrics_lock:
+            metrics = self.route_metrics[route]
+            metrics["elapsed_ms"].append(elapsed_ms)
+            metrics["payload_bytes"].append(int(size))
+            metrics["statuses"].append(200)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Server-Timing", f"app;dur={elapsed_ms:.3f}")
+            self.send_header("X-Fleet-Payload-Bytes", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            with open(path, "rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            pass
 
     def get_screen(self):
         # reads a live terminal's rendered screen -> token-gated like /api/file

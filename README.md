@@ -27,8 +27,11 @@ the provider's native control path. Built 2026-07-13; still evolving.
   opens beside the rail); on mobile the Now header keeps a compact summary chip such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
-  a 118px meta rail on the right carries status, model, context %, quiet time, and live agent
-  count ("Console" design system — see `design-system/`). A working session also names the tool
+  an adaptive 136–164px meta rail on the right carries status, model, context %, quiet time, and live agent
+  count without clipping ("Console" design system — see `design-system/`). The configured card
+  preview line count is a maximum: short previews hug their text, longer previews clamp, and the
+  whole non-control card surface opens Chat. There is no separate three-dot expansion control.
+  A working session also names the tool
   call it is waiting on — `Bash · 4m`, turning red once the session counts as stalled — so a
   wedged command and a slow build no longer look identical. It comes from the transcript, so it
   works everywhere, and the workspace repeats it beside "Main agent working". Pin/unpin is right-click on the header
@@ -330,21 +333,23 @@ the provider without affecting Claude sessions.
   characters of the latest session message. That line setting is the peek's MAXIMUM: a collapsed
   card sizes to `min(configured lines, actual message lines)`, so a one-line reply renders a
   one-line card instead of reserving empty preview rows.
-  Open cards, explicitly expanded peeks, and cards with questions, errors, inline feedback, or
-  running subagents grow to fit those controls. Overflow
-  replaces the final collapsed row with a clickable `...`. Only a truncated peek responds to a
-  whole-row tap; a fully visible collapsed peek is inert. Once expanded, the exposed content is
-  inert too—use **Less** to collapse it. Expansion reveals the full bounded 800-character preview. Tapping a
-  subagent's peek opens that agent's chat. A card blocked on a QUESTION shows no peek — the ask
-  is the context.
+  Every card grows naturally to the taller of its preview/actions or metadata rail, so questions,
+  errors, feedback, and running subagents cannot be clipped. There is no preview expansion control:
+  tapping any non-control area of the card opens Chat. Inline action and subagent controls keep
+  their own behavior. Tapping a subagent's peek opens that agent's chat. A card blocked on a
+  QUESTION shows no peek — the ask is the context.
 - **Complete messages in full chat:** session card peeks stay bounded, but the full-screen
   conversation keeps the entire user or assistant message. Long consecutive Claude response rows
-  merge without dropping their tails.
+  merge without dropping their tails. Reaching the top automatically loads the next bounded page;
+  when no older conversation exists, no empty "load more" action is shown. Claude prompt branches
+  cancelled before the provider accepts them are omitted, matching Claude's own session view;
+  accepted turns that are interrupted later remain visible.
 - **Running subagents inline** (type, description, model, throughput, sparkline, live $). The
   `tok/s` figure is throughput — tokens per second the agent is processing, **cache reads
   included** — so it is a liveness signal (is it moving?), not output speed; a big context makes
   it large.
-- **Full-chat status strip** directly above the main or subagent composer. Desktop shows branch
+- **Full-chat status strip** directly above the main or subagent composer uses 12px mono text and a
+  taller summary row for legibility. Desktop shows branch
   versus the last-fetched `origin/main`, worktree, model/effort, context and explicit compaction
   headroom, cache-read hit rate, CacheWrite/spikes/peak, session-tree or child cost, turn cost, and
   the last 50 changed CacheWrite values. Mobile starts with the two identity/context rows and
@@ -354,7 +359,8 @@ the provider without affecting Claude sessions.
 - **Sticky full-chat work footer** at the bottom of the conversation history while the main session
   or any child subagent is active. Main and child work have separate symbols and counts; tapping the
   footer expands the active names and distinguishes ordinary work from slow-but-still-possible work.
-  It disappears only when neither the main session nor a child is active.
+  It disappears only when neither the main session nor a child is active. It follows the same
+  Fit/Centered reading-width setting as the conversation.
 - **Model · effort** wherever a model is shown (`opus · high`). Effort lives only in the
   statusline payload, so `statusline-command.sh` side-writes it per session for the daemon; a
   session whose statusline hasn't rendered yet shows the model alone. Subagent effort comes from
@@ -441,13 +447,11 @@ the provider without affecting Claude sessions.
   conversation and preserves the current draft. Both surfaces call the same composer renderer and
   therefore use the exact `＋ | message | Send` row, image drafts, Send behavior, and delivery
   feedback. Its resting controls are one 44px row; newline input grows upward to four lines.
-  Session chat, Markdown, and subagent chat also share the persisted reading-width setting.
-- **Tap a card** → detail panel, top to bottom: recent conversation (with its ⤢ full-view
-  button), a one-line horizontal strip of delivered-file chips (quick open), then the "session
-  info" (full session id, pid, cwd,
-  exact model, started-ago, CLI status, tokens in context, spend split), "delivered files"
-  (caption + age) and "completed agents" dropdowns (the latter two scroll internally past
-  ~220px), and the open-in-claude.ai link.
+  Session chat, Markdown, subagent chat, and the main-agent working signal share the persisted
+  reading-width setting. **Fit the screen** uses the available reader width; **Centered** caps those
+  reading surfaces at 760px. Question, status, and composer controls keep their restrained widths.
+- **Tap a card** → opens the session workspace on Chat. Files, Subagents, and Details remain tabs in
+  that same workspace, with the draft and reading state preserved while switching.
 - **Why this is here** appears in every expanded card and as a **Why here?** control in full chat.
   It shows the exact classifier rule, provider/CLI signal, pending work, latest transcript event,
   activity age, ownership, stale status, confidence, and any lower-priority rules that were
@@ -461,7 +465,9 @@ the provider without affecting Claude sessions.
   - In full chat, a long question has its own scrollable drawer. Its top grip drags upward to
     nearly fill the area below the title bar or downward into a compact waiting bar. The drawer's
     size, collapsed state, and reading position survive Fleet's two-second refreshes, so polling
-    cannot snap a question back to the top.
+    cannot snap a question back to the top. On mobile it reclamps to the live visual viewport as
+    the keyboard or orientation changes without overwriting the saved preferred size. The drawer
+    owns question scrolling, and a vertical question/chat scroll dismisses the keyboard.
   - AskUserQuestion → full question + option buttons (multi-select = toggles + submit), plus an
     **"Other" free-text input** (types your own answer into the TUI's "Type something" row) and
     a **✕ dismiss button** (= the TUI's "Chat about this": the session hears "user declined"
@@ -524,15 +530,18 @@ the provider without affecting Claude sessions.
   Key tool calls appear inline terminal-style as a single `● Edit(path)` line —
   Edit/Write/Bash/Agent/Skill/SendUserFile only; read-only chatter (Read/Grep/Glob) is hidden.
   The buffer keeps the last ~120 entries per session.
-- **Delivered files**: anything the session sent you via SendUserFile appears as a tappable chip
+- **Delivered files**: after SendUserFile confirms delivery, Fleet copies every delivered version
+  into private instance storage and records it in a paged, session-owned inventory with no automatic
+  expiry. Main-agent and subagent deliveries remain browsable after the original scratch file or
+  transcript disappears. Failed or cancelled delivery attempts are not listed. Each delivery also appears as a tappable chip
   (📄 documents, 🖼 images) **inline in the conversation at the point it was delivered**, with its
   caption — so the message explaining the file sits right with it. The detail panel also has a
   "delivered files" dropdown (caption + delivered-ago). Chips open a full-screen viewer with
   Markdown, sandboxed HTML, PDF, formatted JSON, raw text, and images; viewing contents requires the act token (same `?token=`
-  opt-in). If Claude removes an original scratch file, Fleet uses Claude's confined per-session
-  file-history backup when one exists; a file with neither source nor backup shows "(gone)".
-  Re-delivering or updating a previously listed path
-  moves it back to newest without duplicating it, so chat's latest-file button is accurate.
+  opt-in). During historical backfill, Fleet uses either the original or Claude's confined
+  per-session file-history backup; a delivery whose bytes were already gone is labelled unavailable.
+  Re-delivering the same path creates a new retained version, while transcript replay remains
+  idempotent.
   The file viewer keeps its selector at a fixed height; selector buttons show up to 40
   filename characters, then an ellipsis, while the full filename remains available to assistive
   technology and in the button tooltip.

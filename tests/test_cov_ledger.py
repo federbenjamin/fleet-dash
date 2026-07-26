@@ -580,6 +580,59 @@ class ProjectFileIdsTests(EngineFixture):
         self.assertEqual(self.engine._project_file_ids("same", None), None)
 
 
+class DeliveredArtifactTests(EngineFixture):
+    def test_successful_deliveries_are_versioned_copied_and_idempotent(self):
+        source = os.path.join(self.cwd, "report.md")
+        with open(source, "w") as handle:
+            handle.write("version one")
+        first = {"session_id": "same", "source_agent_id": None,
+                 "tool_id": "send-1", "files": [source], "caption": "first",
+                 "ts": "2026-07-15T00:00:01Z", "file_backups": {},
+                 "transcript_path": self.transcript}
+        self.engine.store_artifact_deliveries([first])
+        with open(source, "w") as handle:
+            handle.write("version two")
+        second = {**first, "tool_id": "send-2", "caption": "second",
+                  "ts": "2026-07-15T00:00:02Z"}
+        self.engine.store_artifact_deliveries([second, second])
+
+        inventory = self.engine.session_files("same")
+        self.assertTrue(inventory["ok"])
+        self.assertEqual([item["caption"] for item in inventory["files"]],
+                         ["second", "first"])
+        self.assertNotEqual(inventory["files"][0]["file_id"],
+                            inventory["files"][1]["file_id"])
+        newest = self.engine.artifact_content(
+            "same", inventory["files"][0]["file_id"])
+        oldest = self.engine.artifact_content(
+            "same", inventory["files"][1]["file_id"])
+        self.assertEqual(newest[1], b"version two")
+        self.assertEqual(oldest[1], b"version one")
+        self.assertEqual(self.engine.artifact_selector_for_path("same", source),
+                         inventory["files"][0]["file_id"])
+        download = self.engine.artifact_download(
+            "same", inventory["files"][0]["file_id"])
+        self.assertEqual(download[2], "report.md")
+        self.assertEqual(download[3], len(b"version two"))
+
+    def test_agent_filter_pagination_and_missing_bytes(self):
+        missing = os.path.join(self.cwd, "already-gone.txt")
+        self.engine.store_artifact_deliveries([{
+            "session_id": "same", "source_agent_id": "agent-child",
+            "tool_id": "send-agent", "files": [missing], "caption": "child",
+            "ts": "2026-07-15T00:00:01Z", "file_backups": {},
+            "transcript_path": self.transcript,
+        }])
+        page = self.engine.session_files(
+            "same", "agent-child", limit=1)
+        self.assertTrue(page["ok"])
+        self.assertEqual(page["files"][0]["source_agent_id"], "agent-child")
+        self.assertTrue(page["files"][0]["missing"])
+        self.assertEqual(
+            self.engine.artifact_content("same", page["files"][0]["file_id"])[2],
+            "unreadable: the delivered artifact copy is unavailable")
+
+
 class TrustedDirTests(EngineFixture):
     def test_trusted_dirs_reads_claude_json(self):
         with open(self.claude_account, "w") as handle:

@@ -5,14 +5,14 @@ import { StatusDot } from '../core/StatusDot.jsx';
 const tones = { working: 'green', needs: 'amber', stalled: 'red', paused: 'red', limit: 'red', viewonly: 'dim', closed: 'dim' };
 const labels = { working: 'working', needs: 'needs you', stalled: 'stalled', paused: 'paused', limit: 'limit', viewonly: 'view-only', closed: 'closed' };
 
-/** Desktop session card with the locked 118px right meta rail; mobile puts meta inline. */
+/** Desktop session card with an adaptive right meta rail; mobile puts meta inline. */
 export function SessionCard({ title, repo, peek, status = 'working', model, ctx, quiet, agentCount, selected, pinned, mobile, onClick, children, style }) {
   const tone = tones[status] || 'green';
   const alert = status === 'stalled' || status === 'limit';
   const statusColor = tone === 'dim' ? 'var(--fg-dim-3)' : `var(--${tone})`;
   const cardBorder = selected ? 'var(--amber-border)' : status === 'needs' ? 'var(--amber-border)' : 'var(--line)';
   const cardBg = status === 'needs' ? 'var(--amber-surface)' : 'var(--surface-card)';
-  const metaFont = { font: "400 10px 'IBM Plex Mono', monospace", color: 'var(--fg-dim-1)' };
+  const metaFont = { font: "400 10.5px 'IBM Plex Mono', monospace", color: 'var(--fg-dim-1)' };
   const head = (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
@@ -44,7 +44,7 @@ export function SessionCard({ title, repo, peek, status = 'working', model, ctx,
       <div style={{ flex: 1, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
         {head}{peekEl}{children}
       </div>
-      <div style={{ width: 'var(--w-meta-rail)', flex: 'none', borderLeft: '1px solid #1E1B15', background: alert ? '#150E0C' : '#12100C', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8, ...metaFont }}>
+      <div style={{ width: 'var(--w-meta-rail)', flex: 'none', borderLeft: '1px solid #1E1B15', background: alert ? '#150E0C' : '#12100C', padding: 12, display: 'flex', flexDirection: 'column', gap: 7, ...metaFont }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <StatusDot tone={tone} size={6} />
           <span style={{ color: statusColor, fontWeight: 600 }}>{labels[status]}</span>

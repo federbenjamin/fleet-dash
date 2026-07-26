@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,workstreamLiveRow,renderWorkstreams,renderQueue,toggleHistory,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,historyItems,matchesHistoryFilter,filteredHistory,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewEffort,changeNewMode,changeNewPermission,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,renderNewSessionPane,newSection,spawnChips,newSessionFormHtml,persistQuickSpawns,quickSpawnKey,recordQuickSpawn,quickSpawnList,applyQuickSpawn,toggleQuickSpawnPin,doSpawn,startSpawn,doScheduleNew,checkSpawn,historyCount,historyRow,toggle,togglePeek,togglePeekFromTap,measurePeekOverflow,schedulePeekOverflow});
+Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,workstreamLiveRow,renderWorkstreams,renderQueue,toggleHistory,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,historyItems,matchesHistoryFilter,filteredHistory,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewEffort,changeNewMode,changeNewPermission,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,renderNewSessionPane,newSection,spawnChips,newSessionFormHtml,persistQuickSpawns,quickSpawnKey,recordQuickSpawn,quickSpawnList,applyQuickSpawn,toggleQuickSpawnPin,doSpawn,startSpawn,doScheduleNew,checkSpawn,historyCount,historyRow,toggle});
 // The flat session list is Search TYPE=SESSION; these globals feed it from the
 // search query/provider/access controls (runSessionSearch keeps them in step).
 globalThis.historyFilter='';globalThis.historyAccess='all';globalThis.historyProvider='all';
@@ -582,74 +582,6 @@ function historyRow(item,pinnedView=false){
 }
 
 function toggle(sid){openCards.has(sid)?openCards.delete(sid):openCards.add(sid);render(last,true);}
-function togglePeek(sid,expanded){
-  expanded?expandedPeeks.add(sid):expandedPeeks.delete(sid);
-  render(last,true);
-}
-function togglePeekFromTap(event,sid,expanded){
-  if(expanded||!event.currentTarget.classList.contains('truncated'))return;
-  event.preventDefault();
-  togglePeek(sid,true);
-}
-// The collapsed peek hugs its content: min(configured lines, measured content
-// lines) — a short last message must not reserve empty preview rows (operator
-// decision 2026-07-24). The card's --session-card-lines drives both the peek box
-// and the fixed card frame, so writing the measured minimum shrinks them
-// together. Batched read → write → read so the fleet costs two reflows, not 2N.
-function measurePeekOverflow(){
-  const configured=clampS();
-  const rows=[...document.querySelectorAll('.sessionpeek')].map(row=>{
-    if(row.classList.contains('expanded'))return null;
-    const body=row.querySelector('.peekmd');
-    if(!body)return null;
-    const lineHeight=parseFloat(getComputedStyle(body).lineHeight)||17.9;
-    return{row,body,lines:Math.max(1,Math.min(configured,Math.round(body.scrollHeight/lineHeight)))};
-  }).filter(Boolean);
-  rows.forEach(({row,lines})=>{
-    const card=row.closest('.card');
-    if(card&&card.style.getPropertyValue('--session-card-lines')!==''&&
-      Number(card.style.getPropertyValue('--session-card-lines'))!==lines)
-      card.style.setProperty('--session-card-lines',String(lines));
-  });
-  // toggle, never remove-then-add: an unconditional remove/add pair rewrote the
-  // class attribute of every peek on the fleet on every poll for no change
-  rows.forEach(({row,body})=>{
-    row.classList.toggle('truncated',body.scrollHeight>body.clientHeight+1);
-  });
-}
-globalThis.peekMeasureFrame=0;
-// `now` means measure inside the CALLER's frame. render() must pass it: render
-// already runs inside a requestAnimationFrame, so deferring the measurement to
-// another frame let the browser PAINT the un-measured height first — every card
-// grew to the full line clamp and shrank back one frame later, which is the
-// fleet-wide 2s judder (measured: page height 1256 ⇄ 1471, twice per poll).
-function schedulePeekOverflow(now){
-  if(now===true){
-    if(peekMeasureFrame){cancelAnimationFrame(peekMeasureFrame);peekMeasureFrame=0;}
-    measurePeekOverflow();return;
-  }
-  if(peekMeasureFrame)return;
-  peekMeasureFrame=requestAnimationFrame(()=>{peekMeasureFrame=0;measurePeekOverflow();});
-}
-// the listener receives an Event — never forward it as the `now` flag
-window.addEventListener('resize',()=>schedulePeekOverflow());
-// A peek's line count depends on the width of the column it is in, and that
-// column changes width without the WINDOW changing at all: the docked pane
-// opening, closing, or being dragged by the splitter. Without this the cards
-// kept the previous column's line counts until some later render happened to
-// re-measure them — 522ms of visibly wrong heights after closing the pane,
-// ending in a snap. Writing --session-card-lines cannot change this element's
-// width, so this observer cannot feed itself.
-if(typeof ResizeObserver==='function'){
-  globalThis.lastQueueWidth=0;
-  const watchQueueWidth=new ResizeObserver(entries=>{
-    const width=Math.round(entries[0]?.contentRect?.width||0);
-    if(width===lastQueueWidth)return;
-    lastQueueWidth=width;schedulePeekOverflow();
-  });
-  const queueColumn=document.querySelector('#appmain');
-  if(queueColumn)watchQueueWidth.observe(queueColumn);
-}
 
 // ---- budgets and forecasts ------------------------------------------------
 

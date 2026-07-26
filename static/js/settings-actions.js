@@ -89,14 +89,14 @@ function renderSettings(force=false){
   settingsRendering=true;
   const el=$('#settings');
   try{
-    if(!settingsOpen){el.innerHTML='';return;}
+    if(!settingsOpen){setHtml(el,'');return;}
     const sectionHtml={notifications:notificationPolicySettingsHtml,devices:deviceSettingsHtml,
       sessions:sessionSettingsHtml,appearance:appearanceSettingsHtml,budgets:budgetSectionHtml,
       advanced:advancedSettingsHtml}[settingsSection]();
-    el.innerHTML=`<div class="settingsapp"><nav class="settingsrail" aria-label="Settings sections">
+    setHtml(el,`<div class="settingsapp"><nav class="settingsrail" aria-label="Settings sections">
         ${SETTINGS_SECTIONS.map(section=>`<button class="${section===settingsSection?'active':''}" aria-current="${section===settingsSection?'page':'false'}" onclick="selectSettingsSection('${section}')"><span>${esc(SETTINGS_LABELS[section])}</span></button>`).join('')}</nav>
       <div class="settingsmobile"><label>Section<select onchange="selectSettingsSection(this.value)">${SETTINGS_SECTIONS.map(section=>`<option value="${section}" ${section===settingsSection?'selected':''}>${esc(SETTINGS_LABELS[section])}</option>`).join('')}</select></label></div>
-      <section class="settingscontent"><header><h2>${esc(SETTINGS_LABELS[settingsSection])}</h2><p>${esc(settingsSectionDescription(settingsSection))}</p></header>${sectionHtml}<div class="actmsg" id="setmsg">${esc(settingsMessage)}</div></section></div>`;
+      <section class="settingscontent"><header><h2>${esc(SETTINGS_LABELS[settingsSection])}</h2><p>${esc(settingsSectionDescription(settingsSection))}</p></header>${sectionHtml}<div class="actmsg" id="setmsg">${esc(settingsMessage)}</div></section></div>`);
   }finally{
     settingsRendering=false;
     if(settingsRerenderPending){settingsRerenderPending=false;requestAnimationFrame(()=>renderSettings());}

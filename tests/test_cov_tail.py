@@ -154,6 +154,34 @@ class TailCovTest(unittest.TestCase):
         self.assertEqual(t.permission_mode, "acceptEdits")
         self.assertGreater(t.permission_mode_evidence_offset, 0)
 
+    def test_unaccepted_prompt_branch_is_removed_when_next_prompt_bypasses_it(self):
+        t = self._tail([
+            {"type": "user", "promptId": "cancelled", "uuid": "u-cancelled",
+             "parentUuid": "base", "timestamp": "2026-07-15T00:00:00Z",
+             "message": {"role": "user", "content": "cancelled prompt"}},
+            {"type": "user", "promptId": "kept", "uuid": "u-kept",
+             "parentUuid": "base", "timestamp": "2026-07-15T00:00:01Z",
+             "message": {"role": "user", "content": "kept prompt"}},
+        ])
+        self.assertEqual([row.get("text") for row in t.convo
+                          if row.get("role") == "user"], ["kept prompt"])
+
+    def test_accepted_prompt_branch_remains_after_later_interruption(self):
+        t = self._tail([
+            {"type": "user", "promptId": "accepted", "uuid": "u-accepted",
+             "parentUuid": "base", "timestamp": "2026-07-15T00:00:00Z",
+             "message": {"role": "user", "content": "accepted prompt"}},
+            {**self.assistant("2026-07-15T00:00:01Z", "started"),
+             "promptId": "accepted", "uuid": "a-accepted",
+             "parentUuid": "u-accepted"},
+            {"type": "user", "promptId": "later", "uuid": "u-later",
+             "parentUuid": "base", "timestamp": "2026-07-15T00:00:02Z",
+             "message": {"role": "user", "content": "later prompt"}},
+        ])
+        self.assertEqual([row.get("text") for row in t.convo
+                          if row.get("role") == "user"],
+                         ["accepted prompt", "later prompt"])
+
     def test_file_history_snapshot_backup_mapping(self):
         t = self._tail([{"type": "file-history-snapshot",
                          "timestamp": "2026-07-15T00:00:00Z",
@@ -283,12 +311,35 @@ class TailCovTest(unittest.TestCase):
         self.assertGreaterEqual(row[2], 7)
 
     def test_senduserfile_tool_adds_file(self):
-        t = self._tail([self.assistant("2026-07-15T00:00:00Z", content=[
-            {"type": "tool_use", "id": "f1", "name": "SendUserFile",
-             "input": {"files": ["/work/out.txt", 5], "caption": "report"}}],
-            stop="tool_use", usage={"input_tokens": 1})])
+        t = self._tail([
+            self.assistant("2026-07-15T00:00:00Z", content=[
+                {"type": "tool_use", "id": "f1", "name": "SendUserFile",
+                 "input": {"files": ["/work/out.txt", 5], "caption": "report"}}],
+                stop="tool_use", usage={"input_tokens": 1}),
+            {"type": "user", "timestamp": "2026-07-15T00:00:01Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "f1",
+                  "content": "Files sent successfully"}]}}
+        ])
         self.assertEqual([f["path"] for f in t.files], ["/work/out.txt"])
         self.assertIn("/work/out.txt", t.delivered_paths)
+        self.assertEqual(t.file_deliveries[0]["tool_id"], "f1")
+
+    def test_senduserfile_error_is_not_a_delivery(self):
+        t = self._tail([
+            self.assistant("2026-07-15T00:00:00Z", content=[
+                {"type": "tool_use", "id": "f1", "name": "SendUserFile",
+                 "input": {"files": ["/work/out.txt"], "caption": "report"}}],
+                stop="tool_use", usage={"input_tokens": 1}),
+            {"type": "user", "timestamp": "2026-07-15T00:00:01Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "f1",
+                  "is_error": True, "content": "cancelled"}]}}
+        ])
+        self.assertEqual(list(t.files), [])
+        self.assertEqual(t.file_deliveries, [])
+        tool = next(row for row in t.convo if row.get("name") == "SendUserFile")
+        self.assertNotIn("files", tool)
 
     def test_askuserquestion_qa_event_and_resolve(self):
         t = self._tail([
@@ -306,6 +357,20 @@ class TailCovTest(unittest.TestCase):
         qa = next(e for e in t.convo if e.get("kind") == "qa")
         self.assertEqual(qa["qa"][0]["a"], "A")
         self.assertEqual(qa["qa"][1]["a"], "B")   # leftover filled in order
+
+    def test_askuserquestion_error_removes_unanswered_event(self):
+        t = self._tail([
+            self.assistant("2026-07-15T00:00:00Z", content=[
+                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+                 "input": {"questions": [
+                     {"header": "H1", "question": "Pick?"}]}}],
+                stop="tool_use", usage={"input_tokens": 1}),
+            {"type": "user", "timestamp": "2026-07-15T00:00:01Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "q1",
+                  "is_error": True, "content": "cancelled"}]}}
+        ])
+        self.assertFalse(any(row.get("kind") == "qa" for row in t.convo))
 
     def test_qa_resolve_declined(self):
         t = self._tail([

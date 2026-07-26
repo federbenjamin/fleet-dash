@@ -906,6 +906,17 @@ class ContextOps:
                 continue
             window._fold(row, row_start=offset)
             offset += len(line) + 1
+        # The page boundary is the first row already owned by the newer page.
+        # Feed it to the prompt-lineage classifier without emitting it. This is
+        # what prevents an abandoned command immediately before the boundary
+        # from reappearing only after the reader scrolls into older history.
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(before)
+                boundary = json.loads(handle.readline())
+            window._prompt_segment_update(boundary)
+        except Exception:
+            pass
         messages = [dict(entry) for entry in window.convo]
         # The cursor is where the OLDEST ROW RETURNED begins — never the window
         # start. Those differ whenever the window folds to fewer rows than it
@@ -960,6 +971,7 @@ class ContextOps:
                 msgs = [dict(m) for m in mt.convo]
                 files = [dict(f) for f in mt.files]
                 file_backups = dict(mt.file_backups)
+        tool_files = {}
         def fmeta(p):
             backup = self._claude_file_backup(sid, file_backups.get(p))
             return {"name": os.path.basename(p),
@@ -968,10 +980,15 @@ class ContextOps:
                     "missing": not os.path.isfile(p) and backup is None}
         for m in msgs:                  # enrich inline delivery entries for the client
             if m.get("role") == "tool" and m.get("files"):
-                m["files"] = [fmeta(p) for p in m["files"]]
-        out_files = []
-        for f in reversed(files):       # newest delivery first
-            out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
+                tool_id = str(m.get("tool_id") or "")
+                durable = tool_files.setdefault(
+                    tool_id, self.artifact_tool_files(sid, tool_id)) if tool_id else []
+                m["files"] = durable or [fmeta(p) for p in m["files"]]
+        durable_files = self.session_files(sid, limit=100)
+        out_files = durable_files.get("files") if durable_files.get("ok") else []
+        if not out_files:
+            for f in reversed(files):       # newest delivery first
+                out_files.append({**fmeta(f["path"]), "caption": f["caption"], "ts": f["ts"]})
         # The live page is the newest `limit` of the ring; its cursor is where
         # the oldest row it returns began in the file. Rows inserted by timestamp
         # rather than appended (a compaction's event row, invariant 17) carry no
@@ -998,6 +1015,24 @@ class ContextOps:
 
     def agent_context(self, sid, aid):
         """Conversation + info for ONE subagent (same fold as a session)."""
+        def with_artifacts(messages):
+            for message in messages:
+                if message.get("role") != "tool" or not message.get("files"):
+                    continue
+                tool_id = str(message.get("tool_id") or "")
+                durable = self.artifact_tool_files(sid, tool_id, aid) if tool_id else []
+                if durable:
+                    message["files"] = durable
+                else:
+                    message["files"] = [{
+                        "name": os.path.basename(path),
+                        "file_id": self.file_id(sid, path),
+                        "kind": "image" if os.path.splitext(path)[1].lower() in IMG_EXTS else "text",
+                        "missing": not os.path.isfile(path),
+                    } for path in message["files"] if isinstance(path, str)]
+            inventory = self.session_files(sid, aid, limit=100)
+            return messages, inventory.get("files", []) if inventory.get("ok") else []
+
         with self.lock:
             parent = next((dict(item) for item in
                            self.snapshot_cache.get("sessions") or []
@@ -1025,7 +1060,15 @@ class ContextOps:
                 tail = self.tail_for(transcript)
                 tail.poll()
                 messages = [dict(message) for message in tail.convo]
-            return {"ok": True, "messages": messages,
+                deliveries = [{
+                    **delivery, "session_id": sid, "source_agent_id": aid,
+                    "transcript_path": transcript,
+                    "file_backups": dict(tail.file_backups),
+                } for delivery in tail.file_deliveries]
+                tail.file_deliveries.clear()
+            self.store_artifact_deliveries(deliveries)
+            messages, files = with_artifacts(messages)
+            return {"ok": True, "messages": messages, "files": files,
                     "info": {**agent, "status_line": None}, "closed": True}
         if not agent:
             return {"ok": False, "error": "no such subagent"}
@@ -1060,9 +1103,9 @@ class ContextOps:
             if parent:
                 info["status_line"] = self.agent_status_line(
                     parent, info, metrics=snapshot.get("status_metrics") or {})
-            return {"ok": True,
-                    "messages": copy.deepcopy(snapshot.get("messages") or []),
-                    "info": info}
+            messages, files = with_artifacts(
+                copy.deepcopy(snapshot.get("messages") or []))
+            return {"ok": True, "messages": messages, "files": files, "info": info}
         with self.scan_lock:
             t = self.tail_for(jl)
             t.poll()
@@ -1084,10 +1127,20 @@ class ContextOps:
             info["state"] = agent.get("state")
             if parent:
                 info["status_line"] = self.agent_status_line(parent, info, t)
-        return {"ok": True, "messages": msgs, "info": info}
+            deliveries = [{
+                **delivery, "session_id": sid, "source_agent_id": aid,
+                "transcript_path": jl, "file_backups": dict(t.file_backups),
+            } for delivery in t.file_deliveries]
+            t.file_deliveries.clear()
+        self.store_artifact_deliveries(deliveries)
+        msgs, files = with_artifacts(msgs)
+        return {"ok": True, "messages": msgs, "files": files, "info": info}
 
     def file_selector_for_path(self, sid, raw_path):
         """Return an opaque selector only when ``raw_path`` belongs to ``sid``."""
+        durable = self.artifact_selector_for_path(sid, raw_path)
+        if durable:
+            return durable
         selector = self.file_id(sid, raw_path)
         if str(sid).startswith("codex:"):
             with self.lock:
@@ -1148,6 +1201,9 @@ class ContextOps:
         selector = str(file_id or "")
         if not re.fullmatch(r"[0-9a-f]{24}", selector):
             return None, None, "invalid file selector"
+        durable = self.artifact_content(sid, selector)
+        if durable is not None:
+            return durable
         if str(sid).startswith("codex:"):
             with self.lock:
                 known = any(item.get("session_id") == sid and

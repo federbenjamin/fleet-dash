@@ -36,7 +36,6 @@ function applyInstanceAuth(instance){
   return document.cookie.split(';').some(item=>item.trim().startsWith(cookieName+'='));
 }
 const openCards=new Set();
-const expandedPeeks=new Set();
 const infoOpen=new Set(),doneOpen=new Set(),filesOpen=new Set(),stateInfoOpen=new Set();  // detail-panel fold state, survives re-renders
 const routeNames={now:'Now',notifications:'Notifications',search:'Search',workstreams:'Workstreams',insights:'Insights',settings:'Settings'};
 const validRoutes=new Set(Object.keys(routeNames));
@@ -230,4 +229,4 @@ function matchesNow(session){
 // The daemon indexes separately from provider polling. This page only reads the
 // WAL-backed index, so an old or large transcript cannot delay /api/fleet.
 
-Object.assign(globalThis,{fleetPerf,actCookieName,openCards,expandedPeeks,infoOpen,doneOpen,filesOpen,stateInfoOpen,routeNames,validRoutes,workspaceSections,initialDestination,NAV_SIDE_KEY,SAVED_VIEW_KEY});
+Object.assign(globalThis,{fleetPerf,actCookieName,openCards,infoOpen,doneOpen,filesOpen,stateInfoOpen,routeNames,validRoutes,workspaceSections,initialDestination,NAV_SIDE_KEY,SAVED_VIEW_KEY});
