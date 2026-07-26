@@ -313,6 +313,7 @@ function syncVisualViewport(){
     root.style.setProperty('inset','auto 0px');root.style.setProperty('top',top+'px');
     root.style.setProperty('bottom','auto');root.style.setProperty('height',height+'px');
   }else for(const property of ['inset','top','bottom','height'])root.style.removeProperty(property);}
+  globalThis.syncQuestionDrawerGeometry?.();
   restoreReadingAnchor(readingAnchor);
 }
 window.visualViewport?.addEventListener('resize',syncVisualViewport);
@@ -350,8 +351,8 @@ document.addEventListener('keydown',event=>{
 },true);
 document.addEventListener('touchstart',event=>{
   const input=document.activeElement;
-  if(!event.target.closest?.('#sbody,#vbody')||
-      !input?.matches?.('.session-composer .composer textarea'))return chatTouch=null;
+  if(!event.target.closest?.('#sbody,#vbody,.question-scroll')||
+      !input?.closest?.('.session-composer'))return chatTouch=null;
   const touch=event.touches?.[0];
   chatTouch=touch?{x:touch.clientX,y:touch.clientY,input}:null;
 },{passive:true,capture:true});

@@ -74,6 +74,36 @@ async function loadOlderConversation(scope,sid,aid=''){
     body.scrollTop=old.top+Math.max(0,body.scrollHeight-old.height);
   });
 }
+function retryOlderConversation(scope,sid,aid=''){
+  const c=conversationCache(scope,sid,aid);
+  if(!c)return;
+  c.olderError='';
+  return loadOlderConversation(scope,sid,aid);
+}
+globalThis.olderConversationObserver=null;
+globalThis.olderConversationObserveFrame=0;
+function observeOlderConversations(){
+  olderConversationObserveFrame=0;
+  if(!('IntersectionObserver' in window))return;
+  if(!olderConversationObserver)olderConversationObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries){
+      if(!entry.isIntersecting)continue;
+      const node=entry.target;
+      olderConversationObserver.unobserve(node);
+      loadOlderConversation(node.dataset.scope,decodeURIComponent(node.dataset.sid||''),
+        decodeURIComponent(node.dataset.aid||''));
+    }
+  },{root:null,rootMargin:'96px 0px 0px',threshold:.01});
+  document.querySelectorAll('.oldermsgs-sentinel:not([data-observed])').forEach(node=>{
+    node.dataset.observed='true';olderConversationObserver.observe(node);
+  });
+}
+function scheduleOlderConversationObservation(){
+  if(olderConversationObserveFrame)return;
+  olderConversationObserveFrame=requestAnimationFrame(()=>{
+    olderConversationObserveFrame=requestAnimationFrame(observeOlderConversations);
+  });
+}
 // "opus · high". Effort comes from the statusline side-write, so a session whose
 // statusline hasn't rendered yet (or isn't installed) shows the model alone.
 const modelLabel=s=>{
@@ -617,9 +647,13 @@ function convoMsgs(c,sid,includeOptimistic=true,scope='session',aid=''){
     return`<div class="cmsg ${m.role}"><span class="crole">${m.role==='user'?'you':provider}</span>
       <div class="cbody ${m.role==='assistant'?'mdoc':''}">${m.role==='assistant'?md(m.text):'<p>'+esc(m.text).replace(/\n/g,'<br>')+'</p>'}</div></div>`;
   }).join('');
-  const older=c.next_cursor!=null?`<button class="historyaction oldermsgs" onclick="loadOlderConversation('${scope}',decodeURIComponent('${enc(sid)}'),decodeURIComponent('${enc(aid)}'))"
-    ${c.loadingOlder?'disabled':''}>${c.loadingOlder?'loading older messages…':'load older messages'}</button>`:'';
-  const error=c.olderError?`<div class="ctxload">✗ ${esc(c.olderError)}</div>`:'';
+  const older=c.next_cursor!=null&&!c.olderError?
+    `<div class="oldermsgs-sentinel" role="status" aria-live="polite"
+      data-scope="${scope}" data-sid="${enc(sid)}" data-aid="${enc(aid)}">
+      <i aria-hidden="true"></i><span>${c.loadingOlder?'loading older messages…':'loading earlier history…'}</span></div>`:'';
+  const error=c.olderError?`<div class="oldermsgs-error" role="alert"><span>✗ ${esc(c.olderError)}</span>
+    <button class="historyaction" onclick="retryOlderConversation('${scope}',decodeURIComponent('${enc(sid)}'),decodeURIComponent('${enc(aid)}'))">Retry</button></div>`:'';
+  if(older)scheduleOlderConversationObservation();
   return older+error+canonical+(includeOptimistic?optimisticHtml(sid,c.messages||[]):'');
 }
 function convoBox(s,short){
@@ -630,4 +664,4 @@ function convoBox(s,short){
   return`<div class="ctxbox"><div class="convo${short?' short':''}" data-sid="${s.session_id}">${msgs}</div></div>`;
 }
 
-Object.assign(globalThis,{toolRow,toggleTool,expandedTools,toolResults,loadToolResult,toolResultBody,resultScale,ctxCache,ctxVersion,modelLabel,CLAUDE_PERMISSION_LABELS,claudePermissionLabel,providerModeActions,sessionSettingActions,enc,cpb,EVT_ICON,optimisticMessages,quickResponses,nativeRequestLocks,nativeRequestKey,normalizedMessage,OPTIMISTIC_CONFIRM_MS,SESSION_TAIL_THRESHOLD,readingAnchorRevisions});
+Object.assign(globalThis,{toolRow,toggleTool,expandedTools,toolResults,loadToolResult,toolResultBody,resultScale,ctxCache,ctxVersion,modelLabel,CLAUDE_PERMISSION_LABELS,claudePermissionLabel,providerModeActions,sessionSettingActions,enc,cpb,EVT_ICON,optimisticMessages,quickResponses,nativeRequestLocks,nativeRequestKey,normalizedMessage,OPTIMISTIC_CONFIRM_MS,SESSION_TAIL_THRESHOLD,readingAnchorRevisions,retryOlderConversation,observeOlderConversations,scheduleOlderConversationObservation});

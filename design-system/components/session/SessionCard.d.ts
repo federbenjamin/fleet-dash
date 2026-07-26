@@ -17,7 +17,7 @@ export interface SessionCardProps {
   /** amber selection ring */
   selected?: boolean;
   pinned?: boolean;
-  /** inline status row instead of the 118px meta rail */
+  /** inline status row instead of the adaptive desktop meta rail */
   mobile?: boolean;
   onClick?: () => void;
   /** AgentRow tree, action buttons, etc. */

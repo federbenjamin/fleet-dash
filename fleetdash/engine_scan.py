@@ -701,6 +701,7 @@ class ScanOps:
         claude_tails = {}
         live_claude_ids = set()
         screen_watch = []
+        artifact_deliveries = []
         # Tails are stateful byte offsets: every fold, here and in act(), stays
         # serialized by scan_lock. Only this loop folds them, so only this loop
         # holds it (invariant 24/43); the phases after it touch no Tail.
@@ -710,12 +711,18 @@ class ScanOps:
         self._scan_fold_wait_ms = (held_started - fold_wait_started) * 1000
         try:
             self._scan_claude_sessions(sessions, claude_tails, live_claude_ids, now, cfg,
-                                       screen_watch)
+                                       screen_watch, artifact_deliveries)
         finally:
             self.scan_lock.release()
         # Published as `scan_lock_held_ms`: how long an act() re-poll could have
         # been blocked by this scan. It is the number this split exists to shrink.
         self._scan_lock_held_ms = (time.perf_counter() - held_started) * 1000
+        try:
+            self.store_artifact_deliveries(artifact_deliveries)
+        except Exception as exc:
+            # Artifact persistence is additive. A state-directory or ledger
+            # failure must not suppress the last-good fleet projection.
+            print(f"artifact storage error: {exc}", file=sys.stderr, flush=True)
         phase("claude")
         return self._scan_after_fold(sessions, claude_tails, live_claude_ids,
                                      now, cfg, phase, phases, screen_watch)
@@ -743,7 +750,7 @@ class ScanOps:
                 "seconds": max(0, round(time.time() - started)) if started else None}
 
     def _scan_claude_sessions(self, sessions, claude_tails, live_claude_ids, now, cfg,
-                              screen_watch=None):
+                              screen_watch=None, artifact_deliveries=None):
         """Fold every live Claude transcript. Runs under scan_lock.
 
         `screen_watch` collects (session_id, pid, eligible) for the batched screen
@@ -751,6 +758,8 @@ class ScanOps:
         decided here because this is where the evidence lives; the look itself
         must not happen under the lock.
         """
+        if artifact_deliveries is None:
+            artifact_deliveries = []
         watch = screen_watch if screen_watch is not None else []
         for reg in self.live_sessions():
             sid = reg.get("sessionId")
@@ -801,6 +810,13 @@ class ScanOps:
                 continue
             mt = self.tail_for(main_path)
             mt.poll()
+            if mt.file_deliveries:
+                artifact_deliveries.extend({
+                    **delivery, "session_id": sid, "source_agent_id": None,
+                    "transcript_path": main_path,
+                    "file_backups": dict(mt.file_backups),
+                } for delivery in mt.file_deliveries)
+                mt.file_deliveries.clear()
             control_uncertain = self._reconcile_claude_control_state(sid, mt)
             claude_tails[sid] = mt
             self._claude_context_snapshots[sid] = {
@@ -854,7 +870,8 @@ class ScanOps:
             # parent turn over → a frozen agent is canceled, not mid-tool
             parent_idle = reg_status == "idle" or confirmed_waiting
             agents = self.scan_agents(os.path.join(proj_dir, sid, "subagents"), now,
-                                      parent_idle, parent=mt)
+                                      parent_idle, parent=mt,
+                                      artifact_deliveries=artifact_deliveries)
             sess_effort = self.effort_for(sid)
             for a in agents:            # the agent chat overlay acts through the parent
                 a["session_id"] = sid
@@ -1979,7 +1996,8 @@ class ScanOps:
                 return 0.0
         return max(0.0, now - min(activity, now))
 
-    def scan_agents(self, subdir, now, parent_idle=False, parent=None):
+    def scan_agents(self, subdir, now, parent_idle=False, parent=None,
+                    artifact_deliveries=None):
         out = []
         cfg = self.cfg
         parent_sid = os.path.basename(os.path.dirname(subdir))
@@ -1997,6 +2015,13 @@ class ScanOps:
                 meta = {}
             t = self.tail_for(jl)
             grew = t.poll()
+            if artifact_deliveries is not None and t.file_deliveries:
+                artifact_deliveries.extend({
+                    **delivery, "session_id": parent_sid,
+                    "source_agent_id": agent_id, "transcript_path": jl,
+                    "file_backups": dict(t.file_backups),
+                } for delivery in t.file_deliveries)
+                t.file_deliveries.clear()
             # (quiet is computed from the fold below, not the file's mtime —
             # invariant 81)
             self._claude_agent_context_snapshots[(parent_sid, agent_id)] = {

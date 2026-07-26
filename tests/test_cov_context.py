@@ -361,6 +361,10 @@ class ContextCovTest(EngineCovBase):
                                       "name": "SendUserFile",
                                       "input": {"files": [fpath],
                                                 "caption": "the file"}}]}},
+            {"type": "user", "timestamp": "2026-07-15T00:00:02Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "sf1",
+                  "content": "Files sent successfully"}]}}
         ]
         self.write_transcript(rows)
         return fpath

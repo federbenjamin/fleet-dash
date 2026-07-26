@@ -1,6 +1,6 @@
 """Spend ledger, session/agent finalization, closed-session history and
 context, handoff links (invariants 15, 23, 32)."""
-import json, os, re, sys, glob, time, sqlite3, hashlib, copy, uuid
+import json, os, re, sys, glob, time, sqlite3, hashlib, copy, uuid, shutil, tempfile
 
 
 from . import paths as pathcfg
@@ -111,6 +111,14 @@ class LedgerOps:
                 summary TEXT, error TEXT, revision TEXT)""")
             self.db.execute("""CREATE INDEX IF NOT EXISTS repo_actions_root
                 ON repo_actions(root, id DESC)""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS delivered_artifacts(
+                file_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                source_agent_id TEXT, tool_id TEXT NOT NULL, ordinal INT NOT NULL,
+                source_path TEXT NOT NULL, name TEXT NOT NULL, caption TEXT,
+                delivered_at TEXT, blob_name TEXT, size INT, kind TEXT NOT NULL,
+                missing INT NOT NULL DEFAULT 0, transcript_path TEXT)""")
+            self.db.execute("""CREATE INDEX IF NOT EXISTS delivered_artifacts_session
+                ON delivered_artifacts(session_id)""")
             self.db.commit()
             return self.db
 
@@ -751,6 +759,231 @@ Treat this as an independent session. Verify the repository state before changin
         material = f"{sid}\0{os.path.realpath(str(path or ''))}".encode("utf-8", "surrogatepass")
         return hashlib.sha256(material).hexdigest()[:24]
 
+    @staticmethod
+    def artifact_file_id(sid, source_agent_id, tool_id, ordinal):
+        material = "\0".join((str(sid), str(source_agent_id or ""),
+                               str(tool_id), str(int(ordinal)))).encode(
+                                   "utf-8", "surrogatepass")
+        return hashlib.sha256(material).hexdigest()[:24]
+
+    @staticmethod
+    def _artifact_kind(name):
+        return "image" if os.path.splitext(str(name or ""))[1].lower() in IMG_EXTS else "text"
+
+    def store_artifact_deliveries(self, deliveries):
+        """Copy acknowledged SendUserFile bytes outside ``scan_lock``.
+
+        The database row is per delivery, not per source path. Re-delivering a
+        changing file therefore preserves every version while replaying the
+        same transcript remains idempotent.
+        """
+        if not deliveries:
+            return
+        root = os.path.join(pathcfg.BASE, "delivered-artifacts")
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        db = self.ensure_db()
+        with self.db_lock:
+            for delivery in deliveries:
+                sid = str(delivery.get("session_id") or "")
+                tool_id = str(delivery.get("tool_id") or "")
+                agent_id = str(delivery.get("source_agent_id") or "") or None
+                backups = delivery.get("file_backups") or {}
+                for ordinal, source in enumerate(delivery.get("files") or []):
+                    if not isinstance(source, str) or not source:
+                        continue
+                    selector = self.artifact_file_id(sid, agent_id, tool_id, ordinal)
+                    existing = db.execute(
+                        "SELECT blob_name FROM delivered_artifacts WHERE file_id=?",
+                        (selector,)).fetchone()
+                    blob_name = existing[0] if existing else None
+                    blob_path = os.path.join(root, blob_name) if blob_name else None
+                    missing = not (blob_path and os.path.isfile(blob_path))
+                    size = os.path.getsize(blob_path) if not missing else None
+                    if missing:
+                        candidate = source if os.path.isfile(source) else \
+                            self._claude_file_backup(sid, backups.get(source))
+                        if candidate:
+                            blob_name = selector + ".bin"
+                            blob_path = os.path.join(root, blob_name)
+                            temp = None
+                            try:
+                                handle = tempfile.NamedTemporaryFile(
+                                    dir=root, prefix=selector + ".", delete=False)
+                                temp = handle.name
+                                with handle, open(candidate, "rb") as source_handle:
+                                    shutil.copyfileobj(source_handle, handle, 1024 * 1024)
+                                    handle.flush()
+                                    os.fsync(handle.fileno())
+                                os.chmod(temp, 0o600)
+                                os.replace(temp, blob_path)
+                                size = os.path.getsize(blob_path)
+                                missing = False
+                            except OSError:
+                                if temp:
+                                    try:
+                                        os.unlink(temp)
+                                    except OSError:
+                                        pass
+                    name = os.path.basename(source) or "artifact"
+                    db.execute("""INSERT INTO delivered_artifacts(
+                        file_id,session_id,source_agent_id,tool_id,ordinal,
+                        source_path,name,caption,delivered_at,blob_name,size,kind,
+                        missing,transcript_path)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(file_id) DO UPDATE SET
+                          source_path=excluded.source_path,name=excluded.name,
+                          caption=excluded.caption,delivered_at=excluded.delivered_at,
+                          blob_name=COALESCE(excluded.blob_name,delivered_artifacts.blob_name),
+                          size=COALESCE(excluded.size,delivered_artifacts.size),
+                          kind=excluded.kind,missing=excluded.missing,
+                          transcript_path=excluded.transcript_path""",
+                        (selector, sid, agent_id, tool_id, ordinal, source, name,
+                         str(delivery.get("caption") or ""),
+                         str(delivery.get("ts") or ""), blob_name, size,
+                         self._artifact_kind(name), int(missing),
+                         str(delivery.get("transcript_path") or "")))
+            db.commit()
+
+    def session_files(self, sid, source_agent_id=None, cursor=0, limit=100):
+        try:
+            cursor = max(0, int(cursor or 0))
+            limit = max(1, min(200, int(limit or 100)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid file pagination"}
+        db = None
+        try:
+            db = self.ledger_reader()
+            if source_agent_id:
+                rows = db.execute("""SELECT rowid,file_id,name,caption,delivered_at,
+                    size,kind,missing,source_agent_id
+                    FROM delivered_artifacts
+                    WHERE session_id=? AND source_agent_id=? AND rowid<?
+                    ORDER BY rowid DESC LIMIT ?""",
+                    (str(sid), str(source_agent_id),
+                     cursor or 9223372036854775807, limit + 1)).fetchall()
+            else:
+                rows = db.execute("""SELECT rowid,file_id,name,caption,delivered_at,
+                    size,kind,missing,source_agent_id
+                    FROM delivered_artifacts WHERE session_id=? AND rowid<?
+                    ORDER BY rowid DESC LIMIT ?""",
+                    (str(sid), cursor or 9223372036854775807,
+                     limit + 1)).fetchall()
+        except Exception:
+            return {"ok": False, "error": "file inventory unavailable"}
+        finally:
+            if db is not None:
+                db.close()
+        more = len(rows) > limit
+        rows = rows[:limit]
+        files = [{"file_id": row[1], "name": row[2], "caption": row[3] or "",
+                  "ts": row[4], "size": row[5], "kind": row[6],
+                  "missing": bool(row[7]), "source_agent_id": row[8]}
+                 for row in rows]
+        return {"ok": True, "files": files,
+                "next_cursor": rows[-1][0] if more and rows else None}
+
+    def artifact_content(self, sid, selector):
+        db = None
+        try:
+            db = self.ledger_reader()
+            row = db.execute("""SELECT name,blob_name,missing FROM delivered_artifacts
+                WHERE session_id=? AND file_id=?""", (str(sid), str(selector))).fetchone()
+        except Exception:
+            return None
+        finally:
+            if db is not None:
+                db.close()
+        if not row:
+            return None
+        name, blob_name, missing = row
+        source = os.path.join(pathcfg.BASE, "delivered-artifacts", blob_name or "")
+        if missing or not blob_name or not os.path.isfile(source):
+            return None, None, "unreadable: the delivered artifact copy is unavailable"
+        try:
+            if os.path.getsize(source) > 8_000_000:
+                return None, None, "file too large to preview (>8MB)"
+            with open(source, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            return None, None, f"unreadable: {exc}"
+        ext = os.path.splitext(name)[1].lower()
+        ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".gif": "image/gif", ".webp": "image/webp",
+                 ".svg": "image/svg+xml", ".pdf": "application/pdf",
+                 ".json": "application/json; charset=utf-8"}.get(
+                     ext, "text/plain; charset=utf-8")
+        return ctype, data, None
+
+    def artifact_download(self, sid, selector):
+        db = None
+        try:
+            db = self.ledger_reader()
+            row = db.execute("""SELECT name,blob_name,missing,size
+                FROM delivered_artifacts WHERE session_id=? AND file_id=?""",
+                (str(sid), str(selector))).fetchone()
+        except Exception:
+            return None
+        finally:
+            if db is not None:
+                db.close()
+        if not row:
+            return None
+        name, blob_name, missing, size = row
+        root = os.path.realpath(os.path.join(pathcfg.BASE, "delivered-artifacts"))
+        source = os.path.realpath(os.path.join(root, blob_name or ""))
+        if (missing or not blob_name or os.path.dirname(source) != root or
+                not os.path.isfile(source)):
+            return None, None, None, None, \
+                "unreadable: the delivered artifact copy is unavailable"
+        ext = os.path.splitext(name)[1].lower()
+        ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".gif": "image/gif", ".webp": "image/webp",
+                 ".svg": "image/svg+xml", ".pdf": "application/pdf",
+                 ".json": "application/json; charset=utf-8"}.get(
+                     ext, "application/octet-stream")
+        return ctype, source, name, int(size or os.path.getsize(source)), None
+
+    def artifact_tool_files(self, sid, tool_id, source_agent_id=None):
+        db = None
+        try:
+            db = self.ledger_reader()
+            if source_agent_id:
+                rows = db.execute("""SELECT file_id,name,caption,delivered_at,size,
+                        kind,missing,source_agent_id
+                    FROM delivered_artifacts
+                    WHERE session_id=? AND source_agent_id=? AND tool_id=?
+                    ORDER BY ordinal""",
+                    (str(sid), str(source_agent_id), str(tool_id))).fetchall()
+            else:
+                rows = db.execute("""SELECT file_id,name,caption,delivered_at,size,
+                        kind,missing,source_agent_id
+                    FROM delivered_artifacts
+                    WHERE session_id=? AND source_agent_id IS NULL AND tool_id=?
+                    ORDER BY ordinal""", (str(sid), str(tool_id))).fetchall()
+        except Exception:
+            return []
+        finally:
+            if db is not None:
+                db.close()
+        return [{"file_id": row[0], "name": row[1], "caption": row[2] or "",
+                 "ts": row[3], "size": row[4], "kind": row[5],
+                 "missing": bool(row[6]), "source_agent_id": row[7]}
+                for row in rows]
+
+    def artifact_selector_for_path(self, sid, raw_path):
+        db = None
+        try:
+            db = self.ledger_reader()
+            row = db.execute("""SELECT file_id FROM delivered_artifacts
+                WHERE session_id=? AND source_path=? ORDER BY rowid DESC LIMIT 1""",
+                (str(sid), str(raw_path))).fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+        finally:
+            if db is not None:
+                db.close()
+
     def _project_file_ids(self, sid, context):
         """Project internal file records to opaque, client-safe selectors."""
         if not isinstance(context, dict):
@@ -782,7 +1015,8 @@ Treat this as an independent session. Verify the repository state before changin
             return False, "the saved working directory is unavailable"
         return True, None
 
-    def _closed_claude_agents(self, sid, transcript_path, lock_held=False):
+    def _closed_claude_agents(self, sid, transcript_path, lock_held=False,
+                              artifact_deliveries=None):
         root = os.path.realpath(os.path.join(os.path.dirname(transcript_path), str(sid),
                                              "subagents"))
         expected_parent = os.path.realpath(os.path.dirname(transcript_path))
@@ -807,6 +1041,13 @@ Treat this as an independent session. Verify the repository state before changin
             else:
                 with self.scan_lock:
                     tail.poll()
+            if artifact_deliveries is not None and tail.file_deliveries:
+                artifact_deliveries.extend({
+                    **delivery, "session_id": sid, "source_agent_id": aid,
+                    "transcript_path": transcript,
+                    "file_backups": dict(tail.file_backups),
+                } for delivery in tail.file_deliveries)
+                tail.file_deliveries.clear()
             role, _stop, ctypes = (tail.last_shape or (None, None, []))[:3]
             settled = role == "assistant" and "tool_use" not in (ctypes or [])
             out.append({
@@ -908,25 +1149,51 @@ Treat this as an independent session. Verify the repository state before changin
         fallback = os.path.join(cwd_to_project_dir(row[0] or ""), f"{sid}.jsonl")
         path = self._safe_claude_transcript(sid, row[6] or fallback)
         if not path:
-            return {"ok": False, "error": "transcript is gone"}
+            inventory = self.session_files(sid, limit=100)
+            if not inventory.get("files"):
+                return {"ok": False, "error": "transcript is gone"}
+            can_resume = bool(self._safe_reopen_cwd(row[0]))
+            return {"ok": True, "messages": [], "files": inventory["files"],
+                    "agents": [], "closed": True, "transcript_missing": True,
+                    "info": {"session_id": sid, "cwd": row[0], "model": row[1],
+                             "cost": row[2], "title": row[3], "project": row[4],
+                             "branch": row[5], "status_line": status_line,
+                             "can_reopen": False, "can_resume_and_send": False,
+                             "resume_disabled_reason":
+                                 "the saved Claude transcript is unavailable"}}
+        deliveries = []
         with self.scan_lock:
             t = self.tail_for(path)
             t.poll()
             msgs = [dict(m) for m in t.convo]
             files = [dict(item) for item in t.files]
             backups = dict(t.file_backups)
-            agents = self._closed_claude_agents(sid, path, lock_held=True)
+            agents = self._closed_claude_agents(
+                sid, path, lock_held=True, artifact_deliveries=deliveries)
+            deliveries.extend({
+                **delivery, "session_id": sid, "source_agent_id": None,
+                "transcript_path": path, "file_backups": backups,
+            } for delivery in t.file_deliveries)
+            t.file_deliveries.clear()
+        self.store_artifact_deliveries(deliveries)
         def fmeta(raw_path):
             backup = self._claude_file_backup(sid, backups.get(raw_path))
             return {"name": os.path.basename(raw_path),
                     "file_id": self.file_id(sid, raw_path),
                     "kind": "image" if os.path.splitext(raw_path)[1].lower() in IMG_EXTS
                     else "text", "missing": not os.path.isfile(raw_path) and backup is None}
+        tool_files = {}
         for m in msgs:              # file chips need the same metadata the live view builds
             if m.get("role") == "tool" and m.get("files"):
-                m["files"] = [fmeta(p) for p in m["files"]]
-        out_files = [{**fmeta(item["path"]), "caption": item.get("caption", ""),
-                      "ts": item.get("ts")} for item in reversed(files)]
+                tool_id = str(m.get("tool_id") or "")
+                durable = tool_files.setdefault(
+                    tool_id, self.artifact_tool_files(sid, tool_id)) if tool_id else []
+                m["files"] = durable or [fmeta(p) for p in m["files"]]
+        durable_files = self.session_files(sid, limit=100)
+        out_files = durable_files.get("files") if durable_files.get("ok") else []
+        if not out_files:
+            out_files = [{**fmeta(item["path"]), "caption": item.get("caption", ""),
+                          "ts": item.get("ts")} for item in reversed(files)]
         can_resume = bool(self._safe_reopen_cwd(row[0]))
         reason = None if can_resume else "the saved working directory is unavailable"
         return {"ok": True, "messages": msgs, "files": out_files,

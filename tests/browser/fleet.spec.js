@@ -583,7 +583,6 @@ test('Now hierarchy, Usage chip, active-subagent filter, and card actions are un
   await expect(page.locator('#usagechip')).not.toHaveClass(/usagewarn|usagedanger/);
 
   await reset(page, 'subagent');
-  await expect(page.locator('[data-sid="codex:thread-one"]')).not.toHaveClass(/fixedpeek/);
   await expect(page.locator('[data-now-filter="subagents"]')).toHaveText('Subagents · 1');
   await page.locator('[data-now-filter="subagents"]').click();
   const child = page.locator('#subagents .activeagentcard');
@@ -1389,21 +1388,15 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(peek.locator('code')).toHaveText('compact code');
   await expect(peek.locator('li')).toHaveCount(2);
   const peekRow = card.locator('.sessionpeek');
-  await expect(peekRow).toHaveClass(/truncated/);
-  const expand = peekRow.getByRole('button', { name: 'expand latest message' });
-  await expect(expand).toHaveText('...');
+  await expect(peekRow.locator('.peektoggle')).toHaveCount(0);
   const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
-  await expect(card).toHaveClass(/fixedpeek/);
-  await peekRow.locator('.peekmd').click({ position: { x: 4, y: 4 } });
-  await expect(peekRow).toHaveClass(/expanded/);
-  await expect(peekRow.getByRole('button', { name: 'collapse latest message' })).toHaveText('Less');
-  const expandedBox = await peek.evaluate(el => el.getBoundingClientRect().height);
-  expect(expandedBox).toBeGreaterThan(peekBox.height);
-  const expandedText = await peek.innerText();
-  expect(expandedText.length).toBeLessThanOrEqual(800);
-  expect(expandedText.endsWith('…')).toBe(true);
+  const bounds = await card.evaluate(el => {
+    const cardRect=el.getBoundingClientRect(),meta=el.querySelector('.cmeta')?.getBoundingClientRect();
+    return {cardBottom:cardRect.bottom,metaBottom:meta?.bottom||0};
+  });
+  expect(bounds.metaBottom).toBeLessThanOrEqual(bounds.cardBottom+.5);
   await page.evaluate(() => {
     window.__peekLinkClicks = 0;
     document.querySelector('.sessionpeek a').addEventListener('click', event => {
@@ -1411,21 +1404,17 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
     });
   });
   await peekRow.getByRole('link', { name: 'Fleet docs' }).dispatchEvent('click');
-  await expect(peekRow).toHaveClass(/expanded/);
   expect(await page.evaluate(() => window.__peekLinkClicks)).toBe(1);
-  await page.screenshot({ path: testInfo.outputPath('markdown-peek-expanded.png'), fullPage: true });
-  await peekRow.locator('.peekmd').click({ position: { x: 4, y: 4 } });
-  await expect(peekRow).toHaveClass(/expanded/);
-  await peekRow.getByRole('button', { name: 'collapse latest message' }).click();
-  await expect(peekRow).toHaveClass(/truncated/);
-  await expect(card).toHaveClass(/fixedpeek/);
   const collapsedHeight = await card.evaluate(el => el.getBoundingClientRect().height);
   await page.evaluate(() => setNum('preview_session_lines', 5));
   await expect.poll(async () => card.evaluate(el => el.getBoundingClientRect().height))
     .toBeGreaterThan(collapsedHeight + 45);
   const fiveLineHeight = await card.evaluate(el => el.getBoundingClientRect().height);
   expect(fiveLineHeight - collapsedHeight).toBeLessThan(60);
-  await page.screenshot({ path: testInfo.outputPath('markdown-peek-fixed.png'), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath('markdown-peek-clamped.png'), fullPage: true });
+  await peekRow.locator('.peekmd').click({ position: { x: 4, y: 4 } });
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#sclose').click();
 
   // Console context gauge: a 3px track in the desktop meta rail whose track
   // color is distinct from the card surface (mobile shows ctx % inline only).
@@ -1504,16 +1493,15 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
 test('a fully visible collapsed peek has no expansion action', async ({ page }) => {
   await reset(page);
   const peek = page.locator('[data-sid="codex:thread-one"] .sessionpeek');
-  await expect(peek).not.toHaveClass(/truncated|expanded/);
-  await peek.locator('.peekmd').click({ position: { x: 4, y: 4 } });
-  await expect(peek).not.toHaveClass(/truncated|expanded/);
-  await expect(peek.getByRole('button', { name: 'collapse latest message' })).toHaveCount(0);
+  await expect(peek.locator('.peektoggle')).toHaveCount(0);
   // the configured line count is a MAXIMUM: a short last message shrinks the
   // card to its measured content instead of reserving empty preview rows
+  const before=await peek.locator('.peekmd').evaluate(el=>el.getBoundingClientRect().height);
   await page.evaluate(() => setNum('preview_session_lines', 5));
-  await expect.poll(() => page.evaluate(() =>
-    Number(document.querySelector('[data-sid="codex:thread-one"]')
-      .style.getPropertyValue('--session-card-lines')))).toBeLessThan(5);
+  await expect.poll(() => peek.locator('.peekmd').evaluate(el=>el.getBoundingClientRect().height))
+    .toBeCloseTo(before,0);
+  await page.locator('[data-sid="codex:thread-one"] .cmeta').click();
+  await expect(page.locator('#sview')).toBeVisible();
 });
 
 test('full chat renders a large message without discarding text', async ({ page }) => {
@@ -1550,9 +1538,10 @@ test('large conversations load newest-first in bounded pages without losing olde
   await expect(page.locator('#sbody')).toContainText('Conversation message 204');
   await expect(page.locator('#sbody')).not.toContainText('Conversation message 154');
   for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-    await page.locator('#sbody .oldermsgs').click();
+    await page.locator('#sbody').evaluate(element=>{element.scrollTop=0;});
+    await expect.poll(()=>page.locator('#sbody .cmsg').count()).toBeGreaterThan(50*(pageIndex+1));
   }
-  await expect(page.locator('#sbody .oldermsgs')).toHaveCount(0);
+  await expect(page.locator('#sbody .oldermsgs-sentinel')).toHaveCount(0);
   await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
   await expect(page.locator('#sbody')).toContainText('Conversation message 000');
   await page.locator('#sclose').click();
@@ -1560,7 +1549,8 @@ test('large conversations load newest-first in bounded pages without losing olde
   await openSubagent(page,'codex:thread-one','agent-child-one',{all:true});
   await expect(page.locator('#abody')).toContainText('Subagent report 204');
   for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-    await page.locator('#abody .oldermsgs').click();
+    await page.locator('#abody').evaluate(element=>{element.scrollTop=0;});
+    await expect.poll(()=>page.locator('#abody .cmsg').count()).toBeGreaterThan(50*(pageIndex+1));
   }
   await expect(page.locator('#abody .cmsg')).toHaveCount(205);
   await expect(page.locator('#abody')).toContainText('Subagent report 000');
@@ -1571,7 +1561,8 @@ test('large conversations load newest-first in bounded pages without losing olde
   await closed.getByRole('button', { name: 'View' }).click();
   await expect(page.locator('#sbody')).toContainText('Closed report 204');
   for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-    await page.locator('#sbody .oldermsgs').click();
+    await page.locator('#sbody').evaluate(element=>{element.scrollTop=0;});
+    await expect.poll(()=>page.locator('#sbody .cmsg').count()).toBeGreaterThan(50*(pageIndex+1));
   }
   await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
   await expect(page.locator('#sbody')).toContainText('Closed report 000');
@@ -1590,7 +1581,11 @@ test('large conversations load newest-first in bounded pages without losing olde
 test('loaded conversation pages survive tail refresh and an offline reload', async ({ page, context }) => {
   await reset(page, 'large-conversation', { serviceWorker: true });
   await page.locator('[data-sid="codex:thread-one"] .shead').click();
-  for(let index=0;index<4;index++)await page.locator('#sbody .oldermsgs').click();
+  await expect(page.locator('#sbody')).toContainText('Conversation message 204');
+  for(let index=0;index<4;index++){
+    await page.locator('#sbody').evaluate(element=>{element.scrollTop=0;});
+    await expect.poll(()=>page.locator('#sbody .cmsg').count()).toBeGreaterThan(50*(index+1));
+  }
   await expect(page.locator('#sbody .cmsg')).toHaveCount(205);
   await page.request.post('/test/confirm',{data:{session_id:'codex:thread-one',text:'Newest canonical tail message'}});
   await page.evaluate(()=>tick(true));

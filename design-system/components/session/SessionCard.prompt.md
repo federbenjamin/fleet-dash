@@ -1,4 +1,4 @@
-The canonical Now-queue session card. Desktop: content left + locked 118px meta rail (status/model/ctx/quiet/agents). Mobile: pass `mobile` for inline status. Nest `<AgentRow>` children for live subagent trees.
+The canonical Now-queue session card. Desktop: content left + adaptive 136–164px meta rail (status/model/ctx/quiet/agents); natural height follows the taller side. Mobile: pass `mobile` for inline status. Nest `<AgentRow>` children for live subagent trees.
 
 ```jsx
 <SessionCard title="Explain the three needs of judgments" repo="quirk · refactor/offset-op-lock"

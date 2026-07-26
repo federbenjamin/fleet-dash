@@ -1436,6 +1436,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, "application/pdf",
                                       b"%PDF-1.4\n% Fleet fixture\n%%EOF\n")
                 return self.reply(200, "text/plain; charset=utf-8", "# Artifact\n\nSafe preview.")
+            if route == "/api/session_files":
+                sid = (query.get("sid") or [""])[0]
+                return self.json_reply({"ok": True, "files": fixture_files(sid),
+                                        "next_cursor": None})
             if route == "/api/insights":
                 return self.json_reply({"ok": True, "totals": {"agent_cost": 0,
                     "session_cost": 0, "bust_cost": 0}, "token_mix": [], "cache_busts": [],

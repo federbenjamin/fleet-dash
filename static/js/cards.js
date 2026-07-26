@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{activeToolChip,screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardUsesFixedPeekHeight,cardFrame,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{activeToolChip,screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,cardSurfaceTap,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -90,6 +90,11 @@ function sessionHeaderKey(event,sid){
   if(event.target!==event.currentTarget||!['Enter',' '].includes(event.key))return;
   event.preventDefault();openSession(sid);
 }
+function cardSurfaceTap(event){
+  if(event.defaultPrevented||event.target.closest(
+    'button,a[href],input,select,textarea,[role="button"],[contenteditable="true"]'))return;
+  openSession(event.currentTarget.dataset.sid);
+}
 function agentTap(e,sid,aid){
   e.stopPropagation();
   openAgent(sid,aid);
@@ -143,22 +148,6 @@ function cardCls(s){
   if(s.ui_group==='history')return'dorm';
   return s.reason_label==='Slow'?'stalled':'';
 }
-// Ordinary collapsed cards use one stable frame whose height follows the
-// session-peek line preference. Anything that adds an actionable/volatile row
-// stays content-sized so a fixed frame can never hide a control.
-function cardUsesFixedPeekHeight(s){
-  if(s.provisional||expandedPeeks.has(s.session_id))return false;
-  const pending=s.pending&&(!requestKey(s.pending)||answered[s.session_id]!==requestKey(s.pending));
-  // the running-agent list renders on any card with live agents, so the fixed
-  // frame must lift wherever it appears or the list is clipped (invariant 45)
-  const running=(s.agents||[]).some(a=>!terminalAgentStates.has(a.state));
-  const answerFeedback=optimisticList(s.session_id).some(item=>item.kind==='answer'||item.status==='queued');
-  return!pending&&!s.error&&!s.reply_requested&&!running&&!pinActions.has(s.session_id)&&
-    !quickResponses.has(s.session_id)&&!answerFeedback;
-}
-function cardFrame(s){
-  return{fixed:cardUsesFixedPeekHeight(s),lines:previewSessions()?clampS():0};
-}
 // The Console card's meta strip: status dot+label, model, context bar, quiet
 // time, live agent count. One DOM node, two presentations: the desktop right
 // rail, and on mobile an inline status row directly under the header (10a) —
@@ -186,8 +175,7 @@ function cardMetaRail(s){
   const ctx=s.ctx_pct==null?
     (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow">${fmtTok(s.ctx_tokens)} tok</span>`):
     `<span class="mrow">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
-  return`<div class="cmeta${cls==='stalled'?' alert':''}" role="button" tabindex="-1"
-      onclick="sessionTap(event,'${s.session_id}')">
+  return`<div class="cmeta${cls==='stalled'?' alert':''}">
       <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
       <span class="mrow cmodel">${modelLabel(s)}</span>
       ${ctx}
@@ -237,7 +225,7 @@ function cardTop(s){
       ${headRight}
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek${expandedPeeks.has(s.session_id)?' expanded':''}" title="${expandedPeeks.has(s.session_id)?'full peek exposed':'latest message'}" onclick="togglePeekFromTap(event,'${s.session_id}',${expandedPeeks.has(s.session_id)?'true':'false'})">${s.last_msg.role==='user'?'<span class="peekwho">you ·</span>':''}<div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div><button class="peektoggle ${expandedPeeks.has(s.session_id)?'less':'more'}" type="button" aria-label="${expandedPeeks.has(s.session_id)?'collapse latest message':'expand latest message'}" onclick="event.stopPropagation();togglePeek('${s.session_id}',${expandedPeeks.has(s.session_id)?'false':'true'})">${expandedPeeks.has(s.session_id)?'Less':'...'}</button></div></div>`:''}
+    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek" title="latest message">${s.last_msg.role==='user'?'<span class="peekwho">you ·</span>':''}<div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div></div></div>`:''}
     ${s.error?`<div class="lastmsg carderror"><span class="peekwho">provider ·</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${screenBlockNotice(s)}
     ${s.reply_requested&&!s.staging_observer?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
@@ -273,9 +261,7 @@ function cardAgentList(s){
 // conversation cache.
 // used only for the (wholesale-rendered) dormant fold; live cards go through reconcileCards
 function sessionCard(s){
-  const frame=cardFrame(s);
-  return`<div class="card ${cardCls(s)}${frame.fixed?' fixedpeek':''}" data-sid="${s.session_id}"
-    style="--session-card-lines:${frame.lines}">
+  return`<div class="card ${cardCls(s)}" data-sid="${s.session_id}" onclick="cardSurfaceTap(event)">
     <div class="ctop">${cardTop(s)}</div></div>`;
 }
 function cardTopFocusAnchor(top){
@@ -313,6 +299,7 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
     let card=container.querySelector('.card[data-sid="'+s.session_id+'"]');
     if(!card){
       card=document.createElement('div');card.dataset.sid=s.session_id;
+      card.onclick=cardSurfaceTap;
       const top=document.createElement('div');top.className='ctop';card.appendChild(top);
       container.appendChild(card);
       // setHtml memoises the last string it wrote here; appending a card out of
@@ -320,9 +307,8 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
       // be skipped and leave the card rendered in two places at once.
       container.__setHtml=undefined;
     }
-    const frame=cardFrame(s);
     setClass(card,'card'+(cardCls(s)?' '+cardCls(s):'')+
-      (pinnedSessions.has(s.session_id)?' pinned':'')+(frame.fixed?' fixedpeek':'')+
+      (pinnedSessions.has(s.session_id)?' pinned':'')+
       (sessionView?.sid===s.session_id&&workspaceDocked()?' paneopen':''));
     // Rewriting identical HTML is what made untouched cards re-layout — and
     // move under your finger — on every 2s poll and every user action. The
@@ -333,15 +319,6 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
     if(changed){
       const focusAnchor=cardTopFocusAnchor(top);
       setHtml(top,html);restoreCardTopFocus(top,focusAnchor);
-    }
-    // --session-card-lines is the CONFIGURED maximum here; measurePeekOverflow
-    // replaces it with the content-hugging minimum (invariant 45/57). Writing
-    // the maximum back on every poll made every card grow to the clamp and
-    // shrink again — so it is written only when the peek could actually have
-    // changed: a new card, a settings change, or a rebuilt .ctop.
-    if(changed||card.__frameLines!==frame.lines){
-      card.__frameLines=frame.lines;
-      card.style.setProperty('--session-card-lines',String(frame.lines));
     }
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
