@@ -27,8 +27,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   opens beside the rail); on mobile the Now header keeps a compact summary chip such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
-  an adaptive 136–164px meta rail on the right carries status, model, context %, tool-quiet time, and live agent
-  count without clipping ("Console" design system — see `design-system/`). The configured card
+  state appears as a colored dot prepended to the title, while an adaptive 136–164px meta rail on
+  the right carries model, context %, tool-quiet time, and live agent count without clipping
+  ("Console" design system — see `design-system/`). The configured card
   preview line count is a maximum: short previews hug their text, longer previews clamp, and the
   whole non-control card surface opens Chat. There is no separate three-dot expansion control.
   Quiet time appears only while a tool is actually open; ordinary provider work with no open tool
@@ -52,9 +53,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
   Search, Workstreams, Insights, and Settings. At 390×844 and other narrow widths it becomes
   a fixed bottom bar (mono-caps labels, amber active destination and unread badge); Insights and
-  Settings live under More. Mobile session cards render state, model, context text, and quiet time
-  in one row directly under the card header; active tools, compaction, skills, and agents add a
-  second row only while present. The mobile row omits the desktop context gauge. The URL hash preserves destinations
+  Settings live under More. Mobile session cards prepend the same state dot to the title, then render
+  model, context text, and quiet time in one row directly under the card header; active tools,
+  compaction, skills, and agents add a second row only while present. The mobile row omits the
+  desktop context gauge. The URL hash preserves destinations
   across refresh and browser/native back gestures (legacy `#history` links land on Search
   TYPE=SESSION). Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state

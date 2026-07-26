@@ -223,8 +223,9 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
     const top=card.querySelector('.ctop'),head=card.querySelector('.shead'),
       meta=card.querySelector('.cmeta'),
       peek=card.querySelector('.sessionpeek');
-    const primary=[...meta.querySelectorAll(':scope>:is(.cstat,.cmodel,.ccontext,.cquiet)')];
+    const primary=[...meta.querySelectorAll(':scope>:is(.cmodel,.ccontext,.cquiet)')];
     const primaryTops=primary.map(child=>Math.round(child.getBoundingClientRect().top));
+    const stateDot=card.querySelector('.cardstate');
     return{
       documentWidth:document.documentElement.scrollWidth,viewport:innerWidth,
       cardLeft:card.getBoundingClientRect().left,cardRight:card.getBoundingClientRect().right,
@@ -234,6 +235,9 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
       primaryRows:new Set(primaryTops).size,
       wrapperCount:meta.querySelectorAll('.cmeta-primary,.cmeta-secondary').length,
       directPrimary:primary.every(item=>item.parentElement===meta),
+      statusTags:meta.querySelectorAll('.cstat').length,
+      stateDotParent:stateDot?.parentElement?.className,
+      stateLabel:stateDot?.getAttribute('aria-label'),
       contextBarDisplay:getComputedStyle(meta.querySelector('.railbar')).display,
       titleSize:parseFloat(getComputedStyle(card.querySelector('.stitle')).fontSize),
     };
@@ -247,6 +251,9 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
   expect(now.primaryRows).toBe(1);
   expect(now.wrapperCount).toBe(0);
   expect(now.directPrimary).toBe(true);
+  expect(now.statusTags).toBe(0);
+  expect(now.stateDotParent).toBe('stitle');
+  expect(now.stateLabel).toContain('session status:');
   expect(now.contextBarDisplay).toBe('none');
   expect(now.titleSize).toBeGreaterThanOrEqual(15);
   const legacyRows=await page.evaluate(()=>{
@@ -257,7 +264,7 @@ test('mobile Now and all session sections keep one balanced, unclipped workbench
     const primary=document.createElement('div');primary.className='cmeta-primary';
     const secondary=document.createElement('div');secondary.className='cmeta-secondary';
     for(const item of [...meta.children]){
-      if(item.matches('.cstat,.cmodel,.ccontext,.cquiet'))primary.append(item);
+      if(item.matches('.cmodel,.ccontext,.cquiet'))primary.append(item);
       else secondary.append(item);
     }
     meta.append(primary);if(secondary.childElementCount)meta.append(secondary);
@@ -1870,7 +1877,7 @@ test('a working card names the tool it is blocked on, and a stalled one flags it
   await expect(tool).not.toHaveClass(/crit/);
   if(testInfo.project.name.startsWith('mobile')){
     const rows=await page.locator('[data-sid="claude-one"] .cmeta').evaluate(meta=>({
-      primaryBottom:meta.querySelector('.cstat').getBoundingClientRect().bottom,
+      primaryBottom:meta.querySelector('.cmodel').getBoundingClientRect().bottom,
       secondaryTop:meta.querySelector('.ctool').getBoundingClientRect().top,
       toolParent:meta.querySelector('.ctool').parentElement.className,
     }));
@@ -1978,7 +1985,8 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
-  await expect(card.locator('.cstat')).toContainText('available');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: available');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
 });
 
@@ -2144,7 +2152,8 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   const card = page.locator('[data-sid="claude-one"]');
   await expect(card).toBeVisible();
   await expect(card).toContainText('New Claude session');
-  await expect(card.locator('.cstat')).toContainText('available');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: available');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
@@ -2162,7 +2171,8 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   const card = page.locator('[data-sid="codex:thread-one"]');
 
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(card.locator('.cstat')).toContainText('working elsewhere');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: working elsewhere');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(card).toContainText('Working in ChatGPT desktop.');
   await expect(card.getByRole('button', { name: 'View', exact: true })).toHaveCount(0);
   await expect(card.locator('.termbtn')).toHaveCount(0);
@@ -3458,7 +3468,9 @@ test('available stays visible while inactive lifecycles live in Search TYPE=SESS
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
-  await expect(page.locator('#sessions [data-sid="claude-one"] .cstat')).toContainText('available');
+  await expect(page.locator('#sessions [data-sid="claude-one"] .cardstate'))
+    .toHaveAttribute('aria-label','session status: available');
+  await expect(page.locator('#sessions [data-sid="claude-one"] .cstat')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
@@ -3486,7 +3498,8 @@ test('action inbox separates requests, work, availability, and unread responses'
   await reset(page, 'subagent');
   const working = page.locator('[data-sid="codex:thread-one"]');
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(working.locator('.cstat')).toHaveText('working');
+  await expect(working.locator('.cardstate')).toHaveAttribute('aria-label','session status: working');
+  await expect(working.locator('.cstat')).toHaveCount(0);
   await expect(working.locator('.primarybtn')).toHaveCount(0);
   await working.locator('.shead').click();
   await expect(page.locator('#sview')).toBeVisible();

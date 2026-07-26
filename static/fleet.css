@@ -456,6 +456,7 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoff
 .cstat .mdot{width:6px;height:6px;border-radius:50%;flex:none;background:currentColor}
 .cstat.amber{color:var(--amber)}.cstat.green{color:var(--green)}
 .cstat.red{color:var(--red)}.cstat.dim{color:var(--fg-dim-1)}
+.cmeta .cstat{display:none}
 .cmodel{color:var(--purple)}
 .cagents{color:var(--green)}
 .cmeta .crit{color:var(--red)}
@@ -497,6 +498,17 @@ html[data-instance="staging"] :is(#vhead,#shead2,#ahead,#searchviewhead,#handoff
 .sname{overflow:hidden;flex:1;min-width:0}
 .sname .stitle{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font:600 14px/1.3 var(--font-ui);color:var(--fg)}
+.cardstate{display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;
+  vertical-align:1px;background:var(--fg-dim-1)}
+.cardstate.amber{background:var(--amber)}.cardstate.green{background:var(--green)}
+.cardstate.red{background:var(--red)}.cardstate.dim{background:var(--fg-dim-1)}
+/* Tabs holding the previous card DOM lose the old text tag immediately when
+   this stylesheet arrives and receive the equivalent title-leading dot. */
+.card:not(:has(.cardstate)):has(.cstat) .shead::before{content:"";width:7px;height:7px;
+  border-radius:50%;flex:0 0 auto;background:var(--fg-dim-1)}
+.card:not(:has(.cardstate)):has(.cstat.amber) .shead::before{background:var(--amber)}
+.card:not(:has(.cardstate)):has(.cstat.green) .shead::before{background:var(--green)}
+.card:not(:has(.cardstate)):has(.cstat.red) .shead::before{background:var(--red)}
 .sname small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font:400 11px/1.4 var(--font-mono);color:var(--fg-dim-1)}
 .scost{color:var(--fg);font-weight:600;white-space:nowrap}
@@ -1762,8 +1774,8 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
     border-left:0;border-top:1px solid var(--line-peek);border-bottom:1px solid var(--line-peek);
     background:transparent;font-size:10.5px;line-height:1.35}
   .card>.ctop>.cmeta.alert{background:transparent}
-  .cmeta>:is(.cstat,.ccontext,.cquiet),
-  .cmeta-primary>:is(.cstat,.ccontext,.cquiet){order:0;flex:0 0 auto}
+  .cmeta>:is(.ccontext,.cquiet),
+  .cmeta-primary>:is(.ccontext,.cquiet){order:0;flex:0 0 auto}
   .cmeta>.cmodel,.cmeta-primary>.cmodel{order:0;flex:1 1 72px}
   .cmeta>:is(.ccompact,.ctool,.runskill,.cagents),
   .cmeta-secondary>:is(.ccompact,.ctool,.runskill,.cagents){order:2;flex:0 1 auto;margin-top:7px}
