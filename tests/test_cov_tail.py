@@ -85,6 +85,57 @@ class TailCovTest(unittest.TestCase):
         t.poll()
         self.assertEqual(t.ti, 3)
 
+    # ------------------------------------------- interruption + activity clock
+    def test_interrupted_tail_tracks_only_the_newest_row(self):
+        rows = [{"type": "user", "timestamp": "2026-07-15T00:00:00Z",
+                 "message": {"role": "user", "content": "the task"}}]
+        t = self._tail(rows)
+        self.assertFalse(t.interrupted_tail)
+        for marker in ("[Request interrupted by user]",
+                       "[Request interrupted by user for tool use]"):
+            self._write([{"type": "user", "timestamp": "2026-07-15T00:00:01Z",
+                          "message": {"role": "user", "content": [
+                              {"type": "text", "text": marker}]}}], mode="a")
+            t.poll()
+            self.assertTrue(t.interrupted_tail, marker)
+        # A resumed agent keeps working: any later row clears it.
+        self._write([self.assistant("2026-07-15T00:00:02Z", "back")], mode="a")
+        t.poll()
+        self.assertFalse(t.interrupted_tail)
+        # And the marker must be the row, not a mention inside one.
+        self._write([{"type": "user", "timestamp": "2026-07-15T00:00:03Z",
+                      "message": {"role": "user", "content":
+                                  "why did [Request interrupted by user] appear?"}}],
+                    mode="a")
+        t.poll()
+        self.assertFalse(t.interrupted_tail)
+
+    def test_activity_clock_is_the_newest_row_not_the_mtime(self):
+        """Quiet time rides the fold (invariant 81)."""
+        t = self._tail([self.assistant("2026-07-15T00:00:00Z", "hi",
+                                       usage={"input_tokens": 1})])
+        first = t.activity_ep
+        self.assertAlmostEqual(first, 1784073600.0, delta=1)   # the row's own time
+        os.utime(self.path, None)                              # phantom touch
+        self.assertFalse(t.poll())
+        self.assertEqual(t.activity_ep, first)
+        # Compaction appends rows carrying EARLIER timestamps: the clock is a max,
+        # and real growth is activity even when the row predates it.
+        self._write([self.assistant("2026-07-14T00:00:00Z", "older")], mode="a")
+        self.assertTrue(t.poll())
+        self.assertGreater(t.activity_ep, first)
+
+    def test_first_read_of_an_old_file_is_not_activity(self):
+        """A daemon restart folds a day-old transcript; it is still a day old."""
+        self._write([self.assistant("2026-07-15T00:00:00Z", "hi")])
+        t = Tail(self.path)
+        self.assertTrue(t.poll())
+        self.assertAlmostEqual(t.activity_ep, 1784073600.0, delta=1)
+
+    def test_plain_text_of_an_unusable_content_shape(self):
+        self.assertEqual(Tail._plain_text(None), "")
+        self.assertEqual(Tail._plain_text([{"type": "tool_result"}]), "")
+
     # ---------------------------------------------------------- fold branches
     def test_compact_summary_flag(self):
         t = self._tail([{"type": "user", "timestamp": "2026-07-15T00:00:00Z",

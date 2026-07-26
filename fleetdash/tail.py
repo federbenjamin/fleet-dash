@@ -4,6 +4,13 @@ from collections import deque
 from . import paths as pathcfg
 from .config import KEY_TOOLS, CLAUDE_EFFORTS, ktok, iso_epoch, usd, model_family
 
+# Both forms Claude writes when a turn is interrupted, verified against the local
+# corpus 2026-07-25: `[Request interrupted by user]` and `[Request interrupted by
+# user for tool use]`. Anchored at the row's start — in a MAIN transcript the
+# marker is routinely followed by the operator's next instruction, and only a row
+# that is nothing but the marker is evidence of a stop.
+INTERRUPT_MARKER = re.compile(r"^\[Request interrupted by user[^\]]{0,40}\]")
+
 class Tail:
     """Incremental jsonl reader: keeps byte offset + running aggregates."""
 
@@ -28,6 +35,21 @@ class Tail:
         self.last_shape = None          # ('assistant', stop_reason, [content types]) or ('user', kind)
         self.first_ts = None
         self.last_ts = None
+        # Wall-clock evidence of REAL conversation activity, monotonic. The file's
+        # mtime is not that evidence: Claude rewrites a finished transcript in
+        # place (its trailing `bridge-session` record) hours after the last row —
+        # measured 2026-07-25, 6 of the 8 transcripts touched that day drifted
+        # 3.8–22.9h past their newest row with byte size unchanged. Anything that
+        # asks "how long has this been quiet?" reads this instead (invariant 81).
+        self.activity_ep = 0.0
+        # Claude marks an interrupted turn by writing `[Request interrupted by
+        # user]` as the transcript's next row. In a CHILD transcript that is a
+        # terminal state nothing else records (invariant 7) — the parent's Agent
+        # tool_result is the async-spawn acknowledgement and stays successful.
+        # True only while such a row is the NEWEST one: an agent can be resumed
+        # through SendMessage, and one interrupted agent in the corpus has rows
+        # after its marker.
+        self.interrupted_tail = False
         self.git_branch = None
         self.ai_title = None
         self.pending = {}               # tool_use_id -> {name, input, uuid} awaiting a result
@@ -92,6 +114,10 @@ class Tail:
             self.__init__(self.path)
         if size == self.offset:
             return False
+        # Growth after the initial backfill IS activity, even from a row carrying
+        # no timestamp. The first read must not stamp it: a daemon restart folds
+        # the whole file at once and would report a day-old session as live.
+        resumed = self.offset > 0
         with open(self.path, "rb") as f:
             f.seek(self.offset)
             chunk = f.read()
@@ -109,6 +135,8 @@ class Tail:
             except Exception:
                 continue
             self._fold(o, evidence_offset=row_end, row_start=row_end - len(line))
+        if resumed:
+            self.activity_ep = max(self.activity_ep, time.time())
         return True
 
     def _fold(self, o, evidence_offset=None, row_start=None):
@@ -120,6 +148,10 @@ class Tail:
         if ts:
             self.first_ts = self.first_ts or ts
             self.last_ts = ts
+            # max, not last: compaction appends rows carrying EARLIER timestamps
+            # (invariant 17), and a clock that walks backwards would report a
+            # compacting session as long-silent.
+            self.activity_ep = max(self.activity_ep, iso_epoch(ts) or 0.0)
         if o.get("isCompactSummary"):
             self.saw_compaction = True
         permission_mode = o.get("permissionMode")
@@ -246,8 +278,11 @@ class Tail:
                 self.pending.clear()    # turn over: unanswered tool_uses were canceled
                 self.active_skill = self.active_command = None
             self.last_shape = ("assistant", m.get("stop_reason"), ctypes)
+            self.interrupted_tail = False
         elif role == "user":
             kind = "tool_result" if "tool_result" in ctypes else "prompt"
+            self.interrupted_tail = bool(
+                INTERRUPT_MARKER.match(self._plain_text(content).lstrip()))
             if kind == "tool_result" and isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
@@ -606,6 +641,16 @@ class Tail:
             st = self.stats[key] = [0, 0, 0, 0, 0, 0]
         self.stats_dirty.add(key)
         return st
+
+    @staticmethod
+    def _plain_text(content):
+        """A row's message content as one string, whatever shape it arrived in."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text")
+        return ""
 
     @staticmethod
     def _chars(b):
