@@ -215,6 +215,84 @@ test('responsive application shell routes, filters, and follows browser back', a
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
 });
 
+test('mobile Now and all session sections keep one balanced, unclipped workbench', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile continuity');
+  await reset(page, 'subagent');
+  const now=await page.evaluate(()=>{
+    const card=document.querySelector('[data-sid="codex:thread-one"]');
+    const main=card.querySelector('.cmain'),meta=card.querySelector('.cmeta');
+    const mainStyle=getComputedStyle(main),metaStyle=getComputedStyle(meta);
+    return{
+      documentWidth:document.documentElement.scrollWidth,viewport:innerWidth,
+      cardLeft:card.getBoundingClientRect().left,cardRight:card.getBoundingClientRect().right,
+      mainPadding:parseFloat(mainStyle.paddingLeft),metaColumns:metaStyle.gridTemplateColumns.split(' ').length,
+      titleSize:parseFloat(getComputedStyle(card.querySelector('.stitle')).fontSize),
+    };
+  });
+  expect(now.documentWidth).toBeLessThanOrEqual(now.viewport);
+  expect(now.cardLeft).toBeGreaterThanOrEqual(12);
+  expect(now.cardRight).toBeLessThanOrEqual(now.viewport-12);
+  expect(now.mainPadding).toBeGreaterThanOrEqual(13);
+  expect(now.metaColumns).toBe(2);
+  expect(now.titleSize).toBeGreaterThanOrEqual(15);
+
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const workbenchGeometry=async()=>page.evaluate(()=>{
+    const view=document.querySelector('#sview').getBoundingClientRect(),
+      head=document.querySelector('#shead2').getBoundingClientRect(),
+      workspace=document.querySelector('#sworkspace').getBoundingClientRect(),
+      action=document.querySelector('#sact').getBoundingClientRect(),
+      tabs=document.querySelector('#stabs').getBoundingClientRect();
+    return{viewBottom:view.bottom,headBottom:head.bottom,workspaceTop:workspace.top,
+      workspaceBottom:workspace.bottom,actionTop:action.top,actionBottom:action.bottom,
+      tabsTop:tabs.top,tabsBottom:tabs.bottom,documentWidth:document.documentElement.scrollWidth,viewport:innerWidth};
+  });
+  let geometry=await workbenchGeometry();
+  expect(Math.abs(geometry.workspaceTop-geometry.headBottom)).toBeLessThan(1);
+  expect(geometry.workspaceBottom).toBeLessThanOrEqual(geometry.actionTop+1);
+  expect(Math.abs(geometry.actionBottom-geometry.tabsTop)).toBeLessThanOrEqual(1);
+  expect(Math.abs(geometry.tabsBottom-geometry.viewBottom)).toBeLessThanOrEqual(1);
+  expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewport);
+
+  await page.locator('#stab-files').click();
+  await page.locator('#sfilelist .workspaceitem', {hasText:'artifact.md'}).click();
+  await expect(page.locator('#sfilepreview')).toBeVisible();
+  await expect(page.locator('#sfilepreview .workspaceback')).toBeVisible();
+  await page.locator('#sfilepreview .workspaceback').click();
+  await expect(page.locator('#sfilelist')).toBeVisible();
+
+  await page.locator('#stab-subagents').click();
+  await page.locator('#sagentlist .workspaceitem').first().click();
+  await expect(page.locator('#sagentdetail')).toBeVisible();
+  await expect(page.locator('#sagentdetail .workspaceback')).toBeVisible();
+  await page.locator('#sagentdetail .workspaceback').click();
+  await expect(page.locator('#sagentlistpane')).toBeVisible();
+
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#sdetailindex')).toBeVisible();
+  await expect(page.locator('#sdetails .detailsection').first()).toBeVisible();
+  await page.locator('#stab-chat').click();
+  await expect(page.locator('#spanel-chat')).toBeVisible();
+
+  await page.setViewportSize({width:768,height:1024});
+  await page.reload();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#stab-files').click();
+  const tablet=await page.locator('#sfilebrowser').evaluate(browser=>{
+    const list=browser.querySelector('#sfilelist').getBoundingClientRect(),
+      divider=browser.querySelector('.workspacedivider').getBoundingClientRect(),
+      preview=browser.querySelector('#sfilepreview').getBoundingClientRect();
+    return{browserWidth:browser.getBoundingClientRect().width,listWidth:list.width,
+      dividerWidth:divider.width,previewWidth:preview.width,documentWidth:document.documentElement.scrollWidth};
+  });
+  expect(tablet.listWidth).toBeGreaterThanOrEqual(tablet.browserWidth-1);
+  expect(tablet.dividerWidth).toBe(0);
+  expect(tablet.previewWidth).toBe(0);
+  expect(tablet.documentWidth).toBeLessThanOrEqual(768);
+  geometry=await workbenchGeometry();
+  expect(Math.abs(geometry.actionBottom-geometry.tabsTop)).toBeLessThanOrEqual(1);
+});
+
 test('switching chats replaces a closed chat route and relay uses the normal send width', async ({ page }) => {
   const closedSid = '11111111-2222-3333-4444-555555555555';
   await reset(page, 'claude-archive');
@@ -2342,10 +2420,16 @@ test('fullscreen question drawer preserves reading position and resizes from nea
     const drawer=document.querySelector('#sact .question-drawer').getBoundingClientRect();
     const composer=document.querySelector('#sact .composer-dock').getBoundingClientRect();
     return {viewBottom:view.y+view.height,headBottom:head.y+head.height,tabsBottom:tabs.y+tabs.height,drawerTop:drawer.y,
-      composerBottom:composer.y+composer.height};
+      tabsTop:tabs.y,composerBottom:composer.y+composer.height};
   });
-  expect(geometry.drawerTop).toBeLessThanOrEqual(Math.max(geometry.headBottom,geometry.tabsBottom)+20);
-  expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
+  if(testInfo.project.name.startsWith('mobile')){
+    expect(geometry.drawerTop).toBeGreaterThanOrEqual(geometry.headBottom-1);
+    expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.tabsTop+1);
+    expect(Math.abs(geometry.tabsBottom-geometry.viewBottom)).toBeLessThan(1);
+  }else{
+    expect(geometry.drawerTop).toBeLessThanOrEqual(Math.max(geometry.headBottom,geometry.tabsBottom)+20);
+    expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
+  }
 
   let expandedGrip=null;
   await expect.poll(async()=>{
@@ -2585,7 +2669,7 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
 });
 
-test('mobile session swipes are bounded, ignore horizontal readers, and edge-exit', async ({ page }, testInfo) => {
+test('mobile session bar owns section changes while content swipes scroll and edge-exit', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile workspace gestures');
   await reset(page);
   await page.evaluate(()=>openSession('codex:thread-one'));
@@ -2597,13 +2681,17 @@ test('mobile session swipes are bounded, ignore horizontal readers, and edge-exi
     fire('touchstart',fromX);fire('touchmove',toX);fire('touchend',toX);
   },{fromX,toX});
 
-  await swipe(330,90);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+  await swipe(330,90);
+  await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-files').click();
+  await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-subagents').click();
+  await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await swipe(70,320);
+  await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-chat').click();
 
   await page.locator('#sbody').evaluate(body=>{const scroller=document.createElement('div');
     scroller.id='gesture-scroll-probe';scroller.style.cssText='overflow-x:auto;width:120px';
@@ -2642,10 +2730,12 @@ test('mobile keyboard geometry is flush and preserves chat and Markdown reading 
   expect(focused.text).toBe(before.text);expect(Math.abs(focused.offset-before.offset)).toBeLessThan(2);
   const seam=await page.evaluate(()=>{const view=document.querySelector('#sview').getBoundingClientRect(),
     dock=document.querySelector('#sact .composer-dock').getBoundingClientRect(),
+    tabs=document.querySelector('#stabs').getBoundingClientRect(),
     row=document.querySelector('#sact .freetext.composer').getBoundingClientRect();return{
-      viewBottom:view.bottom,dockBottom:dock.bottom,rowBottom:row.bottom};});
-  expect(Math.abs(seam.viewBottom-seam.dockBottom)).toBeLessThan(.6);
-  expect(seam.dockBottom-seam.rowBottom).toBeLessThanOrEqual(3);
+      viewBottom:view.bottom,dockBottom:dock.bottom,tabsTop:tabs.top,tabsBottom:tabs.bottom,rowBottom:row.bottom};});
+  expect(Math.abs(seam.tabsTop-seam.dockBottom)).toBeLessThanOrEqual(1);
+  expect(Math.abs(seam.viewBottom-seam.tabsBottom)).toBeLessThan(.6);
+  expect(seam.dockBottom-seam.rowBottom).toBeLessThanOrEqual(7);
   await composer.evaluate(element=>element.blur());
   await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:844,offsetTop:0};syncVisualViewport();});
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
@@ -4312,19 +4402,19 @@ test('session history text and access/provider filters shape one flat list in Se
   await expect(results).toContainText('Closed');
 });
 
-test('Console mobile pass: inline card status, file chips over the reader, bottom bar', async ({ page }, testInfo) => {
+test('Console mobile pass: complete card metadata, file navigation, bottom bar', async ({ page }, testInfo) => {
   await reset(page);
   const mobile = testInfo.project.name.startsWith('mobile');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   if (mobile) {
-    // 10a: the meta rail renders as an inline status row directly under the header
+    // The complete desktop metadata set becomes a stable grid after the card content.
     const boxes = await codex.evaluate(card => ({
       head: card.querySelector('.shead').getBoundingClientRect().toJSON(),
       meta: card.querySelector('.cmeta').getBoundingClientRect().toJSON(),
       peek: card.querySelector('.sessionpeek')?.getBoundingClientRect().toJSON() || null,
     }));
     expect(boxes.meta.top).toBeGreaterThanOrEqual(boxes.head.bottom - 1);
-    if (boxes.peek) expect(boxes.meta.bottom).toBeLessThanOrEqual(boxes.peek.top + 1);
+    if (boxes.peek) expect(boxes.meta.top).toBeGreaterThanOrEqual(boxes.peek.bottom - 1);
     await expect(page.locator('#bottomnav [data-route="notifications"] small')).toHaveText('Notifs');
   }
   await codex.locator('.shead').click();
@@ -4332,9 +4422,9 @@ test('Console mobile pass: inline card status, file chips over the reader, botto
   await page.getByRole('button', { name: /artifact\.md/ }).click();
   await expect(page.locator('#vbody')).toContainText('Safe preview');
   if (mobile) {
-    // 11e: the chip strip replaces the back-to-list button and switches files
+    // File chips switch directly while Back always returns to the complete list.
     await expect(page.locator('#sfilechips')).toBeVisible();
-    await expect(page.locator('#sfilepreview .workspaceback')).toBeHidden();
+    await expect(page.locator('#sfilepreview .workspaceback')).toBeVisible();
     await page.locator('#sfilechips .filechip', { hasText: 'data.json' }).click();
     await expect(page.locator('#sfilechips .filechip.on')).toContainText('data.json');
     await expect(page.locator('#vtitle')).toContainText('data.json');

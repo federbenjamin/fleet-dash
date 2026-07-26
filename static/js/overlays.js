@@ -247,10 +247,11 @@ function modalFocusable(root){return[...root.querySelectorAll('button:not([disab
   .filter(element=>!element.hidden&&element.getClientRects().length);}
 function syncModalStack(){
   const stack=modalStack(),top=stack.at(-1)||null;
+  let opened=false;
   for(const [id] of modalDefinitions){
     const root=document.getElementById(id),displayed=modalVisible(root),inStack=stack.includes(root);
     if(inStack&&!modalOpenState.has(root)){
-      modalOpenState.add(root);modalOpeners.set(root,modalOpener(document.activeElement));
+      opened=true;modalOpenState.add(root);modalOpeners.set(root,modalOpener(document.activeElement));
     }else if(!inStack&&modalOpenState.has(root)){
       modalOpenState.delete(root);modalLastClosedOpener=modalOpeners.get(root)||modalLastClosedOpener;
     }
@@ -262,6 +263,7 @@ function syncModalStack(){
   for(const id of ['appshell','bottomnav','mobilemore','usagepanel']){
     const root=document.getElementById(id);if(root)root.inert=Boolean(top);
   }
+  if(opened)requestAnimationFrame(syncVisualViewport);
   if(top)requestAnimationFrame(()=>{
     if(modalStack().at(-1)!==top||top.contains(document.activeElement))return;
     const restore=resolveModalOpener(modalLastClosedOpener);
@@ -308,8 +310,9 @@ function syncVisualViewport(){
   document.documentElement.style.setProperty('--fleet-visual-height',height+'px');
   document.documentElement.style.setProperty('--fleet-visual-top',top+'px');
   document.documentElement.classList.toggle('keyboard-open',keyboardOpen);
-  const compact=matchMedia('(pointer:coarse)').matches||innerWidth<=720;
-  for(const selector of fullscreenOverlaySelectors){const root=$(selector);if(compact){
+  const compact=matchMedia('(pointer:coarse)').matches||innerWidth<=820;
+  const activeOverlay=focused?.closest?.(fullscreenOverlaySelectors.join(','))||modalStack().at(-1)||null;
+  for(const selector of fullscreenOverlaySelectors){const root=$(selector);if(compact&&root===activeOverlay){
     root.style.setProperty('inset','auto 0px');root.style.setProperty('top',top+'px');
     root.style.setProperty('bottom','auto');root.style.setProperty('height',height+'px');
   }else for(const property of ['inset','top','bottom','height'])root.style.removeProperty(property);}
@@ -351,10 +354,10 @@ document.addEventListener('keydown',event=>{
 },true);
 document.addEventListener('touchstart',event=>{
   const input=document.activeElement;
-  if(!event.target.closest?.('#sbody,#vbody,.question-scroll')||
-      !input?.closest?.('.session-composer'))return chatTouch=null;
+  const surface=event.target.closest?.('#sbody,#vbody,#abody,#sfilelist,#sagentlistpane,#spanel-details,.question-scroll');
+  if(!surface||!input?.closest?.('.session-composer'))return chatTouch=null;
   const touch=event.touches?.[0];
-  chatTouch=touch?{x:touch.clientX,y:touch.clientY,input}:null;
+  chatTouch=touch?{x:touch.clientX,y:touch.clientY,input,surface}:null;
 },{passive:true,capture:true});
 document.addEventListener('touchmove',event=>{
   if(!chatTouch)return;

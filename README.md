@@ -90,8 +90,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
   device storage, can queue offline with their message, and are removed locally after delivery or
   after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.
-  On phones the composer stays docked immediately above the keyboard, the full-screen view follows
-  the visible iOS viewport, and a vertical drag on conversation history dismisses the keyboard.
+  On phones the composer stays docked immediately above the section bar and keyboard, the full-screen
+  view follows the visible iOS viewport, and a vertical drag on the active Chat, Files, Agents,
+  Details, or question scroller dismisses the keyboard.
   Fleet also keeps a bounded last-good cache of recently opened session, closed-session, and
   subagent conversations on that device. A failed refresh or offline reload shows saved history as
   stale instead of replacing it with an empty/error screen; refreshed tails merge with older pages.
@@ -121,11 +122,12 @@ the provider's native control path. Built 2026-07-13; still evolving.
   every initial open, preserves spawn order and required ancestors, and offers **All** for terminal
   agents; its tab count includes active agents only. On desktop the Files and Subagents list dividers
   are draggable or keyboard-resizable and their separate widths persist in that browser. One
-  contextual composer and one pending-request drawer serve the whole workspace at a stable height.
-  On mobile, horizontal swipes move between adjacent sections without wrapping; a right swipe that
-  starts at the left edge exits the workspace. Horizontally scrollable readers keep their own gesture.
-  On phones, once a file is open the Files section shows a horizontal file-chip strip above the
-  reader — tap a chip to switch files in place; browser back returns to the file list.
+  contextual composer and one independently scrollable, resizable pending-request drawer serve the
+  whole workspace at a stable height. On mobile, one persistent section bar sits below the composer;
+  taps switch sections without stealing horizontal or diagonal reader gestures. A right swipe that
+  starts at the left edge still exits the workspace. Files and Agents use an explicit list/detail
+  transition. Once a file is open, a horizontal file-chip strip switches files in place and the
+  visible Back control returns to the complete file list.
   Main-agent activity appears as the newest non-interactive Chat row. Closed
   sessions show explicit retained/unavailable states; eligible exact-session resumes use a
   text-only, idempotent first send, while external Codex threads remain view-only.
