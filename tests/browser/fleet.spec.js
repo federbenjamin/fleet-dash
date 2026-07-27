@@ -1101,8 +1101,8 @@ test('idle cards never fetch a conversation; a pending one still does', async ({
     });
   };
 
-  // a queue full of idle cards: the peek is last_msg from the poll, so nothing
-  // on a card needs the conversation
+  // a queue full of idle cards: peek activity arrives in the fleet snapshot, so
+  // nothing on a card needs a separate conversation request
   await chill();
   await expect(page.locator('[data-sid="claude-one"]')).toBeVisible();
   await page.waitForTimeout(300);
@@ -1507,7 +1507,7 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await expect(peek.locator('li')).toHaveCount(2);
   const peekRow = card.locator('.sessionpeek');
   await expect(peekRow.locator('.peektoggle')).toHaveCount(0);
-  const peekBox = await peek.evaluate(el => ({ height: el.getBoundingClientRect().height,
+  const peekBox = await peekRow.locator('.peekstream').evaluate(el => ({ height: el.getBoundingClientRect().height,
     line: parseFloat(getComputedStyle(el).lineHeight) }));
   expect(peekBox.height).toBeLessThanOrEqual(peekBox.line * 2 + 1);
   const bounds = await card.evaluate(el => {
@@ -1629,11 +1629,120 @@ test('context gauge, Markdown peek, and shared reading width stay legible', asyn
   await page.screenshot({ path: testInfo.outputPath('centered-reading-width.png'), fullPage: true });
 });
 
+test('session peeks show the newest visible full-chat lines and keep a long newest message at its beginning', async ({ page }, testInfo) => {
+  await reset(page);
+  const card=page.locator('[data-sid="codex:thread-one"]');
+  await page.evaluate(()=>{
+    last.settings.preview_session_lines=3;
+    const session=last.sessions.find(item=>item.session_id==='codex:thread-one');
+    session.card_peek=[
+      {type:'user',text:'older user line'},
+      {type:'tool',label:'Bash',text:'Flip PR to ready and arm auto-merge\nignored result',failed:true},
+      {type:'event',kind:'compact',label:'Conversation compacted',text:'automatic'},
+      {type:'assistant',text:'Newest answer'},
+    ];
+    render(last,true);
+  });
+  const stream=card.locator('.peekstream');
+  await expect(stream.locator('.peekactivityrow')).toHaveCount(4);
+  const tool=stream.locator('.peekactivityrow.tool');
+  await expect(tool.locator('.peekactivitywho')).toHaveText('Bash');
+  await expect(tool.locator('.peektoolstatus')).toHaveText('failed');
+  await expect(tool.locator('.peekactivitybody')).toHaveText('Flip PR to ready and arm auto-merge');
+  await expect(tool).not.toContainText('ignored result');
+  const toolLines=await tool.evaluate(element=>{
+    const lineHeight=parseFloat(getComputedStyle(element).lineHeight);
+    return element.getBoundingClientRect().height/lineHeight;
+  });
+  expect(toolLines).toBeLessThanOrEqual(1.01);
+  await expect(stream.locator('.peekactivityrow.event')).toContainText('Conversation compacted');
+  const recent=await stream.evaluate(element=>{
+    const box=element.getBoundingClientRect();
+    const rows=[...element.children].map(row=>{
+      const rect=row.getBoundingClientRect();
+      return{type:[...row.classList].find(value=>['user','assistant','tool','event'].includes(value)),
+        display:getComputedStyle(row).display,top:rect.top,bottom:rect.bottom};
+    });
+    return{scrollTop:element.scrollTop,top:box.top,bottom:box.bottom,rows};
+  });
+  expect(recent.scrollTop).toBeGreaterThan(0);
+  expect(recent.rows.every(row=>row.display!=='none')).toBeTruthy();
+  expect(recent.rows[0].top).toBeLessThan(recent.top);
+  expect(recent.rows.at(-1).bottom).toBeLessThanOrEqual(recent.bottom+1);
+
+  await page.evaluate(()=>{
+    const session=last.sessions.find(item=>item.session_id==='codex:thread-one');
+    session.card_peek=[
+      {type:'tool',label:'Bash',text:'Flip PR to ready and arm auto-merge after checks finish, branch protection clears, reviewers approve, release notes update, and deployment health is confirmed\nignored result'},
+    ];
+    render(last,true);
+  });
+  await expect(stream.locator('.peekactivityrow.tool')).toBeVisible();
+  await expect(stream.locator('.peekactivitywho')).toHaveText('Bash');
+  await expect(stream.locator('.peektoolstatus')).toHaveCount(0);
+  const summary=stream.locator('.peekactivitybody');
+  await expect(summary).toHaveText('Flip PR to ready and arm auto-merge after checks finish, branch protection clears, reviewers approve, release notes update, and deployment health is confirmed');
+  const truncation=await summary.evaluate(element=>({
+    height:element.getBoundingClientRect().height,
+    lineHeight:parseFloat(getComputedStyle(element).lineHeight),
+    clientWidth:element.clientWidth,scrollWidth:element.scrollWidth,
+  }));
+  expect(truncation.height/truncation.lineHeight).toBeLessThanOrEqual(1.01);
+  expect(truncation.scrollWidth).toBeGreaterThan(truncation.clientWidth);
+  await page.screenshot({path:testInfo.outputPath('activity-peek-tools.png'),fullPage:true});
+
+  await page.evaluate(()=>{
+    const session=last.sessions.find(item=>item.session_id==='codex:thread-one');
+    session.card_peek=[
+      {type:'tool',label:'Read',text:'older tool row'},
+      {type:'assistant',text:'BEGINNING '+Array.from({length:80},(_,i)=>`word${i}`).join(' ')+' ENDING'},
+    ];
+    render(last,true);
+  });
+  await expect(stream).toHaveClass(/newest-only/);
+  const clipped=await stream.evaluate(element=>{
+    const rows=[...element.children],box=element.getBoundingClientRect();
+    const newest=rows.at(-1).getBoundingClientRect();
+    const textNode=document.createTreeWalker(rows.at(-1),NodeFilter.SHOW_TEXT);
+    let node,startNode,endNode,startOffset=0,endOffset=0;
+    while((node=textNode.nextNode())){
+      const value=node.nodeValue||'';
+      if(!startNode&&value.includes('BEGINNING')){
+        startNode=node;startOffset=value.indexOf('BEGINNING');
+      }
+      if(value.includes('ENDING')){
+        endNode=node;endOffset=value.indexOf('ENDING');
+      }
+    }
+    const rectFor=(target,offset,length)=>{
+      const range=document.createRange();range.setStart(target,offset);
+      range.setEnd(target,offset+length);return range.getBoundingClientRect();
+    };
+    const start=rectFor(startNode,startOffset,'BEGINNING'.length);
+    const end=rectFor(endNode,endOffset,'ENDING'.length);
+    return{
+      olderDisplay:getComputedStyle(rows[0]).display,
+      scrollTop:element.scrollTop,
+      newestTop:newest.top,viewportTop:box.top,viewportBottom:box.bottom,
+      startTop:start.top,endTop:end.top,
+    };
+  });
+  expect(clipped.olderDisplay).toBe('none');
+  expect(clipped.scrollTop).toBe(0);
+  expect(Math.abs(clipped.newestTop-clipped.viewportTop)).toBeLessThan(1);
+  expect(clipped.startTop).toBeLessThan(clipped.viewportBottom);
+  expect(clipped.endTop).toBeGreaterThan(clipped.viewportBottom);
+  await page.screenshot({path:testInfo.outputPath('activity-peek-long-newest.png'),fullPage:true});
+
+  await stream.click({position:{x:6,y:6}});
+  await expect(page.locator('#sview')).toBeVisible();
+});
+
 test('a fully visible collapsed peek has no expansion action', async ({ page }) => {
   await reset(page);
   const peek = page.locator('[data-sid="codex:thread-one"] .sessionpeek');
   await expect(peek.locator('.peektoggle')).toHaveCount(0);
-  // the configured line count is a MAXIMUM: a short last message shrinks the
+  // the configured line count is a MAXIMUM: short activity shrinks the
   // card to its measured content instead of reserving empty preview rows
   const before=await peek.locator('.peekmd').evaluate(el=>el.getBoundingClientRect().height);
   await page.evaluate(() => setNum('preview_session_lines', 5));
@@ -1770,7 +1879,7 @@ test('session cards remove More and list every running subagent', async ({ page 
   expect((await cardStyle(idle)).opacity).toBe('1');
   const peekFrame = await idle.evaluate(card => {
     const peek = card.querySelector('.sessionpeek');
-    const body = peek.querySelector('.peekbody');
+    const body = peek.querySelector('.peekstream');
     const peekRect = peek.getBoundingClientRect();
     return {peekHeight: peekRect.height,
       bodyBottomGap: peekRect.bottom - body.getBoundingClientRect().bottom};

@@ -29,9 +29,15 @@ the provider's native control path. Built 2026-07-13; still evolving.
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
   state appears as a colored dot prepended to the title, while an adaptive 136–164px meta rail on
   the right carries model, context %, tool-quiet time, and live agent count without clipping
-  ("Console" design system — see `design-system/`). The configured card
-  preview line count is a maximum: short previews hug their text, longer previews clamp, and the
-  whole non-control card surface opens Chat. There is no separate three-dot expansion control.
+  ("Console" design system — see `design-system/`). Card peeks use the newest visible lines from
+  full chat, including messages, tool calls, and conversation events. A tool call uses exactly one
+  non-wrapping line with a tool-specific summary, such as `Bash · Flip PR to ready…` or
+  `Edit · app.py`; its end truncates at card width. Result output is omitted and failures keep only
+  a compact status. Older rows fill any
+  space left by the newest row; when the newest message alone exceeds the configured line cap, its
+  first lines are shown. The cap is measured after text wraps at the card's current width, short
+  activity hugs its content, and the whole non-control card surface opens Chat. There is no
+  separate show/hide control.
   Quiet time appears only while a tool is actually open; ordinary provider work with no open tool
   remains Working instead of being mislabeled stalled. A working session also names the tool
   call it is waiting on — `Bash · 4m`, turning red once the session counts as stalled — so a
@@ -331,20 +337,25 @@ the provider without affecting Claude sessions.
   the context-used bar (**amber ≥50%, red ≥60%** — compaction is expensive and costs you working
   context, so this is your cue to wrap up or `/compact` deliberately) · `model - effort`. 🔔 mute
   sits in the tail. Codex mode and lifecycle actions live in the full-view overflow menu.
-- **Conversation peek** on every card: the newest actual message (prose only — tool calls and
-  system events are skipped), tagged YOU / CLAUDE, between the meta row and the subagent rows.
-  Headings, emphasis, lists, links, and inline code render as compact Markdown; document-scale
-  code blocks and tables collapse rather than turning a status card into a document viewer.
+- **Conversation peek** on every card: the most recent visible lines of full chat, including user
+  and assistant messages, tool calls, and conversation events. Each tool call is exactly one
+  non-wrapping line: normalized tool name, compact failure status when applicable, then its
+  tool-specific first-line summary. The end truncates with an ellipsis at card width. Tool result
+  output is omitted. This keeps `Bash · description` or `Edit · filename` dense and scannable.
+  between the meta row and the subagent rows. Eligible row types live in the single
+  `CARD_PEEK_TYPES` filter in `fleetdash/card_preview.py`. Headings, emphasis, lists, links, and
+  inline code render as compact Markdown; document-scale code blocks and tables collapse rather
+  than turning a status card into a document viewer.
   The ⚙ panel gives the session peek and the subagent-row peek their own on/off switch and line
-  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 800
-  characters of the latest session message. That line setting is the peek's MAXIMUM: a collapsed
-  card sizes to `min(configured lines, actual message lines)`, so a one-line reply renders a
-  one-line card instead of reserving empty preview rows.
+  height (1–6; defaults: sessions on at 2 lines, subagents off at 1). Fleet sends at most 16
+  activity rows within a 3,200-character aggregate budget. The line setting is the peek's MAXIMUM,
+  measured after text wraps at the card's current width. Older rows fill space above the newest
+  row. If the newest message alone exceeds the cap, the peek shows its first lines instead of its
+  last lines. Short activity still hugs its content instead of reserving empty preview rows.
   Every card grows naturally to the taller of its preview/actions or metadata rail, so questions,
   errors, feedback, and running subagents cannot be clipped. There is no preview expansion control:
   tapping any non-control area of the card opens Chat. Inline action and subagent controls keep
-  their own behavior. Tapping a subagent's peek opens that agent's chat. A card blocked on a
-  QUESTION shows no peek — the ask is the context.
+  their own behavior. Tapping a subagent's peek opens that agent's chat.
 - **Complete messages in full chat:** session card peeks stay bounded, but the full-screen
   conversation keeps the entire user or assistant message. Long consecutive Claude response rows
   merge without dropping their tails. Reaching the top automatically loads the next bounded page;

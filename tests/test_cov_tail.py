@@ -419,6 +419,10 @@ class TailCovTest(unittest.TestCase):
         self.assertTrue(Tail._tool_arg("Read", {"file_path": long}).endswith("…"))
         homey = os.path.join(self.tmp.name, "f.txt")
         self.assertTrue(Tail._tool_arg("Read", {"path": homey}).startswith("~"))
+        self.assertEqual(Tail._tool_peek_arg(
+            "Write", {"file_path": "/very/long/private/path/report.md"}), "report.md")
+        self.assertEqual(Tail._tool_peek_arg(
+            "Bash", {"description": "Run focused tests"}), "Run focused tests")
 
     def test_tool_refs_trim_over_300(self):
         rows = []

@@ -5,6 +5,7 @@ import json, os, re, sys, glob, time, sqlite3, hashlib, copy, uuid, shutil, temp
 
 from . import paths as pathcfg
 from .config import IMG_EXTS, model_family, cwd_to_project_dir, iso_epoch
+from .card_preview import card_peek_rows
 from .placement import _fact_text, redact_handoff_text
 
 
@@ -1062,7 +1063,8 @@ Treat this as an independent session. Verify the repository state before changin
                 "total_tokens": tail.total_tokens, "cost": round(tail.cost(self.cfg), 4),
                 "tok_per_s": 0, "spark": [], "started": tail.first_ts,
                 "last": tail.last_ts, "convo_v": tail.convo_rev,
-                "last_msg": tail.last_message(800), "closed": True,
+                "last_msg": tail.last_message(800),
+                "card_peek": card_peek_rows(tail.convo), "closed": True,
             })
         out.sort(key=lambda item: (item.get("started") or "", item["agent_id"]))
         return out

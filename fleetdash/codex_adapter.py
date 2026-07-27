@@ -15,6 +15,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from .repo_center import observed_test_outcome
+from .card_preview import card_peek_rows
 from .codex_runtime import (
     CodexError,
     LEGACY_RUNTIME_OWNER,
@@ -733,6 +734,8 @@ class CodexAdapter:
                 "collaboration_mode": mode, "running": None,
                 "last_msg": (_last_message(messages, thread.get("preview")) or
                              (previous_by_tid.get(tid) or {}).get("last_msg")),
+                "card_peek": (card_peek_rows(messages) or
+                              (previous_by_tid.get(tid) or {}).get("card_peek")),
                 "_latest_prose": _latest_prose(messages),
                 "repo_outcome": observed_test_outcome(
                     messages, session_id=self.key(tid), provider="codex"),
