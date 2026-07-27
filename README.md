@@ -27,8 +27,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   opens beside the rail); on mobile the Now header keeps a compact summary chip such as
   **Usage · Claude 23/8 · Codex 14**. Each card is headed by the
   session's AI tab title (same string as your iTerm tab), with project · branch · provider beneath;
-  an adaptive 136–164px meta rail on the right carries status, model, context %, tool-quiet time, and live agent
-  count without clipping ("Console" design system — see `design-system/`). The configured card
+  state appears as a colored dot prepended to the title, while an adaptive 136–164px meta rail on
+  the right carries model, context %, tool-quiet time, and live agent count without clipping
+  ("Console" design system — see `design-system/`). The configured card
   preview line count is a maximum: short previews hug their text, longer previews clamp, and the
   whole non-control card surface opens Chat. There is no separate three-dot expansion control.
   Quiet time appears only while a tool is actually open; ordinary provider work with no open tool
@@ -52,8 +53,10 @@ the provider's native control path. Built 2026-07-13; still evolving.
 - **Responsive application navigation:** desktop uses a persistent rail for Now, Notifications,
   Search, Workstreams, Insights, and Settings. At 390×844 and other narrow widths it becomes
   a fixed bottom bar (mono-caps labels, amber active destination and unread badge); Insights and
-  Settings live under More. Mobile session cards render their status — state, model, context,
-  quiet time, agent count — as an inline row directly under the card header. The URL hash preserves destinations
+  Settings live under More. Mobile session cards prepend the same state dot to the title, then render
+  model, context text, and quiet time in one row directly under the card header; active tools,
+  compaction, skills, and agents add a second row only while present. The mobile row omits the
+  desktop context gauge. The URL hash preserves destinations
   across refresh and browser/native back gestures (legacy `#history` links land on Search
   TYPE=SESSION). Settings places the desktop rail on the left or
   right per browser; mobile always keeps the bottom bar. Now and Workstreams have sticky text/state
@@ -90,8 +93,9 @@ the provider's native control path. Built 2026-07-13; still evolving.
   JPEG, PNG, GIF, WebP, HEIC, or HEIF images at 10 MB each. Image drafts survive reloads in private
   device storage, can queue offline with their message, and are removed locally after delivery or
   after 24 hours. In full chat, picture and scheduled-send actions live in the upward **＋** menu.
-  On phones the composer stays docked immediately above the keyboard, the full-screen view follows
-  the visible iOS viewport, and a vertical drag on conversation history dismisses the keyboard.
+  On phones the composer stays docked immediately above the section bar and keyboard, the full-screen
+  view follows the visible iOS viewport, and a vertical drag on the active Chat, Files, Agents,
+  Details, or question scroller dismisses the keyboard.
   Fleet also keeps a bounded last-good cache of recently opened session, closed-session, and
   subagent conversations on that device. A failed refresh or offline reload shows saved history as
   stale instead of replacing it with an empty/error screen; refreshed tails merge with older pages.
@@ -121,11 +125,12 @@ the provider's native control path. Built 2026-07-13; still evolving.
   every initial open, preserves spawn order and required ancestors, and offers **All** for terminal
   agents; its tab count includes active agents only. On desktop the Files and Subagents list dividers
   are draggable or keyboard-resizable and their separate widths persist in that browser. One
-  contextual composer and one pending-request drawer serve the whole workspace at a stable height.
-  On mobile, horizontal swipes move between adjacent sections without wrapping; a right swipe that
-  starts at the left edge exits the workspace. Horizontally scrollable readers keep their own gesture.
-  On phones, once a file is open the Files section shows a horizontal file-chip strip above the
-  reader — tap a chip to switch files in place; browser back returns to the file list.
+  contextual composer and one independently scrollable, resizable pending-request drawer serve the
+  whole workspace at a stable height. On mobile, one persistent section bar sits below the composer;
+  taps switch sections without stealing horizontal or diagonal reader gestures. A right swipe that
+  starts at the left edge still exits the workspace. Files and Agents use an explicit list/detail
+  transition. Once a file is open, a horizontal file-chip strip switches files in place and the
+  visible Back control returns to the complete file list.
   Main-agent activity appears as the newest non-interactive Chat row. Closed
   sessions show explicit retained/unavailable states; eligible exact-session resumes use a
   text-only, idempotent first send, while external Codex threads remain view-only.

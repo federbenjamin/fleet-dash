@@ -148,11 +148,9 @@ function cardCls(s){
   if(s.ui_group==='history')return'dorm';
   return s.reason_label==='Slow'?'stalled':'';
 }
-// The Console card's meta strip: status dot+label, model, context bar, quiet
-// time, live agent count. One DOM node, two presentations: the desktop right
-// rail, and on mobile an inline status row directly under the header (10a) —
-// `.cmain{display:contents}` lets flex `order` interleave it there. Alert
-// states (stalled / limit) darken the rail surface and redden the quiet clock.
+// The Console card's meta strip carries model, context, quiet time, and
+// conditional live-work details. State is only the colored dot prepended to
+// the title, so the rail never repeats working/available/etc. as text.
 // "stalled" means frozen mid-tool (invariant 7), but until now the card never
 // said WHICH tool — so a session wedged on a hung command and one running a slow
 // build looked identical. This comes from the transcript fold, not a screen read,
@@ -166,17 +164,20 @@ function activeToolChip(s){
     'this turn has been inside this tool call with no result':
     'the tool call this turn is waiting on'}">${esc(t.name)}${more}${age}</span>`;
 }
-function cardMetaRail(s){
+function cardStateDot(s){
   const cls=cardCls(s);
   const tone=cls==='needs'?'amber':cls==='stalled'?'red':
     s.ui_group==='working'?'green':'dim';
-  const label=String(s.reason_label||stateLabel[s.state]||s.state||'').toLowerCase();
+  const label=String(s.reason_label||stateLabel[s.state]||s.state||'session status').toLowerCase();
+  return`<span class="cardstate ${tone}" role="img" aria-label="session status: ${esc(label)}" title="${esc(label)}"></span>`;
+}
+function cardMetaRail(s){
+  const cls=cardCls(s);
   const running=(s.agents||[]).filter(a=>!terminalAgentStates.has(a.state)).length;
   const ctx=s.ctx_pct==null?
-    (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow">${fmtTok(s.ctx_tokens)} tok</span>`):
-    `<span class="mrow">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
+    (s.provider==='codex'||!s.ctx_tokens?'':`<span class="mrow ccontext">${fmtTok(s.ctx_tokens)} tok</span>`):
+    `<span class="mrow ccontext">ctx ${s.ctx_pct}%<span class="railbar"><i class="${s.ctx_pct>=90?'crit':s.ctx_pct>=70?'warn':''}" style="width:${Math.min(s.ctx_pct||0,100)}%"></i></span></span>`;
   return`<div class="cmeta${cls==='stalled'?' alert':''}">
-      <span class="mrow cstat ${tone}"><i class="mdot"></i>${esc(label)}</span>
       <span class="mrow cmodel">${modelLabel(s)}</span>
       ${ctx}
       ${s.quiet_s!=null&&s.ui_group!=='available'&&(s.active_tool||s.state==='stalled')?
@@ -219,7 +220,7 @@ function cardTop(s){
       oncontextmenu="event.preventDefault();toggleSessionPin('${s.session_id}')"
       ontouchstart="sessionPressStart('${s.session_id}',this)" ontouchend="sessionPressEnd()" ontouchmove="sessionPressEnd()">
       ${s.new_response?'<span class="newdot" role="img" aria-label="new response" title="new response"></span>':''}
-      <span class="sname"><span class="stitle">${esc(s.title||s.project||'session')}</span>
+      <span class="sname"><span class="stitle">${cardStateDot(s)}${esc(s.title||s.project||'session')}</span>
         <small>${esc(s.project)}${s.branch&&s.branch!=='HEAD'?` · ${esc(s.branch)}`:''} · ${esc(s.provider||'claude')}</small></span>
       ${s.access==='view_only'?`<span class="accessbadge view_only">view only</span>`:''}
       ${pinned?`<span class="pinmark" title="pinned — right-click or long-press to unpin">⌖ pinned</span>`:''}

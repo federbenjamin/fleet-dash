@@ -215,6 +215,124 @@ test('responsive application shell routes, filters, and follows browser back', a
   await page.screenshot({ path: testInfo.outputPath(`application-shell-${mobile ? 'mobile' : 'desktop'}.png`), fullPage: true });
 });
 
+test('mobile Now and all session sections keep one balanced, unclipped workbench', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile continuity');
+  await reset(page, 'subagent');
+  const now=await page.evaluate(()=>{
+    const card=document.querySelector('[data-sid="codex:thread-one"]');
+    const top=card.querySelector('.ctop'),head=card.querySelector('.shead'),
+      meta=card.querySelector('.cmeta'),
+      peek=card.querySelector('.sessionpeek');
+    const primary=[...meta.querySelectorAll(':scope>:is(.cmodel,.ccontext,.cquiet)')];
+    const primaryTops=primary.map(child=>Math.round(child.getBoundingClientRect().top));
+    const stateDot=card.querySelector('.cardstate');
+    return{
+      documentWidth:document.documentElement.scrollWidth,viewport:innerWidth,
+      cardLeft:card.getBoundingClientRect().left,cardRight:card.getBoundingClientRect().right,
+      cardPadding:parseFloat(getComputedStyle(top).paddingLeft),
+      headBottom:head.getBoundingClientRect().bottom,metaTop:meta.getBoundingClientRect().top,
+      metaBottom:meta.getBoundingClientRect().bottom,peekTop:peek?.getBoundingClientRect().top||null,
+      primaryRows:new Set(primaryTops).size,
+      wrapperCount:meta.querySelectorAll('.cmeta-primary,.cmeta-secondary').length,
+      directPrimary:primary.every(item=>item.parentElement===meta),
+      statusTags:meta.querySelectorAll('.cstat').length,
+      stateDotParent:stateDot?.parentElement?.className,
+      stateLabel:stateDot?.getAttribute('aria-label'),
+      contextBarDisplay:getComputedStyle(meta.querySelector('.railbar')).display,
+      titleSize:parseFloat(getComputedStyle(card.querySelector('.stitle')).fontSize),
+    };
+  });
+  expect(now.documentWidth).toBeLessThanOrEqual(now.viewport);
+  expect(now.cardLeft).toBeGreaterThanOrEqual(12);
+  expect(now.cardRight).toBeLessThanOrEqual(now.viewport-12);
+  expect(now.cardPadding).toBeGreaterThanOrEqual(13);
+  expect(now.metaTop).toBeGreaterThanOrEqual(now.headBottom);
+  if(now.peekTop!==null)expect(now.metaBottom).toBeLessThanOrEqual(now.peekTop);
+  expect(now.primaryRows).toBe(1);
+  expect(now.wrapperCount).toBe(0);
+  expect(now.directPrimary).toBe(true);
+  expect(now.statusTags).toBe(0);
+  expect(now.stateDotParent).toBe('stitle');
+  expect(now.stateLabel).toContain('session status:');
+  expect(now.contextBarDisplay).toBe('none');
+  expect(now.titleSize).toBeGreaterThanOrEqual(15);
+  const legacyRows=await page.evaluate(()=>{
+    const source=document.querySelector('[data-sid="codex:thread-one"]');
+    const clone=source.cloneNode(true),meta=clone.querySelector('.cmeta');
+    clone.removeAttribute('data-sid');
+    clone.style.cssText=`position:absolute;visibility:hidden;left:0;top:0;width:${source.getBoundingClientRect().width}px`;
+    const primary=document.createElement('div');primary.className='cmeta-primary';
+    const secondary=document.createElement('div');secondary.className='cmeta-secondary';
+    for(const item of [...meta.children]){
+      if(item.matches('.cmodel,.ccontext,.cquiet'))primary.append(item);
+      else secondary.append(item);
+    }
+    meta.append(primary);if(secondary.childElementCount)meta.append(secondary);
+    document.body.append(clone);
+    const tops=[...primary.children].map(item=>Math.round(item.getBoundingClientRect().top));
+    const result={primaryRows:new Set(tops).size,wrapperDisplay:getComputedStyle(primary).display};
+    clone.remove();return result;
+  });
+  expect(legacyRows.primaryRows).toBe(1);
+  expect(legacyRows.wrapperDisplay).toBe('contents');
+
+  await page.locator('[data-sid="codex:thread-one"] .shead').click();
+  const workbenchGeometry=async()=>page.evaluate(()=>{
+    const view=document.querySelector('#sview').getBoundingClientRect(),
+      head=document.querySelector('#shead2').getBoundingClientRect(),
+      workspace=document.querySelector('#sworkspace').getBoundingClientRect(),
+      action=document.querySelector('#sact').getBoundingClientRect(),
+      tabs=document.querySelector('#stabs').getBoundingClientRect();
+    return{viewBottom:view.bottom,headBottom:head.bottom,workspaceTop:workspace.top,
+      workspaceBottom:workspace.bottom,actionTop:action.top,actionBottom:action.bottom,
+      tabsTop:tabs.top,tabsBottom:tabs.bottom,documentWidth:document.documentElement.scrollWidth,viewport:innerWidth};
+  });
+  let geometry=await workbenchGeometry();
+  expect(Math.abs(geometry.workspaceTop-geometry.headBottom)).toBeLessThan(1);
+  expect(geometry.workspaceBottom).toBeLessThanOrEqual(geometry.actionTop+1);
+  expect(Math.abs(geometry.actionBottom-geometry.tabsTop)).toBeLessThanOrEqual(1);
+  expect(Math.abs(geometry.tabsBottom-geometry.viewBottom)).toBeLessThanOrEqual(1);
+  expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewport);
+
+  await page.locator('#stab-files').click();
+  await page.locator('#sfilelist .workspaceitem', {hasText:'artifact.md'}).click();
+  await expect(page.locator('#sfilepreview')).toBeVisible();
+  await expect(page.locator('#sfilepreview .workspaceback')).toBeVisible();
+  await page.locator('#sfilepreview .workspaceback').click();
+  await expect(page.locator('#sfilelist')).toBeVisible();
+
+  await page.locator('#stab-subagents').click();
+  await page.locator('#sagentlist .workspaceitem').first().click();
+  await expect(page.locator('#sagentdetail')).toBeVisible();
+  await expect(page.locator('#sagentdetail .workspaceback')).toBeVisible();
+  await page.locator('#sagentdetail .workspaceback').click();
+  await expect(page.locator('#sagentlistpane')).toBeVisible();
+
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#sdetailindex')).toBeVisible();
+  await expect(page.locator('#sdetails .detailsection').first()).toBeVisible();
+  await page.locator('#stab-chat').click();
+  await expect(page.locator('#spanel-chat')).toBeVisible();
+
+  await page.setViewportSize({width:768,height:1024});
+  await page.reload();
+  await expect(page.locator('#sview')).toBeVisible();
+  await page.locator('#stab-files').click();
+  const tablet=await page.locator('#sfilebrowser').evaluate(browser=>{
+    const list=browser.querySelector('#sfilelist').getBoundingClientRect(),
+      divider=browser.querySelector('.workspacedivider').getBoundingClientRect(),
+      preview=browser.querySelector('#sfilepreview').getBoundingClientRect();
+    return{browserWidth:browser.getBoundingClientRect().width,listWidth:list.width,
+      dividerWidth:divider.width,previewWidth:preview.width,documentWidth:document.documentElement.scrollWidth};
+  });
+  expect(tablet.listWidth).toBeGreaterThanOrEqual(tablet.browserWidth-1);
+  expect(tablet.dividerWidth).toBe(0);
+  expect(tablet.previewWidth).toBe(0);
+  expect(tablet.documentWidth).toBeLessThanOrEqual(768);
+  geometry=await workbenchGeometry();
+  expect(Math.abs(geometry.actionBottom-geometry.tabsTop)).toBeLessThanOrEqual(1);
+});
+
 test('switching chats replaces a closed chat route and relay uses the normal send width', async ({ page }) => {
   const closedSid = '11111111-2222-3333-4444-555555555555';
   await reset(page, 'claude-archive');
@@ -1747,7 +1865,7 @@ test('full chat renders main work as the newest non-interactive conversation row
   await expect(activity).toBeHidden();
 });
 
-test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }) => {
+test('a working card names the tool it is blocked on, and a stalled one flags it', async ({ page }, testInfo) => {
   // "stalled" has always meant frozen mid-TOOL, but the card never said WHICH
   // tool — so a wedged session and a slow one looked identical.
   await reset(page);
@@ -1757,6 +1875,15 @@ test('a working card names the tool it is blocked on, and a stalled one flags it
   const tool = page.locator('[data-sid="claude-one"] .ctool');
   await expect(tool).toHaveText('Bash · 3s');
   await expect(tool).not.toHaveClass(/crit/);
+  if(testInfo.project.name.startsWith('mobile')){
+    const rows=await page.locator('[data-sid="claude-one"] .cmeta').evaluate(meta=>({
+      primaryBottom:meta.querySelector('.cmodel').getBoundingClientRect().bottom,
+      secondaryTop:meta.querySelector('.ctool').getBoundingClientRect().top,
+      toolParent:meta.querySelector('.ctool').parentElement.className,
+    }));
+    expect(rows.secondaryTop).toBeGreaterThanOrEqual(rows.primaryBottom);
+    expect(rows.toolParent).toMatch(/cmeta/);
+  }
 
   // stalled: the count of other open calls shows, and the chip goes critical
   await reset(page, 'active-tool-stalled');
@@ -1858,7 +1985,8 @@ test('Codex mode, send, UI stop, and completed lifecycle', async ({ page }) => {
   await expect(page.locator('#confirm')).toContainText('Stop this turn?');
   await page.locator('#confirm').getByRole('button', { name: 'stop the turn' }).click();
   await refresh(page);
-  await expect(card.locator('.cstat')).toContainText('available');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: available');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(page.locator('#sctrl > .termbtn')).toHaveCount(0);
 });
 
@@ -2024,7 +2152,8 @@ test('brand-new Claude sessions are interactive before the first transcript exis
   const card = page.locator('[data-sid="claude-one"]');
   await expect(card).toBeVisible();
   await expect(card).toContainText('New Claude session');
-  await expect(card.locator('.cstat')).toContainText('available');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: available');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(card).not.toContainText('$0.00');
   await card.locator('.shead').click();
   await expect(page.locator('#sbody')).toContainText('no conversation yet');
@@ -2042,7 +2171,8 @@ test('desktop-owned Codex work is active without unsafe controls', async ({ page
   const card = page.locator('[data-sid="codex:thread-one"]');
 
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(card.locator('.cstat')).toContainText('working elsewhere');
+  await expect(card.locator('.cardstate')).toHaveAttribute('aria-label','session status: working elsewhere');
+  await expect(card.locator('.cstat')).toHaveCount(0);
   await expect(card).toContainText('Working in ChatGPT desktop.');
   await expect(card.getByRole('button', { name: 'View', exact: true })).toHaveCount(0);
   await expect(card.locator('.termbtn')).toHaveCount(0);
@@ -2342,10 +2472,16 @@ test('fullscreen question drawer preserves reading position and resizes from nea
     const drawer=document.querySelector('#sact .question-drawer').getBoundingClientRect();
     const composer=document.querySelector('#sact .composer-dock').getBoundingClientRect();
     return {viewBottom:view.y+view.height,headBottom:head.y+head.height,tabsBottom:tabs.y+tabs.height,drawerTop:drawer.y,
-      composerBottom:composer.y+composer.height};
+      tabsTop:tabs.y,composerBottom:composer.y+composer.height};
   });
-  expect(geometry.drawerTop).toBeLessThanOrEqual(Math.max(geometry.headBottom,geometry.tabsBottom)+20);
-  expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
+  if(testInfo.project.name.startsWith('mobile')){
+    expect(geometry.drawerTop).toBeGreaterThanOrEqual(geometry.headBottom-1);
+    expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.tabsTop+1);
+    expect(Math.abs(geometry.tabsBottom-geometry.viewBottom)).toBeLessThan(1);
+  }else{
+    expect(geometry.drawerTop).toBeLessThanOrEqual(Math.max(geometry.headBottom,geometry.tabsBottom)+20);
+    expect(geometry.composerBottom).toBeLessThanOrEqual(geometry.viewBottom+1);
+  }
 
   let expandedGrip=null;
   await expect.poll(async()=>{
@@ -2585,7 +2721,7 @@ test('mobile chat keeps a docked composer and dismisses it on a vertical history
   await expect(page.locator('#sact')).not.toHaveClass(/composer-active/);
 });
 
-test('mobile session swipes are bounded, ignore horizontal readers, and edge-exit', async ({ page }, testInfo) => {
+test('mobile session bar owns section changes while content swipes scroll and edge-exit', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith('mobile'), 'mobile workspace gestures');
   await reset(page);
   await page.evaluate(()=>openSession('codex:thread-one'));
@@ -2597,13 +2733,17 @@ test('mobile session swipes are bounded, ignore horizontal readers, and edge-exi
     fire('touchstart',fromX);fire('touchmove',toX);fire('touchend',toX);
   },{fromX,toX});
 
-  await swipe(330,90);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
-  await swipe(330,90);await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
-  await swipe(70,320);await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+  await swipe(330,90);
+  await expect(page.locator('#stab-chat')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-files').click();
+  await expect(page.locator('#stab-files')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-subagents').click();
+  await expect(page.locator('#stab-subagents')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-details').click();
+  await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await swipe(70,320);
+  await expect(page.locator('#stab-details')).toHaveAttribute('aria-selected','true');
+  await page.locator('#stab-chat').click();
 
   await page.locator('#sbody').evaluate(body=>{const scroller=document.createElement('div');
     scroller.id='gesture-scroll-probe';scroller.style.cssText='overflow-x:auto;width:120px';
@@ -2642,10 +2782,12 @@ test('mobile keyboard geometry is flush and preserves chat and Markdown reading 
   expect(focused.text).toBe(before.text);expect(Math.abs(focused.offset-before.offset)).toBeLessThan(2);
   const seam=await page.evaluate(()=>{const view=document.querySelector('#sview').getBoundingClientRect(),
     dock=document.querySelector('#sact .composer-dock').getBoundingClientRect(),
+    tabs=document.querySelector('#stabs').getBoundingClientRect(),
     row=document.querySelector('#sact .freetext.composer').getBoundingClientRect();return{
-      viewBottom:view.bottom,dockBottom:dock.bottom,rowBottom:row.bottom};});
-  expect(Math.abs(seam.viewBottom-seam.dockBottom)).toBeLessThan(.6);
-  expect(seam.dockBottom-seam.rowBottom).toBeLessThanOrEqual(3);
+      viewBottom:view.bottom,dockBottom:dock.bottom,tabsTop:tabs.top,tabsBottom:tabs.bottom,rowBottom:row.bottom};});
+  expect(Math.abs(seam.tabsTop-seam.dockBottom)).toBeLessThanOrEqual(1);
+  expect(Math.abs(seam.viewBottom-seam.tabsBottom)).toBeLessThan(.6);
+  expect(seam.dockBottom-seam.rowBottom).toBeLessThanOrEqual(7);
   await composer.evaluate(element=>element.blur());
   await page.evaluate(()=>{globalThis.__fleetVisualViewportOverride={height:844,offsetTop:0};syncVisualViewport();});
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
@@ -3326,7 +3468,9 @@ test('available stays visible while inactive lifecycles live in Search TYPE=SESS
   await page.request.post('/test/reset', { data: { scenario: 'organization' } });
   await page.goto('/?token=abcdef123456');
 
-  await expect(page.locator('#sessions [data-sid="claude-one"] .cstat')).toContainText('available');
+  await expect(page.locator('#sessions [data-sid="claude-one"] .cardstate'))
+    .toHaveAttribute('aria-label','session status: available');
+  await expect(page.locator('#sessions [data-sid="claude-one"] .cstat')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="codex:thread-one"]')).toHaveCount(0);
   await expect(page.locator('#sessions [data-sid="claude-dormant"]')).toHaveCount(0);
 
@@ -3354,7 +3498,8 @@ test('action inbox separates requests, work, availability, and unread responses'
   await reset(page, 'subagent');
   const working = page.locator('[data-sid="codex:thread-one"]');
   await expect(page.locator('#working')).toContainText('Working · 1');
-  await expect(working.locator('.cstat')).toHaveText('working');
+  await expect(working.locator('.cardstate')).toHaveAttribute('aria-label','session status: working');
+  await expect(working.locator('.cstat')).toHaveCount(0);
   await expect(working.locator('.primarybtn')).toHaveCount(0);
   await working.locator('.shead').click();
   await expect(page.locator('#sview')).toBeVisible();
@@ -4312,12 +4457,12 @@ test('session history text and access/provider filters shape one flat list in Se
   await expect(results).toContainText('Closed');
 });
 
-test('Console mobile pass: inline card status, file chips over the reader, bottom bar', async ({ page }, testInfo) => {
+test('Console mobile pass: complete card metadata, file navigation, bottom bar', async ({ page }, testInfo) => {
   await reset(page);
   const mobile = testInfo.project.name.startsWith('mobile');
   const codex = page.locator('[data-sid="codex:thread-one"]');
   if (mobile) {
-    // 10a: the meta rail renders as an inline status row directly under the header
+    // Primary metadata sits between the header and peek; active details get a second row.
     const boxes = await codex.evaluate(card => ({
       head: card.querySelector('.shead').getBoundingClientRect().toJSON(),
       meta: card.querySelector('.cmeta').getBoundingClientRect().toJSON(),
@@ -4332,9 +4477,9 @@ test('Console mobile pass: inline card status, file chips over the reader, botto
   await page.getByRole('button', { name: /artifact\.md/ }).click();
   await expect(page.locator('#vbody')).toContainText('Safe preview');
   if (mobile) {
-    // 11e: the chip strip replaces the back-to-list button and switches files
+    // File chips switch directly while Back always returns to the complete list.
     await expect(page.locator('#sfilechips')).toBeVisible();
-    await expect(page.locator('#sfilepreview .workspaceback')).toBeHidden();
+    await expect(page.locator('#sfilepreview .workspaceback')).toBeVisible();
     await page.locator('#sfilechips .filechip', { hasText: 'data.json' }).click();
     await expect(page.locator('#sfilechips .filechip.on')).toContainText('data.json');
     await expect(page.locator('#vtitle')).toContainText('data.json');

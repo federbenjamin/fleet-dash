@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{deliveryHonestyHtml,workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,syncQuestionDrawerGeometry,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,sessionScreenHtml,loadSessionScreen,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceHorizontalTarget,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,loadWorkspaceFileInventory,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
+Object.assign(globalThis,{deliveryHonestyHtml,workspaceDockable,workspaceDocked,paneSplitBounds,applyPaneSplit,setPaneSplit,startPaneSplit,paneSplitKey,applyWorkspaceChrome,toggleWorkspaceExpand,rememberSessionFile,questionPanelState,persistQuestionPanels,questionScrollKey,setQuestionScrollPosition,rememberQuestionScroll,questionPanelMaxHeight,questionPanelHeight,syncQuestionDrawerGeometry,toggleQuestionPanel,setQuestionPanelHeight,questionResizeKey,startQuestionResize,questionDrawerHtml,confidenceText,evidenceFactsHtml,evidenceEventHtml,renderEvidenceRail,sessionScreenHtml,loadSessionScreen,loadSessionEvidence,toggleSessionEvidence,primarySessionAction,markSessionRevision,markRead,markAvailable,workspaceHash,saveWorkspaceScroll,restoreWorkspaceScroll,workspaceSplitBounds,setWorkspaceSplit,applyWorkspaceSplit,startWorkspaceSplit,workspaceSplitKey,activateWorkspaceSection,openSessionWorkspace,applyWorkspaceRoute,openSession,openClosed,exitSessionWorkspace,setSessionSection,clearWorkspaceSelection,mobileWorkspaceSwipeEnabled,workspaceTouchPoint,finishWorkspaceTouch,loadClosedMeta,closeSession,sessionActivityHtml,renderSessionActivity,workspaceContext,workspaceAgents,renderWorkspaceChrome,renderParentWorkspaceAction,chosenWorkspaceFile,renderWorkspaceFileDocument,loadWorkspaceFileInventory,renderWorkspaceFiles,filteredWorkspaceAgents,setSubagentFilter,selectWorkspaceAgent,renderWorkspaceSubagents,workspaceSessionModel,renderWorkspaceDetails,renderClosedComposer,requestResumeAndSend,sendClosedResume,renderClosed,reopenClosed,renderSession,openAgent,closeAgent,agentMeta,ensureAgentCtx,renderAgent,agentRelayKey,agentRelayHtml,restoreRelay,sendRelay,agentRow});
 globalThis.sessionView=null;            // one session workspace: section + optional file/agent selection
 // Console two-pane shell: on wide desktops the workspace docks as a persistent
 // right pane beside the queue (never a modal there); ⤢ expands it to the full
@@ -126,18 +126,19 @@ function questionPanelMaxHeight(){
   const view=$('#sview')?.getBoundingClientRect(),head=$('#shead2')?.getBoundingClientRect();
   const dock=$('#sact .composer-dock')?.getBoundingClientRect();
   const extras=$('#sact .session-extras')?.getBoundingClientRect();
+  const tabs=$('#stabs')?.getBoundingClientRect();
   const visualHeight=parseFloat(getComputedStyle(document.documentElement)
     .getPropertyValue('--fleet-visual-height'))||innerHeight;
-  const minimum=innerWidth<=720?120:180;
+  const mobile=innerWidth<=820,minimum=mobile?112:180;
   return Math.max(minimum,Math.floor((view?.height||visualHeight)-(head?.height||52)-
-    (dock?.height||76)-(extras?.height||0)-18));
+    (dock?.height||76)-(extras?.height||0)-(mobile?(tabs?.height||52):0)-(mobile?24:18)));
 }
 function questionPanelHeight(sid,nonce){
   const state=questionPanelState(sid,nonce);
   const visualHeight=parseFloat(getComputedStyle(document.documentElement)
     .getPropertyValue('--fleet-visual-height'))||innerHeight;
   const fallback=Math.min(420,Math.round(visualHeight*.44));
-  const minimum=innerWidth<=720?120:180;
+  const minimum=innerWidth<=820?112:180;
   return Math.max(minimum,Math.min(questionPanelMaxHeight(),state.height||fallback));
 }
 function syncQuestionDrawerGeometry(){
@@ -166,7 +167,7 @@ function toggleQuestionPanel(encodedSid,encodedNonce){
 }
 function setQuestionPanelHeight(sid,nonce,height){
   const state=questionPanelState(sid,nonce),max=questionPanelMaxHeight();
-  state.height=Math.max(innerWidth<=720?120:180,Math.min(max,Math.round(height)));state.collapsed=false;
+  state.height=Math.max(innerWidth<=820?112:180,Math.min(max,Math.round(height)));state.collapsed=false;
   persistQuestionPanels();renderSession(true);
 }
 function questionResizeKey(event,encodedSid,encodedNonce){
@@ -200,7 +201,7 @@ function startQuestionResize(event,encodedSid,encodedNonce){
     window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);
     window.removeEventListener('pointercancel',finish);questionResizeActive=null;
     state.collapsed=state.height<=112;
-    const minimum=innerWidth<=720?120:180;
+    const minimum=innerWidth<=820?112:180;
     state.height=state.collapsed?Math.max(minimum,Math.min(max,Math.round(startHeight))):
       Math.max(minimum,state.height);
     persistQuestionPanels();
@@ -425,7 +426,7 @@ function setWorkspaceSplit(kind,width,persist=false){
 }
 function applyWorkspaceSplit(kind){setWorkspaceSplit(kind,workspaceSplitWidths[kind]||300,false);}
 function startWorkspaceSplit(event,kind){
-  if(matchMedia('(max-width:720px)').matches||(event.pointerType==='mouse'&&event.button!==0))return;
+  if(matchMedia('(max-width:820px)').matches||(event.pointerType==='mouse'&&event.button!==0))return;
   const divider=event.currentTarget,browser=divider.closest('.workspacebrowser');if(!browser)return;
   event.preventDefault();const startX=event.clientX,startWidth=browser.querySelector('aside')?.getBoundingClientRect().width||300;
   divider.classList.add('resizing');divider.setPointerCapture?.(event.pointerId);
@@ -536,23 +537,14 @@ $('#stabs')?.addEventListener('keydown',event=>{
 const WORKSPACE_SWIPE_MIN_PX=56,WORKSPACE_EDGE_SWIPE_PX=24;
 globalThis.workspaceTouch=null;
 function mobileWorkspaceSwipeEnabled(){
-  return Boolean(sessionView&&$('#sview')?.style.display!=='none'&&matchMedia('(max-width:720px)').matches);
-}
-function workspaceHorizontalTarget(target){
-  if(!(target instanceof Element))return false;
-  if(target.closest('input,textarea,select,[contenteditable="true"],iframe,embed,object'))return true;
-  for(let node=target;node&&node!==$('#sview');node=node.parentElement){
-    const style=getComputedStyle(node),overflow=style.overflowX;
-    if(['auto','scroll'].includes(overflow)&&node.scrollWidth>node.clientWidth+1)return true;
-  }
-  return false;
+  return Boolean(sessionView&&$('#sview')?.style.display!=='none'&&matchMedia('(max-width:820px)').matches);
 }
 function workspaceTouchPoint(event){return event.touches?.[0]||event.changedTouches?.[0]||null;}
 $('#sview')?.addEventListener('touchstart',event=>{
   if(!mobileWorkspaceSwipeEnabled()||event.touches?.length!==1)return workspaceTouch=null;
   const point=workspaceTouchPoint(event);if(!point)return workspaceTouch=null;
   workspaceTouch={x:point.clientX,y:point.clientY,lastX:point.clientX,lastY:point.clientY,
-    edge:point.clientX<=WORKSPACE_EDGE_SWIPE_PX,ignored:workspaceHorizontalTarget(event.target),axis:null};
+    edge:point.clientX<=WORKSPACE_EDGE_SWIPE_PX,axis:null};
 },{passive:true,capture:true});
 $('#sview')?.addEventListener('touchmove',event=>{
   if(!workspaceTouch||event.touches?.length!==1)return;
@@ -564,8 +556,7 @@ $('#sview')?.addEventListener('touchmove',event=>{
     else if(Math.abs(dy)>Math.abs(dx)*1.2)workspaceTouch.axis='y';
   }
   if(workspaceTouch.axis!=='x')return;
-  const edgeExit=workspaceTouch.edge&&dx>0;
-  if(edgeExit||!workspaceTouch.ignored)event.preventDefault();
+  if(workspaceTouch.edge&&dx>0)event.preventDefault();
 },{passive:false,capture:true});
 function finishWorkspaceTouch(event){
   if(!workspaceTouch)return;
@@ -574,10 +565,6 @@ function finishWorkspaceTouch(event){
   const dx=endX-gesture.x,dy=endY-gesture.y;
   if(gesture.axis!=='x'||Math.abs(dx)<WORKSPACE_SWIPE_MIN_PX||Math.abs(dx)<=Math.abs(dy)*1.2)return;
   if(gesture.edge&&dx>0){exitSessionWorkspace();return;}
-  if(gesture.ignored||!sessionView)return;
-  const sections=[...workspaceSections],current=sections.indexOf(sessionView.section);
-  const next=current+(dx<0?1:-1);
-  if(next>=0&&next<sections.length)setSessionSection(sections[next]);
 }
 $('#sview')?.addEventListener('touchend',finishWorkspaceTouch,{passive:true,capture:true});
 $('#sview')?.addEventListener('touchcancel',()=>{workspaceTouch=null;},{passive:true,capture:true});
