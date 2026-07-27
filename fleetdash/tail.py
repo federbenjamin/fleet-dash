@@ -439,6 +439,7 @@ class Tail:
             entry["caption"] = inp.get("caption", "")
         else:
             entry["arg"] = self._tool_arg(name, inp)
+            entry["peek_arg"] = self._tool_peek_arg(name, inp)
             if name == "Bash" and inp.get("command"):
                 entry["command"] = str(inp.get("command"))[:2000]
         self.convo.append(self._with_offset(entry))
@@ -476,6 +477,15 @@ class Tail:
                 v = scalars[0] if len(scalars) == 1 else ""
         v = str(v).replace(pathcfg.HOME, "~").replace("\n", " ").strip()
         return v[:90] + ("…" if len(v) > 90 else "")
+
+    @classmethod
+    def _tool_peek_arg(cls, name, inp):
+        if name in ("Edit", "MultiEdit", "Write", "NotebookEdit", "Read"):
+            value = (inp.get("file_path") or inp.get("notebook_path") or
+                     inp.get("path") or "")
+            if value:
+                return os.path.basename(str(value))[:240]
+        return cls._tool_arg(name, inp)
 
     @staticmethod
     def _result_text(b):

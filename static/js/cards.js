@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{activeToolChip,screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,cardSurfaceTap,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardMetaRail,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
+Object.assign(globalThis,{activeToolChip,screenBlockNotice,syncPinnedSessions,agentListHtml,activeSubagents,activeSubagentCard,renderActiveSubagents,toggleSessionPin,pinFeedbackHtml,sessionPressStart,sessionPressEnd,sessionTap,sessionHeaderKey,cardSurfaceTap,agentTap,cardAgentTap,renderPinned,applyReaderWidth,cardCls,cardMetaRail,cardPeekRow,cardPeekHtml,fitCardPeek,observeCardPeek,cardTop,cardAgentList,sessionCard,cardTopFocusAnchor,restoreCardTopFocus,reconcileCards});
 const pinnedSessions=new Set();
 const pinActions=new Map();
 function syncPinnedSessions(f){
@@ -191,6 +191,65 @@ function cardMetaRail(s){
       ${running?`<span class="mrow cagents">${running} agent${running>1?'s':''}</span>`:''}
     </div>`;
 }
+const CARD_PEEK_EVENT_ICON={compact:'⧉',model:'⇄',api_error:'⚠',command:'›',qa:'☑'};
+function cardPeekRow(row,s){
+  const type=String(row?.type||'');
+  if(type==='user'||type==='assistant'){
+    const who=type==='user'?'you':String(s.provider||'assistant');
+    const body=type==='assistant'?peekMd(row.text||''):esc(row.text||'').replace(/\n/g,'<br>');
+    return`<div class="peekactivityrow ${type}"><span class="peekactivitywho">${esc(who)} ·</span><div class="peekactivitybody peekmd">${body}</div></div>`;
+  }
+  if(type==='tool'){
+    const detail=esc(String(row.text||'').split(/\r?\n/,1)[0]);
+    return`<div class="peekactivityrow tool${row.failed?' failed':''}"${detail?` title="${detail}"`:''}><span class="peekactivitywho">${esc(row.label||'tool')}</span>${row.failed?'<span class="peektoolstatus">failed</span>':''}${detail?`<span class="peektoolsep" aria-hidden="true">·</span><span class="peekactivitybody">${detail}</span>`:''}</div>`;
+  }
+  if(type==='event'){
+    const icon=CARD_PEEK_EVENT_ICON[row.kind]||'•';
+    const count=Number(row.n)>1?` ×${Number(row.n)}`:'';
+    const detail=esc(row.text||'').replace(/\n/g,'<br>');
+    return`<div class="peekactivityrow event ${esc(row.level||'info')}"><span class="peekactivitywho">${icon} ${esc(row.label||'Event')}${count}</span>${detail?`<div class="peekactivitybody">${detail}</div>`:''}</div>`;
+  }
+  return'';
+}
+function cardPeekHtml(s){
+  const projected=Array.isArray(s.card_peek);
+  let rows=projected?s.card_peek.filter(Boolean):[];
+  // A rolling daemon or an older fixture may not project activity rows yet.
+  // Preserve the old prose peek until its next provider refresh.
+  if(!projected&&s.last_msg?.text)rows=[{type:s.last_msg.role||'assistant',text:s.last_msg.text}];
+  if(!previewSessions()||!rows.length)return'';
+  return`<div class="lastmsg sessionpeek" title="recent conversation activity">
+    <div class="peekstream" style="--peek-lines:${clampS()}">${rows.map(row=>cardPeekRow(row,s)).join('')}</div></div>`;
+}
+function fitCardPeek(peek){
+  const stream=peek?.matches?.('.peekstream')?peek:peek?.querySelector?.('.peekstream');
+  if(!stream)return;
+  stream.classList.remove('newest-only');
+  const rows=[...stream.querySelectorAll(':scope > .peekactivityrow')];
+  if(!rows.length)return;
+  const lineHeight=parseFloat(getComputedStyle(stream).lineHeight)||17.825;
+  const budget=lineHeight*clampS();
+  stream.style.maxHeight=`${budget}px`;
+  const newest=rows[rows.length-1];
+  const newestOwnHeight=newest.scrollHeight;
+  const newestOnly=newestOwnHeight>budget+.5;
+  stream.classList.toggle('newest-only',newestOnly);
+  stream.scrollTop=newestOnly?0:Math.max(0,stream.scrollHeight-stream.clientHeight);
+}
+const cardPeekResizeObserver=typeof ResizeObserver==='undefined'?null:new ResizeObserver(entries=>{
+  entries.forEach(entry=>{
+    const width=entry.contentRect.width;
+    if(Math.abs(width-(entry.target.__peekObservedWidth??-1))<.5)return;
+    entry.target.__peekObservedWidth=width;fitCardPeek(entry.target);
+  });
+});
+function observeCardPeek(top){
+  const peek=top?.querySelector?.('.sessionpeek');if(!peek)return;
+  if(cardPeekResizeObserver&&!peek.__peekObserved){
+    peek.__peekObserved=true;cardPeekResizeObserver.observe(peek);
+  }
+  fitCardPeek(peek);
+}
 // The volatile top of the card — rebuilt every poll (header, peek, pending,
 // running agents, meta rail). No native <details> here, so replacing it each
 // tick doesn't flash. Pin = right-click (desktop) / long-press (mobile); the
@@ -201,8 +260,8 @@ function cardTop(s){
   const navigationOnly=!s.primary_action||['open','continue','view'].includes(s.primary_action);
   const showPrimary=s.ui_group!=='needs_you'&&!(navigationOnly&&['claude','codex'].includes(s.provider));
   // A card needs the conversation for exactly one thing: confirming an
-  // outstanding optimistic receipt (invariant 34). The peek is `s.last_msg` from
-  // the poll, and the file/agent folds this used to feed are gone — so a card
+  // outstanding optimistic receipt (invariant 34). The activity peek arrives
+  // in the fleet snapshot, and the file/agent folds this used to feed are gone — so a card
   // with nothing in flight fetches nothing. Measured on production: 49 of 49
   // sessions fetched /api/context every time their conversation moved, and none
   // of them needed it.
@@ -227,7 +286,7 @@ function cardTop(s){
       ${headRight}
       ${showPrimary?`<button class="primarybtn" onclick="event.stopPropagation();primarySessionAction('${s.session_id}')">${esc(s.primary_action_label||'Open')}</button>`:''}
     </div>
-    ${previewSessions()&&s.last_msg?`<div class="lastmsg sessionpeek" title="latest message">${s.last_msg.role==='user'?'<span class="peekwho">you ·</span>':''}<div class="peekbody"><div class="lmtext peekmd" style="--peek-lines:${clampS()}">${peekMd(s.last_msg.text)}</div></div></div>`:''}
+    ${cardPeekHtml(s)}
     ${s.error?`<div class="lastmsg carderror"><span class="peekwho">provider ·</span><span class="lmtext">${esc(s.error)}</span></div>`:''}
     ${screenBlockNotice(s)}
     ${s.reply_requested&&!s.staging_observer?`<div class="replysignal"><span>Waiting for your reply</span><button onclick="event.stopPropagation();markAvailable('${s.session_id}','${enc(String(s.convo_v||''))}')">mark available</button></div>`:''}
@@ -320,7 +379,7 @@ function reconcileCards(container,list,emptyMessage='no live sessions'){
     const changed=top.__setHtml!==html;
     if(changed){
       const focusAnchor=cardTopFocusAnchor(top);
-      setHtml(top,html);restoreCardTopFocus(top,focusAnchor);
+      setHtml(top,html);restoreCardTopFocus(top,focusAnchor);observeCardPeek(top);
     }
   });
   [...container.children].forEach(el=>{if(el.classList.contains('card')&&!seen.has(el.dataset.sid))el.remove();});
@@ -336,4 +395,4 @@ const otherDraft={}; // sessionId -> single-question "Other" draft (survives re-
 const elicitDraft={}; // sessionId -> field values for MCP elicitation forms
 const answered={};   // sessionId -> nonce already sent: hide the selector instantly
 
-Object.assign(globalThis,{pinnedSessions,pinActions,cardAgentTapAttr,setg,previewAgents,previewSessions,clampS,clampA,readerWidth,multiSel,mqSel,otherDraft,elicitDraft,answered});
+Object.assign(globalThis,{pinnedSessions,pinActions,cardAgentTapAttr,setg,previewAgents,previewSessions,clampS,clampA,readerWidth,CARD_PEEK_EVENT_ICON,cardPeekResizeObserver,multiSel,mqSel,otherDraft,elicitDraft,answered});

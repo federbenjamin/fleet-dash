@@ -8,6 +8,7 @@ from .repo_center import RepositoryOutcomeCenter, observed_test_outcome
 from . import paths as pathcfg
 from .paths import capture_base  # legacy alias; reads paths.* at call time
 from .config import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, _write_private_json, model_family, cwd_to_project_dir, iso_epoch)
+from .card_preview import card_peek_rows
 from .placement import _pending_placement, classify_placement, classify_closed_placement
 from .tail import Tail
 
@@ -802,7 +803,8 @@ class ScanOps:
                     "effort": self.effort_for(sid), "running": None,
                     "permission_mode": None,
                     "permission_modes": ["default", "acceptEdits", "plan"],
-                    "last_msg": None, "_latest_prose": None, "repo_outcome": None,
+                    "last_msg": None, "card_peek": None,
+                    "_latest_prose": None, "repo_outcome": None,
                     "state": state, "reg_status": reg_status, "quiet_s": 0,
                     "ctx_tokens": None, "ctx_window": None, "ctx_pct": None,
                     "total_tokens": None,
@@ -1043,10 +1045,12 @@ class ScanOps:
                 # looked identical. No screen read is involved, so this works on
                 # sessions outside tmux too.
                 "active_tool": self._active_tool(mt, state),
-                # Collapsed height is CSS-controlled. Keep up to 800 characters so
-                # the explicit expansion reveals a useful bounded preview.
+                # `last_msg` remains the newest-prose signal used by placement,
+                # notifications, and handoffs. Card display uses `card_peek`.
                 "last_msg": (mt.last_message(800)
                              if cfg.get("preview_sessions", True) else None),
+                "card_peek": (card_peek_rows(mt.convo)
+                              if cfg.get("preview_sessions", True) else None),
                 "_latest_prose": mt.latest_prose(),
                 "repo_outcome": observed_test_outcome(
                     mt.convo, session_id=sid, provider="claude"),
@@ -1186,6 +1190,9 @@ class ScanOps:
             if hasattr(self.codex, "track_external"):
                 self.codex.track_external(self.cfg.get("pinned_sessions") or [])
             codex_sessions = [copy.deepcopy(item) for item in self.codex.sessions()]
+            if not cfg.get("preview_sessions", True):
+                for session in codex_sessions:
+                    session["card_peek"] = None
             self._provider_session_cache["codex"] = copy.deepcopy(codex_sessions)
             self.codex_scan_error = None
             self._ensure_codex_launcher()
@@ -1401,7 +1408,7 @@ class ScanOps:
                   "branch", "state", "ui_group", "reason_label", "access",
                   "access_label", "primary_action", "primary_action_label",
                   "activity_at", "last_seen", "closed_at", "can_reopen", "cost",
-                  "ctx_tokens", "last_msg", "repo_outcome")
+                  "ctx_tokens", "last_msg", "card_peek", "repo_outcome")
         for item in sessions + closed:
             digest.update(json.dumps(
                 {key: item.get(key) for key in fields}, sort_keys=True,

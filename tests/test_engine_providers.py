@@ -199,6 +199,9 @@ class EngineProviderTest(unittest.TestCase):
         self.assertTrue(claude["capabilities"]["model_effort_settings"])
         self.assertTrue(claude["capabilities"]["change_model_effort"])
         self.assertTrue(codex["capabilities"]["close"])
+        self.assertEqual([row["type"] for row in claude["card_peek"]],
+                         ["user", "assistant"])
+        self.assertEqual(claude["card_peek"][-1]["text"], "hi")
         self.assertTrue(fleet["totals"]["cost_partial"])
         self.assertGreaterEqual(fleet["totals"]["session_cost"], 0)
         self.assertGreaterEqual(fleet["diagnostics"]["scan_ms"], 0)

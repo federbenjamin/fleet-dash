@@ -396,8 +396,9 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
 .modesel:disabled{opacity:.5;cursor:not-allowed}
 .permissiondetail{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
 .permissiondetail .permissionselect{max-width:190px}
-/* last-message peek — Console: quiet mono text over a soft hairline, no
-   speaker chrome (a leading "you ·" marks your own last message). */
+/* Recent-activity peek — a bounded slice of the same messages, tools, and
+   events shown in full chat. The browser scrolls this clipped viewport to the
+   newest rows; a newest row that exceeds the budget stays at its beginning. */
 .lastmsg{display:flex;align-items:flex-start;gap:7px;font:400 11.5px/1.55 var(--font-mono);
   color:var(--fg-dim-2);border-top:1px solid var(--line-peek);margin-top:8px;padding-top:8px;
   overflow:hidden}
@@ -410,6 +411,24 @@ html[data-reader-width="centered"] #searchviewbody>.searchcontext{max-width:760p
   max-height:calc(var(--peek-lines,2) * 1.55em)}
 .lastmsg .peekbody{position:relative;flex:1;min-width:0}
 .lastmsg .peekbody .lmtext{width:100%}
+.sessionpeek{display:block}
+.peekstream{overflow:hidden;font:inherit;line-height:1.55}
+.peekactivityrow{display:flex;align-items:flex-start;gap:7px;min-width:0;line-height:inherit}
+.peekactivityrow+.peekactivityrow{margin-top:0}
+.peekactivitywho{flex:0 0 auto;color:var(--fg-dim-3);white-space:nowrap}
+.peekactivitybody{flex:1;min-width:0;overflow-wrap:anywhere}
+.peekactivitybody.peekmd{display:block;max-height:none}
+.peekactivityrow.tool{display:flex;white-space:nowrap;overflow:hidden}
+.peekactivityrow.tool .peekactivitywho{max-width:38%;overflow:hidden;text-overflow:ellipsis;
+  color:var(--purple);font-weight:600}
+.peekactivityrow.tool .peekactivitybody{display:block;overflow:hidden;overflow-wrap:normal;
+  white-space:nowrap;text-overflow:ellipsis;color:var(--fg-dim-1)}
+.peektoolsep{flex:0 0 auto;color:var(--fg-dim-3)}
+.peektoolstatus{flex:0 0 auto;color:var(--red);font-size:10px;text-transform:uppercase;
+  letter-spacing:.04em}
+.peekactivityrow.event .peekactivitywho{color:var(--fg-dim-1)}
+.peekactivityrow:is(.failed,.error) .peekactivitywho{color:var(--red)}
+.peekstream.newest-only>.peekactivityrow:not(:last-child){display:none}
 .peekmd h1,.peekmd h2,.peekmd h3,.peekmd h4,.peekmd h5,.peekmd h6{
   color:var(--fg-bright);font-size:1em;line-height:inherit;font-weight:600;margin:0}
 .peekmd p,.peekmd ul,.peekmd ol,.peekmd blockquote{margin:0;line-height:inherit}

@@ -213,6 +213,10 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                          ("running", "running", 2))
         self.assertEqual(session["last_msg"],
                          {"role": "assistant", "text": "Working now"})
+        self.assertEqual(session["card_peek"], [
+            {"type": "user", "text": "Build it"},
+            {"type": "assistant", "text": "Working now"},
+        ])
         self.assertTrue(session["observed_external"])
         self.assertEqual(session["observation_confidence"], "observed_local_rollout")
         self.assertTrue(session["read_only"])
@@ -260,6 +264,11 @@ class CodexAdapterFixtureTest(unittest.TestCase):
                           session["agents"][0]["effort"]),
                          ("gpt-5.6-terra", "high"))
         self.assertEqual(session["last_msg"]["text"], "App Server message")
+        self.assertEqual(session["card_peek"][0],
+                         {"type": "assistant", "text": "App Server message"})
+        self.assertEqual((session["card_peek"][-1]["type"],
+                          session["card_peek"][-1]["label"]),
+                         ("tool", "Agent"))
         self.assertFalse(session["observed_external"])
 
     def test_managed_saved_settings_beat_an_older_rollout_fallback(self):
