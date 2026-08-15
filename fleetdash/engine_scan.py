@@ -931,7 +931,7 @@ class ScanOps:
                 state = "stalled_or_prompt"
             # abandoned/backgrounded sessions (VS Code backends, forgotten panes)
             # aren't "waiting on you" in any actionable sense
-            if quiet > cfg["dormant_seconds"] and not agents_running and not provider_error:
+            if quiet > cfg["dormant_seconds"] and not agents_running:
                 state = "dormant"
 
             # The CLI transcript has no explicit interrupted-turn event. A

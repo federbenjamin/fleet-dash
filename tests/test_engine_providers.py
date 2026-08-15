@@ -895,6 +895,18 @@ class EngineProviderTest(unittest.TestCase):
              limited["card_peek"][-1]["level"]),
             ("event", "api_error", "error"))
 
+        with mock.patch.object(
+                self.engine, "transcript_quiet",
+                return_value=self.engine.cfg["dormant_seconds"] + 1):
+            dormant = next(item for item in self.engine.scan()["sessions"]
+                           if item["provider"] == "claude")
+        self.assertEqual(
+            (dormant["state"], dormant["ui_group"], dormant["reason_label"],
+             dormant["winning_rule"]),
+            ("dormant", "history", "Inactive", "placement.state.dormant"))
+        self.assertEqual(dormant["error"],
+                         "Sonnet requires usage credits. Run /usage-credits to continue.")
+
     def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
         fleet = self.engine.scan()
         revision = next(item["convo_v"] for item in fleet["sessions"]
