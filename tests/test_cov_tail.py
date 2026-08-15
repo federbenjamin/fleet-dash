@@ -509,6 +509,41 @@ class TailCovTest(unittest.TestCase):
         api_ev = next(e for e in t.convo if e.get("kind") == "api_error")
         self.assertEqual(api_ev["n"], 2)      # retry storm collapsed
 
+    def test_assistant_usage_error_preserves_real_model_and_usage(self):
+        usage = {"input_tokens": 2, "cache_creation_input_tokens": 1010,
+                 "cache_read_input_tokens": 174984, "output_tokens": 1224}
+        t = self._tail([
+            self.assistant("2026-07-15T00:00:00Z", "working",
+                           usage=usage, model="claude-fable-5", stop="tool_use"),
+            {"type": "assistant", "timestamp": "2026-07-15T00:00:01Z",
+             "isApiErrorMessage": True, "error": "rate_limit",
+             "message": {"role": "assistant", "model": "<synthetic>",
+                         "stop_reason": "stop_sequence",
+                         "usage": {"input_tokens": 0, "output_tokens": 0,
+                                   "cache_creation_input_tokens": 0,
+                                   "cache_read_input_tokens": 0},
+                         "content": [{"type": "text", "text":
+                             "Fable 5 requires usage credits. Run /usage-credits "
+                             "to continue or switch models with /model."}]}},
+        ])
+        self.assertEqual(t.model, "claude-fable-5")
+        self.assertEqual(t.last_usage, usage)
+        self.assertEqual(t.context_tokens(), 175996)
+        self.assertEqual(t.provider_error, {
+            "state": "blocked", "code": "rate_limit",
+            "message": ("Fable 5 requires usage credits. Run /usage-credits "
+                        "to continue or switch models with /model."),
+        })
+        self.assertEqual(t.turn_state(), "awaiting_input")
+        event = next(e for e in t.convo if e.get("kind") == "api_error")
+        self.assertEqual((event["level"], event["detail"]), ("error", "rate_limit"))
+        self.assertEqual(t.last_message(), {"role": "assistant", "text": "working"})
+
+        self._write([{"type": "user", "timestamp": "2026-07-15T00:00:02Z",
+                      "message": {"role": "user", "content": "continue"}}], mode="a")
+        t.poll()
+        self.assertIsNone(t.provider_error)
+
     def test_system_model_refusal_default_title(self):
         t = self._tail([{"type": "system", "subtype": "model_refusal_fallback",
                          "timestamp": "2026-07-15T00:00:00Z", "content": "x"}])
