@@ -93,6 +93,21 @@ class UpdateSettingsTests(EngineFixture):
             {"bulk_triage": {"operation": "mark_read",
                              "items": [{"session_id": "s", "action_id": "a"}]}})["error"])
 
+    def test_exact_attention_dismissal_validation(self):
+        self.assertIn("must be an object", self.engine.update_settings(
+            {"dismiss_action": "bad"})["error"])
+        self.assertIn("session and action IDs", self.engine.update_settings(
+            {"dismiss_action": {"session_id": "", "action_id": ""}})["error"])
+        with self.engine.lock:
+            self.engine.snapshot_cache = {"actions": [
+                {"action_id": "a1", "session_id": "s1", "dismissible": False},
+                {"action_id": "a2", "session_id": "s2", "dismissible": True}]}
+        self.assertIn("stale or ineligible", self.engine.update_settings(
+            {"dismiss_action": {"session_id": "s1", "action_id": "a1"}})["error"])
+        out = self.engine.update_settings(
+            {"dismiss_action": {"session_id": "s2", "action_id": "a2"}})
+        self.assertIn("a2", out["dismissed_actions"])
+
     def test_bulk_triage_mute_and_dismiss(self):
         out = self.engine.update_settings({"bulk_triage": {
             "operation": "mute",

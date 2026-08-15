@@ -1,8 +1,8 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,workstreamLiveRow,renderWorkstreams,renderQueue,toggleHistory,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,historyItems,matchesHistoryFilter,filteredHistory,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewEffort,changeNewMode,changeNewPermission,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,renderNewSessionPane,newSection,spawnChips,newSessionFormHtml,persistQuickSpawns,quickSpawnKey,recordQuickSpawn,quickSpawnList,applyQuickSpawn,toggleQuickSpawnPin,doSpawn,startSpawn,doScheduleNew,checkSpawn,historyCount,historyRow,toggle});
+Object.assign(globalThis,{actionSession,actionBaseMatches,actionKindMatches,actionMatches,openInboxAction,dismissInboxAction,setActionKind,actionIcon,renderActionInbox,filteredWorkstreams,toggleWorkstream,workstreamSessionRow,workstreamLiveRow,renderWorkstreams,renderQueue,toggleHistory,closedSession,isClosedSession,historyParams,renderHistoryDestination,loadHistory,historyItems,matchesHistoryFilter,filteredHistory,spawnCatalog,spawnEfforts,repairSpawnSelection,spawnSnapshot,provisionalSessionObject,sessionsWithProvisional,provisionalCardTop,renderProvisionalSession,restoreSpawnForm,keepWaitingForSpawn,retrySpawn,changeNewProvider,changeNewDirectory,changeNewModel,changeNewEffort,changeNewMode,changeNewPermission,changeNewWorktree,renderNewSectionNow,openNewSessionComposer,renderNewSessionPane,newSection,spawnChips,newSessionFormHtml,persistQuickSpawns,quickSpawnKey,recordQuickSpawn,quickSpawnList,applyQuickSpawn,toggleQuickSpawnPin,doSpawn,startSpawn,doScheduleNew,checkSpawn,historyCount,historyRow,toggle});
 // The flat session list is Search TYPE=SESSION; these globals feed it from the
 // search query/provider/access controls (runSessionSearch keeps them in step).
-globalThis.historyFilter='';globalThis.historyAccess='all';globalThis.historyProvider='all';
+globalThis.historyFilter='';globalThis.historyAccess='all';globalThis.historyProvider='all';globalThis.historyProject='all';
 globalThis.historyData={ok:true,items:[],next_cursor:0,total:0};;
 globalThis.historyLoading=false;globalThis.historyLoadedAt=0;globalThis.historyAbort=null;
 globalThis.closedIds=new Set();
@@ -34,6 +34,26 @@ function openInboxAction(actionId){
   ['question','form','approval'].includes(action.kind)?openSessionQ(action.session_id):
     primarySessionAction(action.session_id);
 }
+async function dismissInboxAction(encodedActionId,encodedSid){
+  const actionId=decodeURIComponent(encodedActionId),sid=decodeURIComponent(encodedSid);
+  const action=((last&&last.actions)||[]).find(item=>item.action_id===actionId);
+  if(!action||action.session_id!==sid||!action.dismissible)return;
+  const button=document.querySelector(`[data-dismiss-action="${CSS.escape(actionId)}"]`);
+  if(button){button.disabled=true;button.textContent='Dismissing…';}
+  try{
+    const response=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({dismiss_action:{session_id:sid,action_id:actionId}})});
+    const data=await response.json();if(!response.ok||!data.ok)throw new Error(data.error||'dismiss failed');
+    last.actions=(last.actions||[]).filter(item=>item.action_id!==actionId);
+    if(last.settings)last.settings.dismissed_actions=data.dismissed_actions||{};
+    const session=(last.sessions||[]).find(item=>item.session_id===sid);
+    if(session){session.attention_dismissed=true;session.unresolved_attention=true;
+      if(session.ui_group!=='history'){const viewOnly=session.access==='view_only'||session.read_only||session.headless;
+        Object.assign(session,{ui_group:'available',reason_label:'Available',
+          primary_action:viewOnly?'view':'continue',primary_action_label:viewOnly?'View':'Continue'});}}
+    render(last,true);
+  }catch(error){alert('dismiss failed: '+String(error.message||error));tick(true);}
+}
 function setActionKind(value){
   actionKind=['all','requests','approvals','problems','budgets'].includes(value)?value:'all';
   render(last,true);
@@ -52,7 +72,7 @@ function renderActionInbox(f){
       ['problems','Problems'],['budgets','Budgets']].map(([value,label])=>
       `<button class="${actionKind===value?'active':''}" onclick="setActionKind('${value}')">${label}</button>`).join('')}</div></div>
     <div class="actionrows">${actions.length?actions.map(action=>{
-      const session=actionSession(action),encoded=enc(action.action_id);
+      const session=actionSession(action),encoded=enc(action.action_id),encodedSid=enc(action.session_id||'');
       const identityTitle=session?.title||action.title||'',identityProject=session?.project||action.project||'';
       const displayRequest=identityTitle||action.request;
       const contextSignal=action.kind==='reply'?action.context:action.request;
@@ -62,9 +82,10 @@ function renderActionInbox(f){
         <button class="actionopen" onclick="openInboxAction(decodeURIComponent('${encoded}'))">
           <span class="actionglyph">${actionIcon(action.kind)}</span><span class="actioncopy"><span class="actionrequest">${esc(displayRequest)}</span>
           ${displayContext?`<span class="actioncontext">${esc(displayContext)}</span>`:''}
-          <span class="actionmeta"><strong>${esc(action.reason||'Needs review')}</strong> · ${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${fmtAge(age)} ago</span></span>
-          <span class="actiondelivery">${esc(action.delivery_state||'Review')}</span></button>
-        ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}
+          <span class="actionmeta"><strong>${esc(action.reason||'Needs review')}</strong> · ${esc(action.provider||'fleet')} · ${esc(action.access_label||'Review')} · ${fmtAge(age)} ago</span></span></button>
+        <span class="actioncontrols"><span class="actiondelivery">${esc(action.delivery_state||'Review')}</span>
+          ${action.dismissible?`<button class="actiondismiss" data-dismiss-action="${esc(action.action_id)}" onclick="dismissInboxAction('${encoded}','${encodedSid}')">Dismiss</button>`:''}
+          ${session?.muted?'<span class="actionmuted" title="session notifications muted">🔕</span>':''}</span>
         ${session?cardResponseFeedback(session):''}
         ${session?pinFeedbackHtml(session.session_id):''}
       </div>`;}).join(''):`<div class="actionempty">No ${esc(actionKind==='all'?'matching':actionKind)} actions.</div>`}</div>`);
@@ -178,6 +199,7 @@ function historyParams(cursor){
   if(historyFilter.trim())params.set('q',historyFilter.trim());
   if(historyAccess!=='all')params.set('access',historyAccess);
   if(historyProvider!=='all')params.set('provider',historyProvider);
+  if(historyProject!=='all')params.set('project',historyProject);
   return params.toString();
 }
 function renderHistoryDestination(){
@@ -217,9 +239,10 @@ function matchesHistoryFilter(item){
   const query=historyFilter.trim().toLowerCase();
   const accessOk=historyAccess==='all'||item.primary_action===historyAccess;
   const providerOk=historyProvider==='all'||(item.provider||'claude')===historyProvider;
+  const projectOk=historyProject==='all'||(item.project||'')===historyProject;
   const hay=[item.title,item.name,item.project,item.branch,item.provider,item.reason_label,
     item.access_label,item.state,item.reg_status].filter(Boolean).join(' ').toLowerCase();
-  return accessOk&&providerOk&&(!query||hay.includes(query));
+  return accessOk&&providerOk&&projectOk&&(!query||hay.includes(query));
 }
 function filteredHistory(f){
   return historyItems(f).filter(matchesHistoryFilter);

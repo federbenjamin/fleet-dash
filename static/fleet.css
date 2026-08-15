@@ -626,7 +626,7 @@ details.insfold>summary:hover{color:var(--fg)}
 .actionrow{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;
   min-height:66px;padding:6px 9px;border-bottom:1px solid #302817}.actionrow:last-child{border-bottom:0}
 .actionrow:hover{background:#19170f}
-.actionopen{min-width:0;display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:center;gap:9px;
+.actionopen{min-width:0;display:grid;grid-template-columns:26px minmax(0,1fr);align-items:center;gap:9px;
   border:0;background:transparent;color:var(--fg);font:inherit;text-align:left;padding:3px;cursor:pointer}
 .actionglyph{width:24px;height:24px;display:flex;align-items:center;justify-content:center;border:1px solid #5b461b;
   border-radius:7px;color:var(--amber);font:700 12px/1 "SF Mono",Menlo,monospace}
@@ -640,6 +640,11 @@ details.insfold>summary:hover{color:var(--fg)}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.actiondelivery{color:var(--amber);font-size:9.5px;
   text-transform:uppercase;letter-spacing:.35px;white-space:nowrap}.actionrow.outcome .actiondelivery{color:var(--green)}
 .actionmeta strong{color:var(--amber);font-weight:600}
+.actioncontrols{display:flex;align-items:center;justify-content:flex-end;gap:7px}
+.actiondismiss{border:1px solid #5b461b;border-radius:var(--radius-control);background:transparent;
+  color:var(--amber);font:500 10px var(--font-mono);padding:5px 8px;cursor:pointer}
+.actiondismiss:hover,.actiondismiss:focus-visible{background:#211b0f;border-color:var(--amber)}
+.actiondismiss:disabled{opacity:.55;cursor:wait}
 .actionmuted{font-size:11px;color:var(--faint)}
 .actionempty{padding:13px;text-align:center;color:var(--faint);font-size:11px}
 .actionrow>.quickfeedback{grid-column:2/-1;margin:0 0 3px;padding:5px 7px;border-radius:6px}
@@ -1863,6 +1868,7 @@ html[data-reader-width="centered"] #vbody>img{display:block;max-width:min(100%,7
   .actionrow{grid-template-columns:minmax(0,1fr) auto;padding:7px 7px}
   .actionopen{grid-template-columns:25px minmax(0,1fr)}
   .actiondelivery{grid-column:2;justify-self:start;margin-top:2px}
+  .actioncontrols{align-items:flex-end;flex-direction:column}
   .actionmuted{display:none}
   .actionrow>.quickfeedback{grid-column:1/-1}
   .actioncontext{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}

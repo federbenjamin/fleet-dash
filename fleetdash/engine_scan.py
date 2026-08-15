@@ -9,7 +9,8 @@ from . import paths as pathcfg
 from .paths import capture_base  # legacy alias; reads paths.* at call time
 from .config import (DEFAULT_CONFIG, WAITING_CONFIRM_SECONDS, _write_private_json, model_family, cwd_to_project_dir, iso_epoch)
 from .card_preview import card_peek_rows
-from .placement import _pending_placement, classify_placement, classify_closed_placement
+from .placement import (action_identity, attention_action, _pending_placement,
+                        classify_placement, classify_closed_placement)
 from .tail import Tail
 
 
@@ -125,7 +126,7 @@ class ScanOps:
         """Add provider-neutral placement, reason, access, and action fields."""
         placement = classify_placement(
             session, now, self.cfg.get("reply_available"), self.cfg.get("read_sessions"),
-            self.cfg.get("dormant_seconds"))
+            self.cfg.get("dormant_seconds"), self.cfg.get("dismissed_actions"))
         session.pop("_latest_prose", None)
         normalized_state = placement.pop("state")
         session.update(placement)
@@ -149,13 +150,6 @@ class ScanOps:
         return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
 
     @staticmethod
-    def _action_identity(session, kind, revision):
-        raw = "\0".join((str(session.get("provider") or "claude"),
-                          str(session.get("session_id") or ""), kind,
-                          str(revision or "")))
-        return "act-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
-
-    @staticmethod
     def _sort_action_records(records):
         priority = {"approval": 0, "question": 1, "form": 1, "budget": 2,
                     "problem": 3, "attention": 4, "reply": 5, "outcome": 6}
@@ -170,7 +164,7 @@ class ScanOps:
         records, seen = [], set()
         for session in sessions:
             sid = str(session.get("session_id") or "")
-            if not sid:
+            if not sid or session.get("ui_group") == "history":
                 continue
             pending = session.get("pending") or {}
             revision = str(session.get("convo_v") or "")
@@ -208,7 +202,11 @@ class ScanOps:
                 delivery = "Intervention needed"
             if not kind:
                 continue
-            action_id = self._action_identity(session, kind, action_revision)
+            exact_action = attention_action(session, session.get("reply_requested"))
+            if exact_action and kind in {"question", "form", "approval", "reply",
+                                         "problem", "attention"}:
+                kind, action_revision = exact_action
+            action_id = action_identity(session, kind, action_revision)
             if action_id in seen or action_id in dismissed:
                 continue
             seen.add(action_id)
@@ -229,6 +227,7 @@ class ScanOps:
                 "primary_action_label": session.get("primary_action_label") or "View",
                 "delivery_state": delivery,
                 "safe_bulk": safe_bulk,
+                "dismissible": bool(exact_action),
                 "revision": revision,
                 "pending_nonce": pending.get("nonce"),
                 "title": session.get("title") or session.get("name") or session.get("project"),
@@ -904,6 +903,7 @@ class ScanOps:
                                or self.agent_effort(a.get("agent_type"), cwd, sess_effort))
             # long tool calls freeze an agent's transcript ("stalled"); still active
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
+            compacting = self.compacting_secs(sid, cwd, mt)
 
             turn = mt.turn_state()
             provider_error = mt.provider_error
@@ -931,7 +931,11 @@ class ScanOps:
                 state = "stalled_or_prompt"
             # abandoned/backgrounded sessions (VS Code backends, forgotten panes)
             # aren't "waiting on you" in any actionable sense
-            if quiet > cfg["dormant_seconds"] and not agents_running:
+            registry_active = (reg_status in ("busy", "shell")
+                               and turn != "awaiting_input")
+            if (quiet > cfg["dormant_seconds"] and not registry_active
+                    and not agents_running
+                    and not confirmed_waiting and compacting is None):
                 state = "dormant"
 
             # The CLI transcript has no explicit interrupted-turn event. A
@@ -1006,7 +1010,6 @@ class ScanOps:
             fam = model_family(mt.model)
             cw = cfg["context_windows"].get(fam, cfg["context_windows"]["default"])
             permission_modes = self._claude_permission_modes(reg, mt)
-            compacting = self.compacting_secs(sid, cwd, mt)
             can_change_permission_mode = bool(
                 reg_status == "idle" and pending is None and compacting is None and
                 not turn_starting and not control_uncertain and
@@ -1206,6 +1209,9 @@ class ScanOps:
             for session in codex_sessions:
                 if session.get("state") != "stale":
                     session["stale_previous_state"] = session.get("state") or "idle"
+                activity_at = session.get("provider_activity_at")
+                if activity_at is not None:
+                    session["quiet_s"] = round(max(0, now - float(activity_at)))
                 session.update(state="stale", stale=True, stale_reason=self.codex_scan_error,
                                error=self.codex_scan_error)
                 session["capabilities"] = {
@@ -1359,7 +1365,8 @@ class ScanOps:
         fleet["_scan_phases_ms"] = phases
         return fleet
 
-    def history_snapshot(self, cursor=0, limit=100, query="", provider="", access="", sid=""):
+    def history_snapshot(self, cursor=0, limit=100, query="", provider="", access="", sid="",
+                         project=""):
         """Page closed-session metadata outside the two-second fleet payload."""
         try:
             cursor = max(0, int(cursor or 0))
@@ -1368,7 +1375,9 @@ class ScanOps:
             return {"ok": False, "error": "invalid history pagination"}
         query = str(query or "").strip().lower()
         sid = str(sid or "").strip()
-        if len(query) > 300 or len(sid) > 320 or any(ord(char) < 32 for char in sid):
+        project = str(project or "").strip()
+        if (len(query) > 300 or len(sid) > 320 or len(project) > 300 or
+                any(ord(char) < 32 for char in sid + project)):
             return {"ok": False, "error": "invalid history filter"}
         if provider not in ("", "claude", "codex"):
             return {"ok": False, "error": "invalid history provider"}
@@ -1387,6 +1396,8 @@ class ScanOps:
             if provider and (item.get("provider") or "claude") != provider:
                 continue
             if access and item.get("primary_action") != access:
+                continue
+            if project and str(item.get("project") or "") != project:
                 continue
             if query:
                 haystack = " ".join(str(item.get(key) or "") for key in (

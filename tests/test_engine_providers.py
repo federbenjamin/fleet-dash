@@ -2920,6 +2920,37 @@ class EngineProviderTest(unittest.TestCase):
                          ("stale", "running", "working", "stale", "interactive"))
         self.assertIn("stale", [fact["kind"] for fact in organized["state_evidence"]])
 
+    def test_stale_inactive_attention_decays_but_retained_active_work_does_not(self):
+        for previous in ("blocked", "error", "needs_you"):
+            recent = codex_session()
+            recent.update(state="stale", stale=True, stale_previous_state=previous,
+                          reg_status="notLoaded", quiet_s=60, error="old failure")
+            current = self.engine.organize_session(recent, 100)
+            self.assertEqual(current["ui_group"], "needs_you", previous)
+
+            old = codex_session()
+            old.update(state="stale", stale=True, stale_previous_state=previous,
+                       reg_status="notLoaded",
+                       quiet_s=self.engine.cfg["dormant_seconds"] + 1,
+                       error="old failure")
+            historical = self.engine.organize_session(old, 100)
+            self.assertEqual(
+                (historical["ui_group"], historical["reason_label"],
+                 historical["winning_rule"]),
+                ("history", "Inactive", "placement.state.dormant"), previous)
+
+        for active_patch in (
+                {"stale_previous_state": "running"},
+                {"stale_previous_state": "stalled"},
+                {"stale_previous_state": "blocked", "agents_running": 1},
+                {"stale_previous_state": "blocked", "compacting": 5}):
+            active = codex_session()
+            active.update(state="stale", stale=True, reg_status="notLoaded",
+                          quiet_s=self.engine.cfg["dormant_seconds"] + 1,
+                          **active_patch)
+            retained = self.engine.organize_session(active, 100)
+            self.assertNotEqual(retained["ui_group"], "history", active_patch)
+
     def test_state_journal_deduplicates_recovers_and_pages(self):
         session = codex_session()
         session.update(_latest_prose={"role": "assistant", "text": "Done."})
@@ -2996,6 +3027,40 @@ class EngineProviderTest(unittest.TestCase):
             "hooked", "waiting", now,
             pending={"kind": "question", "nonce": "q1"}))
         self.assertFalse(self.engine.waiting_confirmed("plain", "busy", now + 10))
+
+    def test_confirmed_live_claude_prompt_does_not_age_into_history(self):
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "waiting", "name": "Claude"}, handle)
+        self.engine.registry_status_since["same"] = (
+            "waiting", time.time() - WAITING_CONFIRM_SECONDS - 1)
+        with mock.patch.object(
+                self.engine, "transcript_quiet",
+                return_value=self.engine.cfg["dormant_seconds"] + 1):
+            session = next(item for item in self.engine.scan()["sessions"]
+                           if item["provider"] == "claude")
+        self.assertEqual((session["state"], session["ui_group"]),
+                         ("needs_you", "needs_you"))
+
+    def test_busy_claude_provider_error_does_not_age_into_history(self):
+        self.engine.scan()
+        self.engine.tails[self.transcript].provider_error = {
+            "state": "error", "code": "connection_error",
+            "message": "Provider connection failed"}
+        self.engine.tails[self.transcript].last_shape = (
+            "assistant", None, ["text"])
+        registry = os.path.join(self.sessions, "same.json")
+        with open(registry, "w") as handle:
+            json.dump({"sessionId": "same", "pid": os.getpid(), "cwd": self.cwd,
+                       "status": "busy", "name": "Claude"}, handle)
+        with mock.patch.object(
+                self.engine, "transcript_quiet",
+                return_value=self.engine.cfg["dormant_seconds"] + 1):
+            session = next(item for item in self.engine.scan()["sessions"]
+                           if item["provider"] == "claude")
+        self.assertEqual((session["state"], session["ui_group"]),
+                         ("error", "needs_you"))
 
     def test_session_organization_maps_every_user_facing_group(self):
         now = 10_000
@@ -3244,6 +3309,7 @@ class EngineProviderTest(unittest.TestCase):
                          ("question", "Which scope?", "Awaiting response"))
         self.assertNotIn("approve", first[0]["safe_bulk"])
         self.assertNotIn("dismiss", first[0]["safe_bulk"])
+        self.assertTrue(first[0]["dismissible"])
 
         rejected = self.engine.update_settings({"bulk_triage": {
             "operation": "approve", "items": [{"session_id": "codex:same",
@@ -3255,6 +3321,57 @@ class EngineProviderTest(unittest.TestCase):
                                                   "action_id": first[0]["action_id"]}]}})
         self.assertFalse(dismissed["ok"])
         self.assertEqual(len(self.engine.action_records([organized])), 1)
+
+        self.engine.snapshot_cache = {"actions": first}
+        dismissed = self.engine.update_settings({"dismiss_action": {
+            "session_id": "codex:same", "action_id": first[0]["action_id"]}})
+        self.assertTrue(dismissed["ok"])
+        dismissed_session = self.engine.organize_session(session, 101)
+        self.assertEqual(
+            (dismissed_session["ui_group"], dismissed_session["reason_label"],
+             dismissed_session["winning_rule"]),
+            ("available", "Available", "placement.attention.dismissed"))
+        self.assertTrue(dismissed_session["attention_dismissed"])
+        self.assertTrue(dismissed_session["unresolved_attention"])
+        self.assertEqual(self.engine.action_records([dismissed_session]), [])
+
+        changed = copy.deepcopy(session)
+        changed["pending"]["nonce"] = "question:8"
+        resurfaced = self.engine.organize_session(changed, 102)
+        self.assertEqual(resurfaced["ui_group"], "needs_you")
+        self.assertFalse(resurfaced["attention_dismissed"])
+
+        dormant = copy.deepcopy(session)
+        dormant["state"] = "dormant"
+        historical = self.engine.organize_session(dormant, 103)
+        self.assertEqual(historical["ui_group"], "history")
+
+    def test_dismissed_problem_stays_available_during_stale_provider_poll(self):
+        session = codex_session()
+        session.update(state="error", convo_v="problem:1", error="Connection failed")
+        organized = self.engine.organize_session(session, 100)
+        action = self.engine.action_records([organized])[0]
+        self.engine.snapshot_cache = {"actions": [action]}
+        dismissed = self.engine.update_settings({"dismiss_action": {
+            "session_id": session["session_id"], "action_id": action["action_id"]}})
+        self.assertTrue(dismissed["ok"])
+
+        stale = copy.deepcopy(session)
+        stale.update(state="stale", stale=True, stale_previous_state="error",
+                     reg_status="idle", quiet_s=60)
+        retained = self.engine.organize_session(stale, 101)
+        self.assertEqual(
+            (retained["ui_group"], retained["attention_dismissed"],
+             retained["attention_action_id"]),
+            ("available", True, action["action_id"]))
+        self.assertEqual(self.engine.action_records([retained]), [])
+
+        changed = copy.deepcopy(stale)
+        changed["error"] = "A different provider failure"
+        resurfaced = self.engine.organize_session(changed, 102)
+        self.assertEqual(resurfaced["ui_group"], "needs_you")
+        self.assertFalse(resurfaced["attention_dismissed"])
+        self.assertNotEqual(resurfaced["attention_action_id"], action["action_id"])
 
     def test_completed_handoffs_are_unreviewed_actions_and_progress_is_not(self):
         reply = codex_session()
