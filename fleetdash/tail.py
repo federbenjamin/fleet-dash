@@ -22,6 +22,11 @@ class Tail:
         # Byte offsets, rather than row timestamps, establish provider evidence
         # order. Compaction can append older-timestamped rows after a command.
         self.model_evidence_offset = 0
+        # A terminal assistant-shaped API failure is provider state, not model or
+        # usage evidence. Claude emits these with `isApiErrorMessage` and a
+        # synthetic model after exhausting usage credits. Keep the normalized
+        # condition until a genuine later prompt/assistant row proves recovery.
+        self.provider_error = None       # {state: blocked|error, code, message}
         # Claude Code ≥2.1.217 stamps the live effort level onto every
         # assistant row (top-level `effort`); this is the primary effort source.
         self.effort = ""
@@ -229,7 +234,11 @@ class Tail:
         role = m.get("role")
         content = m.get("content")
         ctypes = [b.get("type") for b in content if isinstance(b, dict)] if isinstance(content, list) else ["str"]
+        if role == "assistant" and o.get("isApiErrorMessage"):
+            self._assistant_api_error(o, m, content, ts)
+            return
         if role == "assistant":
+            self.provider_error = None
             eff = o.get("effort")
             if isinstance(eff, str) and eff in CLAUDE_EFFORTS:
                 self.effort = eff
@@ -338,6 +347,7 @@ class Tail:
                             else:
                                 self._qa_resolve(qa, b)
             elif kind == "prompt":
+                self.provider_error = None
                 self.pending.clear()    # new user turn
                 self.active_skill = self.active_command = None
                 self.turn_usage = [0, 0, 0, 0]
@@ -523,6 +533,42 @@ class Tail:
                 return
         self.convo.append(e)
 
+    def _api_error_event(self, msg, detail, ts):
+        last = self.convo[-1] if self.convo else None
+        if last and last.get("role") == "event" and last.get("kind") == "api_error" \
+           and last.get("title") == msg:
+            last["n"] = last.get("n", 1) + 1
+            last["detail"], last["ts"] = detail, ts
+            self.convo_rev += 1
+            return
+        self._event_add("api_error", msg, detail, ts, level="error")
+
+    def _assistant_api_error(self, o, m, content, ts):
+        """Normalize Claude's terminal assistant-shaped provider error row."""
+        raw_error = o.get("error")
+        if isinstance(raw_error, dict):
+            code = str(raw_error.get("code") or raw_error.get("type") or "")
+            fallback = raw_error.get("formatted") or raw_error.get("message")
+        else:
+            code = str(raw_error or "")
+            fallback = ""
+        message = self._plain_text(content).strip() or str(fallback or "API error")
+        signal = f"{code} {message}".lower().replace("-", "_")
+        limit = any(marker in signal for marker in (
+            "rate_limit", "usage", "quota", "credit", "context_limit",
+            "context_window", "token_limit"))
+        self.provider_error = {
+            "state": "blocked" if limit else "error",
+            "code": code[:80],
+            "message": message[:600],
+        }
+        self.pending.clear()
+        self.active_skill = self.active_command = None
+        self.last_shape = ("assistant", m.get("stop_reason") or "stop_sequence",
+                           ["api_error"])
+        self.interrupted_tail = False
+        self._api_error_event(message[:120], code[:120], ts)
+
     def _system_event(self, o, ts):
         st = o.get("subtype")
         if st == "compact_boundary":
@@ -545,14 +591,7 @@ class Tail:
             err = o.get("error") or {}
             msg = str(err.get("formatted") or err.get("message") or "API error")[:120]
             detail = f"retry {o.get('retryAttempt')}/{o.get('maxRetries')}"
-            last = self.convo[-1] if self.convo else None
-            if last and last.get("role") == "event" and last.get("kind") == "api_error" \
-               and last.get("title") == msg:     # retry storm: collapse into one row
-                last["n"] = last.get("n", 1) + 1
-                last["detail"], last["ts"] = detail, ts
-                self.convo_rev += 1
-                return
-            self._event_add("api_error", msg, detail, ts, level="error")
+            self._api_error_event(msg, detail, ts)
         elif st == "local_command":
             out = re.sub(r"</?local-command-[a-z]+>", "", str(o.get("content") or "")).strip()
             for e in reversed(self.convo):       # attach stdout to the command that ran

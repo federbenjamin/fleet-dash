@@ -906,7 +906,10 @@ class ScanOps:
             agents_running = [a for a in agents if a["state"] in ("running", "stalled")]
 
             turn = mt.turn_state()
-            if confirmed_waiting:
+            provider_error = mt.provider_error
+            if provider_error:
+                state = provider_error["state"]
+            elif confirmed_waiting:
                 state = "needs_you"         # blocked mid-turn: question or permission prompt
             elif reg_status == "idle" or (reg_status in (None, "shell") and
                                           turn == "awaiting_input"):
@@ -928,7 +931,7 @@ class ScanOps:
                 state = "stalled_or_prompt"
             # abandoned/backgrounded sessions (VS Code backends, forgotten panes)
             # aren't "waiting on you" in any actionable sense
-            if quiet > cfg["dormant_seconds"] and not agents_running:
+            if quiet > cfg["dormant_seconds"] and not agents_running and not provider_error:
                 state = "dormant"
 
             # The CLI transcript has no explicit interrupted-turn event. A
@@ -1055,6 +1058,7 @@ class ScanOps:
                 "repo_outcome": observed_test_outcome(
                     mt.convo, session_id=sid, provider="claude"),
                 "state": state,
+                "error": provider_error["message"] if provider_error else None,
                 "reg_status": reg_status,
                 "interrupted": interrupted,
                 "quiet_s": round(quiet),

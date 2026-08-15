@@ -433,7 +433,9 @@ the provider without affecting Claude sessions.
   - **⇄ model fallback** — the "Fable 5's safeguards flagged this message … switched to Opus
     4.8" notice (it's a *refusal* fallback, not a usage limit) and anything of that shape.
   - **⚠ API errors** — `529 Overloaded`, `503 upstream connect error`, with the retry count
-    (a retry storm collapses into one row: `⚠ 529 Overloaded ×7`).
+    (a retry storm collapses into one row: `⚠ 529 Overloaded ×7`). Terminal usage-credit
+    failures appear as a red **Limit reached** session while preserving the last real model and
+    context reading; Claude's synthetic error envelope is never presented as the model.
   - **› slash commands you ran** — `/compact`, `/model`, `/login`, with their output.
   - **☑ questions you answered** — every question and the answer you picked, in **full**, so
     you can confirm from your phone that the right answers landed.

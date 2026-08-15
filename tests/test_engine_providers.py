@@ -865,6 +865,36 @@ class EngineProviderTest(unittest.TestCase):
                           active["capabilities"]["interrupt"]),
                          ("running", "working", True))
 
+    def test_claude_assistant_usage_error_is_a_blocked_session(self):
+        with open(self.transcript, "a") as handle:
+            handle.write(json.dumps({
+                "type": "assistant", "timestamp": "2026-07-17T07:40:00Z",
+                "isApiErrorMessage": True, "error": "rate_limit",
+                "message": {"role": "assistant", "model": "<synthetic>",
+                    "stop_reason": "stop_sequence",
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 0},
+                    "content": [{"type": "text", "text":
+                        "Sonnet requires usage credits. Run /usage-credits to continue."}]},
+            }) + "\n")
+        self.freshen_transcript()
+
+        limited = next(item for item in self.engine.scan()["sessions"]
+                       if item["provider"] == "claude")
+        self.assertEqual(
+            (limited["state"], limited["ui_group"], limited["reason_label"],
+             limited["winning_rule"]),
+            ("blocked", "needs_you", "Limit reached", "placement.provider.limit"))
+        self.assertEqual((limited["model"], limited["family"]), ("claude-sonnet", "sonnet"))
+        self.assertEqual(limited["ctx_tokens"], 10)
+        self.assertEqual(limited["error"],
+                         "Sonnet requires usage credits. Run /usage-credits to continue.")
+        self.assertEqual(
+            (limited["card_peek"][-1]["type"], limited["card_peek"][-1]["kind"],
+             limited["card_peek"][-1]["level"]),
+            ("event", "api_error", "error"))
+
     def test_live_context_uses_published_scan_snapshot_without_scan_lock(self):
         fleet = self.engine.scan()
         revision = next(item["convo_v"] for item in fleet["sessions"]
