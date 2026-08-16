@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
     "working_order": [],                 # stable entry order while sessions remain Working
     "reply_available": {},               # session_id -> dismissed conversation revision
     "read_sessions": {},                 # session_id -> opened conversation revision
-    "dismissed_actions": {},             # action_id -> dismissal ts (inbox only)
+    "dismissed_actions": {},             # exact attention action_id -> dismissal ts
     # Private recovery state. Values contain only provider ids/nonces and
     # allowlisted control selections; never prompts, answers, or credentials.
     "claude_delivery_uncertain": {},      # session_id -> pending prompt nonce

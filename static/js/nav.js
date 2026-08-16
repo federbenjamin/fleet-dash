@@ -114,7 +114,7 @@ function navigateTo(route,push=true,preserveNotificationDetail=false){
   closeMobileMore();
   if(route==='history'){
     // Decommissioned destination: session history lives in Search TYPE=SESSION.
-    searchFilters.kind='session';syncSearchControls();
+    searchFilters.kind='session';searchAccess='all';syncSearchControls();
     if(location.hash==='#history')history.replaceState({fdRoute:'search'},'','#search');
     route='search';
   }

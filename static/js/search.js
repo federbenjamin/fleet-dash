@@ -1,5 +1,5 @@
 // extracted verbatim from app.js — shared state lives on globalThis (see AGENTS.md)
-Object.assign(globalThis,{syncSearchControls,setSearchQuery,setSearchFilter,setSearchAccess,queueSearch,searchParams,searchHasCriteria,renderSearchStatus,loadSearchStatus,searchWhen,renderSearchResults,runSessionSearch,sessionResultRow,renderSessionResults,updateSearchProjects,runSearch,searchContextMessage,searchSourceAction,openSearchContext,closeSearchView,switchSearchView,rebuildSearch});
+Object.assign(globalThis,{syncSearchControls,showSearchHistory,setSearchQuery,setSearchFilter,setSearchAccess,queueSearch,searchParams,searchHasCriteria,renderSearchStatus,loadSearchStatus,searchWhen,renderSearchResults,runSessionSearch,sessionResultRow,renderSessionResults,updateSearchProjects,runSearch,searchContextMessage,searchSourceAction,openSearchContext,closeSearchView,switchSearchView,rebuildSearch});
 globalThis.searchTimer=null;globalThis.searchAbort=null;globalThis.searchCursor=0;globalThis.searchBusy=false;
 globalThis.searchItems=[];globalThis.searchProjects=[];globalThis.searchStatusData=null;globalThis.searchStatusAt=0;globalThis.searchError='';
 globalThis.searchView=null;
@@ -13,7 +13,10 @@ function syncSearchControls(){
     project:$('#searchproject')};
   for(const [key,control] of Object.entries(controls))if(control&&control.value!==searchFilters[key])
     control.value=searchFilters[key];
+  const history=$('#searchhistory');if(history){const active=searchFilters.kind==='session'&&searchAccess==='all';
+    history.classList.toggle('active',active);history.setAttribute('aria-pressed',String(active));}
 }
+function showSearchHistory(){searchFilters.kind='session';searchAccess='all';syncSearchControls();runSearch(true);}
 function setSearchQuery(value){
   searchFilters.query=String(value??'');
   // The delegated draft listener normally persisted this input first. Keep
@@ -31,7 +34,7 @@ function setSearchFilter(key,value){
 }
 function setSearchAccess(value){
   searchAccess=['all','continue','view','reopen'].includes(value)?value:'all';
-  runSearch(true);
+  syncSearchControls();runSearch(true);
 }
 function queueSearch(reset){clearTimeout(searchTimer);searchTimer=setTimeout(()=>runSearch(reset),180);}
 function searchParams(cursor){
@@ -159,6 +162,7 @@ async function runSessionSearch(reset){
   if(searchAbort){searchAbort.abort();searchAbort=null;searchBusy=false;}
   historyFilter=searchFilters.query;
   historyProvider=searchFilters.provider||'all';
+  historyProject=searchFilters.project||'all';
   historyAccess=searchAccess;
   const signature=historyParams(0);
   // Revisiting the destination re-renders the cached list; only changed

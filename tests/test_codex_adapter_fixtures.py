@@ -544,6 +544,57 @@ class CodexAdapterFixtureTest(unittest.TestCase):
         self.assertEqual(states["threshold"], "idle")
         self.assertEqual(states["dormant"], "dormant")
 
+    def test_old_not_loaded_attention_becomes_dormant_without_active_evidence(self):
+        old = 92_799
+        threads = [self.thread("limited", {"type": "notLoaded"}, updated=old),
+                   self.thread("broken", {"type": "notLoaded"}, updated=old),
+                   self.thread("pending", {"type": "notLoaded"}, updated=old),
+                   self.thread("active", {"type": "notLoaded"}, updated=old),
+                   self.thread("loaded", {"type": "notLoaded"}, updated=old)]
+        adapter, client = self.adapter(threads, now=100_000)
+        for item in ("limited", "broken", "pending", "active", "loaded"):
+            adapter._remember(item, "default")
+        client.thread_state.update({
+            "limited": {"error": "Rate limit reached"},
+            "broken": {"error": "provider protocol failed"},
+            "pending": {"pending": "approval-1"},
+            "active": {"status": "running", "turn_id": "turn-1"},
+        })
+        client.approvals["approval-1"] = {
+            "thread_id": "pending", "method": "item/commandExecution/requestApproval",
+            "params": {"command": "make test"}}
+        client.loaded = ["loaded"]
+
+        adapter._refresh()
+
+        states = {item["native_session_id"]: item["state"] for item in adapter.sessions()}
+        self.assertEqual(states["limited"], "dormant")
+        self.assertEqual(states["broken"], "dormant")
+        self.assertEqual(states["pending"], "dormant")
+        self.assertEqual(states["active"], "stalled")
+        self.assertEqual(states["loaded"], "idle")
+
+    def test_stale_snapshot_quiet_age_keeps_advancing(self):
+        now = [1000]
+        thread = self.thread("managed", {"type": "notLoaded"}, updated=950)
+        client = FixtureClient([thread])
+        adapter = CodexAdapter(client=client, state_path=self.state_path,
+                               clock=lambda: now[0], stall_seconds=30,
+                               models_cache_path=os.path.join(
+                                   self.tmp.name, "models-cache.json"))
+        adapter._remember("managed", "default")
+        client.thread_state["managed"] = {"error": "Rate limit reached"}
+        adapter._refresh()
+        self.assertEqual(adapter.sessions()[0]["state"], "blocked")
+
+        now[0] = 9000
+        client.fail_list = True
+        adapter._refresh()
+        stale = adapter.sessions()[0]
+        self.assertEqual(stale["state"], "stale")
+        self.assertEqual(stale["stale_previous_state"], "blocked")
+        self.assertEqual(stale["quiet_s"], 8050)
+
     def test_refresh_failure_marks_cached_sessions_stale(self):
         adapter, client = self.adapter([self.thread()])
         adapter._remember("managed", "default")

@@ -110,6 +110,9 @@
       <div class="searchbar" role="search">
         <label class="commandinput"><span>⌕</span><input id="searchquery" data-draft-key="filter:search" placeholder="Search every transcript" autocomplete="off"
           oninput="setSearchQuery(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch(true)}"></label>
+        <div class="commandchips" aria-label="Search shortcuts">
+          <button id="searchhistory" aria-pressed="false" onclick="showSearchHistory()">History</button>
+        </div>
         <div class="searchfilters">
           <label><span>Provider</span><select id="searchprovider" onchange="setSearchFilter('provider',this.value)">
             <option value="">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>

@@ -233,9 +233,9 @@ class HistorySnapshotTests(EngineFixture):
         with self.engine.lock:
             self.engine.snapshot_cache = {"closed": [
                 {"session_id": "c1", "provider": "claude", "title": "Alpha",
-                 "primary_action": "reopen", "pinned": False},
+                 "project": "one", "primary_action": "reopen", "pinned": False},
                 {"session_id": "c2", "provider": "codex", "title": "Beta",
-                 "primary_action": "view", "pinned": False},
+                 "project": "two", "primary_action": "view", "pinned": False},
                 {"session_id": "c3", "provider": "claude", "title": "Pinned",
                  "pinned": True}]}
 
@@ -250,6 +250,8 @@ class HistorySnapshotTests(EngineFixture):
                       self.engine.history_snapshot(access="bogus")["error"])
         self.assertIn("invalid history filter",
                       self.engine.history_snapshot(sid="\x01")["error"])
+        self.assertIn("invalid history filter",
+                      self.engine.history_snapshot(project="bad\x01")["error"])
 
     def test_single_item_lookup(self):
         self._seed_closed()
@@ -262,6 +264,8 @@ class HistorySnapshotTests(EngineFixture):
                                            query="alpha")
         ids = [i["session_id"] for i in out["items"]]
         self.assertEqual(ids, ["c1"])
+        project = self.engine.history_snapshot(project="two")
+        self.assertEqual([item["session_id"] for item in project["items"]], ["c2"])
         # Pinned items are excluded from history listing.
         allrows = self.engine.history_snapshot()
         self.assertNotIn("c3", [i["session_id"] for i in allrows["items"]])

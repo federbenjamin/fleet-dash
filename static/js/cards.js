@@ -166,9 +166,10 @@ function activeToolChip(s){
 }
 function cardStateDot(s){
   const cls=cardCls(s);
-  const tone=cls==='needs'?'amber':cls==='stalled'?'red':
+  const tone=s.unresolved_attention?'amber':cls==='needs'?'amber':cls==='stalled'?'red':
     s.ui_group==='working'?'green':'dim';
-  const label=String(s.reason_label||stateLabel[s.state]||s.state||'session status').toLowerCase();
+  const label=s.attention_dismissed?'unresolved needs you item dismissed':
+    String(s.reason_label||stateLabel[s.state]||s.state||'session status').toLowerCase();
   return`<span class="cardstate ${tone}" role="img" aria-label="session status: ${esc(label)}" title="${esc(label)}"></span>`;
 }
 function cardMetaRail(s){

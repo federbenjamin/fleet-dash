@@ -1,4 +1,5 @@
 """Session placement: Now-queue classification and reply-request detection (invariant 31)."""
+import hashlib
 import re
 from .config import DEFAULT_CONFIG, EXTERNAL_VIEW_ONLY_REPLY_GRACE_SECONDS
 
@@ -127,11 +128,42 @@ def _pending_placement(pending):
     return None
 
 
+def action_identity(session, kind, revision):
+    """Return the stable server-owned identity for one attention item."""
+    raw = "\0".join((str(session.get("provider") or "claude"),
+                      str(session.get("session_id") or ""), str(kind or ""),
+                      str(revision or "")))
+    return "act-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def attention_action(session, reply_requested=False):
+    """Describe the exact unresolved item that can own Needs You placement."""
+    pending = session.get("pending") or {}
+    revision = str(session.get("convo_v") or "")
+    if pending:
+        kind = {"question": "question", "elicitation": "form",
+                "permission": "approval"}.get(pending.get("kind"))
+        if kind:
+            return kind, str(pending.get("nonce") or revision)
+    if reply_requested:
+        return "reply", revision
+    raw_state = str(session.get("state") or "idle")
+    state = str(session.get("stale_previous_state") or "idle") \
+        if raw_state == "stale" else raw_state
+    if state in ("blocked", "error", "stalled_or_prompt"):
+        detail = str(session.get("error") or "").strip()[:600]
+        return "problem", "\0".join((revision, state, detail))
+    if state == "needs_you":
+        return "attention", revision
+    return None
+
+
 def classify_placement(session, now, reply_available=None, read_sessions=None,
-                       dormant_seconds=None):
+                       dormant_seconds=None, dismissed_actions=None):
     """Pure provider-neutral session placement with diagnostic evidence."""
     reply_available = reply_available or {}
     read_sessions = read_sessions or {}
+    dismissed_actions = dismissed_actions or {}
     if dormant_seconds is None:
         dormant_seconds = DEFAULT_CONFIG["dormant_seconds"]
     dormant_seconds = max(0, float(dormant_seconds))
@@ -163,21 +195,40 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     if external_reply_expired:
         reply_requested = False
 
+    unresolved = attention_action(session, reply_requested)
+    attention_id = action_identity(session, *unresolved) if unresolved else None
+    attention_dismissed = bool(attention_id and attention_id in dismissed_actions)
+    stale_inactive = bool(
+        provider_stale and str(session.get("reg_status") or "").lower() == "notloaded"
+        and quiet > dormant_seconds and not session.get("agents_running")
+        and session.get("compacting") is None and state not in ("running", "stalled"))
+    inactive_dormant = bool(
+        (state == "dormant" or stale_inactive) and not session.get("agents_running")
+        and session.get("compacting") is None)
+
     candidates = []
+    if inactive_dormant:
+        candidates.append(("placement.access.external" if external else
+                           "placement.state.dormant",
+                           "history", "External" if external else "Inactive",
+                           "view" if external else "continue", "inferred"))
+    if attention_dismissed and not inactive_dormant:
+        candidates.append(("placement.attention.dismissed", "available", "Available",
+                           "view" if external else "continue", "confirmed"))
     pending_rule = _pending_placement(pending)
-    if pending_rule:
+    if pending_rule and not attention_dismissed:
         reason, primary, rule = pending_rule
         candidates.append((rule, "needs_you", reason, primary, "confirmed"))
-    if raw_state == "error":
+    if state == "error" and not attention_dismissed:
         candidates.append(("placement.provider.error", "needs_you", "Fix needed",
                            "open", "confirmed"))
-    if raw_state == "blocked":
+    if state == "blocked" and not attention_dismissed:
         candidates.append(("placement.provider.limit", "needs_you", "Limit reached",
                            "open", "confirmed"))
-    if state == "stalled_or_prompt":
+    if state == "stalled_or_prompt" and not attention_dismissed:
         candidates.append(("placement.state.stalled_or_prompt", "needs_you",
                            "Check session", "open", "inferred"))
-    if state == "needs_you":
+    if state == "needs_you" and not attention_dismissed:
         candidates.append(("placement.state.needs_you", "needs_you",
                            "Response needed", "respond", "confirmed"))
     if session.get("compacting") is not None:
@@ -192,19 +243,19 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
     if external_reply_expired:
         candidates.append(("placement.external.reply_request_expired", "history", "External",
                            "view", "confirmed"))
-    if reply_requested:
+    if reply_requested and not attention_dismissed:
         candidates.append(("placement.prose.reply_requested", "needs_you",
                            "Reply requested", "respond", "inferred"))
     if state == "turn_done":
         candidates.append(("placement.state.turn_done", "available", "Available",
                            "view" if external else "continue", "confirmed"))
-    if external_dormant:
+    if external_dormant and not inactive_dormant:
         candidates.append(("placement.access.external", "history", "External",
                            "view", "confirmed"))
     if state == "reopenable":
         candidates.append(("placement.state.reopenable", "history", "Reopenable",
                            "reopen" if capabilities.get("reopen") else "view", "confirmed"))
-    if state == "dormant":
+    if state == "dormant" and not inactive_dormant:
         candidates.append(("placement.state.dormant", "history", "Inactive",
                            "continue", "inferred"))
     default_confidence = ("unknown" if state not in
@@ -278,6 +329,9 @@ def classify_placement(session, now, reply_available=None, read_sessions=None,
         "access": access, "access_label": ACCESS_LABELS[access],
         "external": external, "provider_stale": provider_stale,
         "reply_requested": reply_requested, "new_response": new_response,
+        "unresolved_attention": bool(unresolved),
+        "attention_dismissed": attention_dismissed,
+        "attention_action_id": attention_id,
         "activity_at": max(0, float(now) - float(session.get("quiet_s") or 0)),
         "winning_rule": winning_rule,
         "suppressed_rules": [candidate[0] for candidate in candidates[1:]],

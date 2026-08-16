@@ -45,9 +45,10 @@ It includes provider-native questions, approvals, permissions, MCP forms, direct
 requests, session errors requiring intervention, and completed work not yet reviewed. Every row has
 a stable id derived from provider, session, kind, and pending nonce/conversation revision, so the same
 request does not duplicate across refreshes or daemon restarts. Selecting it opens the existing full
-session interaction. Bulk actions are restricted to mark reviewed, mark available, mute, and dismiss
-reviewable completion notices. Unresolved questions/forms/approvals cannot be hidden by bulk triage,
-and command/file approvals are never bulk actions.
+session interaction. **Dismiss** suppresses only that exact Fleet attention identity; it does not
+answer a prompt, send Escape, interrupt a turn, or erase provider state. The live session moves to
+Available with an amber unresolved marker, while a new nonce or conversation revision creates a new
+Needs-you item. Bulk actions remain restricted, and command/file approvals are never bulk actions.
 
 ## Placement and classification
 
@@ -57,7 +58,7 @@ and command/file approvals are never bulk actions.
 | Needs you | A structured question, approval, permission, or MCP form is pending; the latest assistant prose directly requests a reply; a likely prompt could not be normalized; or a confirmed session-specific failure requires intervention. |
 | Working | A provider reports an active turn, live turn evidence has no completion, compaction is active, or the turn is slow but not confirmed failed. External active turns retain the same Working reason while their access is labeled View only. |
 | Available | No turn is active and nothing requires a response. This includes interactive provider `idle`, completed non-question turns, and recently active external/view-only sessions. |
-| Session history | No turn is active and the session is dormant, reopenable, explicitly closed, or otherwise no longer part of the immediate inventory. External/view-only sessions become dormant after the configured inactivity threshold (2 hours by default); an externally archived Codex thread is removed from Fleet inventory immediately. |
+| Session history | No turn is active and the session is dormant, reopenable, explicitly closed, or otherwise no longer part of the immediate inventory. Inactivity outranks a historical request or provider error after the configured threshold (2 hours by default); active turns, running tools, subagents, and compaction do not age-demote. An externally archived Codex thread is removed from Fleet inventory immediately. |
 
 Fleet incrementally observes at most the 32 most recently updated external Codex rollouts from the
 last 24 hours, plus explicitly pinned external sessions. An active external session is Working and
@@ -85,6 +86,7 @@ after 30 minutes of quiet, Fleet clears that prose-only request and moves it to 
 | Working | Working | A turn is active. External ownership is communicated separately by View-only access. | Open, or View when external |
 | Working | Slow | The turn is still active but activity has exceeded the stall threshold. | Open, or View when external |
 | Available | Available | No turn is active and nothing requires a response. External ownership is communicated separately by View-only access. | Continue, or View when external |
+| Available | Available with amber dot | The exact unresolved attention identity was manually dismissed from the queue. The underlying request remains visible in the session, and a changed identity resurfaces in Needs you. | Continue, or View when external |
 | Available | New response | A completed non-question assistant response has not been opened at its current conversation revision. Its placement remains Available, but the unreviewed outcome is presented in the Action inbox until reviewed. | Continue |
 | Session history | Inactive | A managed, interactive session is dormant. | Continue |
 | Session history | External | The external/view-only session has exceeded the configured inactivity threshold (2 hours by default). | View |
@@ -122,7 +124,7 @@ when the user sends a response or explicitly chooses **Mark available**.
 | `reopenable` | Session history / Reopenable / Reopen |
 | Closed Claude ledger entry with a validated main transcript and cwd | Session history / Reopenable / View or Reopen |
 | Explicitly closed ledger entry without a safe reopen target | Session history / Closed / View |
-| `stale` caused by a provider-wide outage | Preserve the last known card placement and access; an owned interactive session keeps its controls, while an external session remains view-only; show one provider-level banner |
+| `stale` caused by a provider-wide outage | Preserve the last known card placement and access unless retained `notLoaded` evidence passes the inactivity threshold, in which case historical attention decays to Session history; retained running/stalled work never age-demotes; show one provider-level banner |
 
 Provider-wide failures are page-level banners. Fleet must not duplicate the same
 outage as a Fix-needed card for every session. A failure isolated to one session is
@@ -141,6 +143,10 @@ background prose follows.
 The dismissal record is keyed by session id and conversation revision. A later
 assistant message therefore creates a new decision instead of inheriting an old
 dismissal.
+
+Manual Action-inbox dismissal uses the exact server-owned action identity derived
+from provider, session, action kind, and pending nonce or conversation revision.
+It changes queue placement only; provider-native dismiss controls remain separate.
 
 ## Sorting
 

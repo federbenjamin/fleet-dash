@@ -13,9 +13,11 @@ the provider's native control path. Built 2026-07-13; still evolving.
   inbox** for questions, approvals, MCP forms, explicit reply requests, intervention errors, and
   unreviewed completed work. **Working** and **Available** session cards follow; empty groups collapse
   while Available retains a small empty state. Action rows show provider, access, reason, age, and
-  delivery state, then open the same full-chat response controls used everywhere else; there are no
-  checkboxes, bulk actions, or duplicate right-side navigation buttons. The flat inventory of
-  dormant, external, reopenable, and closed sessions lives in **Search under TYPE=SESSION**. Cards
+  delivery state, then open the same full-chat response controls used everywhere else. A row's
+  **Dismiss** control moves that exact unresolved item to Available without answering or canceling
+  it; the card keeps an amber dot until the provider state changes. There are no checkboxes, bulk
+  actions, or duplicate right-side navigation buttons. The flat inventory of dormant, external,
+  reopenable, and closed sessions is one click away through **History** in Search. Cards
   use reasons such as **Reply requested**, **Command approval**, **Working**, and **Inactive**
   instead of raw provider lifecycle terms. A separate **View only** access label identifies sessions
   owned by another runtime. An archived external thread is removed from Fleet inventory rather than
@@ -299,6 +301,10 @@ Requires a `codex` executable with App Server support. Set `codex_enabled` to `f
 the provider without affecting Claude sessions.
 - **Needs you** includes native questions/approvals and ordinary assistant prose that directly asks
   for a reply. Opening prose does not dismiss it: replying or choosing **Mark available** does.
+  **Dismiss** is the manual queue backstop: it suppresses only the current Fleet attention identity,
+  leaves the unresolved request visible inside the session, and never sends input to the provider.
+  A changed request resurfaces automatically. A session with no active-work evidence moves to
+  History after the two-hour inactivity threshold even when an old error or request remains.
   An unloaded external view-only thread is the exception: Fleet clears a prose-only request after
   30 minutes because it cannot submit a reply to that runtime.
   A completed-work handoff with a concrete summary or verification enters the Action Inbox as
@@ -306,10 +312,10 @@ the provider without affecting Claude sessions.
   turns do not. Each Action Inbox row opens directly; it has no checkbox, bulk action, or duplicate
   View/Respond control. Other completed non-question turns remain **Available** without entering
   the Action Inbox.
-- The session inventory is one flat chronological list in **Search under TYPE=SESSION** — an empty
+- The **History** shortcut in Search opens the one flat chronological session inventory — an empty
   query lists every dormant, inactive external, reopenable, and closed session newest-first. Filter
   it with the search box, the Access chips (All, Continue,
-  View only, Reopen), and the Provider filter. Dormant means no active turn and no
+  View only, Reopen), Provider, and Project filters. Dormant means no active turn and no
   recent activity; it is a diagnostic raw state, not a separate page section. Fleet indexes every
   surviving top-level Claude transcript under `~/.claude/projects` on startup, including sessions
   from before Fleet was installed. Saved subagent transcripts remain inside their parent
@@ -586,7 +592,8 @@ the provider without affecting Claude sessions.
   panel's "recent conversation" is the tall one.
 - **Session rows in Search (TYPE=SESSION):** inactive sessions plus every surviving top-level
   Claude transcript (title, provider, project, state, and age), loaded 100 rows at a time.
-  Combine the search text with the Access chips and Provider filter. A closed row always has
+  Use **History** to select this list in one click. Combine the search text with the Access chips,
+  Provider filter, and Project filter. A closed row always has
   **View**. It also has **Reopen** when its exact transcript and original working directory still
   exist; Reopen starts `claude --resume <id>` in a new terminal. Session ids, cwds and agent ids
   in any info block are **tap-to-copy**.

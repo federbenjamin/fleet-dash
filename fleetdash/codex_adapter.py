@@ -242,6 +242,9 @@ class CodexAdapter:
         previous_state = stale.get("state")
         if previous_state != "stale":
             stale["stale_previous_state"] = previous_state
+        activity_at = stale.get("provider_activity_at")
+        if activity_at is not None:
+            stale["quiet_s"] = round(max(0, self.clock() - float(activity_at)))
         can_queue = not stale.get("read_only")
         stale.update(state="stale", stale=True, stale_reason=str(reason)[:1000],
                      control_state="reconnecting" if can_queue else "view_only",
@@ -595,7 +598,12 @@ class CodexAdapter:
                                          turn_error)
             blocked = (live.get("status") == "blocked" or
                        _is_limit_error(provider_error))
-            if blocked:
+            inactive_not_loaded = bool(
+                recorded_type == "notLoaded" and quiet > self.dormant_seconds
+                and tid not in loaded and not running and live.get("compacting") is None)
+            if inactive_not_loaded:
+                state = "dormant"
+            elif blocked:
                 state = "blocked"
             elif provider_error or recorded_type == "systemError":
                 state = "error"
@@ -607,8 +615,6 @@ class CodexAdapter:
                 state = "running"
             elif completed_epoch is not None and 0 <= now - completed_epoch < 90:
                 state = "turn_done"
-            elif recorded_type == "notLoaded" and quiet > self.dormant_seconds:
-                state = "dormant"
             else:
                 state = "idle"
             cwd = thread.get("cwd") or ""
@@ -755,6 +761,7 @@ class CodexAdapter:
                 "queue_accepting": bool(is_managed and uncontrolled_active and
                                         state not in ("blocked", "error", "stale")),
                 "quiet_s": round(quiet),
+                "provider_activity_at": updated_epoch,
                 "ctx_tokens": ctx_tokens,
                 "ctx_window": ctx_window,
                 "ctx_pct": round(100 * ctx_tokens / ctx_window, 1) if ctx_window else None,

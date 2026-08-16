@@ -3599,10 +3599,31 @@ test('action inbox separates requests, work, availability, and unread responses'
   await expect(question).toContainText('How broad should the change be?');
   await expect(question).toContainText('Question waiting');
   await expect(question.locator('.actionopen')).toBeVisible();
+  await expect(question.getByRole('button', { name: 'Dismiss' })).toBeVisible();
   await expect(question.getByRole('checkbox')).toHaveCount(0);
   await expect(question.locator('.primarybtn')).toHaveCount(0);
   await expect(page.locator('#usagebody .uprovider')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('action-inbox.png'), fullPage: true });
+
+  await page.evaluate(()=>{const session=last.sessions.find(item=>item.session_id==='codex:thread-one');
+    Object.assign(session,{access:'view_only',read_only:true,primary_action:'view',primary_action_label:'View'});});
+  await question.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(question).toHaveCount(0);
+  await expect.poll(()=>page.evaluate(()=>{const session=last.sessions.find(
+    item=>item.session_id==='codex:thread-one');return [session.primary_action,session.primary_action_label];}))
+    .toEqual(['view','View']);
+  const dismissedCard=page.locator('#sessions [data-sid="codex:thread-one"]');
+  await expect(dismissedCard).toBeVisible();
+  await expect(dismissedCard.locator('.cardstate'))
+    .toHaveAttribute('aria-label','session status: unresolved needs you item dismissed');
+  await expect(dismissedCard.locator('.cardstate')).toHaveClass(/amber/);
+  await expect(dismissedCard.locator('.pend')).toHaveCount(0);
+  await dismissedCard.locator('.shead').click();
+  await expect(page.locator('#sact .pend')).toBeVisible();
+  await page.locator('#sclose').click();
+  await page.reload();
+  await expect(page.locator('#sessions [data-sid="codex:thread-one"] .cardstate'))
+    .toHaveClass(/amber/);
 
   await reset(page, 'subagent');
   const working = page.locator('[data-sid="codex:thread-one"]');
@@ -4564,6 +4585,27 @@ test('session history text and access/provider filters shape one flat list in Se
   await expect(results.locator('.sessionresult')).toHaveCount(2);
   await expect(results).toContainText('External');
   await expect(results).toContainText('Closed');
+});
+
+test('Search History shortcut preserves useful filters and resets access in one click', async ({ page }) => {
+  await reset(page, 'organization');
+  await goTo(page, 'search');
+  await page.locator('#searchquery').fill('migration');
+  await expect(page.locator('#searchproject option[value="fleet-dash"]')).toHaveCount(1);
+  await page.locator('#searchprovider').selectOption('claude');
+  await page.locator('#searchproject').selectOption('fleet-dash');
+  await page.evaluate(() => { searchAccess='continue';syncSearchControls(); });
+
+  await page.locator('#searchhistory').click();
+
+  await expect(page.locator('#searchhistory')).toHaveAttribute('aria-pressed','true');
+  await expect(page.locator('#searchkind')).toHaveValue('session');
+  await expect(page.locator('#searchquery')).toHaveValue('migration');
+  await expect(page.locator('#searchprovider')).toHaveValue('claude');
+  await expect(page.locator('#searchproject')).toHaveValue('fleet-dash');
+  await expect(page.locator('#searchsessionchips [data-search-access="all"]')).toHaveClass(/active/);
+  await expect(page.locator('#searchresults .sessionresult')).toHaveCount(1);
+  await expect(page.locator('#searchresults')).toContainText('Dormant migration');
 });
 
 test('Console mobile pass: complete card metadata, file navigation, bottom bar', async ({ page }, testInfo) => {

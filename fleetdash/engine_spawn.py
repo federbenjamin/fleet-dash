@@ -429,7 +429,7 @@ class SpawnOps:
         allowed = (set(self.NUM_KEYS) | set(self.BOOL_KEYS) | {
             "reader_width", "mute_session", "muted", "pin_session", "pinned",
             "mark_available_session", "mark_read_session", "revision", "bulk_triage",
-            "budgets"})
+            "dismiss_action", "budgets"})
         unknown = sorted(str(key) for key in patch if key not in allowed)
         if unknown:
             return {"ok": False, "error": f"unknown settings field: {unknown[0]}"}
@@ -503,6 +503,26 @@ class SpawnOps:
             values[sid] = revision
             values = dict(list(values.items())[-1000:])
             staged[config_key] = changed[config_key] = values
+        dismiss_action = patch.get("dismiss_action")
+        if dismiss_action is not None:
+            if not isinstance(dismiss_action, dict):
+                return {"ok": False, "error": "dismiss_action must be an object"}
+            sid = str(dismiss_action.get("session_id") or "").strip()
+            action_id = str(dismiss_action.get("action_id") or "").strip()
+            if (not sid or not action_id or len(sid) > 300 or len(action_id) > 80 or
+                    any(ord(char) < 32 for char in sid + action_id)):
+                return {"ok": False,
+                        "error": "dismiss_action needs session and action IDs"}
+            with self.lock:
+                current = next((item for item in self.snapshot_cache.get("actions") or []
+                                if item.get("action_id") == action_id), None)
+            if (not current or current.get("session_id") != sid or
+                    not current.get("dismissible")):
+                return {"ok": False, "error": "stale or ineligible attention action"}
+            values = dict(staged.get("dismissed_actions") or {})
+            values[action_id] = time.time()
+            values = dict(list(values.items())[-2000:])
+            staged["dismissed_actions"] = changed["dismissed_actions"] = values
         bulk = patch.get("bulk_triage")
         if bulk is not None:
             if not isinstance(bulk, dict):

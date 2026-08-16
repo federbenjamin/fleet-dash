@@ -687,7 +687,7 @@ class Handler(BaseHTTPRequestHandler):
         out = self.eng.history_snapshot(
             self.query("cursor") or 0, self.query("limit") or 100,
             self.query("q"), self.query("provider"), self.query("access"),
-            self.query("sid"))
+            self.query("sid"), self.query("project"))
         return self.reply(200, "application/json", json.dumps(out).encode())
 
     def get_fleet(self):

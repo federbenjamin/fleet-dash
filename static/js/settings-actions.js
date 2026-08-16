@@ -408,7 +408,7 @@ function sendElicitation(sid,nonce,choice,pre){
 // question expanded. Permission prompts are small and stay inline (allow/deny).
 function cardPending(s){
   const p=s.pending;
-  if(!p||(requestKey(p)&&answered[s.session_id]===requestKey(p)))return'';
+  if(!p||s.attention_dismissed||(requestKey(p)&&answered[s.session_id]===requestKey(p)))return'';
   if(s.staging_observer)return`<div class="pend qsignal stagingreadonly" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">
     <div class="ptool"><span class="ptlabel">production request · view only in staging</span></div>
     <button class="pbtn" onclick="event.stopPropagation();openSessionQ('${s.session_id}')">view ⤢</button></div>`;

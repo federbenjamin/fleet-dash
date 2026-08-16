@@ -344,10 +344,40 @@ def fixture_notifications(query):
         "next_cursor": next_cursor}
 
 
+def fixture_action_identity(session, kind, revision):
+    raw = "\0".join((session.get("provider") or "claude", session["session_id"],
+                      kind, str(revision)))
+    return "act-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def fixture_attention(session):
+    pending = session.get("pending") or {}
+    revision = str(session.get("convo_v") or "")
+    raw_state = str(session.get("state") or "idle")
+    state = str(session.get("stale_previous_state") or "idle") \
+        if raw_state == "stale" else raw_state
+    kind = {"question": "question", "permission": "approval",
+            "elicitation": "form"}.get(pending.get("kind"))
+    if kind:
+        action_revision = str(pending.get("nonce") or revision)
+    elif session.get("reply_requested"):
+        kind, action_revision = "reply", revision
+    elif state in ("error", "blocked", "stalled_or_prompt"):
+        detail = str(session.get("error") or "").strip()[:600]
+        kind, action_revision = "problem", "\0".join((revision, state, detail))
+    elif state == "needs_you":
+        kind, action_revision = "attention", revision
+    else:
+        return None
+    return kind, action_revision, fixture_action_identity(session, kind, action_revision)
+
+
 def fixture_actions(sessions):
     records = []
     for session in sessions:
         if session["session_id"] in STATE.get("hidden_action_sessions", []):
+            continue
+        if session.get("ui_group") == "history":
             continue
         pending = session.get("pending") or {}
         kind = request = delivery = None
@@ -374,8 +404,8 @@ def fixture_actions(sessions):
             request, delivery = session.get("error") or session.get("reason_label"), "Intervention needed"
         if not kind:
             continue
-        raw = "\0".join((session.get("provider") or "claude", session["session_id"], kind, revision))
-        action_id = "act-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+        exact = fixture_attention(session)
+        action_id = exact[2] if exact else fixture_action_identity(session, kind, revision)
         if action_id in STATE.get("dismissed_actions", {}):
             continue
         records.append({"action_id": action_id, "session_id": session["session_id"],
@@ -388,6 +418,7 @@ def fixture_actions(sessions):
             "primary_action": session.get("primary_action"),
             "primary_action_label": session.get("primary_action_label"),
             "delivery_state": delivery, "safe_bulk": safe,
+            "dismissible": bool(exact),
             "revision": str(session.get("convo_v") or ""),
             "pending_nonce": pending.get("nonce"), "title": session.get("title"),
             "project": session.get("project"), "muted": session.get("muted", False)})
@@ -551,7 +582,15 @@ def organize_session(session):
     pending = session.get("pending") or {}
     external = bool(session.get("headless") or session.get("read_only"))
     kind = pending.get("kind")
-    if kind == "question":
+    attention = fixture_attention(session)
+    attention_dismissed = bool(attention and
+                               attention[2] in STATE.get("dismissed_actions", {}))
+    if state == "dormant":
+        group, reason, action = "history", "External" if external else "Inactive", \
+            "view" if external else "continue"
+    elif attention_dismissed:
+        group, reason, action = "available", "Available", "view" if external else "continue"
+    elif kind == "question":
         group, reason, action = "needs_you", "Question waiting", "respond"
     elif kind == "elicitation":
         group, reason, action = "needs_you", "Form waiting", "respond"
@@ -579,8 +618,6 @@ def organize_session(session):
         group, reason, action = "needs_you", "Reply requested", "respond"
     elif external:
         group, reason, action = "history", "External", "view"
-    elif state == "dormant":
-        group, reason, action = "history", "Inactive", "continue"
     else:
         group, reason, action = "available", "Available", "continue"
     if external or state == "stale":
@@ -594,6 +631,9 @@ def organize_session(session):
                        "open": "Open", "continue": "Continue", "view": "View"}[action],
                    access=access, access_label="View only" if access == "view_only" else "Interactive",
                    external=external, provider_stale=state == "stale",
+                   unresolved_attention=bool(attention),
+                   attention_dismissed=attention_dismissed,
+                   attention_action_id=attention[2] if attention else None,
                    activity_at=time.time() - float(session.get("quiet_s") or 0),
                    pinned=session["session_id"] in STATE["settings"]["pinned_sessions"])
     return session
@@ -720,7 +760,9 @@ def fleet():
                                          "blockers": [], "error": None,
                                          "launcher": {"state": "ready"}})}},
             "ledger": copy.deepcopy(STATE.get("ledger") or {"ok": True}),
-            "settings": copy.deepcopy(STATE["settings"]),
+            "settings": {**copy.deepcopy(STATE["settings"]),
+                         "dismissed_actions": copy.deepcopy(
+                             STATE.get("dismissed_actions", {}))},
             "page_v": 1}
 
 
@@ -1256,6 +1298,7 @@ class Handler(BaseHTTPRequestHandler):
                 q = (query.get("q") or [""])[0].strip().lower()
                 provider = (query.get("provider") or [""])[0]
                 access = (query.get("access") or [""])[0]
+                project = (query.get("project") or [""])[0]
                 try:
                     cursor = max(0, int((query.get("cursor") or ["0"])[0]))
                     limit = max(1, min(200, int((query.get("limit") or ["100"])[0])))
@@ -1265,6 +1308,8 @@ class Handler(BaseHTTPRequestHandler):
                     rows = [item for item in rows if item.get("provider") == provider]
                 if access:
                     rows = [item for item in rows if item.get("primary_action") == access]
+                if project:
+                    rows = [item for item in rows if item.get("project") == project]
                 if q:
                     rows = [item for item in rows if q in " ".join(str(item.get(key) or "")
                         for key in ("title", "name", "project", "branch", "provider",
@@ -1780,6 +1825,16 @@ class Handler(BaseHTTPRequestHandler):
                     if target:
                         target["new_response"] = False
                     STATE["read_sessions"][sid] = payload.get("revision")
+                dismiss = payload.get("dismiss_action")
+                if dismiss:
+                    current = {item["action_id"]: item for item in fleet()["actions"]}
+                    action = current.get(dismiss.get("action_id"))
+                    if (not action or action.get("session_id") != dismiss.get("session_id") or
+                            not action.get("dismissible")):
+                        return self.json_reply({"ok": False,
+                            "error": "stale or ineligible attention action"})
+                    STATE["dismissed_actions"][dismiss["action_id"]] = time.time()
+                    payload["dismissed_actions"] = copy.deepcopy(STATE["dismissed_actions"])
                 bulk = payload.get("bulk_triage") or {}
                 if bulk:
                     operation = bulk.get("operation")
