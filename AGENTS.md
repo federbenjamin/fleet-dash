@@ -1,12 +1,15 @@
 # fleet-dash agent guide
 
-`AGENTS.md` is the canonical development guide; `CLAUDE.md` imports it. Keep
-user-facing setup and behavior in `README.md`, visual rules in `design-system/`,
-and session-placement details in `docs/session-organization.md`. Do not turn this
-file back into a changelog, incident log, roadmap, or exhaustive file index.
+`AGENTS.md` is the canonical development guide. `README.md` is the short public
+overview with screenshots. Keep user-facing setup and behavior in
+`docs/reference.md`, visual rules in `design-system/`, and session-placement
+details in `docs/session-organization.md`. Do not turn this file back into a
+changelog, incident log, roadmap, or exhaustive file index.
 
-Update `README.md` with user-visible behavior changes. Update this file only when
-a durable development or safety constraint changes.
+Update `docs/reference.md` with user-visible behavior changes, and `README.md`
+when a headline feature or a screenshot goes stale (`docs/images/` is shot from
+the browser fixture server, never from a live dashboard). Update this file only
+when a durable development or safety constraint changes.
 
 ## Project shape
 
@@ -458,4 +461,11 @@ production at this checkout.
 - macOS TCC grant: injector applet to iTerm2 only
 
 Setup, applet rebuilds, phone/PWA onboarding, config fields, terminal usage, and
-current known gaps belong in `README.md`.
+current known gaps belong in `docs/reference.md`.
+
+<!-- >>> git-workflow (generated block; do not edit by hand) -->
+## Git workflow
+
+- `main` changes only through a PR, squash-merged.
+- Branch names: `<type>/<slug>`, the type being the commit type (`feat`, `fix`, `docs`, `chore`, `refactor`).
+<!-- <<< git-workflow -->

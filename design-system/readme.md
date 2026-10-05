@@ -6,7 +6,7 @@ The design system distilled from the final Fleet Dash redesign (the "Console" di
 - `Fleet Dash Redesign.dc.html` — master mockup canvas, every final screen/state
 - `Fleet Dash Prototype.dc.html` / `Fleet Dash Prototype Light.dc.html` — interactive dark/light prototypes
 - `fleet-dash/` mounted repo; brief at `fleet-dash/redesign-brief/BRIEF.md`
-- Locked product decisions: `CLAUDE.md`; developer handoff: `design_handoff_fleet_dash/`
+- Locked product decisions: `AGENTS.md`; developer handoff: `design_handoff_fleet_dash/`
 
 ## CONTENT FUNDAMENTALS
 
