@@ -28,7 +28,7 @@ BASH = """\
 READ = """\
  Read file
 
-  Read(/Users/benjaminfeder/.claude/metrics/.session-unlock)
+  Read(/Users/test/.claude/metrics/.session-unlock)
 
  Do you want to proceed?
  ❯ 1. Yes
@@ -45,7 +45,7 @@ READ = """\
 NO_ALWAYS = """\
  Bash command
 
-   echo "$(date)" > /Users/benjaminfeder/.claude/metrics/.session-unlock
+   echo "$(date)" > /Users/test/.claude/metrics/.session-unlock
    Run shell command
 
  Contains shell syntax (string) that cannot be statically analyzed
