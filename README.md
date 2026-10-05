@@ -88,3 +88,7 @@ Coverage is held at 95% or more per Python module.
 - [`docs/session-organization.md`](docs/session-organization.md): how a session is placed in the queue.
 - [`design-system/`](design-system/): the "Console" visual language.
 - [`docs/postmortems/`](docs/postmortems/) and [`docs/roadmaps/`](docs/roadmaps/): what went wrong and what was planned.
+
+## License
+
+[MIT](LICENSE). The bundled fonts in `static/fonts/` (IBM Plex Mono, Space Grotesk) are under the SIL Open Font License.
