@@ -11,6 +11,15 @@ when a headline feature or a screenshot goes stale (`docs/images/` is shot from
 the browser fixture server, never from a live dashboard). Update this file only
 when a durable development or safety constraint changes.
 
+## Project state
+
+- 2026-10-06: not launched — public source, no release; people run it from a
+  clone. Retires at the first version tag.
+- 2026-10-06: real data — the operator's production and staging instances read
+  live Claude Code and Codex sessions and keep private state on that one Mac;
+  nothing leaves the machine except opted-in Web Push. Tests use fixtures only.
+  Retires if it ever stores or sends session data off the user's machine.
+
 ## Project shape
 
 fleet-dash is a Python `ThreadingHTTPServer` plus a no-build browser app.
