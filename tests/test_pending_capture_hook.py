@@ -13,11 +13,12 @@ HOOK = ROOT / "hooks" / "pending-capture.py"
 
 
 class PendingCaptureHookTest(unittest.TestCase):
-    def run_hook(self, home, payload):
+    def run_hook(self, home, payload, **env):
+        base = {k: v for k, v in os.environ.items() if k != "FLEET_DASH_CAPTURE_DIR"}
         result = subprocess.run(
             [sys.executable, str(HOOK)], input=json.dumps(payload), text=True,
             capture_output=True, timeout=5,
-            env={**os.environ, "HOME": str(home)})
+            env={**base, "HOME": str(home), **env})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
 
@@ -73,6 +74,14 @@ class PendingCaptureHookTest(unittest.TestCase):
             self.assertEqual(path.stat().st_ino, before_inode)
             self.assertEqual(json.loads(before)["kind"], "question")
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_capture_dir_env_overrides_the_default(self):
+        payload = {"session_id": "env-session", "hook_event_name": "PreToolUse",
+                   "tool_name": "AskUserQuestion", "tool_input": {"questions": []}}
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as capture:
+            self.run_hook(home, payload, FLEET_DASH_CAPTURE_DIR=capture)
+            self.assertTrue((Path(capture) / "pending" / "env-session.json").is_file())
+            self.assertFalse(self.capture_path(home, "env-session").exists())
 
 
 if __name__ == "__main__":
