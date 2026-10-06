@@ -7,7 +7,11 @@ every consumer sees the override.
 import os
 
 HOME = os.path.expanduser("~")
+PRODUCTION_CHECKOUT = os.path.join(HOME, ".claude", "fleet-dash-prod")
+STAGING_CHECKOUT = os.path.join(HOME, ".claude", "fleet-dash")
 PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-prod-state")
+STAGING_BASE = os.path.join(HOME, ".claude", "fleet-dash-staging-state")
+LOG_FILE = "fleet-dash.log"
 BASE = os.path.abspath(os.path.expanduser(
     os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
 INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()

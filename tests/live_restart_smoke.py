@@ -7,11 +7,15 @@ import subprocess
 import time
 import urllib.error
 import urllib.parse
+import sys
 import urllib.request
 
 
 ROOT = "http://127.0.0.1:8377"
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE)
+
+from fleetdash import launchd
 
 
 def request(path, payload=None, token=None):
@@ -68,7 +72,7 @@ def main():
     assert session and session["state"] == "running", session
 
     subprocess.run(["launchctl", "kickstart", "-k",
-                    f"gui/{os.getuid()}/com.benjaminfeder.fleet-dash"], check=True)
+                    f"gui/{os.getuid()}/{launchd.label('production')}"], check=True)
     for _ in range(120):
         time.sleep(0.5)
         try:

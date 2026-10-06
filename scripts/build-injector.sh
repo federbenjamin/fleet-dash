@@ -17,10 +17,9 @@ scratch=${TMPDIR:-/private/tmp}/codex
 mkdir -p "$scratch"
 source_file=$script_dir/injector.applescript
 compiled_source=$scratch/injector-$mode.applescript
-bundle_id=com.benjaminfeder.fleet-dash.injector
+bundle_id=$(cd "$script_dir" && /usr/bin/python3 -m fleetdash.launchd bundle-id "$mode")
 if [ "$mode" = "staging" ]; then
   sed 's#\.claude/fleet-dash-prod-state/#.claude/fleet-dash-staging-state/#g' "$source_file" > "$compiled_source"
-  bundle_id=com.benjaminfeder.fleet-dash.staging.injector
 else
   cp "$source_file" "$compiled_source"
 fi

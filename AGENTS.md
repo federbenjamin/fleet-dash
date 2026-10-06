@@ -28,6 +28,7 @@ fleet-dash is a Python `ThreadingHTTPServer` plus a no-build browser app.
 server.py                  HTTP routes and process startup
 fleetdash/
   paths.py                 instance paths; patch this module in tests
+  launchd.py               launchd labels, install paths, plist rendering
   config.py                defaults, validation, pricing, shared constants
   tail.py                  incremental Claude transcript fold
   placement.py             provider-neutral queue placement
@@ -452,7 +453,7 @@ helpers. Disengage follow-tail with a real wheel/touch gesture, not a synthetic
 Restart staging after Python changes:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging
+launchctl kickstart -k gui/$(id -u)/$(python3 -m fleetdash.launchd label staging)
 curl -fsS http://127.0.0.1:8378/api/fleet
 ```
 
@@ -463,7 +464,8 @@ production at this checkout.
 ## External integration points
 
 - `~/.claude/settings.json`: hook registrations
-- `~/Library/LaunchAgents/com.benjaminfeder.fleet-dash*.plist`: live daemons
+- `~/Library/LaunchAgents/<label-prefix>.fleet-dash*.plist`: live daemons,
+  rendered by `python3 -m fleetdash.launchd render <instance>`
 - `~/.claude/fleet-dash-*-state`: private instance state
 - `~/.claude/fleet-dash-capture`: shared hook/statusline captures
 - `$TMUX_TMPDIR/tmux-<uid>` or `/tmp/tmux-<uid>`: operator tmux sockets

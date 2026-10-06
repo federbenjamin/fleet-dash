@@ -845,7 +845,7 @@ Verification:
   Codex commands.
 - `python3 tests/live_outbox_smoke.py` — created a future Claude delivery, verified it persisted, then
   cancelled it; the message was not sent.
-- `launchctl kickstart -k gui/501/com.benjaminfeder.fleet-dash` and local HTTP verification — daemon
+- `launchctl kickstart -k gui/$(id -u)/<label-prefix>.fleet-dash` and local HTTP verification — daemon
   restarted and returned 200.
 - The ChatGPT in-app Browser remains unavailable to this desktop root task: the current desktop log
   records the Browser helper/socket peer being rejected as `untrusted-code-signing-identity`, and the
@@ -1027,7 +1027,7 @@ Live and recovery verification:
   bytes.
 - `node tests/browser_baseline.js http://127.0.0.1:8377/ 8` measured first useful render p50/p95
   51.945/91.734 ms desktop and 53.842/58.278 ms mobile. The browser poll payload was 165,539 bytes.
-- Repeated `launchctl kickstart -k gui/501/com.benjaminfeder.fleet-dash` restarts settled at HTTP 200.
+- Repeated `launchctl kickstart -k gui/$(id -u)/<label-prefix>.fleet-dash` restarts settled at HTTP 200.
 
 Exact remaining limitations:
 

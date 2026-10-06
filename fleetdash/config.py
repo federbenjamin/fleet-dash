@@ -2,6 +2,8 @@
 import os, re, json, secrets, sys, mmap, stat, math
 from . import paths as pathcfg
 
+STAGING_PORT = 8378
+
 # Claude spawn/control allowlists (Engine.MODELS/EFFORTS alias these).
 CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")

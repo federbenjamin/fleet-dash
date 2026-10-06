@@ -57,8 +57,8 @@ class Engine(StagingOps,
     def __init__(self, cfg):
         self.cfg = cfg
         self.config_lock = threading.RLock()
-        _scrub_private_log(os.path.join(pathcfg.BASE, "fleet-dash.log"), _runtime_log_secrets(cfg))
-        for runtime_name in ("config.json", "fleet-dash.log"):
+        _scrub_private_log(os.path.join(pathcfg.BASE, pathcfg.LOG_FILE), _runtime_log_secrets(cfg))
+        for runtime_name in ("config.json", pathcfg.LOG_FILE):
             runtime_path = os.path.join(pathcfg.BASE, runtime_name)
             try:
                 if not os.path.islink(runtime_path):

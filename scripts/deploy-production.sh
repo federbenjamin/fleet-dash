@@ -1,9 +1,13 @@
 #!/bin/sh
 set -eu
 
-production_checkout=${FLEET_DASH_PROD_CHECKOUT:-"$HOME/.claude/fleet-dash-prod"}
-production_state=${FLEET_DASH_PROD_STATE:-"$HOME/.claude/fleet-dash-prod-state"}
-service=com.benjaminfeder.fleet-dash
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+install_value() {
+  (cd "$repo" && /usr/bin/python3 -m fleetdash.launchd "$1" production)
+}
+production_checkout=$(install_value checkout)
+production_state=$(install_value state)
+service=$(install_value label)
 fleet_url=http://127.0.0.1:8377
 scratch=${TMPDIR:-/private/tmp}/codex
 mkdir -p "$scratch"
