@@ -8,7 +8,7 @@
 
 <p align="center"><img src="docs/images/needs-you-desktop.png" alt="The Now queue with a session workspace open: a waiting question rendered as answer buttons" width="720"></p>
 
-Coding agents stop and wait: a question, a permission prompt, a finished turn. With a dozen sessions across projects and worktrees, the one that needs you is always in a terminal tab you are not looking at. fleet-dash watches all of them, puts the ones that need you at the top, and turns each pending prompt into buttons. Tap one and the answer is typed into the real session.
+Coding agents stop and wait: a question, a permission prompt, a finished turn. With a dozen sessions across projects and worktrees, the one that needs you is always in a terminal tab you are not looking at. fleet-dash watches all of them, puts the ones that need you at the top, and turns each pending prompt into buttons. Tap one and the answer is typed into the real session. It is for a developer who runs many Claude Code or Codex CLI sessions at once on their own Mac.
 
 Status: no release yet. You run it from a clone.
 
@@ -49,6 +49,22 @@ Every screenshot on this page was taken that way (`scripts/readme-screenshots.js
 </table>
 
 ![A working Codex session with its subagent, tool calls, and reasoning](docs/images/working-desktop.png)
+
+## Usage
+
+Open the dashboard and work from `Now`:
+
+1. A session that needs you sits under *Needs you*. Open it to see its chat, files, subagents, and details.
+2. A waiting question or permission prompt shows as buttons at the bottom of the session. Tap one, and the answer is typed into the real session.
+3. Type in the composer to send a message. A busy session holds it in the Outbox until the session is free.
+
+In the `Try it` server, the session *Get 429 into a mergable state* is waiting on a question, so you can try all three:
+
+```
+http://127.0.0.1:8399/?token=abcdef123456
+```
+
+Running it on your own sessions needs the daemon under launchd, a Claude Code hook, and a token on each device; the [reference](docs/reference.md#manual-setup--already-done-on-this-mac) lists each step.
 
 ## Configuration
 
