@@ -16,7 +16,6 @@ ENV_CAPTURE_DIR = "FLEET_DASH_CAPTURE_DIR"
 ENV_STAGING_SOURCE = "FLEET_DASH_STAGING_SOURCE"
 ENV_CODEX_SOCKET = "FLEET_DASH_CODEX_SOCKET"
 ENV_PORT = "FLEET_DASH_PORT"
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def env_path(name, default):

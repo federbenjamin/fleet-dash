@@ -47,17 +47,10 @@ def bundle_id(instance):
     return label(instance) + ".injector"
 
 
-def _staging_default():
-    conventional = pathcfg.STAGING_CHECKOUT
-    if os.path.isfile(os.path.join(conventional, "server.py")):
-        return conventional
-    return pathcfg.REPO_ROOT
-
-
 def checkout(instance):
     if _instance(instance) == "production":
         return pathcfg.env_path("FLEET_DASH_PROD_CHECKOUT", pathcfg.PRODUCTION_CHECKOUT)
-    return pathcfg.env_path("FLEET_DASH_STAGING_CHECKOUT", _staging_default())
+    return pathcfg.env_path("FLEET_DASH_STAGING_CHECKOUT", pathcfg.STAGING_CHECKOUT)
 
 
 def state_dir(instance):

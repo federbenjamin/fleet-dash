@@ -715,10 +715,9 @@ Each step is done once per Mac:
 
    The render names the checkout each daemon runs from; it does not create it. The production
    plist runs `server.py` from `FLEET_DASH_PROD_CHECKOUT` (default `~/.claude/fleet-dash-prod`),
-   which must be a checkout you have made there (or elsewhere, with the variable set when you
-   render and deploy). The staging plist runs `~/.claude/fleet-dash` when that holds a `server.py`,
-   else the clone you render from; `FLEET_DASH_STAGING_CHECKOUT` names another checkout. Skip the
-   production render and bootstrap if you run staging only.
+   and the staging plist from `FLEET_DASH_STAGING_CHECKOUT` (default `~/.claude/fleet-dash`).
+   Each must be a checkout you have made there (or elsewhere, with the variable set when you
+   render and deploy). Skip the production render and bootstrap if you run staging only.
 
    `launchctl kickstart -k` restarts a loaded job with the definition it was bootstrapped from.
    To apply a re-render (changed checkout or state path), run `launchctl bootout

@@ -38,8 +38,7 @@ class LaunchdTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.claude = claude
-        os.makedirs(os.path.join(claude, "src"))
-        pathlib.Path(claude, "src", "server.py").touch()
+        os.makedirs(claude)
 
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -141,18 +140,23 @@ class LaunchdTests(unittest.TestCase):
             for name in names:
                 self.assertNotIn(f'"{name}"', text, f"{module.name} holds {name} as a literal")
 
-    def test_staging_checkout_is_the_clone_unless_overridden(self):
-        clone = os.path.join(self.root, "code", "fleet-dash")
-        with mock.patch.object(engine_paths, "STAGING_CHECKOUT", os.path.join(self.root, "absent")), \
-                mock.patch.object(engine_paths, "REPO_ROOT", clone):
-            self.assertEqual(launchd.checkout("staging"), clone)
-            staging = launchd.plist("staging")
-            self.assertEqual(staging["ProgramArguments"][1], f"{clone}/server.py")
-            self.assertEqual(staging["EnvironmentVariables"][engine_paths.ENV_STAGING_SOURCE], clone)
-            with mock.patch.dict(os.environ, {"FLEET_DASH_STAGING_CHECKOUT": f"{self.root}/pinned"}):
-                self.assertEqual(launchd.checkout("staging"), f"{self.root}/pinned")
-        with mock.patch.object(engine_paths, "REPO_ROOT", clone):
-            self.assertEqual(launchd.checkout("staging"), f"{self.claude}/src")
+    def test_staging_checkout_is_the_conventional_path_unless_overridden(self):
+        default = f"{self.claude}/src"
+        self.assertFalse(os.path.exists(default))
+        self.assertEqual(launchd.checkout("staging"), default)
+        staging = launchd.plist("staging")
+        self.assertEqual(staging["ProgramArguments"][1], f"{default}/server.py")
+        self.assertEqual(staging["EnvironmentVariables"][engine_paths.ENV_STAGING_SOURCE], default)
+        with mock.patch.dict(os.environ, {"FLEET_DASH_STAGING_CHECKOUT": f"{self.root}/pinned"}):
+            self.assertEqual(launchd.checkout("staging"), f"{self.root}/pinned")
+            self.assertEqual(launchd.plist("staging")["ProgramArguments"][1],
+                             f"{self.root}/pinned/server.py")
+
+    def test_staging_checkout_ignores_what_exists_on_disk(self):
+        before = launchd.plist("staging")
+        os.makedirs(f"{self.claude}/src")
+        pathlib.Path(f"{self.claude}/src/server.py").write_text("")
+        self.assertEqual(launchd.plist("staging"), before)
 
     def test_failed_render_leaves_the_installed_plist_intact(self):
         target = launchd.render("production", self.root)
