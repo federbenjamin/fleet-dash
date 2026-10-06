@@ -6,6 +6,9 @@ Notification                 -> writes permission-request prompts; ignores idle 
 Never blocks: always exits 0 fast."""
 import json, os, secrets, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from fleetdash import paths
+
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -13,7 +16,7 @@ except Exception:
 sid = d.get("session_id")
 if not sid:
     sys.exit(0)
-base = os.path.expanduser("~/.claude/fleet-dash-capture/pending")
+base = os.path.join(paths.capture_base(), "pending")
 path = os.path.join(base, f"{sid}.json")
 ev = d.get("hook_event_name")
 out = None
