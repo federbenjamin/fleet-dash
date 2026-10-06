@@ -450,7 +450,7 @@ rebuilt DOM nodes can detach between reads, so use retrying locators/geometry
 helpers. Disengage follow-tail with a real wheel/touch gesture, not a synthetic
 `scroll` event.
 
-Restart staging after Python changes:
+Restart staging after Python changes (from the repo root, where `fleetdash` imports):
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/$(python3 -m fleetdash.launchd label staging)

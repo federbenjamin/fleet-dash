@@ -1,7 +1,7 @@
 use AppleScript version "2.4"
 use scripting additions
 
--- FleetDashInjector: reads ~/.claude/fleet-dash-prod-state/inject-request.txt and types the
+-- FleetDashInjector: reads <state dir>/inject-request.txt and types the
 -- requested keystrokes into the iTerm session owning the requested tty.
 -- Request format (plain text lines):
 --   line 1: tty device path (/dev/ttysNNN), or the literal SPAWN
@@ -31,7 +31,7 @@ on reopen
 end reopen
 
 on handleRequest()
-	set base to (POSIX path of (path to home folder)) & ".claude/fleet-dash-prod-state/"
+	set base to "@STATE_DIR@/"
 	set resultFile to base & "inject-result.txt"
 	try
 		set req to do shell script "cat " & quoted form of (base & "inject-request.txt")

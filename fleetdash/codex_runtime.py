@@ -19,6 +19,8 @@ import platform
 import threading
 import subprocess
 
+from . import paths as pathcfg
+
 
 class CodexError(RuntimeError):
     def __init__(self, message, *, code="codex_error", queueable=False):
@@ -77,6 +79,12 @@ MANAGED_RUNTIME_OWNER = "managed_daemon"
 RUNTIME_MIGRATION_SCHEMA = 1
 
 
+def private_codex_socket(state_dir):
+    """Fleet's isolated socket inside one instance's state directory."""
+    return os.path.join(os.path.abspath(os.path.expanduser(state_dir)),
+                        "codex-app-server.sock")
+
+
 def codex_control_socket(managed=True, state_dir=None):
     """Return the canonical production socket or Fleet's isolated legacy socket.
 
@@ -91,11 +99,9 @@ def codex_control_socket(managed=True, state_dir=None):
         default = os.path.join(codex_home, "app-server-control",
                                "app-server-control.sock")
     else:
-        configured = os.environ.get("FLEET_DASH_CODEX_SOCKET")
-        default = os.path.join(
-            os.path.abspath(os.path.expanduser(
-                state_dir or os.path.join("~", ".claude", "fleet-dash"))),
-            "codex-app-server.sock")
+        configured = os.environ.get(pathcfg.ENV_CODEX_SOCKET)
+        default = private_codex_socket(
+            state_dir or os.path.join("~", ".claude", "fleet-dash"))
     return os.path.abspath(os.path.expanduser(configured or default))
 
 

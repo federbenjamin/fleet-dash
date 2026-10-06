@@ -18,11 +18,12 @@ mkdir -p "$scratch"
 source_file=$script_dir/injector.applescript
 compiled_source=$scratch/injector-$mode.applescript
 bundle_id=$(cd "$script_dir" && /usr/bin/python3 -m fleetdash.launchd bundle-id "$mode")
-if [ "$mode" = "staging" ]; then
-  sed 's#\.claude/fleet-dash-prod-state/#.claude/fleet-dash-staging-state/#g' "$source_file" > "$compiled_source"
-else
-  cp "$source_file" "$compiled_source"
-fi
+state_dir=$(cd "$script_dir" && /usr/bin/python3 -m fleetdash.launchd state "$mode")
+applescript_state=$(printf '%s' "$state_dir" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+STATE_DIR=$applescript_state awk '
+  BEGIN { value = ENVIRON["STATE_DIR"] }
+  { at = index($0, "@STATE_DIR@"); if (at) $0 = substr($0, 1, at - 1) value substr($0, at + 11); print }
+' "$source_file" > "$compiled_source"
 
 osacompile -o "$destination" "$compiled_source"
 plutil -replace OSAAppletStayOpen -bool true "$destination/Contents/Info.plist"

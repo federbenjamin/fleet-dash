@@ -14,26 +14,20 @@ import plistlib
 import pwd
 import re
 import sys
+import tempfile
 
 from . import config
 from . import paths as pathcfg
-from .codex_runtime import codex_control_socket
+from .codex_runtime import private_codex_socket
 
-INSTANCES = ("production", "staging")
-FIELDS = ("label", "bundle-id", "checkout", "state", "render")
+INSTANCES = pathcfg.INSTANCES
 _PREFIX = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
-_USAGE = ("usage: python3 -m fleetdash.launchd "
-          "label|bundle-id|checkout|state|render production|staging [directory]")
 
 
 def _instance(instance):
     if instance not in INSTANCES:
         raise ValueError(f"unknown instance: {instance!r}")
     return instance
-
-
-def _override(name, default):
-    return os.path.abspath(os.path.expanduser(os.environ.get(name) or default))
 
 
 def label_prefix():
@@ -53,29 +47,36 @@ def bundle_id(instance):
     return label(instance) + ".injector"
 
 
+def _staging_default():
+    conventional = pathcfg.STAGING_CHECKOUT
+    if os.path.isfile(os.path.join(conventional, "server.py")):
+        return conventional
+    return pathcfg.REPO_ROOT
+
+
 def checkout(instance):
     if _instance(instance) == "production":
-        return _override("FLEET_DASH_PROD_CHECKOUT", pathcfg.PRODUCTION_CHECKOUT)
-    return pathcfg.STAGING_CHECKOUT
+        return pathcfg.env_path("FLEET_DASH_PROD_CHECKOUT", pathcfg.PRODUCTION_CHECKOUT)
+    return pathcfg.env_path("FLEET_DASH_STAGING_CHECKOUT", _staging_default())
 
 
 def state_dir(instance):
     if _instance(instance) == "production":
-        return _override("FLEET_DASH_PROD_STATE", pathcfg.PRODUCTION_BASE)
+        return pathcfg.env_path("FLEET_DASH_PROD_STATE", pathcfg.PRODUCTION_BASE)
     return pathcfg.STAGING_BASE
 
 
 def plist(instance):
     state = state_dir(instance)
     env = {
-        "FLEET_DASH_INSTANCE": instance,
-        "FLEET_DASH_STATE_DIR": state,
-        "FLEET_DASH_CAPTURE_DIR": pathcfg.DEFAULT_CAPTURE_BASE,
+        pathcfg.ENV_INSTANCE: instance,
+        pathcfg.ENV_STATE_DIR: state,
+        pathcfg.ENV_CAPTURE_DIR: pathcfg.DEFAULT_CAPTURE_BASE,
     }
     if instance == "staging":
-        env["FLEET_DASH_STAGING_SOURCE"] = checkout(instance)
-        env["FLEET_DASH_CODEX_SOCKET"] = codex_control_socket(managed=False, state_dir=state)
-        env["FLEET_DASH_PORT"] = str(config.STAGING_PORT)
+        env[pathcfg.ENV_STAGING_SOURCE] = checkout(instance)
+        env[pathcfg.ENV_CODEX_SOCKET] = private_codex_socket(state)
+        env[pathcfg.ENV_PORT] = str(config.STAGING_PORT)
     log = os.path.join(state, pathcfg.LOG_FILE)
     return {
         "Label": label(instance),
@@ -90,13 +91,30 @@ def plist(instance):
 
 
 def render(instance, directory=None):
+    """Write the plist beside its final name, then rename it over the target."""
     directory = directory or os.path.join(pathcfg.HOME, "Library", "LaunchAgents")
     content = plist(instance)
     os.makedirs(directory, exist_ok=True)
     target = os.path.join(directory, content["Label"] + ".plist")
-    with open(target, "wb") as handle:
-        plistlib.dump(content, handle, sort_keys=False)
+    handle, scratch = tempfile.mkstemp(dir=directory, prefix=".render-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            plistlib.dump(content, out, sort_keys=False)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(scratch, 0o644)
+        os.replace(scratch, target)
+    except BaseException:
+        if os.path.exists(scratch):
+            os.unlink(scratch)
+        raise
     return target
+
+
+_VALUES = {"label": label, "bundle-id": bundle_id, "checkout": checkout, "state": state_dir}
+FIELDS = (*_VALUES, "render")
+_USAGE = (f"usage: python3 -m fleetdash.launchd {'|'.join(FIELDS)} "
+          f"{'|'.join(INSTANCES)} [directory]")
 
 
 def main(argv):
@@ -108,9 +126,8 @@ def main(argv):
         if field == "render":
             value = render(instance, argv[2] if len(argv) == 3 else None)
         else:
-            value = {"label": label, "bundle-id": bundle_id,
-                     "checkout": checkout, "state": state_dir}[field](instance)
-    except ValueError as error:
+            value = _VALUES[field](instance)
+    except (ValueError, OSError) as error:
         print(f"fleetdash.launchd: {error}", file=sys.stderr)
         return 2
     print(value)

@@ -7,19 +7,34 @@ every consumer sees the override.
 import os
 
 HOME = os.path.expanduser("~")
+INSTANCES = ("production", "staging")
+# Environment variables a launchd plist sets for the daemon. `fleetdash.launchd`
+# writes them and the modules that read them import these names.
+ENV_INSTANCE = "FLEET_DASH_INSTANCE"
+ENV_STATE_DIR = "FLEET_DASH_STATE_DIR"
+ENV_CAPTURE_DIR = "FLEET_DASH_CAPTURE_DIR"
+ENV_STAGING_SOURCE = "FLEET_DASH_STAGING_SOURCE"
+ENV_CODEX_SOCKET = "FLEET_DASH_CODEX_SOCKET"
+ENV_PORT = "FLEET_DASH_PORT"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def env_path(name, default):
+    """The absolute path in environment variable `name`, else `default`."""
+    return os.path.abspath(os.path.expanduser(os.environ.get(name) or default))
+
+
 PRODUCTION_CHECKOUT = os.path.join(HOME, ".claude", "fleet-dash-prod")
 STAGING_CHECKOUT = os.path.join(HOME, ".claude", "fleet-dash")
 PRODUCTION_BASE = os.path.join(HOME, ".claude", "fleet-dash-prod-state")
 STAGING_BASE = os.path.join(HOME, ".claude", "fleet-dash-staging-state")
 LOG_FILE = "fleet-dash.log"
-BASE = os.path.abspath(os.path.expanduser(
-    os.environ.get("FLEET_DASH_STATE_DIR") or PRODUCTION_BASE))
-INSTANCE_MODE = str(os.environ.get("FLEET_DASH_INSTANCE") or "production").strip().lower()
-if INSTANCE_MODE not in ("production", "staging"):
+BASE = env_path(ENV_STATE_DIR, PRODUCTION_BASE)
+INSTANCE_MODE = str(os.environ.get(ENV_INSTANCE) or "production").strip().lower()
+if INSTANCE_MODE not in INSTANCES:
     INSTANCE_MODE = "production"
 DEFAULT_CAPTURE_BASE = os.path.join(HOME, ".claude", "fleet-dash-capture")
-CAPTURE_BASE = os.path.abspath(os.path.expanduser(
-    os.environ.get("FLEET_DASH_CAPTURE_DIR") or DEFAULT_CAPTURE_BASE))
+CAPTURE_BASE = env_path(ENV_CAPTURE_DIR, DEFAULT_CAPTURE_BASE)
 PROJECTS = os.path.join(HOME, ".claude", "projects")
 SESSIONS = os.path.join(HOME, ".claude", "sessions")
 CLAUDE_ACCOUNT = os.path.join(HOME, ".claude.json")

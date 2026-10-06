@@ -59,7 +59,7 @@ class StagingOps:
 
     def _staging_source_root(self):
         source = os.path.realpath(os.path.expanduser(
-            str(os.environ.get("FLEET_DASH_STAGING_SOURCE") or "")))
+            str(os.environ.get(pathcfg.ENV_STAGING_SOURCE) or "")))
         if not source or not os.path.isdir(source) or not os.path.exists(
                 os.path.join(source, ".git")):
             return None

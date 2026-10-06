@@ -2,7 +2,9 @@
 import contextlib
 import io
 import os
+import pathlib
 import plistlib
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -12,7 +14,7 @@ from fleetdash import launchd
 from fleetdash import paths as engine_paths
 
 _ENV_KEYS = ("FLEET_DASH_LABEL_PREFIX", "FLEET_DASH_PROD_CHECKOUT",
-             "FLEET_DASH_PROD_STATE", "FLEET_DASH_CODEX_SOCKET")
+             "FLEET_DASH_PROD_STATE", "FLEET_DASH_STAGING_CHECKOUT")
 
 
 class LaunchdTests(unittest.TestCase):
@@ -36,6 +38,8 @@ class LaunchdTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.claude = claude
+        os.makedirs(os.path.join(claude, "src"))
+        pathlib.Path(claude, "src", "server.py").touch()
 
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -106,6 +110,107 @@ class LaunchdTests(unittest.TestCase):
             code, out, err = self.run_cli(*argv)
             self.assertEqual((code, out), (2, ""), argv)
             self.assertTrue(err.startswith("usage:"), argv)
+
+    def test_render_ignores_the_callers_runtime_environment(self):
+        hostile = {engine_paths.ENV_CODEX_SOCKET: "/prod/codex.sock",
+                   engine_paths.ENV_PORT: "8377", engine_paths.ENV_INSTANCE: "production",
+                   engine_paths.ENV_STATE_DIR: "/prod/state",
+                   engine_paths.ENV_CAPTURE_DIR: "/prod/capture",
+                   engine_paths.ENV_STAGING_SOURCE: "/prod/src"}
+        clean_staging = launchd.plist("staging")
+        with mock.patch.dict(os.environ, hostile):
+            staging = launchd.plist("staging")
+            production = launchd.plist("production")
+        self.assertEqual(staging, clean_staging)
+        self.assertEqual(staging["EnvironmentVariables"][engine_paths.ENV_CODEX_SOCKET],
+                         f"{self.claude}/staging-state/codex-app-server.sock")
+        self.assertEqual(production["EnvironmentVariables"][engine_paths.ENV_STATE_DIR],
+                         f"{self.claude}/prod-state")
+        self.assertEqual(production["EnvironmentVariables"][engine_paths.ENV_CAPTURE_DIR],
+                         f"{self.claude}/capture")
+
+    def test_plist_env_names_are_the_names_the_readers_import(self):
+        names = {engine_paths.ENV_INSTANCE, engine_paths.ENV_STATE_DIR,
+                 engine_paths.ENV_CAPTURE_DIR, engine_paths.ENV_STAGING_SOURCE,
+                 engine_paths.ENV_CODEX_SOCKET, engine_paths.ENV_PORT}
+        self.assertEqual(set(launchd.plist("staging")["EnvironmentVariables"]), names)
+        for module in pathlib.Path(launchd.__file__).parent.glob("*.py"):
+            if module.name == "paths.py":
+                continue
+            text = module.read_text()
+            for name in names:
+                self.assertNotIn(f'"{name}"', text, f"{module.name} holds {name} as a literal")
+
+    def test_staging_checkout_is_the_clone_unless_overridden(self):
+        clone = os.path.join(self.root, "code", "fleet-dash")
+        with mock.patch.object(engine_paths, "STAGING_CHECKOUT", os.path.join(self.root, "absent")), \
+                mock.patch.object(engine_paths, "REPO_ROOT", clone):
+            self.assertEqual(launchd.checkout("staging"), clone)
+            staging = launchd.plist("staging")
+            self.assertEqual(staging["ProgramArguments"][1], f"{clone}/server.py")
+            self.assertEqual(staging["EnvironmentVariables"][engine_paths.ENV_STAGING_SOURCE], clone)
+            with mock.patch.dict(os.environ, {"FLEET_DASH_STAGING_CHECKOUT": f"{self.root}/pinned"}):
+                self.assertEqual(launchd.checkout("staging"), f"{self.root}/pinned")
+        with mock.patch.object(engine_paths, "REPO_ROOT", clone):
+            self.assertEqual(launchd.checkout("staging"), f"{self.claude}/src")
+
+    def test_failed_render_leaves_the_installed_plist_intact(self):
+        target = launchd.render("production", self.root)
+        before = pathlib.Path(target).read_bytes()
+
+        def partial_dump(content, handle, **kwargs):
+            handle.write(b"<?xml partial")
+            raise OSError(28, "No space left on device")
+
+        def interrupted(content, handle, **kwargs):
+            handle.write(b"<?xml partial")
+            raise KeyboardInterrupt
+
+        with mock.patch.object(launchd.plistlib, "dump", partial_dump):
+            code, out, err = self.run_cli("render", "production", self.root)
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err.startswith("fleetdash.launchd: "), err)
+        self.assertEqual(len(err.splitlines()), 1)
+        self.assertEqual(pathlib.Path(target).read_bytes(), before)
+        with mock.patch.object(launchd.plistlib, "dump", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                launchd.render("production", self.root)
+        self.assertEqual(pathlib.Path(target).read_bytes(), before)
+        self.assertEqual(sorted(os.listdir(self.root)), ["com.tester.fleet-dash.plist", "home"])
+        self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o644")
+
+
+class BuildInjectorTests(unittest.TestCase):
+    def test_script_stamps_the_modules_state_dir_and_bundle_id(self):
+        repo = pathlib.Path(launchd.__file__).parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = pathlib.Path(tmp, "bin")
+            bin_dir.mkdir()
+            log = pathlib.Path(tmp, "calls.txt")
+            stub = f'#!/bin/sh\necho "$(basename "$0") $*" >> "{log}"\n'
+            (bin_dir / "plutil").write_text(stub)
+            (bin_dir / "codesign").write_text(stub)
+            (bin_dir / "osacompile").write_text(stub + f'cp "$3" "{tmp}/compiled.applescript"\n')
+            for stub_file in bin_dir.iterdir():
+                stub_file.chmod(0o755)
+            state = f'{tmp}/state "dir" & \\ x'
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMPDIR": tmp,
+                   "FLEET_DASH_PROD_STATE": state, "FLEET_DASH_LABEL_PREFIX": "org.example"}
+            for mode in ("production", "staging"):
+                result = subprocess.run(
+                    ["sh", str(repo / "scripts" / "build-injector.sh"), mode, f"{tmp}/Probe.app"],
+                    cwd=tmp, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                compiled = pathlib.Path(tmp, "compiled.applescript").read_text()
+                self.assertNotIn("@STATE_DIR@", compiled)
+                self.assertNotIn("fleet-dash-prod-state", compiled)
+                if mode == "production":
+                    escaped = state.replace("\\", "\\\\").replace('"', '\\"')
+                    self.assertIn(f'set base to "{escaped}/"', compiled)
+                else:
+                    self.assertIn("/.claude/fleet-dash-staging-state/", compiled)
+            self.assertIn("CFBundleIdentifier -string org.example.fleet-dash.staging.injector",
+                          log.read_text())
 
 
 if __name__ == "__main__":

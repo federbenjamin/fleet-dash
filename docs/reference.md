@@ -698,8 +698,9 @@ controls at the top of Fleet.
 
 Each step is done once per Mac:
 
-1. launchd agents: from the checkout, render both plists into `~/Library/LaunchAgents`, then
-   bootstrap each once:
+1. launchd agents: `cd` into the clone (every `python3 -m fleetdash.launchd` command in this file
+   runs from the repo root), render the plists into `~/Library/LaunchAgents`, then bootstrap each
+   once:
 
    ```
    python3 -m fleetdash.launchd render production && python3 -m fleetdash.launchd render staging
@@ -710,8 +711,19 @@ Each step is done once per Mac:
    The labels are `<label-prefix>.fleet-dash` and `<label-prefix>.fleet-dash.staging`. The prefix
    is `FLEET_DASH_LABEL_PREFIX` when set, else `com.<your login name>`; `fleetdash/launchd.py` is
    the one source for the labels, the injector bundle IDs, and each instance's paths, and the
-   deploy and injector scripts read it. Re-run the render after changing the prefix or
-   `FLEET_DASH_PROD_CHECKOUT`/`FLEET_DASH_PROD_STATE`, then `launchctl kickstart -k` the instance.
+   deploy and injector scripts read it.
+
+   The render names the checkout each daemon runs from; it does not create it. The production
+   plist runs `server.py` from `FLEET_DASH_PROD_CHECKOUT` (default `~/.claude/fleet-dash-prod`),
+   which must be a checkout you have made there (or elsewhere, with the variable set when you
+   render and deploy). The staging plist runs `~/.claude/fleet-dash` when that holds a `server.py`,
+   else the clone you render from; `FLEET_DASH_STAGING_CHECKOUT` names another checkout. Skip the
+   production render and bootstrap if you run staging only.
+
+   `launchctl kickstart -k` restarts a loaded job with the definition it was bootstrapped from.
+   To apply a re-render (changed checkout or state path), run `launchctl bootout
+   gui/$(id -u)/<label>` and bootstrap the plist again. A changed prefix is a new label: bootstrap
+   its plist, and `bootout` the old label.
 2. Hooks registered in `~/.claude/settings.json`: PreToolUse+PostToolUse `AskUserQuestion` and
    `Notification` → `hooks/pending-capture.py`.
 3. Automation grant: FleetDashInjector → iTerm2 (System Settings › Privacy & Security ›
@@ -746,7 +758,7 @@ The staging launch agent is `<label-prefix>.fleet-dash.staging`; its mobile-inst
 origin is `https://<mac-name>.<tailnet>.ts.net:8443`. The purple **STAGING** banner must always be
 visible there. Production remains at the default Tailscale HTTPS origin.
 
-Restart one instance without touching the other:
+Restart one instance without touching the other (from the repo root):
 
 ```
 launchctl kickstart -k gui/$(id -u)/$(python3 -m fleetdash.launchd label production)
