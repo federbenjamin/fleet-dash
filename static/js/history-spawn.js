@@ -257,7 +257,6 @@ function filteredHistory(f){
 // message is typed into the live chat, or into the Schedule overlay.
 globalThis.newOpen=false;globalThis.newProvider='claude';globalThis.newDir=draftValue('new:directory');globalThis.newModel='';globalThis.newEffort='';globalThis.newMode='plan';globalThis.newPermissionMode='default';globalThis.newWt=true;globalThis.newWtName=draftValue('new:worktree');globalThis.spawnWait=null;globalThis.spawnMsg='';
 globalThis.spawnProvisional=null;
-const DEFAULT_DIR='/Users/benjaminfeder/Programming/Quirk';
 // Quick-spawn recents: device-local, right-click (or long-press context menu)
 // pins a row. Only non-secret spawn configuration is stored.
 const QUICK_SPAWN_KEY='fleet.quickSpawns.v1';
@@ -448,7 +447,7 @@ function newSessionFormHtml(){
   const dirs=(last&&last.recent_dirs)||[];
   const staging=last?.instance?.mode==='staging',stagingSource=last?.instance?.source_root||'';
   if(staging&&stagingSource)newDir=stagingSource;
-  if(!newDir&&dirs.some(d=>d.path===DEFAULT_DIR))newDir=DEFAULT_DIR;   // the usual repo
+  if(!newDir&&dirs.length)newDir=dirs[0].path;   // the newest directory the server has seen
   const catalog=spawnCatalog(newProvider);
   const models=catalog.length?catalog.map(m=>m.id):
     (newProvider==='claude'?((last&&last.models)||[]):[]);
@@ -608,4 +607,4 @@ function toggle(sid){openCards.has(sid)?openCards.delete(sid):openCards.add(sid)
 
 // ---- budgets and forecasts ------------------------------------------------
 
-Object.assign(globalThis,{closedMeta,historyInfoOpen,workstreamOpen,DEFAULT_DIR});
+Object.assign(globalThis,{closedMeta,historyInfoOpen,workstreamOpen});

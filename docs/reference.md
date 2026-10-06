@@ -694,12 +694,35 @@ link only. Snooze/Mute shortcuts use ten-minute, single-use signed capabilities;
 reusable dashboard token. Clients without system action buttons open the exact event with the same
 controls at the top of Fleet.
 
-## Manual setup — already done on this Mac
+## Manual setup
 
-Nothing to redo unless something breaks; listed for disaster recovery:
+Each step is done once per Mac:
 
-1. launchd agent: `~/Library/LaunchAgents/com.benjaminfeder.fleet-dash.plist` (bootstrap once:
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.benjaminfeder.fleet-dash.plist`).
+1. launchd agents: `cd` into the clone (every `python3 -m fleetdash.launchd` command in this file
+   runs from the repo root), render the plists into `~/Library/LaunchAgents`, then bootstrap each
+   once:
+
+   ```
+   python3 -m fleetdash.launchd render production && python3 -m fleetdash.launchd render staging
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$(python3 -m fleetdash.launchd label production).plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$(python3 -m fleetdash.launchd label staging).plist
+   ```
+
+   The labels are `<label-prefix>.fleet-dash` and `<label-prefix>.fleet-dash.staging`. The prefix
+   is `FLEET_DASH_LABEL_PREFIX` when set, else `com.<your login name>`; `fleetdash/launchd.py` is
+   the one source for the labels, the injector bundle IDs, and each instance's paths, and the
+   deploy and injector scripts read it.
+
+   The render names the checkout each daemon runs from; it does not create it. The production
+   plist runs `server.py` from `FLEET_DASH_PROD_CHECKOUT` (default `~/.claude/fleet-dash-prod`),
+   and the staging plist from `FLEET_DASH_STAGING_CHECKOUT` (default `~/.claude/fleet-dash`).
+   Each must be a checkout you have made there (or elsewhere, with the variable set when you
+   render and deploy). Skip the production render and bootstrap if you run staging only.
+
+   `launchctl kickstart -k` restarts a loaded job with the definition it was bootstrapped from.
+   To apply a re-render (changed checkout or state path), run `launchctl bootout
+   gui/$(id -u)/<label>` and bootstrap the plist again. A changed prefix is a new label: bootstrap
+   its plist, and `bootout` the old label.
 2. Hooks registered in `~/.claude/settings.json`: PreToolUse+PostToolUse `AskUserQuestion` and
    `Notification` → `hooks/pending-capture.py`.
 3. Automation grant: FleetDashInjector → iTerm2 (System Settings › Privacy & Security ›
@@ -730,15 +753,15 @@ Production and staging store browser credentials in separate `act_token_producti
 `act_token_staging` cookies. This matters on localhost and the shared tailnet hostname because
 browser cookies do not distinguish ports.
 
-The staging launch agent is `com.benjaminfeder.fleet-dash.staging`; its mobile-installable HTTPS
+The staging launch agent is `<label-prefix>.fleet-dash.staging`; its mobile-installable HTTPS
 origin is `https://<mac-name>.<tailnet>.ts.net:8443`. The purple **STAGING** banner must always be
 visible there. Production remains at the default Tailscale HTTPS origin.
 
-Restart one instance without touching the other:
+Restart one instance without touching the other (from the repo root):
 
 ```
-launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash
-launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash.staging
+launchctl kickstart -k gui/$(id -u)/$(python3 -m fleetdash.launchd label production)
+launchctl kickstart -k gui/$(id -u)/$(python3 -m fleetdash.launchd label staging)
 ```
 
 Promote and relaunch production with `scripts/deploy-production.sh`. It requires a clean production
@@ -823,7 +846,7 @@ normalize to Critical.
 Retired automatic-ntfy keys may remain in an older `config.json` for migration compatibility, but
 Fleet no longer reads them for dispatch and Settings rejects attempts to change them.
 
-Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/com.benjaminfeder.fleet-dash`
+Apply config/engine changes with: `launchctl kickstart -k gui/$(id -u)/<label-prefix>.fleet-dash`
 (dashboard/static asset changes need no restart — open tabs self-reload). Log: `fleet-dash.log`.
 
 ## Tests
@@ -925,7 +948,7 @@ A rebuild MAY re-trigger the automation prompt once (ad-hoc signature changes).
 
 `scripts/build-injector.sh staging ~/.claude/fleet-dash-staging-state/FleetDashInjector.app` compiles the
 same source with staging's private request directory and bundle ID
-`com.benjaminfeder.fleet-dash.staging.injector`. The two resident applets therefore cannot race the
+`<label-prefix>.fleet-dash.staging.injector`. The two resident applets therefore cannot race the
 same request/result files. The staging applet receives its own one-time iTerm automation approval.
 
 ## Hard-won platform facts baked into the design

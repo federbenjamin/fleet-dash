@@ -2,6 +2,8 @@
 import os, re, json, secrets, sys, mmap, stat, math
 from . import paths as pathcfg
 
+STAGING_PORT = 8378
+
 # Claude spawn/control allowlists (Engine.MODELS/EFFORTS alias these).
 CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -287,7 +289,7 @@ def load_config():
     # staging process into production or make it bind production's port.
     merged["instance_mode"] = pathcfg.INSTANCE_MODE
     merged["instance_name"] = "Fleet Staging" if pathcfg.INSTANCE_MODE == "staging" else "Fleet Dash"
-    port_override = os.environ.get("FLEET_DASH_PORT")
+    port_override = os.environ.get(pathcfg.ENV_PORT)
     if port_override:
         try:
             port = int(port_override)
@@ -295,7 +297,7 @@ def load_config():
                 raise ValueError
             merged["port"] = port
         except ValueError:
-            print("FLEET_DASH_PORT is invalid; using configured port", file=sys.stderr)
+            print(f"{pathcfg.ENV_PORT} is invalid; using configured port", file=sys.stderr)
     bind_override = os.environ.get("FLEET_DASH_BIND")
     if bind_override:
         merged["bind"] = bind_override

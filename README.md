@@ -64,7 +64,7 @@ In the `Try it` server, the session *Get 429 into a mergable state* is waiting o
 http://127.0.0.1:8399/?token=abcdef123456
 ```
 
-Running it on your own sessions needs the daemon under launchd, a Claude Code hook, and a token on each device; the [reference](docs/reference.md#manual-setup--already-done-on-this-mac) lists each step.
+Running it on your own sessions needs the daemon under launchd, a Claude Code hook, and a token on each device; the [reference](docs/reference.md#manual-setup) lists each step.
 
 ## Configuration
 
