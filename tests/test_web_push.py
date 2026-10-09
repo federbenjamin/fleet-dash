@@ -72,9 +72,20 @@ class BlockingHelper:
 class WebPushTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def run_service(self, service):
+        # Cleanups run last-in-first-out, so the worker thread is joined
+        # before the temp directory it writes into is removed.
+        self.addCleanup(self.stop_service, service)
+        service.start()
+
+    def stop_service(self, service):
+        service.stop()
+        thread = service.thread
+        if thread:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "web-push worker did not stop")
 
     def test_vapid_subject_never_inherits_dashboard_credentials_or_query(self):
         service = WebPushService(None, self.tmp.name, {
@@ -126,11 +137,9 @@ class WebPushTests(unittest.TestCase):
         service = WebPushService(operations, self.tmp.name, {})
         service.helper = helper
         service.runtime_state = "ready"
-        service.start()
+        self.run_service(service)
         self.assertTrue(helper.entered.wait(2))
         saturated = sample()
-        service.stop()
-        service.thread.join(timeout=2)
         self.assertLess(saturated[0] - baseline[0], 5, (baseline, saturated))
         self.assertLess(saturated[1] - baseline[1], 5, (baseline, saturated))
 
@@ -223,7 +232,7 @@ class WebPushTests(unittest.TestCase):
         service = WebPushService(
             operations, self.tmp.name, {}, helper_factory=FakeHelper,
             node_resolver=lambda _configured: "/usr/bin/false")
-        service.start()
+        self.run_service(service)
         delivery = service.enqueue_test("phone")
         deadline = time.time() + 3
         while time.time() < deadline:
@@ -247,7 +256,6 @@ class WebPushTests(unittest.TestCase):
         self.assertTrue(projected["configured"])
         self.assertNotIn("private", repr(projected))
         self.assertNotIn("web.push.apple.com", repr(projected))
-        service.stop()
 
     def test_action_payload_is_generic_exact_and_contains_only_reversible_capabilities(self):
         operations = FleetOperations(os.path.join(self.tmp.name, "payload.db"))
